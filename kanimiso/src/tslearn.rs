@@ -5467,6 +5467,612 @@ impl Predict for FittedTemporalDictionaryEnsemble {
     }
 }
 
+fn interval_feats_rise(x: &Matrix, intervals: &[Interval]) -> Matrix {
+    let p = intervals.len() * 4;
+    Matrix::from_fn(x.nrows(), p, |i, j| {
+        let spec = &intervals[j / 4];
+        let kind = j % 4;
+        let a = spec.start.min(x.ncols());
+        let b = spec.end.min(x.ncols()).max(a + 1);
+        let len = (b - a).max(1);
+        let mut mean = 0.0;
+        for t in a..b {
+            mean += x.get(i, t);
+        }
+        mean /= len as f64;
+        match kind {
+            0 => mean,
+            1 => {
+                let mut e = 0.0;
+                for t in a..b {
+                    let v = x.get(i, t);
+                    e += v * v;
+                }
+                e / len as f64
+            }
+            _ => {
+                let k = if kind == 2 { 1.0 } else { 2.0 };
+                let omega = std::f64::consts::TAU * k / len as f64;
+                let mut re = 0.0;
+                let mut im = 0.0;
+                for (u, t) in (a..b).enumerate() {
+                    let v = x.get(i, t) - mean;
+                    let ang = omega * u as f64;
+                    re += v * ang.cos();
+                    im += v * ang.sin();
+                }
+                (re * re + im * im).sqrt() / len as f64
+            }
+        }
+    })
+}
+
+/// Random Interval Spectral Ensemble (sktime `RandomIntervalSpectralEnsemble` lite).
+///
+/// Interval / tree counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Rise {
+    /// Trees.
+    pub n_estimators: usize,
+    /// Random intervals per tree.
+    pub n_intervals: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for Rise {
+    fn default() -> Self {
+        Self {
+            n_estimators: 6,
+            n_intervals: 3,
+            max_depth: 4,
+            seed: 23,
+        }
+    }
+}
+
+impl Rise {
+    /// Default RISE lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted RISE vote.
+#[derive(Clone, Debug)]
+pub struct FittedRise {
+    trees: Vec<crate::tree::FittedTreeClassifier>,
+    intervals: Vec<Vec<Interval>>,
+    /// Fallback label.
+    pub default_label: f64,
+}
+
+impl Fit for Rise {
+    type Fitted = FittedRise;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRise>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .message("RISE lite uses four interval DFT summaries, not ACF/periodogram forests")
+                .compromise(NumericalCompromise::new(
+                    "RISE spectral interval map",
+                    "mean/energy/first two DFT bins per random interval",
+                    "the published estimator uses a richer spectral dictionary",
+                    "do not treat this as the sktime RISE feature map",
+                ))
+                .build(),
+        );
+        let default_label = y
+            .as_slice()
+            .iter()
+            .copied()
+            .find(|v| v.is_finite())
+            .unwrap_or(0.0);
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        let mut intervals = Vec::new();
+        let tlen = x.ncols().max(1);
+        for e in 0..self.n_estimators.max(1) {
+            let mut iv = Vec::new();
+            for _ in 0..self.n_intervals.max(1) {
+                let a = rng.below(tlen);
+                let span = 1 + rng.below(tlen);
+                iv.push(Interval {
+                    start: a,
+                    end: (a + span).min(tlen).max(a + 1),
+                });
+            }
+            let feat = interval_feats_rise(x, &iv);
+            let mut tree = crate::tree::DecisionTreeClassifier {
+                max_depth: self.max_depth,
+                seed: rng.next_u64(),
+                ..crate::tree::DecisionTreeClassifier::default()
+            };
+            match tree.fit(&feat, y, &session.child("rise_tree")) {
+                Ok(q) => {
+                    trees.push(q.value);
+                    intervals.push(iv);
+                }
+                Err(err) => {
+                    for issue in err.report.issues() {
+                        if !matches!(
+                            issue.code,
+                            IssueCode::ResidualTooLarge
+                                | IssueCode::NearSingular
+                                | IssueCode::RankZero
+                                | IssueCode::R2IsOne
+                        ) {
+                            ctx.push(issue.clone());
+                        }
+                    }
+                }
+            }
+            ctx.session.step(e as u64, 0.0, None);
+        }
+        if trees.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("every RISE tree failed to fit")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedRise {
+            trees,
+            intervals,
+            default_label,
+        })
+    }
+}
+
+impl Predict for FittedRise {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let mut votes = vec![BTreeMap::<i64, usize>::new(); x.nrows()];
+        for (tree, iv) in self.trees.iter().zip(&self.intervals) {
+            let feat = interval_feats_rise(x, iv);
+            match tree.predict(&feat, &session.child("risep")) {
+                Ok(q) => {
+                    for i in 0..x.nrows().min(q.value.len()) {
+                        *votes[i].entry(q.value[i].round() as i64).or_insert(0) += 1;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        let out = Vector::from_iter(votes.iter().map(|m| {
+            m.iter()
+                .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(k, _)| *k as f64)
+                .unwrap_or(self.default_label)
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// Elastic 1-NN vote over DTW/MSM/TWE/Euclidean (sktime `ElasticEnsemble` lite).
+#[derive(Clone, Debug)]
+pub struct ElasticEnsemble {
+    /// MSM move cost.
+    pub msm_c: f64,
+    /// TWE stiffness.
+    pub twe_nu: f64,
+}
+
+impl Default for ElasticEnsemble {
+    fn default() -> Self {
+        Self {
+            msm_c: 0.1,
+            twe_nu: 0.0,
+        }
+    }
+}
+
+impl ElasticEnsemble {
+    /// Default elastic ensemble.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted elastic 1-NN committee.
+#[derive(Clone, Debug)]
+pub struct FittedElasticEnsemble {
+    x: Matrix,
+    y: Vector,
+    msm_c: f64,
+    twe_nu: f64,
+}
+
+impl Fit for ElasticEnsemble {
+    type Fitted = FittedElasticEnsemble;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedElasticEnsemble>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let c = if self.msm_c.is_finite() && self.msm_c >= 0.0 {
+            self.msm_c
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "ElasticEnsemble msm_c={} is invalid; using 0.1",
+                        self.msm_c
+                    ))
+                    .build(),
+            );
+            0.1
+        };
+        let nu = if self.twe_nu.is_finite() && self.twe_nu >= 0.0 {
+            self.twe_nu
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "ElasticEnsemble twe_nu={} is invalid; using 0",
+                        self.twe_nu
+                    ))
+                    .build(),
+            );
+            0.0
+        };
+        ctx.finish(FittedElasticEnsemble {
+            x: x.clone(),
+            y: y.clone(),
+            msm_c: c,
+            twe_nu: nu,
+        })
+    }
+}
+
+impl Predict for FittedElasticEnsemble {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.x.nrows() == 0 {
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let q = x.row(i);
+            let mut votes = BTreeMap::<i64, usize>::new();
+            for metric in 0..4 {
+                let mut best = 0usize;
+                let mut bd = f64::INFINITY;
+                for t in 0..self.x.nrows() {
+                    let d = match metric {
+                        0 => dtw_raw(q.as_slice(), self.x.row(t).as_slice()),
+                        1 => msm_raw(q.as_slice(), self.x.row(t).as_slice(), self.msm_c),
+                        2 => twe_raw(q.as_slice(), self.x.row(t).as_slice(), self.twe_nu, 1.0),
+                        _ => {
+                            let mut s = 0.0;
+                            for j in 0..q.len().min(self.x.ncols()) {
+                                let z = q[j] - self.x.get(t, j);
+                                s += z * z;
+                            }
+                            s.sqrt()
+                        }
+                    };
+                    if d < bd {
+                        bd = d;
+                        best = t;
+                    }
+                }
+                *votes
+                    .entry(self.y[best.min(self.y.len().saturating_sub(1))].round() as i64)
+                    .or_insert(0) += 1;
+            }
+            votes
+                .iter()
+                .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(k, _)| *k as f64)
+                .unwrap_or(0.0)
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// Catch22 + ridge regression (sktime `Catch22Regressor` lite).
+#[derive(Clone, Debug)]
+pub struct Catch22Regressor {
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for Catch22Regressor {
+    fn default() -> Self {
+        Self { alpha: 0.1 }
+    }
+}
+
+impl Catch22Regressor {
+    /// Catch22 regressor with ridge penalty `alpha`.
+    pub fn new(alpha: f64) -> Self {
+        Self { alpha }
+    }
+}
+
+/// Fitted Catch22 ridge regressor.
+#[derive(Clone, Debug)]
+pub struct FittedCatch22Regressor {
+    inner: FittedPenalized,
+}
+
+impl Fit for Catch22Regressor {
+    type Fitted = FittedCatch22Regressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCatch22Regressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let z = catch22_rows(x, session, &mut ctx);
+        let mut scratch = signlred::Report::new("c22reg", "ridge");
+        let design = z.with_intercept();
+        let beta = ridge_solve(&mut scratch, &design, y, self.alpha.max(0.0), &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::PerfectCollinearity
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedCatch22Regressor {
+            inner: FittedPenalized {
+                coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+                alpha: self.alpha,
+                l1_ratio: 0.0,
+            },
+        })
+    }
+}
+
+impl Predict for FittedCatch22Regressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let z = catch22_rows(x, session, &mut ctx);
+        match self.inner.predict(&z, &session.child("ridge")) {
+            Ok(q) => ctx.finish(q.value),
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::RankZero
+                ) {
+                    ctx.push(e.primary);
+                }
+                ctx.finish(Vector::zeros(x.nrows()))
+            }
+        }
+    }
+}
+
+/// Soft-DTW \(k\)-NN (tslearn `KNeighborsTimeSeriesClassifier` with soft-DTW).
+///
+/// Neighbor count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SoftDtwKnn {
+    /// Neighbors.
+    pub k: usize,
+    /// Soft-DTW smoothness.
+    pub gamma: f64,
+}
+
+impl Default for SoftDtwKnn {
+    fn default() -> Self {
+        Self { k: 1, gamma: 0.5 }
+    }
+}
+
+impl SoftDtwKnn {
+    /// Soft-DTW k-NN with `k` neighbors.
+    pub fn new(k: usize) -> Self {
+        Self {
+            k,
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted soft-DTW k-NN.
+#[derive(Clone, Debug)]
+pub struct FittedSoftDtwKnn {
+    x: Matrix,
+    y: Vector,
+    k: usize,
+    gamma: f64,
+}
+
+impl Fit for SoftDtwKnn {
+    type Fitted = FittedSoftDtwKnn;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSoftDtwKnn>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let k = if self.k >= 1 {
+            self.k
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("SoftDtwKnn k={} < 1; using 1", self.k))
+                    .build(),
+            );
+            1
+        };
+        let g = if self.gamma.is_finite() && self.gamma > 0.0 {
+            self.gamma
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "SoftDtwKnn gamma={} is not positive; using 0.5",
+                        self.gamma
+                    ))
+                    .build(),
+            );
+            0.5
+        };
+        ctx.finish(FittedSoftDtwKnn {
+            x: x.clone(),
+            y: y.clone(),
+            k,
+            gamma: g,
+        })
+    }
+}
+
+impl Predict for FittedSoftDtwKnn {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.x.nrows() == 0 {
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let k = self.k.max(1).min(self.x.nrows());
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let q = x.row(i);
+            let mut dist: Vec<(f64, f64)> = (0..self.x.nrows())
+                .map(|t| {
+                    (
+                        softdtw_raw(q.as_slice(), self.x.row(t).as_slice(), self.gamma),
+                        self.y[t],
+                    )
+                })
+                .collect();
+            dist.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let mut votes = BTreeMap::<i64, usize>::new();
+            for &(_, lab) in dist.iter().take(k) {
+                *votes.entry(lab.round() as i64).or_insert(0) += 1;
+            }
+            votes
+                .iter()
+                .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(c, _)| *c as f64)
+                .unwrap_or(0.0)
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// Summary statistics + ridge (sktime `SummaryClassifier` lite).
+#[derive(Clone, Debug)]
+pub struct SummaryClassifier {
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for SummaryClassifier {
+    fn default() -> Self {
+        Self { alpha: 0.1 }
+    }
+}
+
+impl SummaryClassifier {
+    /// Default summary classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted summary ridge.
+#[derive(Clone, Debug)]
+pub struct FittedSummaryClassifier {
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+fn summary_rows(x: &Matrix) -> Matrix {
+    Matrix::from_fn(x.nrows(), 6, |i, j| {
+        let row = x.row(i);
+        let n = row.len().max(1) as f64;
+        let mean = row.as_slice().iter().sum::<f64>() / n;
+        match j {
+            0 => mean,
+            1 => {
+                let ss: f64 = row.as_slice().iter().map(|v| (v - mean) * (v - mean)).sum();
+                (ss / n.max(1.0)).sqrt()
+            }
+            2 => row.as_slice().iter().copied().fold(f64::INFINITY, f64::min),
+            3 => row
+                .as_slice()
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max),
+            4 => {
+                let mut v = row.as_slice().to_vec();
+                v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                v[v.len() / 2]
+            }
+            _ => {
+                let tbar = (row.len().saturating_sub(1)) as f64 / 2.0;
+                let mut num = 0.0;
+                let mut den = 0.0;
+                for (u, &v) in row.as_slice().iter().enumerate() {
+                    let dt = u as f64 - tbar;
+                    num += dt * (v - mean);
+                    den += dt * dt;
+                }
+                if den > 0.0 {
+                    num / den
+                } else {
+                    0.0
+                }
+            }
+        }
+    })
+}
+
+impl Fit for SummaryClassifier {
+    type Fitted = FittedSummaryClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSummaryClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let z = summary_rows(x);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "summary");
+        ctx.finish(FittedSummaryClassifier { inner })
+    }
+}
+
+impl Predict for FittedSummaryClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = summary_rows(x);
+        self.inner.predict(&z, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5954,5 +6560,51 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(tdep.len(), 6);
+        let rise = Rise::new()
+            .fit(&x, &yb, &Session::new("ts", "rise"))
+            .unwrap();
+        let risp = rise
+            .value
+            .predict(&x, &Session::new("ts", "risep"))
+            .unwrap()
+            .value;
+        assert_eq!(risp.len(), 6);
+        let ee = ElasticEnsemble::new()
+            .fit(&x, &yb, &Session::new("ts", "ee"))
+            .unwrap();
+        let eep = ee
+            .value
+            .predict(&x, &Session::new("ts", "eep"))
+            .unwrap()
+            .value;
+        assert_eq!(eep.len(), 6);
+        let c22r = Catch22Regressor::new(0.1)
+            .fit(&x, &yramp, &Session::new("ts", "c22r"))
+            .unwrap();
+        let c22p = c22r
+            .value
+            .predict(&x, &Session::new("ts", "c22rp"))
+            .unwrap()
+            .value;
+        assert_eq!(c22p.len(), 6);
+        assert!(c22p.as_slice().iter().all(|v| v.is_finite()));
+        let sdknn = SoftDtwKnn::new(1)
+            .fit(&x, &yb, &Session::new("ts", "sdknn"))
+            .unwrap();
+        let sdkp = sdknn
+            .value
+            .predict(&x, &Session::new("ts", "sdknnp"))
+            .unwrap()
+            .value;
+        assert_eq!(sdkp.len(), 6);
+        let sumc = SummaryClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "sum"))
+            .unwrap();
+        let sump = sumc
+            .value
+            .predict(&x, &Session::new("ts", "sump"))
+            .unwrap()
+            .value;
+        assert_eq!(sump.len(), 6);
     }
 }

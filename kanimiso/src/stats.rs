@@ -4764,6 +4764,221 @@ pub fn compare_lr(
     })
 }
 
+/// Nested OLS extra-sum-of-squares *F* (statsmodels `compare_f_test`).
+///
+/// Extra-column count is not identification `p`.
+pub fn compare_f(
+    y: &Vector,
+    x_restr: &Matrix,
+    x_unrestr: &Matrix,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x_restr, Some(y), &ctx.policy);
+    inspect_xy(&mut ctx.report, x_unrestr, Some(y), &ctx.policy);
+    let n = y.len().min(x_restr.nrows()).min(x_unrestr.nrows());
+    if x_unrestr.ncols() <= x_restr.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message("compare_f: unrestricted design is not wider")
+                .build(),
+        );
+    }
+    let Some(br) = statistical_ols(&mut ctx, x_restr, y) else {
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: (x_unrestr.ncols() as f64 - x_restr.ncols() as f64).max(1.0),
+            nobs: n as f64,
+        });
+    };
+    let Some(bu) = statistical_ols(&mut ctx, x_unrestr, y) else {
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: (x_unrestr.ncols() as f64 - x_restr.ncols() as f64).max(1.0),
+            nobs: n as f64,
+        });
+    };
+    let fr = x_restr.matvec(&br);
+    let fu = x_unrestr.matvec(&bu);
+    let mut ssr_r = 0.0;
+    let mut ssr_u = 0.0;
+    for i in 0..n {
+        let er = y[i] - if i < fr.len() { fr[i] } else { 0.0 };
+        let eu = y[i] - if i < fu.len() { fu[i] } else { 0.0 };
+        ssr_r += er * er;
+        ssr_u += eu * eu;
+    }
+    let q = (x_unrestr.ncols() as f64 - x_restr.ncols() as f64).max(1.0);
+    let df_den = (n as f64 - x_unrestr.ncols() as f64).max(1.0);
+    if n <= x_unrestr.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("compare_f: n ≤ p_unrestricted; residual df is patched to 1")
+                .build(),
+        );
+    }
+    let stat = if ssr_u > 0.0 {
+        ((ssr_r - ssr_u).max(0.0) / q) / (ssr_u / df_den)
+    } else {
+        f64::NAN
+    };
+    let pvalue = if stat.is_finite() {
+        f_pvalue(stat.max(0.0), q, df_den)
+    } else {
+        f64::NAN
+    };
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: q,
+        nobs: n as f64,
+    })
+}
+
+/// Joint Wald test that every slope in OLS is zero (statsmodels `wald_test`).
+///
+/// Slope count is not identification `p`. The intercept is not restricted.
+pub fn wald_ols(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let design = x.with_intercept();
+    let n = y.len().min(design.nrows());
+    let k = design.ncols();
+    let q = k.saturating_sub(1);
+    if q == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("wald_ols: no slope coefficients to test")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 0.0,
+            nobs: n as f64,
+        });
+    }
+    let Some(beta) = statistical_ols(&mut ctx, &design, y) else {
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: q as f64,
+            nobs: n as f64,
+        });
+    };
+    let fit = design.matvec(&beta);
+    let mut sse = 0.0;
+    for i in 0..n {
+        let e = y[i] - fit[i];
+        sse += e * e;
+    }
+    let df_res = (n as f64 - k as f64).max(1.0);
+    let sigma2 = sse / df_res;
+    let gram = design.gram();
+    let mut gs = Mat::<f64>::zeros(q, q);
+    for i in 0..q {
+        for j in 0..q {
+            gs[(i, j)] = gram[(i + 1, j + 1)] * sigma2.max(1e-18);
+        }
+        gs[(i, i)] += 1e-12;
+    }
+    let z = Vector::from_iter((1..beta.len()).map(|j| beta[j]));
+    let mut scratch = Report::new("wald", "chol");
+    let stat = match chol_solve(&mut scratch, &gs, &z, &ctx.policy) {
+        Some(sol) => z.dot(&sol),
+        None => {
+            ctx.push(
+                Issue::builder(IssueCode::CholeskyFailed)
+                    .severity(Severity::Warning)
+                    .message("wald_ols: slope covariance was not SPD; statistic is undefined")
+                    .compromise(NumericalCompromise::new(
+                        "Cholesky of σ² (X'X)⁻¹ on the slopes",
+                        "Wald statistic set to NaN",
+                        "the Gram of the slopes was indefinite even after jitter",
+                        "do not read a missing Wald as a zero effect",
+                    ))
+                    .build(),
+            );
+            f64::NAN
+        }
+    };
+    let pvalue = if stat.is_finite() {
+        chi2_pvalue(stat.max(0.0), q as f64)
+    } else {
+        f64::NAN
+    };
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: q as f64,
+        nobs: n as f64,
+    })
+}
+
+/// Box–Pierce portmanteau (statsmodels `acorr_ljungbox` `boxpierce=True`).
+///
+/// Lag count is not identification `p`.
+pub fn box_pierce(x: &Vector, lags: usize, session: &Session) -> Result<Qualified<LjungBoxResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, x);
+    let n = x.len();
+    let h = if lags >= 1 && lags < n {
+        lags
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "Box–Pierce lags={lags} is not in 1..n-1 (n={n}); using 1"
+                ))
+                .build(),
+        );
+        1.min(n.saturating_sub(1))
+    };
+    if h == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Box–Pierce needs n≥2")
+                .build(),
+        );
+        return ctx.finish(LjungBoxResult {
+            stat: f64::NAN,
+            pvalue: f64::NAN,
+            lags: 0,
+        });
+    }
+    let rho = acf_raw(x.as_slice(), h);
+    let mut q = 0.0;
+    for k in 1..=h {
+        let r = rho[k];
+        q += r * r;
+    }
+    q *= n as f64;
+    let pvalue = if q.is_finite() {
+        chi2_pvalue(q, h as f64)
+    } else {
+        f64::NAN
+    };
+    if pvalue.is_finite() && pvalue < 0.05 {
+        ctx.push(
+            Issue::builder(IssueCode::AutocorrelatedResiduals)
+                .message(format!("Box–Pierce Q={q:.3} p={pvalue:.4}"))
+                .build(),
+        );
+    }
+    ctx.finish(LjungBoxResult {
+        stat: q,
+        pvalue,
+        lags: h,
+    })
+}
+
 /// Nested-model ANOVA (statsmodels `anova_lm`).
 #[derive(Clone, Debug)]
 pub struct AnovaLm {
@@ -5827,5 +6042,12 @@ mod tests {
         let lr = compare_lr(&yr, &xr, &xf, &Session::new("lr", "t")).expect("lr");
         assert!(lr.value.statistic.is_finite() || lr.value.pvalue.is_nan());
         assert!(lr.value.df > 0.0);
+        let cf = compare_f(&yr, &xr, &xf, &Session::new("cf", "t")).expect("cf");
+        assert!(cf.value.statistic.is_finite() || cf.value.pvalue.is_nan());
+        let wd = wald_ols(&x, &y, &Session::new("wald", "t")).expect("wald");
+        assert!(wd.value.statistic.is_finite() || wd.value.pvalue.is_nan());
+        assert!(wd.value.df > 0.0);
+        let bp = box_pierce(&e, 2, &Session::new("bp", "t")).expect("bp");
+        assert!(bp.value.stat.is_finite() || bp.value.pvalue.is_nan());
     }
 }

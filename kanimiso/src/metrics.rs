@@ -658,6 +658,250 @@ pub fn pairwise_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Q
     ctx.finish(out)
 }
 
+/// Maximum residual (sklearn `max_error`).
+pub fn max_error(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "max_error") {
+        return ctx.finish(f64::NAN);
+    }
+    warn_constant_target(&mut ctx, y_true, false);
+    let mut m: f64 = 0.0;
+    let mut n = 0.0;
+    for i in 0..y_true.len().min(y_pred.len()) {
+        if y_true[i].is_finite() && y_pred[i].is_finite() {
+            m = m.max((y_true[i] - y_pred[i]).abs());
+            n += 1.0;
+        }
+    }
+    ctx.finish(if n > 0.0 { m } else { f64::NAN })
+}
+
+/// \(F_\beta\) score (sklearn `fbeta_score`).
+///
+/// Binary positive class is the larger label; otherwise macro-averaged.
+/// \(\beta\) is not identification `p`.
+pub fn fbeta_score(
+    y_true: &Vector,
+    y_pred: &Vector,
+    beta: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "fbeta_score") {
+        return ctx.finish(f64::NAN);
+    }
+    inspect_classes(&mut ctx.report, y_true, &ctx.policy);
+    warn_constant_target(&mut ctx, y_true, true);
+    let b = if beta.is_finite() && beta > 0.0 {
+        beta
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("fbeta β={beta} is not positive; using 1"))
+                .build(),
+        );
+        1.0
+    };
+    let pr = match precision_recall_f1(y_true, y_pred, &session.child("prf1")) {
+        Ok(q) => {
+            for issue in q.report.issues() {
+                if issue.code == IssueCode::MeaninglessFit {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            q.value
+        }
+        Err(e) => {
+            if e.primary.code != IssueCode::MeaninglessFit {
+                ctx.push(e.primary);
+            }
+            return ctx.finish(f64::NAN);
+        }
+    };
+    let b2 = b * b;
+    let den = b2 * pr.precision + pr.recall;
+    ctx.finish(if den.abs() <= 1e-18 {
+        0.0
+    } else {
+        (1.0 + b2) * pr.precision * pr.recall / den
+    })
+}
+
+/// Unadjusted Rand index (sklearn `rand_score`).
+pub fn rand_score(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "rand_score") {
+        return ctx.finish(f64::NAN);
+    }
+    inspect_classes(&mut ctx.report, y_true, &ctx.policy);
+    warn_constant_target(&mut ctx, y_true, true);
+    let yt = labels_of(y_true);
+    let yp = labels_of(y_pred);
+    let n = yt.len().min(yp.len());
+    let cn = comb2(n as f64);
+    if cn <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("rand_score is undefined for n<2")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let mut a = 0.0;
+    let mut b = 0.0;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let st = yt[i] == yt[j];
+            let sp = yp[i] == yp[j];
+            if st && sp {
+                a += 1.0;
+            } else if !st && !sp {
+                b += 1.0;
+            }
+        }
+    }
+    ctx.finish((a + b) / cn)
+}
+
+/// Neighborhood trustworthiness of an embedding (sklearn `manifold.trustworthiness`).
+///
+/// Neighbor count is not identification `p`.
+pub fn trustworthiness(
+    x: &Matrix,
+    embedded: &Matrix,
+    n_neighbors: usize,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, embedded, None, &ctx.policy);
+    if x.nrows() != embedded.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "trustworthiness x.nrows()={} embedded.nrows()={}",
+                    x.nrows(),
+                    embedded.nrows()
+                ))
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let n = x.nrows();
+    let k = if n_neighbors >= 1 && n_neighbors < n {
+        n_neighbors
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "trustworthiness n_neighbors={n_neighbors} is not in 1..n-1 (n={n}); using 1"
+                ))
+                .build(),
+        );
+        1.min(n.saturating_sub(1)).max(1)
+    };
+    if n < 3 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("trustworthiness needs n≥3")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let mut acc = 0.0;
+    for i in 0..n {
+        let mut orig: Vec<(f64, usize)> = (0..n)
+            .filter(|&j| j != i)
+            .map(|j| (euclid(x, i, j), j))
+            .collect();
+        orig.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut rank = vec![0usize; n];
+        for (r, &(_, j)) in orig.iter().enumerate() {
+            rank[j] = r + 1;
+        }
+        let mut emb: Vec<(f64, usize)> = (0..n)
+            .filter(|&j| j != i)
+            .map(|j| {
+                let mut s = 0.0;
+                for c in 0..embedded.ncols() {
+                    let d = embedded.get(i, c) - embedded.get(j, c);
+                    s += d * d;
+                }
+                (s.sqrt(), j)
+            })
+            .collect();
+        emb.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        for &(_, j) in emb.iter().take(k) {
+            let r = rank[j];
+            if r > k {
+                acc += (r - k) as f64;
+            }
+        }
+    }
+    let nk = n as f64 * k as f64 * (2.0 * n as f64 - 3.0 * k as f64 - 1.0);
+    ctx.finish(if nk.abs() <= 1e-12 {
+        1.0
+    } else {
+        (1.0 - 2.0 / nk * acc).clamp(0.0, 1.0)
+    })
+}
+
+/// Per-label 2×2 tables stacked as \(L\times 4\) `[tn, fp, fn, tp]`
+/// (sklearn `multilabel_confusion_matrix`).
+pub fn multilabel_confusion_matrix(
+    y_true: &Matrix,
+    y_pred: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if y_true.nrows() != y_pred.nrows() || y_true.ncols() != y_pred.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "multilabel_confusion_matrix y_true is {}×{} y_pred is {}×{}",
+                    y_true.nrows(),
+                    y_true.ncols(),
+                    y_pred.nrows(),
+                    y_pred.ncols()
+                ))
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(0, 4));
+    }
+    inspect_xy(&mut ctx.report, y_true, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, y_pred, None, &ctx.policy);
+    let l = y_true.ncols();
+    let n = y_true.nrows();
+    let out = Matrix::from_fn(l, 4, |j, k| {
+        let mut tn = 0.0;
+        let mut fp = 0.0;
+        let mut fn_ = 0.0;
+        let mut tp = 0.0;
+        for i in 0..n {
+            let t = y_true.get(i, j) > 0.5;
+            let p = y_pred.get(i, j) > 0.5;
+            match (t, p) {
+                (false, false) => tn += 1.0,
+                (false, true) => fp += 1.0,
+                (true, false) => fn_ += 1.0,
+                (true, true) => tp += 1.0,
+            }
+        }
+        match k {
+            0 => tn,
+            1 => fp,
+            2 => fn_,
+            _ => tp,
+        }
+    });
+    ctx.finish(out)
+}
+
 fn comb2(n: f64) -> f64 {
     if n < 2.0 {
         0.0
@@ -2846,5 +3090,29 @@ mod tests {
             .value;
         assert_eq!(pd.shape(), (8, 8));
         assert!(pd.get(0, 0).abs() < 1e-12);
+        let me = max_error(&y2, &h2, &Session::new("m", "maxe"))
+            .unwrap()
+            .value;
+        assert!((me - 1.0).abs() < 1e-12);
+        let fb = fbeta_score(
+            &y,
+            &Vector::from_slice(&[0.0, 1.0, 1.0, 0.0]),
+            1.0,
+            &Session::new("m", "fb"),
+        )
+        .unwrap()
+        .value;
+        assert!((fb - 1.0).abs() < 1e-12);
+        let rs = rand_score(&y, &y, &Session::new("m", "ri")).unwrap().value;
+        assert!((rs - 1.0).abs() < 1e-12);
+        let tw = trustworthiness(&xb, &xb, 2, &Session::new("m", "tw"))
+            .unwrap()
+            .value;
+        assert!(tw > 0.8, "trust={tw}");
+        let mlcm = multilabel_confusion_matrix(&yt, &yt, &Session::new("m", "mlcm"))
+            .unwrap()
+            .value;
+        assert_eq!(mlcm.shape(), (3, 4));
+        assert!((mlcm.get(0, 3) - 1.0).abs() < 1e-12);
     }
 }

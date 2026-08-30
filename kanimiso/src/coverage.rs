@@ -2830,6 +2830,79 @@ const INVENTORY: &[Algorithm] = &[
         "river.model_selection.SuccessiveHalvingRegressor",
         "online",
     ),
+    a("metrics.max_error", "sklearn.metrics.max_error", "metric"),
+    a(
+        "metrics.fbeta_score",
+        "sklearn.metrics.fbeta_score",
+        "metric",
+    ),
+    a("metrics.rand_score", "sklearn.metrics.rand_score", "metric"),
+    a(
+        "metrics.trustworthiness",
+        "sklearn.manifold.trustworthiness",
+        "metric",
+    ),
+    a(
+        "metrics.multilabel_confusion_matrix",
+        "sklearn.metrics.multilabel_confusion_matrix",
+        "metric",
+    ),
+    a(
+        "stats.compare_f",
+        "statsmodels.regression.linear_model.OLSResults.compare_f_test",
+        "stats",
+    ),
+    a(
+        "stats.wald_ols",
+        "statsmodels.base.model.LikelihoodModelResults.wald_test",
+        "stats",
+    ),
+    a(
+        "stats.box_pierce",
+        "statsmodels.stats.diagnostic.acorr_ljungbox",
+        "stats",
+    ),
+    a(
+        "tslearn.Rise",
+        "sktime.classification.interval_based.RandomIntervalSpectralEnsemble",
+        "timeseries",
+    ),
+    a(
+        "tslearn.ElasticEnsemble",
+        "sktime.classification.distance_based.ElasticEnsemble",
+        "timeseries",
+    ),
+    a(
+        "tslearn.Catch22Regressor",
+        "sktime.regression.feature_based.Catch22Regressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.SoftDtwKnn",
+        "tslearn.neighbors.KNeighborsTimeSeriesClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.SummaryClassifier",
+        "sktime.classification.feature_based.SummaryClassifier",
+        "timeseries",
+    ),
+    a(
+        "online.AmfClassifier",
+        "river.forest.AMFClassifier",
+        "online",
+    ),
+    a("online.DbStream", "river.cluster.DBSTREAM", "online"),
+    a(
+        "online.OnlineBaggingRegressor",
+        "river.ensemble.BaggingRegressor",
+        "online",
+    ),
+    a(
+        "online.OnlineBinarizer",
+        "river.preprocessing.Binarizer",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -2946,6 +3019,11 @@ mod tests {
             "stats.compare_lr",
             "tslearn.TemporalDictionaryEnsemble",
             "online.SuccessiveHalvingRegressor",
+            "metrics.max_error",
+            "stats.wald_ols",
+            "tslearn.Rise",
+            "tslearn.ElasticEnsemble",
+            "online.AmfClassifier",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

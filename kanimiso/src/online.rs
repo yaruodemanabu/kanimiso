@@ -10277,6 +10277,655 @@ impl Predict for SuccessiveHalvingRegressor {
     }
 }
 
+/// Aggregated Mondrian Forest lite (river `forest.AMFClassifier`).
+///
+/// Tree count is not identification `p`. Each tree grows at most one
+/// axis-aligned stump once two labelled rows have been seen.
+#[derive(Clone, Debug)]
+pub struct AmfClassifier {
+    /// Trees.
+    pub n_trees: usize,
+    trees: Vec<AmfTree>,
+    n_seen: u64,
+    updates: u64,
+    rng: Rng,
+}
+
+#[derive(Clone, Debug)]
+struct AmfTree {
+    p: usize,
+    n: u64,
+    lo: Vector,
+    hi: Vector,
+    split_j: Option<usize>,
+    split_t: f64,
+    leaf: HashMap<i64, f64>,
+    left: HashMap<i64, f64>,
+    right: HashMap<i64, f64>,
+}
+
+impl Default for AmfClassifier {
+    fn default() -> Self {
+        Self {
+            n_trees: 4,
+            trees: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            rng: Rng::new(29),
+        }
+    }
+}
+
+impl AmfClassifier {
+    /// AMF with `n_trees` Mondrian stumps.
+    pub fn new(n_trees: usize) -> Self {
+        Self {
+            n_trees: n_trees.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+fn amf_majority(counts: &HashMap<i64, f64>) -> f64 {
+    counts
+        .iter()
+        .max_by(|a, b| {
+            a.1.partial_cmp(b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.0.cmp(a.0))
+        })
+        .map(|(k, _)| *k as f64)
+        .unwrap_or(0.0)
+}
+
+impl PartialFit for AmfClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        if self.trees.is_empty() {
+            self.trees = (0..self.n_trees.max(1))
+                .map(|_| AmfTree {
+                    p: x.ncols(),
+                    n: 0,
+                    lo: Vector::filled(x.ncols(), f64::INFINITY),
+                    hi: Vector::filled(x.ncols(), f64::NEG_INFINITY),
+                    split_j: None,
+                    split_t: 0.0,
+                    leaf: HashMap::new(),
+                    left: HashMap::new(),
+                    right: HashMap::new(),
+                })
+                .collect();
+        } else if self.trees[0].p != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.n_seen;
+        let mut splits = 0u64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let lab = y[i].round() as i64;
+            for t in &mut self.trees {
+                for j in 0..x.ncols().min(t.lo.len()) {
+                    let v = x.get(i, j);
+                    if v < t.lo[j] {
+                        t.lo[j] = v;
+                    }
+                    if v > t.hi[j] {
+                        t.hi[j] = v;
+                    }
+                }
+                t.n += 1;
+                if let Some(j) = t.split_j {
+                    let v = if j < x.ncols() { x.get(i, j) } else { 0.0 };
+                    if v <= t.split_t {
+                        *t.left.entry(lab).or_insert(0.0) += 1.0;
+                    } else {
+                        *t.right.entry(lab).or_insert(0.0) += 1.0;
+                    }
+                } else {
+                    *t.leaf.entry(lab).or_insert(0.0) += 1.0;
+                    if t.n >= 2 {
+                        let mut best_j = 0usize;
+                        let mut best_r = 0.0;
+                        for j in 0..t.lo.len() {
+                            let r = t.hi[j] - t.lo[j];
+                            if r > best_r {
+                                best_r = r;
+                                best_j = j;
+                            }
+                        }
+                        if best_r > 1e-12 {
+                            let u = self.rng.uniform();
+                            t.split_j = Some(best_j);
+                            t.split_t = t.lo[best_j] + u * best_r;
+                            t.left = t.leaf.clone();
+                            t.right = HashMap::new();
+                            splits += 1;
+                        }
+                    }
+                }
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(splits as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "AMF {} Mondrian stumps, {splits} new splits this batch",
+            self.trees.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Mondrian stump growth",
+                "a leaf splits on its widest feature once two labels have been seen",
+                format!("n={before}"),
+                format!("n={} splits={splits}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for AmfClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.trees.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut votes = HashMap::<i64, f64>::new();
+            for t in &self.trees {
+                let lab = if let Some(j) = t.split_j {
+                    let v = if j < x.ncols() { x.get(i, j) } else { 0.0 };
+                    if v <= t.split_t {
+                        amf_majority(&t.left)
+                    } else {
+                        amf_majority(&t.right)
+                    }
+                } else {
+                    amf_majority(&t.leaf)
+                };
+                *votes.entry(lab.round() as i64).or_insert(0.0) += 1.0;
+            }
+            votes
+                .iter()
+                .max_by(|a, b| {
+                    a.1.partial_cmp(b.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(b.0.cmp(a.0))
+                })
+                .map(|(k, _)| *k as f64)
+                .unwrap_or(0.0)
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// Shared-density stream clustering (river `cluster.DBSTREAM` lite).
+///
+/// Micro-cluster count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct DbStream {
+    /// Merge radius.
+    pub eps: f64,
+    /// Per-row weight decay.
+    pub lambda: f64,
+    micros: Vec<(Vector, f64)>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for DbStream {
+    fn default() -> Self {
+        Self {
+            eps: 1.0,
+            lambda: 0.99,
+            micros: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl DbStream {
+    /// DBSTREAM with radius `eps`.
+    pub fn new(eps: f64) -> Self {
+        Self {
+            eps,
+            ..Self::default()
+        }
+    }
+
+    /// Current micro-cluster count.
+    pub fn n_micro(&self) -> usize {
+        self.micros.len()
+    }
+}
+
+impl PartialFit for DbStream {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let eps = if self.eps.is_finite() && self.eps > 0.0 {
+            self.eps
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "DbStream eps={} is not positive; using 1",
+                        self.eps
+                    ))
+                    .build(),
+            );
+            1.0
+        };
+        let lam = if self.lambda.is_finite() && self.lambda > 0.0 && self.lambda <= 1.0 {
+            self.lambda
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "DbStream lambda={} is not in (0,1]; using 0.99",
+                        self.lambda
+                    ))
+                    .build(),
+            );
+            0.99
+        };
+        let before = self.n_seen;
+        let mut spawned = 0u64;
+        let mut merged = 0u64;
+        for i in 0..x.nrows() {
+            for mc in self.micros.iter_mut() {
+                mc.1 *= lam;
+            }
+            self.micros.retain(|mc| mc.1 >= 1e-3);
+            let row = x.row(i);
+            let mut best = None;
+            let mut best_d = f64::INFINITY;
+            for (c, (ctr, _)) in self.micros.iter().enumerate() {
+                let mut d = 0.0;
+                for j in 0..row.len().min(ctr.len()) {
+                    let z = row[j] - ctr[j];
+                    d += z * z;
+                }
+                d = d.sqrt();
+                if d < best_d {
+                    best_d = d;
+                    best = Some(c);
+                }
+            }
+            if let Some(c) = best {
+                if best_d <= eps {
+                    let w = self.micros[c].1;
+                    let nw = w + 1.0;
+                    for j in 0..self.micros[c].0.len().min(row.len()) {
+                        let old = self.micros[c].0[j];
+                        self.micros[c].0[j] = (old * w + row[j]) / nw;
+                    }
+                    self.micros[c].1 = nw;
+                    merged += 1;
+                } else {
+                    self.micros.push((row, 1.0));
+                    spawned += 1;
+                }
+            } else {
+                self.micros.push((row, 1.0));
+                spawned += 1;
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((spawned + merged) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.micros.is_empty();
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!(
+            "DBSTREAM micros={} spawned={spawned} absorbed={merged}",
+            self.micros.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "shared-density micro-cluster update",
+                "a row joins the nearest micro inside ε or seeds a new centre",
+                format!("n={before} micros"),
+                format!("n={} micros={}", self.n_seen, self.micros.len()),
+            ),
+        )
+    }
+}
+
+impl Predict for DbStream {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.micros.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let m = self.micros.len();
+        let mut parent: Vec<usize> = (0..m).collect();
+        let find = |p: &mut [usize], mut a: usize| {
+            while p[a] != a {
+                p[a] = p[p[a]];
+                a = p[a];
+            }
+            a
+        };
+        let link = 2.0 * self.eps.max(1e-12);
+        for a in 0..m {
+            for b in (a + 1)..m {
+                let mut d = 0.0;
+                for j in 0..self.micros[a].0.len().min(self.micros[b].0.len()) {
+                    let z = self.micros[a].0[j] - self.micros[b].0[j];
+                    d += z * z;
+                }
+                if d.sqrt() <= link {
+                    let pa = find(&mut parent, a);
+                    let pb = find(&mut parent, b);
+                    parent[pb] = pa;
+                }
+            }
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut best = 0usize;
+            let mut bd = f64::INFINITY;
+            for (c, (ctr, _)) in self.micros.iter().enumerate() {
+                let mut d = 0.0;
+                for j in 0..x.ncols().min(ctr.len()) {
+                    let z = x.get(i, j) - ctr[j];
+                    d += z * z;
+                }
+                if d < bd {
+                    bd = d;
+                    best = c;
+                }
+            }
+            let mut a = best;
+            while parent[a] != a {
+                a = parent[a];
+            }
+            a as f64
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// Poisson-bootstrap bag of RLS members (river `ensemble.BaggingRegressor`).
+#[derive(Clone, Debug)]
+pub struct OnlineBaggingRegressor {
+    /// Members.
+    pub n_models: usize,
+    models: Vec<LinearRegression>,
+    n_seen: u64,
+    updates: u64,
+    rng: Rng,
+}
+
+impl Default for OnlineBaggingRegressor {
+    fn default() -> Self {
+        Self {
+            n_models: 3,
+            models: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            rng: Rng::new(31),
+        }
+    }
+}
+
+impl OnlineBaggingRegressor {
+    /// Bag of `n_models` RLS estimators.
+    pub fn new(n_models: usize) -> Self {
+        Self {
+            n_models: n_models.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineBaggingRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        if self.models.is_empty() {
+            self.models = vec![LinearRegression::new(1.0); self.n_models.max(1)];
+        }
+        let before = self.n_seen;
+        for m in 0..self.models.len() {
+            let mut rows: Vec<usize> = Vec::new();
+            for i in 0..x.nrows().min(y.len()) {
+                let k = self.rng.poisson(1.0) as usize;
+                for _ in 0..k {
+                    rows.push(i);
+                }
+            }
+            if rows.is_empty() && x.nrows() > 0 {
+                rows.push(0);
+            }
+            if rows.is_empty() {
+                continue;
+            }
+            let xb = Matrix::from_fn(rows.len(), x.ncols(), |r, c| x.get(rows[r], c));
+            let yb = Vector::from_iter(rows.iter().map(|&i| y[i]));
+            let _ = self.models[m].partial_fit(&xb, Some(&yb), &session.child(format!("bagr_{m}")));
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "OnlineBaggingRegressor {} RLS members, Poisson bootstrap",
+            self.models.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "RLS committee",
+                "each member sees a Poisson(1) bootstrap of the batch",
+                format!("n={before}"),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for OnlineBaggingRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.models.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let mut acc = vec![0.0; x.nrows()];
+        let mut k: f64 = 0.0;
+        for (t, m) in self.models.iter().enumerate() {
+            match m.predict(x, &session.child(format!("br{t}"))) {
+                Ok(q) => {
+                    for i in 0..x.nrows().min(q.value.len()) {
+                        acc[i] += q.value[i];
+                    }
+                    k += 1.0;
+                }
+                Err(_) => {}
+            }
+        }
+        let k = k.max(1.0);
+        ctx.finish(Vector::from_iter(acc.iter().map(|v| v / k)))
+    }
+}
+
+/// Streaming binarizer (river `preprocessing.Binarizer`).
+#[derive(Clone, Debug)]
+pub struct OnlineBinarizer {
+    /// Threshold.
+    pub threshold: f64,
+    p: usize,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OnlineBinarizer {
+    fn default() -> Self {
+        Self {
+            threshold: 0.0,
+            p: 0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlineBinarizer {
+    /// Binarizer with threshold `threshold`.
+    pub fn new(threshold: f64) -> Self {
+        Self {
+            threshold,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineBinarizer {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.threshold.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "OnlineBinarizer threshold={} is not finite; using 0",
+                        self.threshold
+                    ))
+                    .build(),
+            );
+            self.threshold = 0.0;
+        }
+        if self.p == 0 {
+            self.p = x.ncols();
+        } else if self.p != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.n_seen;
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(0.0);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = true;
+        q.warmup = false;
+        q.explanation = format!("OnlineBinarizer threshold={:.6e}", self.threshold);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "threshold map",
+                "each coordinate is 1 iff it meets the recorded cut",
+                format!("n={before}"),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Transform for OnlineBinarizer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        let t = if self.threshold.is_finite() {
+            self.threshold
+        } else {
+            0.0
+        };
+        ctx.finish(Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            if x.get(i, j) >= t {
+                1.0
+            } else {
+                0.0
+            }
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10559,6 +11208,18 @@ mod tests {
         SuccessiveHalvingRegressor::new(4)
             .partial_fit(&x, Some(&y), &session)
             .expect("shr");
+        AmfClassifier::new(3)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("amf");
+        DbStream::new(2.0)
+            .partial_fit(&x, None, &session)
+            .expect("dbstream");
+        OnlineBaggingRegressor::new(2)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("obagr");
+        OnlineBinarizer::new(0.0)
+            .partial_fit(&x, None, &session)
+            .expect("obin");
 
         let n_expl = session
             .ledger()
