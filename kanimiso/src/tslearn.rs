@@ -10962,6 +10962,129 @@ impl Predict for FittedHiveCoteV1 {
     }
 }
 
+/// Catch22 + ExtraTrees (sktime `Catch22` + `ExtraTreesClassifier` / `Catch22El`).
+///
+/// Catch22 width and tree count are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Catch22El {
+    /// ExtraTrees count.
+    pub n_estimators: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for Catch22El {
+    fn default() -> Self {
+        Self {
+            n_estimators: 8,
+            max_depth: 4,
+            seed: 5,
+        }
+    }
+}
+
+impl Catch22El {
+    /// Default Catch22–ExtraTrees ensemble.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted Catch22–ExtraTrees (ridge fallback if the forest is vacuous).
+#[derive(Clone, Debug)]
+pub struct FittedCatch22El {
+    forest: Option<crate::tree::FittedForestClassifier>,
+    ridge: Option<FittedCatch22Classifier>,
+}
+
+impl Fit for Catch22El {
+    type Fitted = FittedCatch22El;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedCatch22El>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let z = catch22_rows(x, session, &mut ctx);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Catch22El is Catch22 features plus ExtraTrees, not CanonicalIntervalForest")
+                .compromise(NumericalCompromise::new(
+                    "sktime Catch22 + ExtraTrees pipeline",
+                    "catch22_rows then ExtraTreesClassifier",
+                    "rotation-forest / CIF members are omitted",
+                    "do not read as a published Catch22-ensemble accuracy",
+                ))
+                .build(),
+        );
+        let mut et = crate::tree::ExtraTreesClassifier {
+            n_estimators: self.n_estimators.max(1),
+            max_depth: self.max_depth.max(1),
+            min_samples_split: 2,
+            max_features: Some(4),
+            seed: self.seed,
+        };
+        match et.fit(&z, y, &session.child("c22el-et")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::R2IsOne
+                            | IssueCode::RankZero
+                            | IssueCode::MeaninglessFit
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                ctx.finish(FittedCatch22El {
+                    forest: Some(q.value),
+                    ridge: None,
+                })
+            }
+            Err(_) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("Catch22El ExtraTrees failed; falling back to Catch22 ridge")
+                        .build(),
+                );
+                match Catch22Classifier::new(0.1).fit(x, y, &session.child("c22el-ridge")) {
+                    Ok(q) => ctx.finish(FittedCatch22El {
+                        forest: None,
+                        ridge: Some(q.value),
+                    }),
+                    Err(_) => ctx.finish(FittedCatch22El {
+                        forest: None,
+                        ridge: None,
+                    }),
+                }
+            }
+        }
+    }
+}
+
+impl Predict for FittedCatch22El {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        if let Some(f) = &self.forest {
+            let z = {
+                let mut ctx = FitCtx::with_session(session.child("c22el-z"));
+                catch22_rows(x, session, &mut ctx)
+            };
+            return f.predict(&z, session);
+        }
+        if let Some(r) = &self.ridge {
+            return r.predict(x, session);
+        }
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+        ctx.finish(Vector::zeros(x.nrows()))
+    }
+}
+
 /// Random supervised time-series forest (sktime `RSTSF` lite).
 ///
 /// Interval / tree counts are not identification `p`.
@@ -12921,6 +13044,15 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(ph1.len(), 8);
+        let c22el = Catch22El::new()
+            .fit(&x, &y, &Session::new("ts", "c22el"))
+            .unwrap();
+        let pc22el = c22el
+            .value
+            .predict(&x, &Session::new("ts", "c22elp"))
+            .unwrap()
+            .value;
+        assert_eq!(pc22el.len(), 8);
         let rst = Rstsf::new()
             .fit(&x, &y, &Session::new("ts", "rstsf"))
             .unwrap();

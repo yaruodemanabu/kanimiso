@@ -5298,6 +5298,72 @@ const INVENTORY: &[Algorithm] = &[
         "sktime.classification.hybrid.HIVECOTEV1",
         "estimator",
     ),
+    a(
+        "stats.weibull_ph",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "stats",
+    ),
+    a(
+        "stats.WeibullPH",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "estimator",
+    ),
+    a(
+        "stats.gompertz_ph",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "stats",
+    ),
+    a(
+        "stats.GompertzPH",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "estimator",
+    ),
+    a(
+        "stats.loglogistic_ph",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "stats",
+    ),
+    a(
+        "stats.LogLogisticPH",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "estimator",
+    ),
+    a("stats.peto", "lifelines.statistics.logrank_test", "function"),
+    a(
+        "stats.tarone_ware",
+        "lifelines.statistics.logrank_test",
+        "function",
+    ),
+    a(
+        "stats.gehan_wilcoxon",
+        "lifelines.statistics.logrank_test",
+        "function",
+    ),
+    a(
+        "stats.logrank_trend",
+        "statsmodels.duration.survfunc.survdiff",
+        "function",
+    ),
+    a(
+        "online.NormalPredictor",
+        "surprise.prediction_algorithms.random_pred.NormalPredictor",
+        "online",
+    ),
+    a(
+        "online.BaselineOnly",
+        "surprise.prediction_algorithms.baseline_only.BaselineOnly",
+        "online",
+    ),
+    a(
+        "online.CoClustering",
+        "surprise.prediction_algorithms.co_clustering.CoClustering",
+        "online",
+    ),
+    a(
+        "tslearn.Catch22El",
+        "sktime.classification.feature_based.Catch22Classifier",
+        "estimator",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5680,6 +5746,12 @@ mod tests {
             "stats.TimeVaryingCox",
             "online.SlopeOne",
             "tslearn.HiveCoteV1",
+            "stats.weibull_ph",
+            "stats.GompertzPH",
+            "stats.peto",
+            "stats.logrank_trend",
+            "online.BaselineOnly",
+            "tslearn.Catch22El",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

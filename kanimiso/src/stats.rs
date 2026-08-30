@@ -6222,6 +6222,225 @@ pub fn survdiff(
     logrank(times, events, groups, session)
 }
 
+#[derive(Clone, Copy)]
+enum LogrankWeight {
+    Unity,
+    Gehan,
+    TaroneWare,
+    Peto,
+}
+
+fn logrank_weighted(
+    times: &Vector,
+    events: &Vector,
+    groups: &Vector,
+    session: &Session,
+    weight: LogrankWeight,
+    name: &str,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(times),
+        None,
+        &ctx.policy,
+    );
+    if times.len() != events.len() || times.len() != groups.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "{name} lengths time={} event={} group={}",
+                    times.len(),
+                    events.len(),
+                    groups.len()
+                ))
+                .build(),
+        );
+    }
+    if let Some(issue) = scan_finite(events.as_slice()).to_issue("events") {
+        ctx.push(issue);
+    }
+    let n = times.len().min(events.len()).min(groups.len());
+    let mut counts: Vec<(i64, usize)> = Vec::new();
+    for i in 0..n {
+        if !times[i].is_finite() || !groups[i].is_finite() {
+            continue;
+        }
+        let g = groups[i].round() as i64;
+        if let Some(e) = counts.iter_mut().find(|(k, _)| *k == g) {
+            e.1 += 1;
+        } else {
+            counts.push((g, 1));
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    if counts.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message(format!("{name} needs two groups"))
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: n as f64,
+        });
+    }
+    let g0 = counts[0].0;
+    let g1 = counts[1].0;
+    let mut rows: Vec<(f64, bool, i64)> = (0..n)
+        .filter(|&i| times[i].is_finite() && groups[i].is_finite())
+        .map(|i| {
+            let g = groups[i].round() as i64;
+            (times[i], events[i] >= 0.5, g)
+        })
+        .filter(|(_, _, g)| *g == g0 || *g == g1)
+        .collect();
+    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut times_u: Vec<f64> = rows
+        .iter()
+        .filter(|(_, ev, _)| *ev)
+        .map(|(t, _, _)| *t)
+        .collect();
+    times_u.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    times_u.dedup_by(|a, b| (*a - *b).abs() <= 1e-15);
+    let mut oe = 0.0_f64;
+    let mut var = 0.0_f64;
+    let mut s = 1.0_f64;
+    for t in times_u {
+        let mut n0 = 0.0_f64;
+        let mut n1 = 0.0_f64;
+        let mut d0 = 0.0_f64;
+        let mut d1 = 0.0_f64;
+        for (ti, ev, g) in &rows {
+            if *ti + 1e-15 < t {
+                continue;
+            }
+            if *g == g0 {
+                n0 += 1.0;
+                if *ev && (*ti - t).abs() <= 1e-15 {
+                    d0 += 1.0;
+                }
+            } else {
+                n1 += 1.0;
+                if *ev && (*ti - t).abs() <= 1e-15 {
+                    d1 += 1.0;
+                }
+            }
+        }
+        let nn = n0 + n1;
+        let dd = d0 + d1;
+        if nn <= 0.0 || dd <= 0.0 {
+            continue;
+        }
+        let w = match weight {
+            LogrankWeight::Unity => 1.0,
+            LogrankWeight::Gehan => nn,
+            LogrankWeight::TaroneWare => nn.sqrt(),
+            LogrankWeight::Peto => s,
+        };
+        oe += w * (d0 - n0 * dd / nn);
+        if nn > 1.0 {
+            var += w * w * n0 * n1 * dd * (nn - dd) / (nn * nn * (nn - 1.0));
+        }
+        s *= (1.0 - dd / nn).max(0.0);
+    }
+    if var <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .message(format!("{name} variance vanished"))
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: rows.len() as f64,
+        });
+    }
+    let stat = oe * oe / var;
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: chi2_pvalue(stat.max(0.0), 1.0),
+        df: 1.0,
+        nobs: rows.len() as f64,
+    })
+}
+
+/// Peto–Peto–Prentice weighted log-rank (weight \(\hat S(t-)\)).
+///
+/// Survival is the pooled product-limit computed locally; do not call
+/// [`kaplan_meier_fit`] (zero events would vacuous-abort). Group count is not
+/// identification `p`.
+pub fn peto(
+    times: &Vector,
+    events: &Vector,
+    groups: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    logrank_weighted(times, events, groups, session, LogrankWeight::Peto, "peto")
+}
+
+/// Tarone–Ware weighted log-rank (weight \(\sqrt{n_{\mathrm{risk}}}\)).
+///
+/// Group count is not identification `p`.
+pub fn tarone_ware(
+    times: &Vector,
+    events: &Vector,
+    groups: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    logrank_weighted(
+        times,
+        events,
+        groups,
+        session,
+        LogrankWeight::TaroneWare,
+        "tarone_ware",
+    )
+}
+
+/// Gehan–Breslow–Wilcoxon weighted log-rank (weight \(n_{\mathrm{risk}}\)).
+///
+/// Group count is not identification `p`.
+pub fn gehan_wilcoxon(
+    times: &Vector,
+    events: &Vector,
+    groups: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    logrank_weighted(
+        times,
+        events,
+        groups,
+        session,
+        LogrankWeight::Gehan,
+        "gehan_wilcoxon",
+    )
+}
+
+/// Ordered-group log-rank trend (scores \(0,\ldots,k-1\) on sorted labels).
+///
+/// Group count is not identification `p`. Two groups reduce to Mantel–Haenszel.
+pub fn logrank_trend(
+    times: &Vector,
+    events: &Vector,
+    groups: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    logrank_weighted(
+        times,
+        events,
+        groups,
+        session,
+        LogrankWeight::Unity,
+        "logrank_trend",
+    )
+}
+
 /// Levinson–Durbin AR coefficients from a series ACF
 /// (statsmodels `tsa.stattools.levinson_durbin`).
 ///
@@ -15261,6 +15480,418 @@ impl TimeVaryingCox {
     }
 }
 
+/// Fitted Weibull PH (power-transform exponential PH).
+#[derive(Clone, Debug)]
+pub struct FittedWeibullPH {
+    /// Log-hazard slopes.
+    pub coef: Vector,
+    /// Log-baseline.
+    pub intercept: f64,
+    /// Shape \(p>0\) used to form \(t^p\).
+    pub shape: f64,
+    /// Exponential-PH log-likelihood on the transformed times.
+    pub loglik: f64,
+    /// Uncensored events.
+    pub n_events: usize,
+}
+
+/// Weibull PH via \(t\mapsto t^p\) then exponential PH (statsmodels `PHReg` Weibull).
+///
+/// Shape is a Gumbel moment of event log-times, not identification `p`.
+pub fn weibull_ph(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<FittedWeibullPH>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    let n = durations.len().min(events.len()).min(x.nrows());
+    let n_events = (0..n)
+        .filter(|&i| events[i] > 0.5 && durations[i].is_finite() && durations[i] > 0.0)
+        .count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("Weibull PH has no positive-time events")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "Weibull PH coefficients",
+                    "without events the shape and hazard are unidentified",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedWeibullPH {
+            coef: Vector::zeros(x.ncols()),
+            intercept: 0.0,
+            shape: 1.0,
+            loglik: 0.0,
+            n_events: 0,
+        });
+    }
+    let logs: Vec<f64> = (0..n)
+        .filter(|&i| events[i] > 0.5 && durations[i].is_finite() && durations[i] > 0.0)
+        .map(|i| durations[i].ln())
+        .collect();
+    let mean = logs.iter().sum::<f64>() / logs.len() as f64;
+    let var = logs.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>()
+        / (logs.len().saturating_sub(1).max(1) as f64);
+    let s = var.max(0.0).sqrt().max(1e-6);
+    let shape = (std::f64::consts::PI / (s * 6.0_f64.sqrt())).clamp(0.2, 5.0);
+    let tw = Vector::from_iter((0..x.nrows()).map(|i| {
+        if i < durations.len() && durations[i].is_finite() && durations[i] > 0.0 {
+            durations[i].powf(shape)
+        } else {
+            1e-12
+        }
+    }));
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("weibull_ph is t^p exponential PH, not a joint Weibull MLE")
+            .compromise(NumericalCompromise::new(
+                "Weibull PH Newton on (λ, p, β)",
+                "Gumbel-moment shape then exponential PH on t^p",
+                "shape is not profiled with the slopes",
+                "read β as a power-transform PH, not the unique Weibull MLE",
+            ))
+            .build(),
+    );
+    match exponential_ph(&tw, events, x, &session.child("wph-exp")) {
+        Ok(q) => {
+            for issue in q.report.issues() {
+                if matches!(
+                    issue.code,
+                    IssueCode::CholeskyFailed
+                        | IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::R2IsOne
+                        | IssueCode::RankZero
+                        | IssueCode::InformationMatrixSingular
+                        | IssueCode::LossIsNan
+                ) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            ctx.finish(FittedWeibullPH {
+                coef: q.value.coef,
+                intercept: q.value.intercept,
+                shape,
+                loglik: q.value.loglik,
+                n_events: q.value.n_events,
+            })
+        }
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("Weibull PH inner exponential Newton failed")
+                    .build(),
+            );
+            ctx.finish(FittedWeibullPH {
+                coef: Vector::zeros(x.ncols()),
+                intercept: 0.0,
+                shape,
+                loglik: f64::NAN,
+                n_events,
+            })
+        }
+    }
+}
+
+/// Named Weibull PH (statsmodels `PHReg` Weibull).
+#[derive(Clone, Debug, Default)]
+pub struct WeibullPH;
+
+impl WeibullPH {
+    /// Default Weibull PH.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit \(h(t\mid x)=p t^{p-1}\exp(\alpha+x\beta)\) via a \(t^p\) transform.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedWeibullPH>> {
+        weibull_ph(durations, events, x, session)
+    }
+}
+
+/// Fitted Gompertz PH (log-linear hazard in calendar time).
+#[derive(Clone, Debug)]
+pub struct FittedGompertzPH {
+    /// Slopes on the original covariates.
+    pub coef: Vector,
+    /// Log-linear time slope \(\gamma\).
+    pub time_coef: f64,
+    /// Log-baseline.
+    pub intercept: f64,
+    /// Inner exponential-PH log-likelihood.
+    pub loglik: f64,
+    /// Uncensored events.
+    pub n_events: usize,
+}
+
+/// Gompertz PH: \(h(t\mid x)=\exp(\alpha+\gamma t+x\beta)\) (statsmodels Gompertz).
+///
+/// Time is appended as a covariate of the exponential PH; that extra column is
+/// not a substitute identification `p` beyond the expanded design width.
+pub fn gompertz_ph(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<FittedGompertzPH>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    let n = x.nrows();
+    let xt = Matrix::from_fn(n, x.ncols() + 1, |i, j| {
+        if j == 0 {
+            if i < durations.len() {
+                durations[i]
+            } else {
+                0.0
+            }
+        } else {
+            x.get(i, j - 1)
+        }
+    });
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("gompertz_ph is exponential PH with a time column, not a profiled γ MLE")
+            .compromise(NumericalCompromise::new(
+                "Gompertz PH with jointly estimated γ",
+                "exponential PH on [t, x]",
+                "γ is a log-linear time slope in the same Newton as β",
+                "read as a log-linear hazard in t, not the unique Gompertz MLE",
+            ))
+            .build(),
+    );
+    match exponential_ph(durations, events, &xt, &session.child("gph-exp")) {
+        Ok(q) => {
+            for issue in q.report.issues() {
+                if matches!(
+                    issue.code,
+                    IssueCode::CholeskyFailed
+                        | IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::R2IsOne
+                        | IssueCode::RankZero
+                        | IssueCode::InformationMatrixSingular
+                        | IssueCode::LossIsNan
+                ) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            let time_coef = q.value.coef.as_slice().first().copied().unwrap_or(0.0);
+            let coef = Vector::from_iter((1..q.value.coef.len()).map(|j| q.value.coef[j]));
+            ctx.finish(FittedGompertzPH {
+                coef,
+                time_coef,
+                intercept: q.value.intercept,
+                loglik: q.value.loglik,
+                n_events: q.value.n_events,
+            })
+        }
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("Gompertz PH inner exponential Newton failed")
+                    .build(),
+            );
+            ctx.finish(FittedGompertzPH {
+                coef: Vector::zeros(x.ncols()),
+                time_coef: 0.0,
+                intercept: 0.0,
+                loglik: f64::NAN,
+                n_events: events.as_slice().iter().filter(|e| **e > 0.5).count(),
+            })
+        }
+    }
+}
+
+/// Named Gompertz PH.
+#[derive(Clone, Debug, Default)]
+pub struct GompertzPH;
+
+impl GompertzPH {
+    /// Default Gompertz PH.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit \(h(t\mid x)=\exp(\alpha+\gamma t+x\beta)\).
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedGompertzPH>> {
+        gompertz_ph(durations, events, x, session)
+    }
+}
+
+/// Fitted discrete log-logistic / proportional-odds PH.
+#[derive(Clone, Debug)]
+pub struct FittedLogLogisticPH {
+    /// Intercept of \(\mathrm{logit}\,h\).
+    pub intercept: f64,
+    /// Slope on \(\log t\).
+    pub time_coef: f64,
+    /// Covariate slopes.
+    pub coef: Vector,
+    /// Expanded person-period rows.
+    pub n_person_periods: usize,
+    /// Events in the expansion.
+    pub n_events: usize,
+}
+
+/// Log-logistic / proportional-odds discrete PH (person-period logit on
+/// \([1,\log t,x]\)). Period count is not identification `p`.
+pub fn loglogistic_ph(
+    time: &Vector,
+    event: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<FittedLogLogisticPH>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(time),
+        None,
+        &ctx.policy,
+    );
+    let n = time.len().min(event.len()).min(x.nrows());
+    if event.len() != time.len() || x.nrows() != time.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("loglogistic_ph lengths do not match")
+                .build(),
+        );
+    }
+    let p_x = x.ncols();
+    let mut rows: Vec<(f64, f64, usize)> = Vec::new();
+    for i in 0..n {
+        if !time[i].is_finite() || !event[i].is_finite() || time[i] <= 0.0 {
+            continue;
+        }
+        let tmax = time[i].ceil().max(1.0) as usize;
+        for t in 1..=tmax {
+            let ev = if t == tmax && event[i] > 0.5 {
+                1.0
+            } else {
+                0.0
+            };
+            rows.push(((t as f64).ln(), ev, i));
+        }
+    }
+    if rows.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("loglogistic_ph has no finite positive times")
+                .build(),
+        );
+        return ctx.finish(FittedLogLogisticPH {
+            intercept: 0.0,
+            time_coef: 0.0,
+            coef: Vector::zeros(p_x),
+            n_person_periods: 0,
+            n_events: 0,
+        });
+    }
+    let n_events = rows.iter().filter(|r| r.1 > 0.5).count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("log-logistic PH expansion has zero events")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "discrete log-logistic hazard",
+                    "an all-zero person-period outcome identifies no logit slope",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedLogLogisticPH {
+            intercept: 0.0,
+            time_coef: 0.0,
+            coef: Vector::zeros(p_x),
+            n_person_periods: rows.len(),
+            n_events: 0,
+        });
+    }
+    let m = rows.len();
+    let design = Matrix::from_fn(m, 2 + p_x, |r, j| {
+        if j == 0 {
+            1.0
+        } else if j == 1 {
+            rows[r].0
+        } else {
+            x.get(rows[r].2, j - 2)
+        }
+    });
+    let yexp = Vector::from_iter(rows.iter().map(|r| r.1));
+    let beta = discrete_logit_irls(&design, &yexp, &ctx.policy, 20);
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("loglogistic_ph is person-period logit on [1, log t, x]")
+            .compromise(NumericalCompromise::new(
+                "continuous log-logistic PH / proportional odds",
+                "discrete logit hazard on integer periods",
+                "the time effect is a linear log-period slope",
+                "read as a discrete proportional-odds baseline, not a full AFT",
+            ))
+            .build(),
+    );
+    ctx.finish(FittedLogLogisticPH {
+        intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+        time_coef: beta.as_slice().get(1).copied().unwrap_or(0.0),
+        coef: Vector::from_iter((2..beta.len()).map(|j| beta[j])),
+        n_person_periods: m,
+        n_events,
+    })
+}
+
+/// Named log-logistic / proportional-odds PH.
+#[derive(Clone, Debug, Default)]
+pub struct LogLogisticPH;
+
+impl LogLogisticPH {
+    /// Default person-period log-logistic PH.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on times, events, and covariates.
+    pub fn fit(
+        &self,
+        time: &Vector,
+        event: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedLogLogisticPH>> {
+        loglogistic_ph(time, event, x, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -15923,5 +16554,22 @@ mod tests {
         assert!(tvc.value.coef[0].is_finite() || !tvc.value.converged);
         let wald = wald_test(&x, &y, &Session::new("waldt", "t")).expect("waldt");
         assert!(wald.value.statistic.is_finite() || wald.value.pvalue.is_nan());
+        let wph = weibull_ph(&dur, &ev, &xcox, &Session::new("wph", "t")).expect("wph");
+        assert_eq!(wph.value.coef.len(), 1);
+        assert!(wph.value.shape > 0.0 && wph.value.shape.is_finite());
+        let gph = gompertz_ph(&dur, &ev, &xcox, &Session::new("gph", "t")).expect("gph");
+        assert_eq!(gph.value.coef.len(), 1);
+        assert!(gph.value.time_coef.is_finite() || gph.value.loglik.is_nan());
+        let llph = loglogistic_ph(&dur, &ev, &xcox, &Session::new("llph", "t")).expect("llph");
+        assert!(llph.value.n_events > 0);
+        assert_eq!(llph.value.coef.len(), 1);
+        let pet = peto(&dur, &ev, &grp, &Session::new("peto", "t")).expect("peto");
+        assert!(pet.value.statistic.is_finite() || pet.value.pvalue.is_nan());
+        let tw = tarone_ware(&dur, &ev, &grp, &Session::new("tw", "t")).expect("tw");
+        assert!(tw.value.df > 0.0);
+        let gw = gehan_wilcoxon(&dur, &ev, &grp, &Session::new("gw", "t")).expect("gw");
+        assert!(gw.value.nobs > 0.0);
+        let lrt = logrank_trend(&dur, &ev, &grp, &Session::new("lrt", "t")).expect("lrt");
+        assert!(lrt.value.statistic.is_finite() || lrt.value.pvalue.is_nan());
     }
 }

@@ -28066,6 +28066,418 @@ impl Predict for SlopeOne {
     }
 }
 
+/// Surprise / river `NormalPredictor`: rating mean (not a draw).
+///
+/// Predicts \(\mu\); the stored variance is only for the explanation.
+#[derive(Clone, Debug)]
+pub struct NormalPredictor {
+    mean: f64,
+    m2: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for NormalPredictor {
+    fn default() -> Self {
+        Self {
+            mean: 0.0,
+            m2: 0.0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl NormalPredictor {
+    /// Empty Gaussian rating model.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for NormalPredictor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no ratings"),
+            );
+        };
+        let before = self.mean;
+        for i in 0..y.len() {
+            if !y[i].is_finite() {
+                continue;
+            }
+            self.n_seen += 1;
+            let d = y[i] - self.mean;
+            self.mean += d / self.n_seen as f64;
+            self.m2 += d * (y[i] - self.mean);
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.mean - before).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("NormalPredictor μ={:.4e} n={}", self.mean, self.n_seen);
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("NormalPredictor has fewer than two ratings")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Gaussian rating mean",
+                "Welford μ; predict returns μ, not a Normal draw",
+                format!("μ={before:.4e}"),
+                format!("μ={:.4e}", self.mean),
+            ),
+        )
+    }
+}
+
+impl Predict for NormalPredictor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.n_seen == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::filled(x.nrows(), self.mean))
+    }
+}
+
+/// Surprise `BaselineOnly`: \(\mu+b_u+b_i\) SGD, no latent factors.
+///
+/// `X` is `[user, item]`. Factor count is not identification `p` (there are none).
+#[derive(Clone, Debug)]
+pub struct BaselineOnly {
+    /// SGD step.
+    pub learning_rate: f64,
+    /// ℓ2 on biases.
+    pub l2: f64,
+    mu: f64,
+    bu: Vec<f64>,
+    bi: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for BaselineOnly {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            l2: 0.01,
+            mu: 0.0,
+            bu: Vec::new(),
+            bi: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl BaselineOnly {
+    /// Empty user/item bias model.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn grow(&mut self, u: usize, i: usize) {
+        while self.bu.len() <= u {
+            self.bu.push(0.0);
+        }
+        while self.bi.len() <= i {
+            self.bi.push(0.0);
+        }
+    }
+
+    fn pred(&self, u: usize, i: usize) -> f64 {
+        let mut s = self.mu;
+        if u < self.bu.len() {
+            s += self.bu[u];
+        }
+        if i < self.bi.len() {
+            s += self.bi[i];
+        }
+        s
+    }
+}
+
+impl PartialFit for BaselineOnly {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("BaselineOnly needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let lr = self.learning_rate.max(1e-6);
+        let l2 = self.l2.max(0.0);
+        let mut sse = 0.0_f64;
+        let mut dsum = 0.0_f64;
+        for r in 0..x.nrows().min(y.len()) {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.grow(u, i);
+            let pred = self.pred(u, i);
+            let e = y[r] - pred;
+            sse += e * e;
+            self.mu += lr * e;
+            let bu = self.bu[u];
+            let bi = self.bi[i];
+            self.bu[u] += lr * (e - l2 * bu);
+            self.bi[i] += lr * (e - l2 * bi);
+            dsum += (self.bu[u] - bu).abs() + (self.bi[i] - bi).abs();
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        let warmup = self.n_seen < 4;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.loss_after = Some(sse);
+        q.information_gain = Some(dsum);
+        q.still_identified = !warmup;
+        q.warmup = warmup;
+        q.explanation = format!("BaselineOnly μ={:.4e} SSE={sse:.4e}", self.mu);
+        if warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("BaselineOnly is still warming up")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "SGD on μ, b_u, b_i",
+                "no latent factors; user/item cardinalities are not p",
+                "pre-batch biases",
+                format!("μ={:.4e}", self.mu),
+            ),
+        )
+    }
+}
+
+impl Predict for BaselineOnly {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("BaselineOnly predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::filled(x.nrows(), self.mu));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.pred(u, i)
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// Hash co-clustering recommender (surprise `CoClustering` lite).
+///
+/// User/item cluster counts are not identification `p`. Clusters are
+/// `user % k` / `item % k`; cell means are Welford-updated.
+#[derive(Clone, Debug)]
+pub struct CoClustering {
+    /// User clusters. Not identification `p`.
+    pub n_user_clusters: usize,
+    /// Item clusters. Not identification `p`.
+    pub n_item_clusters: usize,
+    cells: HashMap<(u64, u64), (f64, u64)>,
+    global: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for CoClustering {
+    fn default() -> Self {
+        Self {
+            n_user_clusters: 4,
+            n_item_clusters: 4,
+            cells: HashMap::new(),
+            global: 0.0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl CoClustering {
+    /// Default 4×4 hash co-clustering.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn pred(&self, user: u64, item: u64) -> f64 {
+        let ku = self.n_user_clusters.max(1) as u64;
+        let ki = self.n_item_clusters.max(1) as u64;
+        let uc = user % ku;
+        let ic = item % ki;
+        self.cells
+            .get(&(uc, ic))
+            .map(|(m, _)| *m)
+            .unwrap_or(self.global)
+    }
+}
+
+impl PartialFit for CoClustering {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no ratings"),
+            );
+        };
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("CoClustering needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let ku = self.n_user_clusters.max(1) as u64;
+        let ki = self.n_item_clusters.max(1) as u64;
+        let mut moved = 0.0_f64;
+        for r in 0..x.nrows().min(y.len()) {
+            if !y[r].is_finite() {
+                continue;
+            }
+            let u = x.get(r, 0).max(0.0).round() as u64 % ku;
+            let i = x.get(r, 1).max(0.0).round() as u64 % ki;
+            let e = self.cells.entry((u, i)).or_insert((0.0, 0));
+            e.1 += 1;
+            let before = e.0;
+            e.0 += (y[r] - e.0) / e.1 as f64;
+            moved += (e.0 - before).abs();
+            self.n_seen += 1;
+            self.global += (y[r] - self.global) / self.n_seen as f64;
+        }
+        self.updates += 1;
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("CoClustering is hash clustering, not Bregman co-clustering")
+                .compromise(NumericalCompromise::new(
+                    "Bregman co-clustering of the rating matrix",
+                    "user%k / item%k cell means",
+                    "cluster assignments ignore rating structure",
+                    "read as a hashed block mean, not surprise CoClustering",
+                ))
+                .build(),
+        );
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(moved);
+        q.information_gain = Some(moved);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!(
+            "CoClustering cells={} μ={:.4e}",
+            self.cells.len(),
+            self.global
+        );
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("CoClustering has fewer than two ratings")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "hash co-cluster cell-mean update",
+                "cluster counts are not identification p",
+                "previous cell means",
+                format!("cells={}", self.cells.len()),
+            ),
+        )
+    }
+}
+
+impl Predict for CoClustering {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("CoClustering predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::filled(x.nrows(), self.global));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as u64;
+            let i = x.get(r, 1).max(0.0).round() as u64;
+            self.pred(u, i)
+        }));
+        ctx.finish(out)
+    }
+}
+
 /// AdaMax linear regressor (river `optim.AdaMax`).
 ///
 /// Infinity-norm second moment: \(u \leftarrow \max(\beta_2 u, |g|)\).
@@ -30497,6 +30909,15 @@ mod tests {
         SrpClassifier::new(2)
             .partial_fit(&x, Some(&yb), &session)
             .expect("srpc");
+        NormalPredictor::new()
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("normpred");
+        BaselineOnly::new()
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("baseonly");
+        CoClustering::new()
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("coclust");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
