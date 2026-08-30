@@ -23247,6 +23247,202 @@ impl PiecewiseExponentialRegressionFitter {
     }
 }
 
+/// Cause-specific random survival forest (sksurv competing-risks forest lite).
+///
+/// One extra-trees RSF per positive event code; other causes are treated as
+/// censored. Cause count is not identification `p`. Inner aborting codes are
+/// not promoted.
+#[derive(Clone, Debug)]
+pub struct CompetingRisksForest {
+    /// Trees per cause. Not identification `p`.
+    pub n_estimators: usize,
+    /// Maximum depth.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for CompetingRisksForest {
+    fn default() -> Self {
+        Self {
+            n_estimators: 4,
+            max_depth: 3,
+            seed: 43,
+        }
+    }
+}
+
+impl CompetingRisksForest {
+    /// Default cause-specific RSF ensemble.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit one RSF per observed cause.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCompetingRisksForest>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(durations.len()).min(events.len());
+        let mut causes: Vec<i64> = Vec::new();
+        for i in 0..n {
+            if events[i].is_finite() && events[i] > 0.5 {
+                let c = events[i].round() as i64;
+                if !causes.contains(&c) {
+                    causes.push(c);
+                }
+            }
+        }
+        causes.sort_unstable();
+        if causes.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("CompetingRisksForest has no events")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "cause-specific ensemble hazards",
+                        "zero events ⇒ no cause to grow a forest",
+                        "collect events",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedCompetingRisksForest {
+                forests: Vec::new(),
+                causes: Vector::zeros(0),
+                n_features: x.ncols(),
+            });
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("CompetingRisksForest is cause-specific RSF, not a Fine–Gray forest")
+                .compromise(NumericalCompromise::new(
+                    "competing-risks forest / Fine–Gray splitting",
+                    "one log-rank extra-trees RSF per cause with others censored",
+                    "subdistribution splitting and CIF ensembles are omitted",
+                    "read each column as a cause-specific ranking, not a published CIF forest",
+                ))
+                .build(),
+        );
+        let spec = RandomSurvivalForest {
+            n_estimators: self.n_estimators.max(1),
+            max_depth: self.max_depth.max(1),
+            min_samples_split: 2,
+            n_try: 6,
+            seed: self.seed,
+        };
+        let mut forests = Vec::new();
+        for (k, &cause) in causes.iter().enumerate() {
+            let evk = Vector::from_iter((0..n).map(|i| {
+                if events[i].is_finite() && (events[i].round() as i64) == cause {
+                    1.0
+                } else {
+                    0.0
+                }
+            }));
+            match spec.fit(durations, &evk, x, &session.child(format!("crf-{k}"))) {
+                Ok(q) => {
+                    for issue in q.report.issues() {
+                        if skip_aborting_inner(issue) {
+                            continue;
+                        }
+                        ctx.push(issue.clone());
+                    }
+                    forests.push((cause, q.value));
+                }
+                Err(err) => {
+                    for issue in err.report.issues() {
+                        if skip_aborting_inner(issue) {
+                            continue;
+                        }
+                        ctx.push(issue.clone());
+                    }
+                    ctx.push(
+                        Issue::builder(IssueCode::DidNotConverge)
+                            .message(format!("CompetingRisksForest cause {cause} failed"))
+                            .build(),
+                    );
+                }
+            }
+        }
+        if forests.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("CompetingRisksForest: every cause forest failed")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedCompetingRisksForest {
+            forests,
+            causes: Vector::from_iter(causes.iter().map(|c| *c as f64)),
+            n_features: x.ncols(),
+        })
+    }
+}
+
+/// Fitted cause-specific survival forests.
+#[derive(Clone, Debug)]
+pub struct FittedCompetingRisksForest {
+    forests: Vec<(i64, FittedRandomSurvivalForest)>,
+    /// Observed cause codes.
+    pub causes: Vector,
+    /// Training feature count.
+    pub n_features: usize,
+}
+
+impl FittedCompetingRisksForest {
+    /// Cause-specific leaf Nelson–Aalen risks (`n` × `n_causes`).
+    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let k = self.forests.len().max(self.causes.len());
+        if self.forests.is_empty() {
+            return ctx.finish(Matrix::zeros(x.nrows(), k.max(1)));
+        }
+        let mut out = Matrix::zeros(x.nrows(), self.forests.len());
+        for (j, (_, forest)) in self.forests.iter().enumerate() {
+            match forest.predict(x, &session.child(format!("crfp-{j}"))) {
+                Ok(q) => {
+                    for i in 0..x.nrows().min(q.value.len()) {
+                        out.set(i, j, q.value[i]);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        ctx.finish(out)
+    }
+}
+
+/// Named cause-specific forest alias.
+#[derive(Clone, Debug, Default)]
+pub struct CauseSpecificForest {
+    inner: CompetingRisksForest,
+}
+
+impl CauseSpecificForest {
+    /// Default cause-specific RSF.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit one RSF per cause.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCompetingRisksForest>> {
+        self.inner.fit(durations, events, x, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -24277,5 +24473,18 @@ mod tests {
             .expect("pere");
         assert_eq!(pere.value.coef.len(), 1);
         assert_eq!(pere.value.intercepts.len(), 3);
+        let crf = CompetingRisksForest::new()
+            .fit(&dur, &ev, &xcox, &Session::new("crf", "t"))
+            .expect("crf");
+        let pcrf = crf
+            .value
+            .predict(&xcox, &Session::new("crf", "p"))
+            .expect("crfp");
+        assert_eq!(pcrf.value.nrows(), 20);
+        assert!(pcrf.value.ncols() >= 1);
+        let csf = CauseSpecificForest::new()
+            .fit(&dur, &ev, &xcox, &Session::new("csf", "t"))
+            .expect("csf");
+        assert_eq!(csf.value.n_features, 1);
     }
 }

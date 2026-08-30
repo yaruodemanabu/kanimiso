@@ -6000,6 +6000,16 @@ const INVENTORY: &[Algorithm] = &[
         "sktime.classification.interval_based.RandomIntervalSpectralForest",
         "estimator",
     ),
+    a(
+        "stats.CompetingRisksForest",
+        "sksurv.ensemble.RandomSurvivalForest",
+        "estimator",
+    ),
+    a(
+        "stats.CauseSpecificForest",
+        "sksurv.ensemble.RandomSurvivalForest",
+        "estimator",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6480,6 +6490,7 @@ mod tests {
             "online.LeveragingBaggingRegressor",
             "online.AdwinBaggingRegressor",
             "tslearn.RiseClassifier",
+            "stats.CompetingRisksForest",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
