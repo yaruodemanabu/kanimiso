@@ -5,14 +5,14 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linalg::ridge_solve;
+use crate::linalg::{ridge_solve, thin_svd};
 use crate::linear_model::{FittedPenalized, Ridge};
 use crate::rng::Rng;
 use crate::special::norm_cdf;
 use crate::traits::{Fit, FitUnsupervised, Predict, Transform};
 use crate::validate::{inspect_classes, inspect_xy};
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, NumericalCompromise, Qualified, Result, Severity};
+use signlred::{Issue, IssueCode, NumericalCompromise, Qualified, Report, Result, Severity};
 use std::collections::BTreeMap;
 
 fn series_ok(a: &Vector) -> bool {
@@ -87,6 +87,170 @@ pub fn lcss(
     }
     let e = if eps.is_finite() { eps.abs() } else { 0.0 };
     ctx.finish(lcss_raw(a.as_slice(), b.as_slice(), e, band))
+}
+
+/// Weighted DTW (tslearn `wdtw`, Jeong logistic weights).
+///
+/// \(w(|i-j|)=1/(1+\exp(-g(|i-j|-m_c)))\) with \(m_c=\max(n,m)/2\).
+pub fn wdtw(a: &Vector, b: &Vector, g: f64, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("wdtw.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("wdtw.b") {
+        ctx.push(issue);
+    }
+    let g = if g.is_finite() && g >= 0.0 {
+        g
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("wdtw g={g} is not a finite ≥0 slope; using 0.1"))
+                .build(),
+        );
+        0.1
+    };
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("WDTW on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(wdtw_raw(a.as_slice(), b.as_slice(), g))
+}
+
+fn wdtw_raw(a: &[f64], b: &[f64], g: f64) -> f64 {
+    let n = a.len();
+    let m = b.len();
+    let mc = n.max(m) as f64 / 2.0;
+    let inf: f64 = 1e300;
+    let mut prev = vec![inf; m + 1];
+    let mut cur = vec![inf; m + 1];
+    prev[0] = 0.0;
+    for i in 1..=n {
+        cur[0] = inf;
+        for j in 1..=m {
+            let d = (i as f64 - j as f64).abs();
+            let w = 1.0 / (1.0 + (-g * (d - mc)).exp());
+            let cost = w * (a[i - 1] - b[j - 1]).abs();
+            cur[j] = cost + prev[j].min(cur[j - 1]).min(prev[j - 1]);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[m]
+}
+
+fn ddtw_deriv(s: &[f64]) -> Vec<f64> {
+    let n = s.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        return vec![0.0];
+    }
+    let mut d = vec![0.0; n];
+    d[0] = s[1] - s[0];
+    d[n - 1] = s[n - 1] - s[n - 2];
+    for i in 1..n - 1 {
+        d[i] = 0.5 * (s[i + 1] - s[i - 1]);
+    }
+    d
+}
+
+/// Derivative DTW (Keogh / tslearn `ddtw`).
+pub fn ddtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("ddtw.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("ddtw.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("DDTW on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let da = ddtw_deriv(a.as_slice());
+    let db = ddtw_deriv(b.as_slice());
+    ctx.finish(dtw_raw(&da, &db))
+}
+
+fn embed_series(s: &[f64], d: usize) -> Matrix {
+    let d = d.max(1);
+    let n = s.len().saturating_sub(d - 1).max(1);
+    Matrix::from_fn(n, d, |i, j| {
+        let t = i + j;
+        if t < s.len() {
+            s[t]
+        } else {
+            *s.last().unwrap_or(&0.0)
+        }
+    })
+}
+
+/// Eigenvector similarity of delay-embedded covariance (tslearn `eros`).
+///
+/// Embedding order is not identification `p`. Identical series score near 1.
+pub fn eros(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("eros.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("eros.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("EROS on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let d = 4.min(a.len().max(2) / 2).max(1).min(b.len().max(2) / 2);
+    let ea = embed_series(a.as_slice(), d);
+    let eb = embed_series(b.as_slice(), d);
+    let mut sa = Report::new("eros", "a");
+    let mut sb = Report::new("eros", "b");
+    let (Some(va), Some(vb)) = (
+        thin_svd(&mut sa, &ea, &ctx.policy),
+        thin_svd(&mut sb, &eb, &ctx.policy),
+    ) else {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("EROS SVD of a delay embedding failed")
+                .build(),
+        );
+        return ctx.finish(0.0);
+    };
+    let r = va
+        .singular_values
+        .len()
+        .min(vb.singular_values.len())
+        .max(1);
+    let mut wsum = 0.0;
+    let mut acc = 0.0;
+    for c in 0..r {
+        let wa = va.singular_values.get(c).copied().unwrap_or(0.0).abs();
+        let wb = vb.singular_values.get(c).copied().unwrap_or(0.0).abs();
+        let w = wa + wb;
+        wsum += w;
+        let mut dot = 0.0;
+        for i in 0..d.min(va.v.nrows()).min(vb.v.nrows()) {
+            dot += va.v[(i, c)] * vb.v[(i, c)];
+        }
+        acc += w * dot.abs();
+    }
+    let sim = if wsum > 1e-18 { acc / wsum } else { 0.0 };
+    ctx.finish(sim.clamp(0.0, 1.0))
 }
 
 /// Naive STOMP-style Euclidean matrix profile (tslearn / stumpy `matrix_profile`).
@@ -9609,6 +9773,14 @@ mod tests {
             .unwrap()
             .value;
         assert!(sd.is_finite());
+        let wd = wdtw(&a, &a, 0.1, &Session::new("ts", "wdtw"))
+            .unwrap()
+            .value;
+        assert!(wd.abs() < 1e-12, "wdtw={wd}");
+        let dd = ddtw(&a, &a, &Session::new("ts", "ddtw")).unwrap().value;
+        assert!(dd.abs() < 1e-12, "ddtw={dd}");
+        let er = eros(&a, &a, &Session::new("ts", "eros")).unwrap().value;
+        assert!(er > 0.9, "eros={er}");
     }
 
     #[test]

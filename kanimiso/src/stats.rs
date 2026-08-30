@@ -2573,6 +2573,289 @@ pub fn aalen_johansen(
     })
 }
 
+/// Fitted Fine–Gray subdistribution coefficients.
+#[derive(Clone, Debug)]
+pub struct FittedFineGray {
+    /// Log subdistribution-hazard slopes.
+    pub coef: Vector,
+    /// Partial-likelihood value at the last Newton step.
+    pub loglik: f64,
+    /// Events of the cause of interest.
+    pub n_events: usize,
+    /// Sample size.
+    pub n: usize,
+    /// Cause code used as the event of interest.
+    pub cause: i64,
+    /// Whether Newton met the gradient tolerance.
+    pub converged: bool,
+}
+
+/// Fine–Gray competing-risk regression (subdistribution hazard).
+///
+/// `events` is 0 = censored, `1..=k` = cause. Cause count is not identification
+/// `p`. Competing events stay in the risk set with IPCW from the censoring KM.
+pub fn fine_gray(
+    x: &Matrix,
+    durations: &Vector,
+    events: &Vector,
+    cause: i64,
+    session: &Session,
+) -> Result<Qualified<FittedFineGray>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+    if events.len() != x.nrows() || durations.len() != x.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("Fine–Gray durations/events length ≠ X rows")
+                .build(),
+        );
+        return ctx.finish(FittedFineGray {
+            coef: Vector::zeros(x.ncols()),
+            loglik: 0.0,
+            n_events: 0,
+            n: x.nrows(),
+            cause,
+            converged: false,
+        });
+    }
+    let n = x.nrows();
+    let p = x.ncols();
+    inspect_identification(&mut ctx.report, n, p, &ctx.policy);
+    let n_events = (0..n)
+        .filter(|&i| events[i].is_finite() && events[i].round() as i64 == cause)
+        .count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("Fine–Gray has no events of the requested cause")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "subdistribution-hazard coefficients",
+                    "the Fine–Gray partial likelihood is an empty product without cause-specific events",
+                    "choose a cause that occurs, or collect more events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedFineGray {
+            coef: Vector::zeros(p),
+            loglik: 0.0,
+            n_events: 0,
+            n,
+            cause,
+            converged: false,
+        });
+    }
+    let g_hat = censoring_km(durations, events);
+    let mut beta = Vector::zeros(p);
+    let mut loglik = f64::NEG_INFINITY;
+    let mut converged = false;
+    for it in 0..25 {
+        let (ll, grad, hess) = fine_gray_grad_hess(durations, events, x, &beta, cause, &g_hat);
+        loglik = ll;
+        if !grad.as_slice().iter().all(|v| v.is_finite()) {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("Fine–Gray gradient became non-finite; last β is retained")
+                    .build(),
+            );
+            break;
+        }
+        let gnorm = grad.norm();
+        ctx.session.step(it as u64, -ll, Some(gnorm));
+        if gnorm < 1e-6 {
+            ctx.session.converged("Fine–Gray Newton", it as u64);
+            converged = true;
+            break;
+        }
+        let mut hneg = Matrix::zeros(p, p);
+        for i in 0..p {
+            for j in 0..p {
+                hneg.set(i, j, -hess.get(i, j));
+            }
+        }
+        let mut scratch = Report::new("fine_gray", "newton");
+        match chol_solve(&mut scratch, hneg.inner(), &grad, &ctx.policy) {
+            Some(delta) => {
+                for j in 0..p {
+                    beta[j] -= delta[j];
+                }
+            }
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::InformationMatrixSingular)
+                        .severity(Severity::Warning)
+                        .message("Fine–Gray observed information is not SPD; Newton step dropped")
+                        .build(),
+                );
+                break;
+            }
+        }
+    }
+    if !beta.as_slice().iter().all(|v| v.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteOutput)
+                .message("Fine–Gray coefficients are non-finite")
+                .build(),
+        );
+    }
+    ctx.finish(FittedFineGray {
+        coef: beta,
+        loglik,
+        n_events,
+        n,
+        cause,
+        converged,
+    })
+}
+
+fn censoring_km(durations: &Vector, events: &Vector) -> Vec<(f64, f64)> {
+    let n = durations.len().min(events.len());
+    let mut idx: Vec<usize> = (0..n).filter(|&i| durations[i].is_finite()).collect();
+    idx.sort_by(|&a, &b| {
+        durations[a]
+            .partial_cmp(&durations[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut out = Vec::new();
+    let mut surv = 1.0;
+    let mut i = 0;
+    while i < idx.len() {
+        let t = durations[idx[i]];
+        let mut j = i;
+        while j < idx.len() && (durations[idx[j]] - t).abs() <= 1e-15 {
+            j += 1;
+        }
+        let y_risk = (idx.len() - i) as f64;
+        let mut d_c = 0.0;
+        for &u in &idx[i..j] {
+            if events[u].is_finite() && events[u].round() as i64 == 0 {
+                d_c += 1.0;
+            }
+        }
+        if d_c > 0.0 && y_risk > 0.0 {
+            surv *= (1.0 - d_c / y_risk).max(0.0);
+        }
+        out.push((t, surv.max(1e-12)));
+        i = j;
+    }
+    out
+}
+
+fn censor_surv_at(g_hat: &[(f64, f64)], t: f64) -> f64 {
+    let mut g = 1.0;
+    for &(ti, gi) in g_hat {
+        if ti <= t {
+            g = gi;
+        } else {
+            break;
+        }
+    }
+    g.max(1e-12)
+}
+
+fn fine_gray_weight(
+    i: usize,
+    t: f64,
+    durations: &Vector,
+    events: &Vector,
+    cause: i64,
+    g_hat: &[(f64, f64)],
+) -> f64 {
+    if i >= durations.len() || !durations[i].is_finite() {
+        return 0.0;
+    }
+    let ti = durations[i];
+    let e = if i < events.len() && events[i].is_finite() {
+        events[i].round() as i64
+    } else {
+        0
+    };
+    if ti >= t {
+        1.0
+    } else if e > 0 && e != cause {
+        let gt = censor_surv_at(g_hat, t);
+        let gs = censor_surv_at(g_hat, ti);
+        (gt / gs).clamp(0.0, 8.0)
+    } else {
+        0.0
+    }
+}
+
+fn fine_gray_grad_hess(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    beta: &Vector,
+    cause: i64,
+    g_hat: &[(f64, f64)],
+) -> (f64, Vector, Matrix) {
+    let n = x.nrows();
+    let p = x.ncols();
+    let mut times: Vec<f64> = Vec::new();
+    for i in 0..n {
+        if events[i].is_finite() && events[i].round() as i64 == cause && durations[i].is_finite() {
+            let t = durations[i];
+            if !times.iter().any(|u| (u - t).abs() <= 1e-15) {
+                times.push(t);
+            }
+        }
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut ll = 0.0;
+    let mut grad = Vector::zeros(p);
+    let mut hess = Matrix::zeros(p, p);
+    for &t in &times {
+        let mut s0 = 0.0;
+        let mut s1 = vec![0.0; p];
+        let mut s2 = vec![0.0; p * p];
+        for i in 0..n {
+            let wgt = fine_gray_weight(i, t, durations, events, cause, g_hat);
+            if wgt <= 0.0 {
+                continue;
+            }
+            let mut xb = 0.0;
+            for j in 0..p {
+                xb += x.get(i, j) * beta[j];
+            }
+            xb = xb.clamp(-20.0, 20.0);
+            let w = wgt * xb.exp().max(1e-300);
+            s0 += w;
+            for j in 0..p {
+                s1[j] += w * x.get(i, j);
+            }
+            for a in 0..p {
+                for b in 0..p {
+                    s2[a * p + b] += w * x.get(i, a) * x.get(i, b);
+                }
+            }
+        }
+        if s0 <= 0.0 {
+            continue;
+        }
+        for i in 0..n {
+            if events[i].round() as i64 != cause || (durations[i] - t).abs() > 1e-15 {
+                continue;
+            }
+            let mut xb = 0.0;
+            for j in 0..p {
+                xb += x.get(i, j) * beta[j];
+            }
+            xb = xb.clamp(-20.0, 20.0);
+            ll += xb - s0.ln();
+            for j in 0..p {
+                grad[j] += x.get(i, j) - s1[j] / s0;
+            }
+            for a in 0..p {
+                for b in 0..p {
+                    let v = s2[a * p + b] / s0 - (s1[a] / s0) * (s1[b] / s0);
+                    hess.set(a, b, hess.get(a, b) - v);
+                }
+            }
+        }
+    }
+    (ll, grad, hess)
+}
+
 /// Baron–Kenny product-of-coefficients mediation.
 #[derive(Clone, Debug)]
 pub struct MediationResult {
@@ -9737,6 +10020,78 @@ pub fn student_t_copula(
     })
 }
 
+/// Fitted Joe copula (statsmodels `JoeCopula`).
+#[derive(Clone, Debug)]
+pub struct JoeCopula {
+    /// Dependence \(\theta \ge 1\).
+    pub theta: f64,
+    /// Copula log-likelihood.
+    pub loglik: f64,
+}
+
+fn joe_ll(u: &[f64], v: &[f64], theta: f64) -> f64 {
+    if theta < 1.0 {
+        return f64::NEG_INFINITY;
+    }
+    let mut ll = 0.0;
+    for i in 0..u.len() {
+        let ub = (1.0 - u[i]).max(1e-12);
+        let vb = (1.0 - v[i]).max(1e-12);
+        let ut = ub.powf(theta);
+        let vt = vb.powf(theta);
+        let w = ut + vt - ut * vt;
+        if w <= 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        let dens = ub.powf(theta - 1.0)
+            * vb.powf(theta - 1.0)
+            * (theta - 1.0 + w.powf(1.0 / theta))
+            * w.powf(1.0 / theta - 2.0);
+        if !dens.is_finite() || dens <= 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        ll += dens.ln();
+    }
+    ll
+}
+
+/// Fit a bivariate Joe copula by a \(\theta\) grid on ranks.
+///
+/// Pair count is not identification `p`.
+pub fn joe_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<JoeCopula>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let n = y1.len().min(y2.len());
+    let x = Matrix::from_fn(n, 2, |i, j| if j == 0 { y1[i] } else { y2[i] });
+    inspect_xy(&mut ctx.report, &x, None, &ctx.policy);
+    let (u, v) = copula_uv(y1, y2);
+    if u.len() < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Joe copula needs n≥4 pairs")
+                .build(),
+        );
+        return ctx.finish(JoeCopula {
+            theta: 1.0,
+            loglik: f64::NAN,
+        });
+    }
+    let mut best_th = 1.5_f64;
+    let mut best_ll = f64::NEG_INFINITY;
+    for step in 0..8 {
+        let th = 1.0 + 0.4 * step as f64;
+        let ll = joe_ll(&u, &v, th);
+        if ll > best_ll {
+            best_ll = ll;
+            best_th = th;
+        }
+    }
+    ctx.finish(JoeCopula {
+        theta: best_th,
+        loglik: best_ll,
+    })
+}
+
 /// Univariate GAM-lite: cubic truncated-power spline + ridge (statsmodels `GLMGam`).
 ///
 /// Knot count is not identification `p`.
@@ -10263,6 +10618,10 @@ mod tests {
         let aj = aalen_johansen(&tm, &evc, &Session::new("aj", "t")).expect("aj");
         assert!(!aj.value.causes.is_empty());
         assert_eq!(aj.value.cif.ncols(), aj.value.causes.len());
+        let xfg = Matrix::from_fn(20, 1, |i, _| (i % 7) as f64);
+        let fg = fine_gray(&xfg, &tm, &evc, 1, &Session::new("fg", "t")).expect("fg");
+        assert!(fg.value.coef[0].is_finite());
+        assert!(fg.value.n_events > 0);
         let xv = Vector::from_iter((0..40).map(|i| i as f64));
         let md = Vector::from_iter((0..40).map(|i| 0.5 * i as f64 + 0.1));
         let yv = Vector::from_iter((0..40).map(|i| 1.0 + 0.8 * i as f64 + 0.4 * md[i]));
@@ -10490,6 +10849,9 @@ mod tests {
         assert!(fr.value.theta.is_finite());
         let tc = student_t_copula(&y, &y2c, 5.0, &Session::new("tcop", "t")).expect("tcop");
         assert!(tc.value.rho > 0.4, "t-rho={}", tc.value.rho);
+        let joe = joe_copula(&y, &y2c, &Session::new("joe", "t")).expect("joe");
+        assert!(joe.value.theta >= 1.0);
+        assert!(joe.value.loglik.is_finite() || joe.value.loglik.is_infinite());
         let gam = UnivariateGam::new(3)
             .fit(&xs, &ys, &Session::new("gam", "t"))
             .expect("gam");

@@ -13479,6 +13479,479 @@ impl PartialFit for OnlinePearson {
     }
 }
 
+/// Streaming mode of a discretized column (river `stats.Mode`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineMode {
+    counts: HashMap<i64, u64>,
+    mode_key: i64,
+    mode_count: u64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl OnlineMode {
+    /// Empty mode accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current mode (decoded from milli-bins), or NaN before the first update.
+    pub fn score(&self) -> f64 {
+        if self.n_seen == 0 {
+            f64::NAN
+        } else {
+            self.mode_key as f64 / 1000.0
+        }
+    }
+}
+
+impl PartialFit for OnlineMode {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            let key = (v * 1000.0).round() as i64;
+            let c = self.counts.entry(key).or_insert(0);
+            *c += 1;
+            let cnt = *c;
+            if cnt > self.mode_count || (cnt == self.mode_count && key < self.mode_key) {
+                self.mode_count = cnt;
+                self.mode_key = key;
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 1;
+        q.explanation = format!("OnlineMode={after:.6e} count={}", self.mode_count);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "discretized mode",
+                "milli-bin counts of column 0; ties take the smaller key",
+                format!("mode={before:.6e}"),
+                format!("mode={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Expanding maximum (river `stats.Peak`).
+#[derive(Clone, Debug)]
+pub struct OnlinePeak {
+    peak: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OnlinePeak {
+    fn default() -> Self {
+        Self {
+            peak: f64::NEG_INFINITY,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlinePeak {
+    /// Empty peak tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current peak, or NaN before the first finite value.
+    pub fn score(&self) -> f64 {
+        if self.n_seen == 0 {
+            f64::NAN
+        } else {
+            self.peak
+        }
+    }
+}
+
+impl PartialFit for OnlinePeak {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            if v > self.peak {
+                self.peak = v;
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 1;
+        q.explanation = format!("OnlinePeak={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "expanding maximum",
+                "running max of column 0",
+                format!("peak={before:.6e}"),
+                format!("peak={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming standard error of the mean (river `stats.SEM`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineSem {
+    n: f64,
+    mean: f64,
+    m2: f64,
+    updates: u64,
+}
+
+impl OnlineSem {
+    /// Empty SEM accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// \(s/\sqrt{n}\), or NaN during warmup.
+    pub fn score(&self) -> f64 {
+        if self.n < 2.0 {
+            return f64::NAN;
+        }
+        let var = self.m2 / (self.n - 1.0);
+        if var < 0.0 {
+            f64::NAN
+        } else {
+            var.sqrt() / self.n.sqrt()
+        }
+    }
+}
+
+impl PartialFit for OnlineSem {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            self.n += 1.0;
+            let d = v - self.mean;
+            self.mean += d / self.n;
+            self.m2 += d * (v - self.mean);
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 2.0;
+        q.warmup = self.n < 2.0;
+        q.explanation = format!("OnlineSem={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "standard error of the mean",
+                "Welford s / √n of column 0",
+                format!("sem={before:.6e}"),
+                format!("sem={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Windowed Spearman rank correlation (river `stats.SpearmanCorr`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineSpearman {
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl OnlineSpearman {
+    /// Empty rank-correlation window.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current Spearman ρ, or NaN during warmup.
+    pub fn score(&self) -> f64 {
+        spearman_window(&self.xs, &self.ys)
+    }
+}
+
+fn spearman_window(xs: &[f64], ys: &[f64]) -> f64 {
+    let n = xs.len().min(ys.len());
+    if n < 3 {
+        return f64::NAN;
+    }
+    let rx = rank_average(xs);
+    let ry = rank_average(ys);
+    let mx = rx.iter().sum::<f64>() / n as f64;
+    let my = ry.iter().sum::<f64>() / n as f64;
+    let mut num = 0.0;
+    let mut d1 = 0.0;
+    let mut d2 = 0.0;
+    for i in 0..n {
+        let a = rx[i] - mx;
+        let b = ry[i] - my;
+        num += a * b;
+        d1 += a * a;
+        d2 += b * b;
+    }
+    if d1 <= 1e-18 || d2 <= 1e-18 {
+        f64::NAN
+    } else {
+        num / (d1.sqrt() * d2.sqrt())
+    }
+}
+
+fn rank_average(xs: &[f64]) -> Vec<f64> {
+    let mut idx: Vec<usize> = (0..xs.len()).collect();
+    idx.sort_by(|&a, &b| xs[a].partial_cmp(&xs[b]).unwrap_or(std::cmp::Ordering::Equal));
+    let mut r = vec![0.0; xs.len()];
+    let mut i = 0;
+    while i < idx.len() {
+        let mut j = i + 1;
+        while j < idx.len() && (xs[idx[j]] - xs[idx[i]]).abs() <= 1e-15 {
+            j += 1;
+        }
+        let avg = (i + j - 1) as f64 / 2.0 + 1.0;
+        for &k in &idx[i..j] {
+            r[k] = avg;
+        }
+        i = j;
+    }
+    r
+}
+
+impl PartialFit for OnlineSpearman {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        if x.ncols() < 2 && y.is_none() {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("OnlineSpearman needs two columns or an explicit y")
+                    .build(),
+            );
+        }
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let a = x.get(i, 0);
+            let b = if x.ncols() >= 2 {
+                x.get(i, 1)
+            } else if let Some(y) = y {
+                if i < y.len() {
+                    y[i]
+                } else {
+                    f64::NAN
+                }
+            } else {
+                f64::NAN
+            };
+            if !a.is_finite() || !b.is_finite() {
+                continue;
+            }
+            self.xs.push(a);
+            self.ys.push(b);
+            if self.xs.len() > 256 {
+                self.xs.remove(0);
+                self.ys.remove(0);
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.xs.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.xs.len() >= 3;
+        q.warmup = self.xs.len() < 3;
+        q.explanation = format!("OnlineSpearman={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed Spearman ρ",
+                "average ranks of column 0 vs column 1 or y; window length is not p",
+                format!("rho={before:.6e}"),
+                format!("rho={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming Hill tail-index on the upper order statistics.
+///
+/// Reservoir size is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct HillSketch {
+    /// Number of upper order statistics kept.
+    pub k: usize,
+    heap: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for HillSketch {
+    fn default() -> Self {
+        Self {
+            k: 8,
+            heap: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl HillSketch {
+    /// Hill reservoir of size `k`.
+    pub fn new(k: usize) -> Self {
+        Self {
+            k: k.max(3),
+            ..Self::default()
+        }
+    }
+
+    /// Hill \(\xi\), or NaN during warmup.
+    pub fn score(&self) -> f64 {
+        let k = self.k.max(3).min(self.heap.len());
+        if k < 3 {
+            return f64::NAN;
+        }
+        let mut xs = self.heap.clone();
+        xs.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        let floor = xs[k - 1].max(1e-12);
+        let mut s = 0.0;
+        for v in xs.iter().take(k) {
+            s += (v / floor).ln();
+        }
+        s / k as f64
+    }
+}
+
+impl PartialFit for HillSketch {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        let cap = self.k.max(3);
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0).abs();
+            if !v.is_finite() || v <= 0.0 {
+                continue;
+            }
+            self.heap.push(v);
+            self.n_seen += 1;
+        }
+        if self.heap.len() > cap * 4 {
+            self.heap
+                .sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+            self.heap.truncate(cap);
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.heap.len().min(cap) as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.heap.len() >= 3;
+        q.warmup = self.heap.len() < 3;
+        q.explanation = format!("HillSketch xi={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Hill tail index",
+                "mean log-excess of the largest |x| over the k-th order statistic",
+                format!("xi={before:.6e}"),
+                format!("xi={after:.6e}"),
+            ),
+        )
+    }
+}
+
 /// Rolling mean (river `stats.RollingMean`).
 #[derive(Clone, Debug, Default)]
 pub struct RollingMean {
@@ -22093,6 +22566,21 @@ mod tests {
         OnlineOutputCode::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("ooc");
+        OnlineMode::new()
+            .partial_fit(&x, None, &session)
+            .expect("omode");
+        OnlinePeak::new()
+            .partial_fit(&x, None, &session)
+            .expect("opeak");
+        OnlineSem::new()
+            .partial_fit(&x, None, &session)
+            .expect("osem");
+        OnlineSpearman::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("ospear");
+        HillSketch::new(6)
+            .partial_fit(&x, None, &session)
+            .expect("hill");
 
         let n_expl = session
             .ledger()

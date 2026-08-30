@@ -223,6 +223,157 @@ impl Fit for ProbitRegression {
     }
 }
 
+/// Binary complementary log-log GLM (statsmodels `Binomial(link=cloglog)`).
+///
+/// \(\mu = 1-\exp(-\exp(\eta))\). IRLS uses a scratch report so a large
+/// working residual cannot abort a well-separated binary fit.
+#[derive(Clone, Debug)]
+pub struct Cloglog {
+    /// Max IRLS iterations.
+    pub max_iter: usize,
+    /// Prepend an intercept.
+    pub fit_intercept: bool,
+}
+
+impl Default for Cloglog {
+    fn default() -> Self {
+        Self {
+            max_iter: 40,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl Cloglog {
+    /// Default complementary log-log.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for Cloglog {
+    type Fitted = FittedGlm;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        if counts.len() != 2 {
+            if counts.len() > 2 {
+                ctx.push(
+                    Issue::builder(IssueCode::UnidentifiedModel)
+                        .message("cloglog is binary; K>2 is not a complementary log-log")
+                        .meaninglessness(Meaninglessness::new(
+                            "cloglog coefficients",
+                            "the extreme-value latent cut is identified for a single threshold",
+                            InterpretiveValue::Misleading,
+                            "use MultinomialLogistic or an ordered model",
+                        ))
+                        .build(),
+                );
+            }
+            return ctx.finish(FittedGlm {
+                coef: Vector::zeros(x.ncols()),
+                intercept: 0.0,
+                dispersion: 1.0,
+            });
+        }
+        let pos = counts[1].0;
+        let y01 = Vector::from_iter(y.as_slice().iter().map(|&v| {
+            if v.round() as i64 == pos {
+                1.0
+            } else {
+                0.0
+            }
+        }));
+        let design = if self.fit_intercept {
+            x.with_intercept()
+        } else {
+            x.clone()
+        };
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let mut beta = Vector::zeros(design.ncols());
+        let mut converged = false;
+        for it in 0..self.max_iter.max(1) {
+            let mut xs = Matrix::zeros(design.nrows(), design.ncols());
+            let mut z = Vector::zeros(y01.len());
+            let mut sep = false;
+            for i in 0..y01.len() {
+                let mut eta = 0.0;
+                for j in 0..design.ncols() {
+                    eta += design.get(i, j) * beta[j];
+                }
+                eta = eta.clamp(-8.0, 5.0);
+                let el = eta.exp();
+                let mu = (1.0 - (-el).exp()).clamp(1e-12, 1.0 - 1e-12);
+                let dmu = (el * (1.0 - mu)).max(1e-12);
+                if (y01[i] > 0.5 && mu > 1.0 - 1e-8) || (y01[i] < 0.5 && mu < 1e-8) {
+                    sep = true;
+                }
+                let w = (dmu * dmu / (mu * (1.0 - mu))).max(1e-12);
+                let sw = w.sqrt();
+                z[i] = (eta + (y01[i] - mu) / dmu) * sw;
+                for j in 0..design.ncols() {
+                    xs.set(i, j, design.get(i, j) * sw);
+                }
+            }
+            if sep {
+                ctx.push(
+                    Issue::builder(IssueCode::QuasiCompleteSeparation)
+                        .message("cloglog IRLS approached μ∈{0,1}; the MLE is diverging")
+                        .build(),
+                );
+            }
+            let mut scratch = signlred::Report::new("cloglog", "irls");
+            let Some(next) = least_squares(&mut scratch, &xs, &z, &ctx.policy) else {
+                break;
+            };
+            for issue in scratch.issues() {
+                if issue.code == IssueCode::ResidualTooLarge {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            let d = next.sub(&beta).norm();
+            beta = next;
+            ctx.session.step(it as u64, d, None);
+            if d < 1e-8 {
+                ctx.session.converged("cloglog IRLS", it as u64);
+                converged = true;
+                break;
+            }
+        }
+        if !converged {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("cloglog IRLS did not meet the tolerance")
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(Severity::Advisory)
+                .message("cloglog coefficients are IRLS; no Hessian SEs are attached")
+                .compromise(NumericalCompromise::new(
+                    "observed-information cloglog MLE",
+                    "IRLS with complementary-log-log working weights",
+                    "the last weighted LS is the score equation, not a sandwich",
+                    "do not treat these as OLS t-statistics",
+                ))
+                .build(),
+        );
+        let (intercept, coef) = if self.fit_intercept {
+            (beta[0], Vector::from_iter((1..beta.len()).map(|j| beta[j])))
+        } else {
+            (0.0, beta)
+        };
+        ctx.finish(FittedGlm {
+            coef,
+            intercept,
+            dispersion: 1.0,
+        })
+    }
+}
+
 /// Negative-binomial GLM (NB2, log link) with a moment \(\alpha\).
 #[derive(Clone, Debug)]
 pub struct NegativeBinomialRegressor {
@@ -1008,6 +1159,214 @@ fn ordered_prob_grad(c: usize, k: usize, xb: f64, thr: &Vector) -> (f64, f64, Ve
     d_thr[c] = dsig(zu);
     d_thr[c - 1] = -dsig(zl);
     (p, -(dsig(zu) - dsig(zl)), d_thr)
+}
+
+/// Ordered probit (cumulative Gaussian) via gradient ascent.
+///
+/// Cut / class counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct OrderedProbit {
+    /// Learning rate.
+    pub eta: f64,
+    /// Max gradient steps.
+    pub max_iter: usize,
+    /// ℓ₂ on the slopes.
+    pub ridge: f64,
+}
+
+impl Default for OrderedProbit {
+    fn default() -> Self {
+        Self {
+            eta: 0.05,
+            max_iter: 200,
+            ridge: 1e-3,
+        }
+    }
+}
+
+impl OrderedProbit {
+    /// Default ordered probit.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted ordered probit.
+#[derive(Clone, Debug)]
+pub struct FittedOrderedProbit {
+    /// Slopes.
+    pub coef: Vector,
+    /// Increasing cutpoints \(\theta_1 < \cdots < \theta_{K-1}\).
+    pub thresholds: Vector,
+    /// Sorted class labels.
+    pub classes: Vec<i64>,
+}
+
+impl FittedOrderedProbit {
+    /// Predicted class (argmax of category probabilities).
+    pub fn predict_label(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() != self.coef.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ordered probit column count ≠ coef")
+                    .build(),
+            );
+        }
+        let k = self.classes.len().max(1);
+        let mut out = Vector::zeros(x.nrows());
+        for i in 0..x.nrows() {
+            let mut xb = 0.0;
+            for j in 0..self.coef.len().min(x.ncols()) {
+                xb += self.coef[j] * x.get(i, j);
+            }
+            let mut best = 0usize;
+            let mut bp = f64::NEG_INFINITY;
+            for c in 0..k {
+                let lo = if c == 0 {
+                    0.0
+                } else {
+                    norm_cdf(self.thresholds[c - 1] - xb)
+                };
+                let hi = if c + 1 == k {
+                    1.0
+                } else {
+                    norm_cdf(self.thresholds[c] - xb)
+                };
+                let p = (hi - lo).max(0.0);
+                if p > bp {
+                    bp = p;
+                    best = c;
+                }
+            }
+            out[i] = self.classes.get(best).copied().unwrap_or(0) as f64;
+        }
+        ctx.finish(out)
+    }
+}
+
+impl Fit for OrderedProbit {
+    type Fitted = FittedOrderedProbit;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedOrderedProbit>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let classes: Vec<i64> = counts.iter().map(|(c, _)| *c).collect();
+        if classes.len() < 2 {
+            return ctx.finish(FittedOrderedProbit {
+                coef: Vector::zeros(x.ncols()),
+                thresholds: Vector::zeros(0),
+                classes,
+            });
+        }
+        let k = classes.len();
+        let mut yidx = vec![0usize; y.len()];
+        for i in 0..y.len() {
+            let lab = y[i].round() as i64;
+            yidx[i] = classes.iter().position(|&c| c == lab).unwrap_or(0);
+        }
+        let p = x.ncols();
+        let mut coef = Vector::zeros(p);
+        let mut thr = Vector::zeros(k - 1);
+        for t in 0..k - 1 {
+            let cum = counts.iter().take(t + 1).map(|(_, c)| *c).sum::<usize>() as f64
+                / y.len().max(1) as f64;
+            let q = cum.clamp(1e-3, 1.0 - 1e-3);
+            thr[t] = (q / (1.0 - q)).ln();
+            if t > 0 && thr[t] <= thr[t - 1] {
+                thr[t] = thr[t - 1] + 0.2;
+            }
+        }
+        let eta = self.eta.max(1e-6);
+        let ridge = self.ridge.max(0.0);
+        for it in 0..self.max_iter.max(1) {
+            let mut g_b = Vector::zeros(p);
+            let mut g_t = Vector::zeros(k - 1);
+            let mut ll = 0.0;
+            for i in 0..x.nrows().min(yidx.len()) {
+                let mut xb = 0.0;
+                for j in 0..p {
+                    xb += coef[j] * x.get(i, j);
+                }
+                let c = yidx[i];
+                let (p_c, d_beta, d_thr) = ordered_probit_grad(c, k, xb, &thr);
+                ll += (p_c.max(1e-15)).ln();
+                let inv = 1.0 / p_c.max(1e-15);
+                for j in 0..p {
+                    g_b[j] += inv * d_beta * x.get(i, j);
+                }
+                for t in 0..k - 1 {
+                    g_t[t] += inv * d_thr[t];
+                }
+            }
+            for j in 0..p {
+                g_b[j] -= ridge * coef[j];
+                coef[j] += eta * g_b[j] / x.nrows().max(1) as f64;
+            }
+            for t in 0..k - 1 {
+                thr[t] += eta * g_t[t] / x.nrows().max(1) as f64;
+            }
+            for t in 1..k - 1 {
+                if thr[t] <= thr[t - 1] + 1e-4 {
+                    thr[t] = thr[t - 1] + 1e-4;
+                }
+            }
+            ctx.session.step(it as u64, -ll, None);
+        }
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(Severity::Advisory)
+                .message(
+                    "ordered probit SEs are not reported; this is a gradient point, not IRLS MLE",
+                )
+                .compromise(NumericalCompromise::new(
+                    "IRLS / Newton ordered probit",
+                    "gradient ascent on the cumulative-Gaussian likelihood",
+                    "the information matrix is not inverted",
+                    "thresholds are ordered by projection, not by a constrained Hessian",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedOrderedProbit {
+            coef,
+            thresholds: thr,
+            classes,
+        })
+    }
+}
+
+fn ordered_probit_grad(c: usize, k: usize, xb: f64, thr: &Vector) -> (f64, f64, Vector) {
+    let mut d_thr = Vector::zeros(k.saturating_sub(1));
+    if k < 2 {
+        return (1.0, 0.0, d_thr);
+    }
+    if c == 0 {
+        let z = thr[0] - xb;
+        let p = norm_cdf(z);
+        let d = norm_pdf(z);
+        d_thr[0] = d;
+        return (p, -d, d_thr);
+    }
+    if c + 1 == k {
+        let z = thr[k - 2] - xb;
+        let p = 1.0 - norm_cdf(z);
+        let d = norm_pdf(z);
+        d_thr[k - 2] = -d;
+        return (p, d, d_thr);
+    }
+    let zu = thr[c] - xb;
+    let zl = thr[c - 1] - xb;
+    let p = norm_cdf(zu) - norm_cdf(zl);
+    let du = norm_pdf(zu);
+    let dl = norm_pdf(zl);
+    d_thr[c] = du;
+    d_thr[c - 1] = -dl;
+    (p, -(du - dl), d_thr)
 }
 
 /// Linear GEE with exchangeable working correlation (Liang–Zeger).
@@ -3016,6 +3375,22 @@ mod tests {
             }
         }
         assert!(ok >= 20, "ok={ok}");
+        let cl = Cloglog::new()
+            .fit(&x, &y, &Session::new("cloglog", "fit"))
+            .expect("cloglog");
+        let cscore = cl
+            .value
+            .predict(&x, &Session::new("cloglog", "p"))
+            .unwrap()
+            .value;
+        let mut cok = 0;
+        for i in 0..24 {
+            let pred = if cscore[i] >= 0.0 { 1.0 } else { 0.0 };
+            if (pred - y[i]).abs() < 0.5 {
+                cok += 1;
+            }
+        }
+        assert!(cok >= 20, "cloglog ok={cok}");
     }
 
     #[test]
@@ -3070,6 +3445,18 @@ mod tests {
         assert!((pred[23] - 2.0).abs() < 0.5 || (pred[22] - 2.0).abs() < 0.5);
         assert_eq!(q.value.thresholds.len(), 2);
         assert!(q.value.thresholds[1] > q.value.thresholds[0]);
+        let op = OrderedProbit::new()
+            .fit(&x, &y, &Session::new("op", "fit"))
+            .expect("op");
+        let opp = op
+            .value
+            .predict_label(&x, &Session::new("op", "p"))
+            .unwrap()
+            .value;
+        assert!((opp[0] - 0.0).abs() < 0.5 || (opp[1] - 0.0).abs() < 0.5);
+        assert!((opp[23] - 2.0).abs() < 0.5 || (opp[22] - 2.0).abs() < 0.5);
+        assert_eq!(op.value.thresholds.len(), 2);
+        assert!(op.value.thresholds[1] > op.value.thresholds[0]);
     }
 
     #[test]

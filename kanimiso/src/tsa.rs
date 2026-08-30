@@ -6975,6 +6975,287 @@ impl FitSeries for Ngarch {
     }
 }
 
+/// Integrated GARCH (Engle–Bollerslev `IGARCH`): \(\alpha+\beta=1\).
+///
+/// \(h_t=\omega+\alpha\varepsilon_{t-1}^2+(1-\alpha)h_{t-1}\). Unconditional
+/// variance is infinite when \(\omega>0\); that is the model, not a unit-root
+/// abort.
+#[derive(Clone, Debug)]
+pub struct Igarch {
+    /// Coordinate-search iterations.
+    pub max_iter: usize,
+}
+
+impl Default for Igarch {
+    fn default() -> Self {
+        Self { max_iter: 28 }
+    }
+}
+
+impl Igarch {
+    /// Default IGARCH settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted IGARCH variances.
+#[derive(Clone, Debug)]
+pub struct FittedIgarch {
+    /// ω.
+    pub omega: f64,
+    /// ARCH coefficient (\(\beta=1-\alpha\)).
+    pub alpha: f64,
+    /// GARCH coefficient.
+    pub beta: f64,
+    /// In-sample conditional variances.
+    pub sigma2: Vector,
+    /// Demeaned residuals.
+    pub resid: Vector,
+}
+
+impl FitSeries for Igarch {
+    type Fitted = FittedIgarch;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedIgarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("IGARCH QMLE needs a longer series")
+                    .build(),
+            );
+        }
+        let mean = y.mean();
+        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
+        let var = e.as_slice().iter().map(|v| v * v).sum::<f64>() / y.len().max(1) as f64;
+        let mut omega = 0.05 * var.max(1e-8);
+        let mut alpha = 0.05;
+        let mut best = garch_nll(e.as_slice(), omega, alpha, 1.0 - alpha);
+        let mut step = 0.05;
+        for it in 0..self.max_iter {
+            let mut improved = false;
+            for (i, cur) in [omega, alpha].into_iter().enumerate() {
+                for dir in [-step, step] {
+                    let mut cand = [omega, alpha];
+                    cand[i] = if i == 0 {
+                        (cur + dir).max(1e-10)
+                    } else {
+                        (cur + dir).clamp(1e-6, 0.999)
+                    };
+                    let nll = garch_nll(e.as_slice(), cand[0], cand[1], 1.0 - cand[1]);
+                    if nll < best {
+                        best = nll;
+                        omega = cand[0];
+                        alpha = cand[1];
+                        improved = true;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, best, None);
+            if !improved {
+                step *= 0.5;
+                if step < 1e-5 {
+                    ctx.session.converged("IGARCH coordinate search", it as u64);
+                    break;
+                }
+            }
+        }
+        if omega > 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonStationary)
+                    .severity(Severity::Advisory)
+                    .message("IGARCH has infinite unconditional variance when ω>0")
+                    .metric("omega", omega)
+                    .build(),
+            );
+        }
+        if !best.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("IGARCH QMLE likelihood is non-finite")
+                    .build(),
+            );
+        }
+        let beta = 1.0 - alpha;
+        let sigma2 = garch_sigma2(e.as_slice(), omega, alpha, beta);
+        ctx.finish(FittedIgarch {
+            omega,
+            alpha,
+            beta,
+            sigma2: Vector::from_iter(sigma2),
+            resid: e,
+        })
+    }
+}
+
+/// Component GARCH (Engle–Lee permanent / transitory).
+///
+/// \(q_t=\omega+\rho q_{t-1}+\phi(\varepsilon_{t-1}^2-h_{t-1})\),
+/// \(h_t=q_t+\alpha(\varepsilon_{t-1}^2-q_{t-1})+\beta(h_{t-1}-q_{t-1})\).
+#[derive(Clone, Debug)]
+pub struct ComponentGarch {
+    /// Coordinate-search iterations.
+    pub max_iter: usize,
+}
+
+impl Default for ComponentGarch {
+    fn default() -> Self {
+        Self { max_iter: 24 }
+    }
+}
+
+impl ComponentGarch {
+    /// Default component-GARCH settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted component-GARCH variances.
+#[derive(Clone, Debug)]
+pub struct FittedComponentGarch {
+    /// Permanent intercept.
+    pub omega: f64,
+    /// Permanent persistence.
+    pub rho: f64,
+    /// Permanent shock.
+    pub phi: f64,
+    /// Transitory ARCH.
+    pub alpha: f64,
+    /// Transitory GARCH.
+    pub beta: f64,
+    /// Conditional variance.
+    pub sigma2: Vector,
+    /// Permanent component \(q_t\).
+    pub q: Vector,
+    /// Demeaned residuals.
+    pub resid: Vector,
+}
+
+fn cgarch_paths(
+    e: &[f64],
+    omega: f64,
+    rho: f64,
+    phi: f64,
+    alpha: f64,
+    beta: f64,
+) -> (Vec<f64>, Vec<f64>) {
+    let var0 = e.iter().map(|v| v * v).sum::<f64>() / e.len().max(1) as f64;
+    let q0 = (omega / (1.0 - rho).max(1e-6)).max(var0).max(1e-12);
+    let mut q = vec![q0; e.len()];
+    let mut h = vec![q0; e.len()];
+    for t in 1..e.len() {
+        let e2 = e[t - 1] * e[t - 1];
+        q[t] = omega + rho * q[t - 1] + phi * (e2 - h[t - 1]);
+        if !q[t].is_finite() || q[t] <= 0.0 {
+            q[t] = omega.max(1e-12);
+        }
+        h[t] = q[t] + alpha * (e2 - q[t - 1]) + beta * (h[t - 1] - q[t - 1]);
+        if !h[t].is_finite() || h[t] <= 0.0 {
+            h[t] = q[t].max(1e-12);
+        }
+    }
+    (h, q)
+}
+
+fn cgarch_nll(e: &[f64], omega: f64, rho: f64, phi: f64, alpha: f64, beta: f64) -> f64 {
+    if omega <= 0.0 || !(0.0..1.0).contains(&rho) || alpha < 0.0 || beta < 0.0 || alpha + beta >= 0.999
+    {
+        return f64::INFINITY;
+    }
+    let (h, _) = cgarch_paths(e, omega, rho, phi, alpha, beta);
+    let mut nll = 0.0;
+    for t in 0..e.len() {
+        let v = h[t].max(1e-12);
+        nll += 0.5 * (v.ln() + e[t] * e[t] / v);
+    }
+    nll
+}
+
+impl FitSeries for ComponentGarch {
+    type Fitted = FittedComponentGarch;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedComponentGarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("component GARCH QMLE needs a longer series")
+                    .build(),
+            );
+        }
+        let mean = y.mean();
+        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
+        let var = e.as_slice().iter().map(|v| v * v).sum::<f64>() / y.len().max(1) as f64;
+        let mut omega = 0.02 * var.max(1e-8);
+        let mut rho = 0.95;
+        let mut phi = 0.05;
+        let mut alpha = 0.05;
+        let mut beta = 0.80;
+        let mut best = cgarch_nll(e.as_slice(), omega, rho, phi, alpha, beta);
+        let mut step = 0.04;
+        for it in 0..self.max_iter {
+            let mut improved = false;
+            for (i, cur) in [omega, rho, phi, alpha, beta].into_iter().enumerate() {
+                for dir in [-step, step] {
+                    let mut cand = [omega, rho, phi, alpha, beta];
+                    cand[i] = match i {
+                        0 => (cur + dir).max(1e-10),
+                        1 => (cur + dir).clamp(0.01, 0.999),
+                        2 => cur + dir,
+                        _ => (cur + dir).max(1e-8),
+                    };
+                    let nll = cgarch_nll(e.as_slice(), cand[0], cand[1], cand[2], cand[3], cand[4]);
+                    if nll < best {
+                        best = nll;
+                        omega = cand[0];
+                        rho = cand[1];
+                        phi = cand[2];
+                        alpha = cand[3];
+                        beta = cand[4];
+                        improved = true;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, best, None);
+            if !improved {
+                step *= 0.5;
+                if step < 1e-5 {
+                    ctx.session.converged("component GARCH coordinate search", it as u64);
+                    break;
+                }
+            }
+        }
+        if !best.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("component GARCH QMLE likelihood is non-finite")
+                    .build(),
+            );
+        }
+        let (sigma2, q) = cgarch_paths(e.as_slice(), omega, rho, phi, alpha, beta);
+        ctx.finish(FittedComponentGarch {
+            omega,
+            rho,
+            phi,
+            alpha,
+            beta,
+            sigma2: Vector::from_iter(sigma2),
+            q: Vector::from_iter(q),
+            resid: e,
+        })
+    }
+}
+
 /// DCC-GARCH lite on a multivariate residual matrix (Engle).
 ///
 /// Series count is not identification `p`.
@@ -7328,6 +7609,99 @@ impl CcGarch {
             corr.set(a, a, 1.0);
         }
         ctx.finish(FittedCcGarch { sigma2, corr })
+    }
+}
+
+/// Orthogonal / GO-GARCH on standardized residuals (van der Weide).
+///
+/// Series / factor counts are not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct GoGarch;
+
+/// Fitted GO-GARCH mixing and factor variances.
+#[derive(Clone, Debug)]
+pub struct FittedGoGarch {
+    /// Mixing matrix \(A\) (`k` × `r`).
+    pub loadings: Matrix,
+    /// Factor GARCH variances (`T` × `r`).
+    pub factor_var: Matrix,
+    /// In-sample residual covariance snapshot.
+    pub cov: Matrix,
+}
+
+impl GoGarch {
+    /// Empty GO-GARCH estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Marginal GARCH, SVD mixing, independent factor GARCH.
+    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedGoGarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let (n, k) = y.shape();
+        if k < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("GO-GARCH needs at least two series")
+                    .build(),
+            );
+        }
+        let mut z = Matrix::zeros(n, k);
+        for j in 0..k {
+            let col = y.column(j);
+            let mean = col.mean();
+            let e: Vec<f64> = col.as_slice().iter().map(|v| v - mean).collect();
+            let var = e.iter().map(|v| v * v).sum::<f64>() / n.max(1) as f64;
+            let s2 = garch_sigma2(&e, 0.05 * var.max(1e-8), 0.05, 0.80);
+            for t in 0..n {
+                let v = s2.get(t).copied().unwrap_or(var).max(1e-12);
+                z.set(t, j, e.get(t).copied().unwrap_or(0.0) / v.sqrt());
+            }
+        }
+        let mut scratch = Report::new("gogarch", "svd");
+        let (loadings, r) = match thin_svd(&mut scratch, &z, &ctx.policy) {
+            Some(svd) => {
+                let r = svd.singular_values.len().min(k).max(1);
+                let a = Matrix::from_fn(k, r, |j, c| svd.v[(j, c)]);
+                (a, r)
+            }
+            None => (Matrix::from_fn(k, k.max(1), |i, j| if i == j { 1.0 } else { 0.0 }), k.max(1)),
+        };
+        let r = r.min(loadings.ncols()).max(1);
+        let mut factor_var = Matrix::zeros(n, r);
+        for c in 0..r {
+            let f: Vec<f64> = (0..n)
+                .map(|t| {
+                    let mut s = 0.0;
+                    for j in 0..k {
+                        s += z.get(t, j) * loadings.get(j, c);
+                    }
+                    s
+                })
+                .collect();
+            let var = f.iter().map(|v| v * v).sum::<f64>() / n.max(1) as f64;
+            let s2 = garch_sigma2(&f, 0.05 * var.max(1e-8), 0.05, 0.80);
+            for t in 0..n {
+                factor_var.set(t, c, s2.get(t).copied().unwrap_or(var).max(1e-12));
+            }
+        }
+        let mut cov = Matrix::zeros(k, k);
+        for a in 0..k {
+            for b in 0..k {
+                let mut s = 0.0;
+                for t in 0..n {
+                    s += z.get(t, a) * z.get(t, b);
+                }
+                cov.set(a, b, s / n.max(1) as f64);
+            }
+        }
+        ctx.finish(FittedGoGarch {
+            loadings,
+            factor_var,
+            cov,
+        })
     }
 }
 
@@ -9260,6 +9634,127 @@ impl FitSeries for PolynomialTrendForecaster {
             ctx.push(issue.clone());
         }
         ctx.finish(FittedPolyTrend { coef, n })
+    }
+}
+
+/// Whittaker / cubic-smooth trend (sktime `SplineTrendForecaster`).
+///
+/// Penalty length is not identification `p`. Distinct from the Kalman
+/// [`LocalLinearTrend`] and the OLS [`PolynomialTrendForecaster`].
+#[derive(Clone, Debug)]
+pub struct SmoothTrend {
+    /// Second-difference penalty \(\lambda\).
+    pub lambda: f64,
+}
+
+impl Default for SmoothTrend {
+    fn default() -> Self {
+        Self { lambda: 100.0 }
+    }
+}
+
+impl SmoothTrend {
+    /// Whittaker smoother with penalty `lambda`.
+    pub fn new(lambda: f64) -> Self {
+        Self { lambda }
+    }
+}
+
+/// Fitted Whittaker trend.
+#[derive(Clone, Debug)]
+pub struct FittedSmoothTrend {
+    /// Smoothed level.
+    pub trend: Vector,
+    /// Last first difference (used to extrapolate).
+    pub last_slope: f64,
+}
+
+impl FittedSmoothTrend {
+    /// Continue the last slope for `h` steps.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let last = self.trend.as_slice().last().copied().unwrap_or(0.0);
+        let out = Vector::from_iter((1..=h).map(|s| last + self.last_slope * s as f64));
+        ctx.finish(out)
+    }
+}
+
+impl FitSeries for SmoothTrend {
+    type Fitted = FittedSmoothTrend;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedSmoothTrend>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        if n < 3 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("SmoothTrend needs n≥3 for a second difference")
+                    .build(),
+            );
+            return ctx.finish(FittedSmoothTrend {
+                trend: y.clone(),
+                last_slope: 0.0,
+            });
+        }
+        let lam = if self.lambda.is_finite() && self.lambda >= 0.0 {
+            self.lambda
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "SmoothTrend.lambda={} is not a finite ≥0 penalty; using 100",
+                        self.lambda
+                    ))
+                    .build(),
+            );
+            100.0
+        };
+        let extra = n.saturating_sub(2);
+        let design = Matrix::from_fn(n + extra, n, |i, j| {
+            if i < n {
+                if i == j {
+                    1.0
+                } else {
+                    0.0
+                }
+            } else {
+                let r = i - n;
+                let s = lam.sqrt();
+                if j == r {
+                    s
+                } else if j == r + 1 {
+                    -2.0 * s
+                } else if j == r + 2 {
+                    s
+                } else {
+                    0.0
+                }
+            }
+        });
+        let target = Vector::from_iter((0..n + extra).map(|i| if i < n { y[i] } else { 0.0 }));
+        let mut scratch = Report::new("smooth_trend", "whittaker");
+        let trend = crate::linalg::least_squares(&mut scratch, &design, &target, &ctx.policy)
+            .unwrap_or_else(|| y.clone());
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::R2IsOne
+                    | IssueCode::RankZero
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let last_slope = if n >= 2 {
+            trend[n - 1] - trend[n - 2]
+        } else {
+            0.0
+        };
+        ctx.finish(FittedSmoothTrend { trend, last_slope })
     }
 }
 
@@ -13510,5 +14005,42 @@ mod tests {
         let nw = statespace_news(&y, &Session::new("news", "t")).expect("news");
         assert_eq!(nw.value.len(), y.len());
         assert!(nw.value.as_slice().iter().all(|v| v.is_finite()));
+        let ig = Igarch::new()
+            .fit_series(&y, &Session::new("igarch", "fit"))
+            .expect("igarch");
+        assert!((ig.value.alpha + ig.value.beta - 1.0).abs() < 1e-12);
+        assert!(ig
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        let cg = ComponentGarch::new()
+            .fit_series(&y, &Session::new("cgarch", "fit"))
+            .expect("cgarch");
+        assert!(cg
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        let gog = GoGarch::new()
+            .fit(&y2, &Session::new("gog", "fit"))
+            .expect("gog");
+        assert_eq!(gog.value.loadings.nrows(), 2);
+        assert!(gog.value.factor_var.ncols() >= 1);
+        let smt = SmoothTrend::new(100.0)
+            .fit_series(&y, &Session::new("smt", "fit"))
+            .expect("smt");
+        assert_eq!(smt.value.trend.len(), 40);
+        assert!(smt.value.trend.as_slice().iter().all(|v| v.is_finite()));
+        assert_eq!(
+            smt.value
+                .forecast(3, &Session::new("smt", "fc"))
+                .expect("smtf")
+                .value
+                .len(),
+            3
+        );
     }
 }

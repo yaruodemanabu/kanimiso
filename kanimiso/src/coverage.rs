@@ -4204,6 +4204,46 @@ const INVENTORY: &[Algorithm] = &[
         "river.multiclass.OutputCodeClassifier",
         "online",
     ),
+    a(
+        "stats.joe_copula",
+        "statsmodels.distributions.copula.JoeCopula",
+        "stats",
+    ),
+    a("stats.fine_gray", "lifelines.FineGrayFitter", "stats"),
+    a(
+        "glm.Cloglog",
+        "statsmodels.genmod.families.links.CLogLog",
+        "estimator",
+    ),
+    a(
+        "glm.OrderedProbit",
+        "statsmodels.miscmodels.ordinal_model.OrderedModel",
+        "estimator",
+    ),
+    a("tsa.Igarch", "arch.univariate.IGARCH", "forecast"),
+    a(
+        "tsa.ComponentGarch",
+        "arch.univariate.ComponentGARCH",
+        "forecast",
+    ),
+    a("tsa.GoGarch", "arch.univariate.GOGARCH", "forecast"),
+    a(
+        "tsa.SmoothTrend",
+        "sktime.forecasting.trend.SplineTrendForecaster",
+        "forecast",
+    ),
+    a("tslearn.wdtw", "tslearn.metrics.wdtw", "timeseries"),
+    a("tslearn.ddtw", "tslearn.metrics.ddtw", "timeseries"),
+    a("tslearn.eros", "tslearn.metrics.eros", "timeseries"),
+    a("online.OnlineMode", "river.stats.Mode", "online"),
+    a("online.OnlinePeak", "river.stats.Peak", "online"),
+    a("online.OnlineSem", "river.stats.SEM", "online"),
+    a(
+        "online.OnlineSpearman",
+        "river.stats.SpearmanCorr",
+        "online",
+    ),
+    a("online.HillSketch", "scipy.stats.genpareto", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4482,6 +4522,11 @@ mod tests {
             "stats.sur",
             "tsa.simulation_smoother",
             "robust.InverseGaussianRegressor",
+            "stats.joe_copula",
+            "glm.OrderedProbit",
+            "tsa.Igarch",
+            "tslearn.wdtw",
+            "online.OnlineSpearman",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
