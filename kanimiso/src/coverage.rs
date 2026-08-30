@@ -4365,6 +4365,62 @@ const INVENTORY: &[Algorithm] = &[
     a("online.OnlineRange", "river.stats.Range", "online"),
     a("online.OnlineMin", "river.stats.Min", "online"),
     a("online.OnlineMcc", "river.metrics.MCC", "online"),
+    a("tsa.ccovf", "statsmodels.tsa.stattools.ccovf", "forecast"),
+    a("tsa.pacf_ols", "statsmodels.tsa.stattools.pacf_ols", "forecast"),
+    a("tsa.Fiegarch", "arch.univariate.FIEGARCH", "forecast"),
+    a("tsa.value_at_risk", "arch.univariate.ValueAtRisk", "forecast"),
+    a(
+        "tsa.expected_shortfall",
+        "arch.univariate.expected_shortfall",
+        "forecast",
+    ),
+    a(
+        "stats.leybourne_mccabe",
+        "statsmodels.tsa.stattools.LeybourneMcCabe",
+        "stats",
+    ),
+    a(
+        "stats.range_unit_root",
+        "statsmodels.tsa.stattools.RangeUnitRoot",
+        "stats",
+    ),
+    a(
+        "stats.breakvar",
+        "statsmodels.stats.diagnostic.breaks_breakvar",
+        "stats",
+    ),
+    a(
+        "stats.vine_copula",
+        "statsmodels.distributions.copula.VineCopula",
+        "stats",
+    ),
+    a(
+        "glm.Scobit",
+        "statsmodels.discrete.discrete_model.Scobit",
+        "estimator",
+    ),
+    a(
+        "iv.driscoll_kraay",
+        "statsmodels.stats.sandwich_covariance.cov_nw_panel",
+        "stats",
+    ),
+    a(
+        "tslearn.TimeSeriesBagOfFeatures",
+        "sktime.classification.interval_based.TimeSeriesForestClassifier",
+        "timeseries",
+    ),
+    a("online.Swinn", "river.neighbors.SWINN", "online"),
+    a("online.Skyline", "river.misc.Skyline", "online"),
+    a("online.Sdft", "river.misc.SDFT", "online"),
+    a("online.AmsGradRegressor", "river.optim.AMSGrad", "online"),
+    a(
+        "online.OnlineBalancedAccuracy",
+        "river.metrics.BalancedAccuracy",
+        "online",
+    ),
+    a("online.OnlineGini", "river.stats.Gini", "online"),
+    a("online.OnlineEwMean", "river.stats.EWMean", "online"),
+    a("online.NUnique", "river.stats.NUnique", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4660,6 +4716,12 @@ mod tests {
             "online.OnlineConfusion",
             "stats.distance_corr",
             "glm.MixedLogit",
+            "tsa.ccovf",
+            "tsa.Fiegarch",
+            "glm.Scobit",
+            "online.Swinn",
+            "stats.vine_copula",
+            "iv.driscoll_kraay",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

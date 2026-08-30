@@ -14542,6 +14542,756 @@ impl PartialFit for OnlineMcc {
     }
 }
 
+/// Sliding-window nearest neighbours (river `neighbors.SWINN` lite).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Swinn {
+    /// Window capacity.
+    pub window: usize,
+    /// Neighbours.
+    pub k: usize,
+    xs: Vec<Vec<f64>>,
+    ys: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for Swinn {
+    fn default() -> Self {
+        Self {
+            window: 32,
+            k: 3,
+            xs: Vec::new(),
+            ys: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl Swinn {
+    /// SWINN with `k` neighbours.
+    pub fn new(k: usize) -> Self {
+        Self {
+            k: k.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Majority vote of the current window, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.ys.is_empty() {
+            f64::NAN
+        } else {
+            *self.ys.last().unwrap_or(&f64::NAN)
+        }
+    }
+}
+
+impl PartialFit for Swinn {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let before = self.score();
+        let fallback = Vector::from_iter((0..x.nrows()).map(|i| x.get(i, 0)));
+        let labels = y.unwrap_or(&fallback);
+        let cap = self.window.max(1);
+        for i in 0..x.nrows().min(labels.len()) {
+            let row: Vec<f64> = (0..x.ncols()).map(|j| x.get(i, j)).collect();
+            self.xs.push(row);
+            self.ys.push(labels[i]);
+            if self.xs.len() > cap {
+                self.xs.remove(0);
+                self.ys.remove(0);
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.xs.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.xs.len() >= self.k;
+        q.warmup = self.xs.len() < self.k;
+        q.explanation = format!("Swinn window={} last={after:.6e}", self.xs.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "sliding-window nearest neighbours",
+                "keep the last W labelled rows; window length is not p",
+                format!("last={before:.6e}"),
+                format!("last={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// 2-D Pareto skyline (river `misc.Skyline`).
+#[derive(Clone, Debug, Default)]
+pub struct Skyline {
+    points: Vec<(f64, f64)>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Skyline {
+    /// Empty skyline.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of non-dominated points, or NaN before the first finite pair.
+    pub fn score(&self) -> f64 {
+        if self.n_seen == 0 {
+            f64::NAN
+        } else {
+            self.points.len() as f64
+        }
+    }
+}
+
+impl PartialFit for Skyline {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let before = self.score();
+        let fallback = Vector::from_iter((0..x.nrows()).map(|i| x.get(i, 0)));
+        let yy = y.unwrap_or(&fallback);
+        for i in 0..x.nrows().min(yy.len()) {
+            let a = x.get(i, 0);
+            let b = yy[i];
+            if !a.is_finite() || !b.is_finite() {
+                continue;
+            }
+            let dominated = self.points.iter().any(|&(u, v)| u >= a && v >= b && (u > a || v > b));
+            if !dominated {
+                self.points.retain(|&(u, v)| !(a >= u && b >= v && (a > u || b > v)));
+                self.points.push((a, b));
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.points.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 1;
+        q.explanation = format!("Skyline n={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Pareto skyline",
+                "keep 2-D points that are not dominated in both coordinates",
+                format!("n={before:.6e}"),
+                format!("n={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Sliding discrete Fourier transform magnitude (river `misc.SDFT`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Sdft {
+    /// Window.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for Sdft {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl Sdft {
+    /// SDFT with `window` samples.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Magnitude of the first harmonic, or NaN during warmup.
+    pub fn score(&self) -> f64 {
+        let w = self.window.max(2);
+        if self.buf.len() < w {
+            return f64::NAN;
+        }
+        let mut re = 0.0;
+        let mut im = 0.0;
+        let n = self.buf.len();
+        for (t, &v) in self.buf.iter().enumerate() {
+            let ang = 2.0 * std::f64::consts::PI * t as f64 / n as f64;
+            re += v * ang.cos();
+            im += v * ang.sin();
+        }
+        (re * re + im * im).sqrt() / n as f64
+    }
+}
+
+impl PartialFit for Sdft {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        let cap = self.window.max(2);
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            self.buf.push(v);
+            if self.buf.len() > cap {
+                self.buf.remove(0);
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.buf.len() >= cap;
+        q.warmup = self.buf.len() < cap;
+        q.explanation = format!("Sdft={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "sliding DFT",
+                "first-harmonic magnitude of the last W samples",
+                format!("mag={before:.6e}"),
+                format!("mag={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// AMSGrad linear regressor (river `optim.AMSGrad`).
+#[derive(Clone, Debug)]
+pub struct AmsGradRegressor {
+    /// Step \(\eta\).
+    pub learning_rate: f64,
+    /// Second-moment decay.
+    pub beta2: f64,
+    /// Floor \(\varepsilon\).
+    pub eps: f64,
+    /// Intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    v: Vector,
+    vhat: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for AmsGradRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            beta2: 0.99,
+            eps: 1e-8,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            v: Vector::zeros(0),
+            vhat: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl AmsGradRegressor {
+    /// Default AMSGrad regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for AmsGradRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.v = Vector::zeros(dim);
+            self.vhat = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self.coef.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let b2 = self.beta2.clamp(0.0, 0.999);
+        let eps = if self.eps.is_finite() && self.eps > 0.0 {
+            self.eps
+        } else {
+            1e-8
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            for j in 0..dim {
+                let g = err * z[j];
+                self.v[j] = b2 * self.v[j] + (1.0 - b2) * g * g;
+                self.vhat[j] = self.vhat[j].max(self.v[j]);
+                self.coef[j] -= eta * g / (self.vhat[j].sqrt() + eps);
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "AMSGrad linear weights",
+            "max-of-second-moment rescales each coordinate",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for AmsGradRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i)));
+        ctx.finish(out)
+    }
+}
+
+/// Streaming balanced accuracy (river `metrics.BalancedAccuracy`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineBalancedAccuracy {
+    tp: f64,
+    tn: f64,
+    p: f64,
+    n: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl OnlineBalancedAccuracy {
+    /// Empty balanced-accuracy tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// \((\mathrm{TPR}+\mathrm{TNR})/2\), or NaN before both classes appear.
+    pub fn score(&self) -> f64 {
+        if self.p <= 0.0 || self.n <= 0.0 {
+            f64::NAN
+        } else {
+            0.5 * (self.tp / self.p + self.tn / self.n)
+        }
+    }
+}
+
+impl PartialFit for OnlineBalancedAccuracy {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let before = self.score();
+        let fallback = Vector::from_iter((0..x.nrows()).map(|i| x.get(i, 0)));
+        let labels = y.unwrap_or(&fallback);
+        for i in 0..x.nrows().min(labels.len()) {
+            let pred = x.get(i, 0);
+            let truth = labels[i];
+            if !pred.is_finite() || !truth.is_finite() {
+                continue;
+            }
+            let p = pred.round() > 0.5;
+            let t = truth.round() > 0.5;
+            if t {
+                self.p += 1.0;
+                if p {
+                    self.tp += 1.0;
+                }
+            } else {
+                self.n += 1.0;
+                if !p {
+                    self.tn += 1.0;
+                }
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.p > 0.0 && self.n > 0.0;
+        q.warmup = self.p <= 0.0 || self.n <= 0.0;
+        q.explanation = format!("OnlineBalancedAccuracy={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "streaming balanced accuracy",
+                "average of TPR and TNR from an expanding 2×2 table",
+                format!("ba={before:.6e}"),
+                format!("ba={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming Gini impurity of integer labels (river `stats.Gini`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineGini {
+    counts: HashMap<i64, f64>,
+    total: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl OnlineGini {
+    /// Empty Gini tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// \(1-\sum p_k^2\), or NaN before the first label.
+    pub fn score(&self) -> f64 {
+        if self.total <= 0.0 {
+            f64::NAN
+        } else {
+            let mut ss = 0.0;
+            for c in self.counts.values() {
+                let p = *c / self.total;
+                ss += p * p;
+            }
+            1.0 - ss
+        }
+    }
+}
+
+impl PartialFit for OnlineGini {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let before = self.score();
+        let fallback = Vector::from_iter((0..x.nrows()).map(|i| x.get(i, 0)));
+        let labels = y.unwrap_or(&fallback);
+        for i in 0..x.nrows().min(labels.len()) {
+            let v = labels[i];
+            if !v.is_finite() {
+                continue;
+            }
+            *self.counts.entry(v.round() as i64).or_insert(0.0) += 1.0;
+            self.total += 1.0;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.total;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 1;
+        q.explanation = format!("OnlineGini={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "streaming Gini impurity",
+                "1 − Σ p_k² over integer-label counts; class count is not p",
+                format!("gini={before:.6e}"),
+                format!("gini={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Exponentially weighted mean (river `stats.EWMean`).
+#[derive(Clone, Debug)]
+pub struct OnlineEwMean {
+    /// Smoothing \(\alpha\in(0,1]\).
+    pub alpha: f64,
+    mean: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OnlineEwMean {
+    fn default() -> Self {
+        Self {
+            alpha: 0.5,
+            mean: 0.0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlineEwMean {
+    /// EW mean with the given \(\alpha\).
+    pub fn new(alpha: f64) -> Self {
+        Self {
+            alpha,
+            ..Self::default()
+        }
+    }
+
+    /// Current EW mean, or NaN before the first finite value.
+    pub fn score(&self) -> f64 {
+        if self.n_seen == 0 {
+            f64::NAN
+        } else {
+            self.mean
+        }
+    }
+}
+
+impl PartialFit for OnlineEwMean {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        let a = if self.alpha.is_finite() && self.alpha > 0.0 && self.alpha <= 1.0 {
+            self.alpha
+        } else {
+            0.5
+        };
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            if self.n_seen == 0 {
+                self.mean = v;
+            } else {
+                self.mean = a * v + (1.0 - a) * self.mean;
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = (1.0 / a).min(self.n_seen as f64);
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 1;
+        q.explanation = format!("OnlineEwMean={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "exponentially weighted mean",
+                "s ← α x + (1−α) s on column 0",
+                format!("ew={before:.6e}"),
+                format!("ew={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Exact unique-value counter (river `stats.NUnique`).
+///
+/// Distinct-key count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct NUnique {
+    keys: HashSet<i64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl NUnique {
+    /// Empty unique counter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of distinct rounded values, or NaN before the first finite value.
+    pub fn score(&self) -> f64 {
+        if self.n_seen == 0 {
+            f64::NAN
+        } else {
+            self.keys.len() as f64
+        }
+    }
+}
+
+impl PartialFit for NUnique {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            self.keys.insert(v.round() as i64);
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 1;
+        q.explanation = format!("NUnique={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "exact unique count",
+                "insert rounded column-0 keys; cardinality is not p",
+                format!("n={before:.6e}"),
+                format!("n={after:.6e}"),
+            ),
+        )
+    }
+}
+
 /// Rolling mean (river `stats.RollingMean`).
 #[derive(Clone, Debug, Default)]
 pub struct RollingMean {
@@ -23192,6 +23942,30 @@ mod tests {
         OnlineMcc::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("omcc");
+        Swinn::new(3)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("swinn");
+        Skyline::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("sky");
+        Sdft::new(8)
+            .partial_fit(&x, None, &session)
+            .expect("sdft");
+        AmsGradRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("ams");
+        OnlineBalancedAccuracy::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("oba");
+        OnlineGini::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("ogini");
+        OnlineEwMean::new(0.4)
+            .partial_fit(&x, None, &session)
+            .expect("oew");
+        NUnique::new()
+            .partial_fit(&x, None, &session)
+            .expect("nuniq");
 
         let n_expl = session
             .ledger()

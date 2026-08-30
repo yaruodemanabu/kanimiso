@@ -1560,6 +1560,14 @@ pub fn newey_west(scores: &Matrix, lags: usize, session: &Session) -> Result<Qua
     ctx.finish(s)
 }
 
+/// Driscoll–Kraay HAC meat for a time-dominant panel (statsmodels `cov_nw_panel`).
+///
+/// With one cross-section this is Newey–West on the score rows. Lag count is
+/// not identification `p`.
+pub fn driscoll_kraay(scores: &Matrix, lags: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    newey_west(scores, lags, session)
+}
+
 /// Engle–Granger residual-based cointegration test.
 #[derive(Clone, Debug)]
 pub struct CointEngleGranger {
@@ -1942,6 +1950,9 @@ mod tests {
         let q = newey_west(&s, 2, &Session::new("hac", "fit")).expect("nw");
         assert_eq!(q.value.shape(), (2, 2));
         assert!(q.value.get(0, 0) >= 0.0);
+        let dk = driscoll_kraay(&s, 2, &Session::new("dk", "fit")).expect("dk");
+        assert_eq!(dk.value.shape(), (2, 2));
+        assert!((dk.value.get(0, 0) - q.value.get(0, 0)).abs() < 1e-12);
     }
 
     #[test]

@@ -11620,6 +11620,176 @@ pub fn stuart_maxwell(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qua
     })
 }
 
+/// Leybourne–McCabe stationarity test (statsmodels `LeybourneMcCabe`).
+///
+/// The AR lag used to prewhiten is not identification `p`.
+pub fn leybourne_mccabe(y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, y);
+    if y.len() < 8 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Leybourne–McCabe needs n≥8")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: y.len() as f64,
+        });
+    }
+    let n = y.len();
+    let design = Matrix::from_fn(n - 1, 2, |i, j| if j == 0 { 1.0 } else { y[i] });
+    let z = Vector::from_iter((1..n).map(|i| y[i]));
+    let mut scratch = Report::new("lmc", "ols");
+    let coef = least_squares(&mut scratch, &design, &z, &ctx.policy)
+        .unwrap_or_else(|| Vector::from_slice(&[0.0, 0.0]));
+    let fit = design.matvec(&coef);
+    let mut e = Vec::new();
+    for i in 0..z.len() {
+        e.push(z[i] - fit[i]);
+    }
+    let mut cs = 0.0;
+    let mut s2 = 0.0;
+    let mut eta = 0.0;
+    for &v in &e {
+        cs += v;
+        eta += cs * cs;
+        s2 += v * v;
+    }
+    let nf = e.len() as f64;
+    let stat = if s2 > 1e-18 {
+        eta / (nf * nf * (s2 / nf))
+    } else {
+        f64::NAN
+    };
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .severity(Severity::Advisory)
+            .message("Leybourne–McCabe p uses a χ²(1) sketch, not tabulated LM critical values")
+            .build(),
+    );
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: chi2_pvalue(stat.max(0.0), 1.0).clamp(0.0, 1.0),
+        df: 1.0,
+        nobs: nf,
+    })
+}
+
+/// Range unit-root statistic (Aparicio / statsmodels `RangeUnitRoot`).
+pub fn range_unit_root(y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, y);
+    let st = slice_stats(y.as_slice());
+    if st.count < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("range unit-root needs n≥4")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: st.count as f64,
+        });
+    }
+    let mut cs = 0.0;
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    let mean = st.mean;
+    for &v in y.as_slice() {
+        if !v.is_finite() {
+            continue;
+        }
+        cs += v - mean;
+        lo = lo.min(cs);
+        hi = hi.max(cs);
+    }
+    let s = st.std().max(1e-12);
+    let stat = (hi - lo) / (s * (st.count as f64).sqrt());
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: (2.0 * (1.0 - norm_cdf(stat.abs()))).clamp(0.0, 1.0),
+        df: f64::NAN,
+        nobs: st.count as f64,
+    })
+}
+
+/// Residual variance-break F test (statsmodels `breaks_breakvar`).
+///
+/// The split index is not identification `p`.
+pub fn breakvar(e: &Vector, split: usize, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(e),
+        None,
+        &ctx.policy,
+    );
+    let n = e.len();
+    let k = split.clamp(2, n.saturating_sub(2));
+    if n < 6 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("breakvar needs n≥6")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: n as f64,
+        });
+    }
+    let v1 = {
+        let s: f64 = e.as_slice().iter().take(k).map(|v| v * v).sum();
+        s / k.max(1) as f64
+    };
+    let v2 = {
+        let s: f64 = e.as_slice().iter().skip(k).map(|v| v * v).sum();
+        s / (n - k).max(1) as f64
+    };
+    let stat = if v1 > 1e-18 { v2 / v1 } else { f64::NAN };
+    let d1 = k.saturating_sub(1) as f64;
+    let d2 = (n - k).saturating_sub(1) as f64;
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: f_pvalue(stat.max(0.0), d1.max(1.0), d2.max(1.0)).clamp(0.0, 1.0),
+        df: d1,
+        nobs: n as f64,
+    })
+}
+
+/// Fitted C-vine pair-copula (statsmodels `VineCopula` lite).
+#[derive(Clone, Debug)]
+pub struct VineCopula {
+    /// Pair-copula count (one edge for two series).
+    pub n_trees: usize,
+    /// Clayton \(\theta\) on the first tree.
+    pub theta: f64,
+    /// Pair log-likelihood.
+    pub loglik: f64,
+}
+
+/// Fit a bivariate C-vine (one Clayton pair) on ranks.
+///
+/// Tree count is not identification `p`.
+pub fn vine_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<VineCopula>> {
+    let q = clayton_copula(y1, y2, session)?;
+    let mut ctx = FitCtx::with_session(session.child("vine"));
+    ctx.finish(VineCopula {
+        n_trees: 1,
+        theta: q.value.theta,
+        loglik: q.value.loglik,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -12098,5 +12268,14 @@ mod tests {
         }
         let lit = litterman(&y, &totals, 4, &Session::new("lit", "t")).expect("lit");
         assert_eq!(lit.value.len(), 40);
+        let lmc = leybourne_mccabe(&y, &Session::new("lmc", "t")).expect("lmc");
+        assert!(lmc.value.statistic.is_finite() || lmc.value.pvalue.is_nan());
+        let rur = range_unit_root(&y, &Session::new("rur", "t")).expect("rur");
+        assert!(rur.value.statistic.is_finite());
+        let bv = breakvar(&e, 20, &Session::new("bv", "t")).expect("bv");
+        assert!(bv.value.statistic.is_finite() || bv.value.pvalue.is_nan());
+        let vn = vine_copula(&y, &y2c, &Session::new("vine", "t")).expect("vine");
+        assert!(vn.value.theta > 0.0);
+        assert_eq!(vn.value.n_trees, 1);
     }
 }

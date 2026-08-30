@@ -4041,6 +4041,128 @@ impl Fit for ZeroInflatedGamma {
     }
 }
 
+/// Scobit (skewed logit) binary GLM (statsmodels `Scobit`).
+///
+/// \(P=\sigma(\eta)^\alpha\). The shape \(\alpha\) is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Scobit {
+    /// IRLS cycles per \(\alpha\) trial.
+    pub max_iter: usize,
+}
+
+impl Default for Scobit {
+    fn default() -> Self {
+        Self { max_iter: 18 }
+    }
+}
+
+impl Scobit {
+    /// Default scobit.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted scobit.
+#[derive(Clone, Debug)]
+pub struct FittedScobit {
+    /// Slopes.
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+    /// Shape \(\alpha>0\).
+    pub alpha: f64,
+}
+
+impl Predict for FittedScobit {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() != self.coef.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("scobit predict column count ≠ coef")
+                    .build(),
+            );
+        }
+        let mut y = x.matvec(&self.coef);
+        for i in 0..y.len() {
+            y[i] += self.intercept;
+        }
+        ctx.finish(y)
+    }
+}
+
+impl Fit for Scobit {
+    type Fitted = FittedScobit;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedScobit>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let design = x.with_intercept();
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let y01 = Vector::from_iter(y.as_slice().iter().map(|v| if *v > 0.5 { 1.0 } else { 0.0 }));
+        let mut best_ll = f64::NEG_INFINITY;
+        let mut best_beta = binary_irls(&design, &y01, &ctx.policy, self.max_iter);
+        let mut best_a = 1.0_f64;
+        for step in 0..6 {
+            let alpha = 0.5 + 0.4 * step as f64;
+            let mut beta = best_beta.clone();
+            for _ in 0..self.max_iter.max(1) {
+                let mut xs = Matrix::zeros(design.nrows(), design.ncols());
+                let mut rhs = Vector::zeros(design.nrows());
+                for i in 0..design.nrows() {
+                    let mut eta = 0.0;
+                    for j in 0..design.ncols() {
+                        eta += design.get(i, j) * beta[j];
+                    }
+                    let s = sigmoid(eta).clamp(1e-8, 1.0 - 1e-8);
+                    let mu = s.powf(alpha).clamp(1e-8, 1.0 - 1e-8);
+                    let dmu = alpha * mu * (1.0 - s);
+                    if dmu.abs() < 1e-12 {
+                        continue;
+                    }
+                    let w = (dmu * dmu / (mu * (1.0 - mu))).max(1e-12);
+                    let sw = w.sqrt();
+                    rhs[i] = (eta + (y01[i] - mu) / dmu) * sw;
+                    for j in 0..design.ncols() {
+                        xs.set(i, j, design.get(i, j) * sw);
+                    }
+                }
+                let mut scratch = signlred::Report::new("scobit", "irls");
+                let Some(next) = least_squares(&mut scratch, &xs, &rhs, &ctx.policy) else {
+                    break;
+                };
+                let d = next.sub(&beta).norm();
+                beta = next;
+                if d < 1e-7 {
+                    break;
+                }
+            }
+            let mut ll = 0.0;
+            for i in 0..design.nrows() {
+                let mut eta = 0.0;
+                for j in 0..design.ncols() {
+                    eta += design.get(i, j) * beta[j];
+                }
+                let s = sigmoid(eta).clamp(1e-12, 1.0 - 1e-12);
+                let mu = s.powf(alpha).clamp(1e-12, 1.0 - 1e-12);
+                ll += if y01[i] > 0.5 { mu.ln() } else { (1.0 - mu).ln() };
+            }
+            if ll > best_ll {
+                best_ll = ll;
+                best_beta = beta;
+                best_a = alpha;
+            }
+        }
+        ctx.finish(FittedScobit {
+            intercept: best_beta.as_slice().first().copied().unwrap_or(0.0),
+            coef: Vector::from_iter((1..best_beta.len()).map(|j| best_beta[j])),
+            alpha: best_a,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4088,6 +4210,23 @@ mod tests {
             }
         }
         assert!(mok >= 20, "mixed logit ok={mok}");
+        let sc = Scobit::new()
+            .fit(&x, &y, &Session::new("scobit", "fit"))
+            .expect("scobit");
+        let sscore = sc
+            .value
+            .predict(&x, &Session::new("scobit", "p"))
+            .unwrap()
+            .value;
+        let mut sok = 0;
+        for i in 0..24 {
+            let pred = if sscore[i] >= 0.0 { 1.0 } else { 0.0 };
+            if (pred - y[i]).abs() < 0.5 {
+                sok += 1;
+            }
+        }
+        assert!(sok >= 20, "scobit ok={sok}");
+        assert!(sc.value.alpha > 0.0);
         let cl = Cloglog::new()
             .fit(&x, &y, &Session::new("cloglog", "fit"))
             .expect("cloglog");

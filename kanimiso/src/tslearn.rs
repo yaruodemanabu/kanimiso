@@ -3745,6 +3745,131 @@ impl Predict for FittedCatch22Classifier {
     }
 }
 
+/// Time-series bag of features (sktime `TimeSeriesForest` / Baydogan TSBF lite).
+///
+/// Interval count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct TimeSeriesBagOfFeatures {
+    /// Random intervals.
+    pub n_intervals: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for TimeSeriesBagOfFeatures {
+    fn default() -> Self {
+        Self {
+            n_intervals: 6,
+            alpha: 0.1,
+            seed: 4,
+        }
+    }
+}
+
+impl TimeSeriesBagOfFeatures {
+    /// Default TSBF-lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted bag-of-features classifier.
+#[derive(Clone, Debug)]
+pub struct FittedTimeSeriesBagOfFeatures {
+    intervals: Vec<Interval>,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for TimeSeriesBagOfFeatures {
+    type Fitted = FittedTimeSeriesBagOfFeatures;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedTimeSeriesBagOfFeatures>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let tlen = x.ncols().max(1);
+        let mut rng = Rng::new(self.seed);
+        let ni = self.n_intervals.max(1);
+        let mut intervals = Vec::with_capacity(ni);
+        for _ in 0..ni {
+            let a = rng.below(tlen);
+            let span = rng.below(tlen).max(1);
+            let b = (a + span).min(tlen);
+            intervals.push(Interval {
+                start: a.min(b.saturating_sub(1)),
+                end: b.max(a + 1),
+            });
+        }
+        let z = interval_feats(x, &intervals);
+        let classes: Vec<i64> = {
+            let mut c: Vec<i64> = y
+                .as_slice()
+                .iter()
+                .filter(|v| v.is_finite())
+                .map(|v| v.round() as i64)
+                .collect();
+            c.sort_unstable();
+            c.dedup();
+            c
+        };
+        let pm = Vector::from_iter(y.as_slice().iter().map(|&v| {
+            let lab = v.round() as i64;
+            if classes.len() >= 2 && lab == classes[classes.len() - 1] {
+                1.0
+            } else {
+                -1.0
+            }
+        }));
+        let mut scratch = signlred::Report::new("tsbf", "ridge");
+        let design = z.with_intercept();
+        let beta = ridge_solve(&mut scratch, &design, &pm, self.alpha.max(0.0), &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        ctx.finish(FittedTimeSeriesBagOfFeatures {
+            intervals,
+            inner: crate::classification::FittedRidgeClassifier::from_penalized(
+                FittedPenalized {
+                    coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                    intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+                    alpha: self.alpha,
+                    l1_ratio: 0.0,
+                },
+                if classes.len() >= 2 {
+                    classes
+                } else {
+                    vec![0, 1]
+                },
+            ),
+        })
+    }
+}
+
+impl Predict for FittedTimeSeriesBagOfFeatures {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let z = interval_feats(x, &self.intervals);
+        match self.inner.predict(&z, &session.child("ridge")) {
+            Ok(q) => ctx.finish(q.value),
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::RankZero
+                ) {
+                    ctx.push(e.primary);
+                }
+                ctx.finish(Vector::zeros(x.nrows()))
+            }
+        }
+    }
+}
+
 /// Per-series min–max scaler (tslearn `TimeSeriesScalerMinMax`).
 #[derive(Clone, Debug, Default)]
 pub struct TimeSeriesScalerMinMax;
@@ -10077,6 +10202,16 @@ mod tests {
             }
         }
         assert!(ok >= 5, "tsf ok={ok}");
+        let tsbf = TimeSeriesBagOfFeatures::new()
+            .fit(&x, &y, &Session::new("ts", "tsbf"))
+            .unwrap();
+        let pbf = tsbf
+            .value
+            .predict(&x, &Session::new("ts", "tsbfp"))
+            .unwrap()
+            .value;
+        assert_eq!(pbf.len(), 8);
+        assert!(pbf.as_slice().iter().all(|v| v.is_finite()));
         let cif = CanonicalIntervalForest {
             n_estimators: 6,
             n_intervals: 3,

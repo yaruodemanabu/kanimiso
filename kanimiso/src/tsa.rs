@@ -217,6 +217,73 @@ pub fn pacf(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vec
     ctx.finish(out)
 }
 
+/// Cross-covariance \(\gamma_{xy}(0),\ldots,\gamma_{xy}(\mathrm{nlags})\) (statsmodels `ccovf`).
+///
+/// Lag count is not identification `p`.
+pub fn ccovf(x: &Vector, y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, x);
+    inspect_univariate(&mut ctx, y);
+    let n = x.len().min(y.len());
+    if nlags + 1 > n && n > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .message(format!("ccovf nlags={nlags} ≥ n={n}"))
+                .build(),
+        );
+    }
+    let mx = x.as_slice().iter().take(n).sum::<f64>() / n.max(1) as f64;
+    let my = y.as_slice().iter().take(n).sum::<f64>() / n.max(1) as f64;
+    let mut out = Vector::zeros(nlags + 1);
+    for k in 0..=nlags {
+        if k >= n {
+            out[k] = f64::NAN;
+            continue;
+        }
+        let mut g = 0.0;
+        for t in k..n {
+            if x[t].is_finite() && y[t - k].is_finite() {
+                g += (x[t] - mx) * (y[t - k] - my);
+            }
+        }
+        out[k] = g / n.max(1) as f64;
+    }
+    ctx.finish(out)
+}
+
+/// OLS partial autocorrelations (statsmodels `pacf_ols`).
+///
+/// \(\varphi_{kk}\) is the last slope of \(y_t\) on \(y_{t-1},\ldots,y_{t-k}\).
+/// Lag count is not identification `p`.
+pub fn pacf_ols(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let mut out = Vector::zeros(nlags + 1);
+    out[0] = 1.0;
+    for k in 1..=nlags {
+        if k + 2 >= y.len() {
+            out[k] = f64::NAN;
+            continue;
+        }
+        let n = y.len() - k;
+        let m = Matrix::from_fn(n, k + 1, |i, j| {
+            if j == 0 {
+                1.0
+            } else {
+                y[i + k - j]
+            }
+        });
+        let z = Vector::from_iter((0..n).map(|i| y[i + k]));
+        let mut scratch = Report::new("pacf_ols", "ols");
+        let coef = least_squares(&mut scratch, &m, &z, &ctx.policy);
+        out[k] = coef
+            .as_ref()
+            .and_then(|c| c.as_slice().get(k).copied())
+            .unwrap_or(f64::NAN);
+    }
+    ctx.finish(out)
+}
+
 /// Additive seasonal decomposition (trend moving average + seasonal averages).
 pub fn seasonal_decompose(
     y: &Vector,
@@ -4939,6 +5006,219 @@ impl FitSeries for Egarch {
             resid: e,
         })
     }
+}
+
+/// Fractionally integrated EGARCH (arch `FIEGARCH`) lite.
+///
+/// News is fractionally weighted with \(d\in(0,1/2)\) before the EGARCH log
+/// recursion. The fractional order is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Fiegarch {
+    /// Coordinate-search iterations.
+    pub max_iter: usize,
+}
+
+impl Default for Fiegarch {
+    fn default() -> Self {
+        Self { max_iter: 24 }
+    }
+}
+
+impl Fiegarch {
+    /// Default FIEGARCH settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted FIEGARCH variances.
+#[derive(Clone, Debug)]
+pub struct FittedFiegarch {
+    /// ω.
+    pub omega: f64,
+    /// Magnitude news.
+    pub alpha: f64,
+    /// Sign news.
+    pub gamma: f64,
+    /// Log-variance persistence.
+    pub beta: f64,
+    /// Fractional integration order.
+    pub d: f64,
+    /// Conditional variances.
+    pub sigma2: Vector,
+    /// Demeaned residuals.
+    pub resid: Vector,
+}
+
+fn frac_weights(d: f64, n: usize) -> Vec<f64> {
+    let mut w = vec![1.0; n.max(1)];
+    for k in 1..n {
+        w[k] = w[k - 1] * (k as f64 - 1.0 - d) / k as f64;
+    }
+    w
+}
+
+fn fiegarch_sigma2(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64, d: f64) -> Vec<f64> {
+    let n = e.len();
+    let w = frac_weights(d.clamp(0.01, 0.49), n);
+    let c = (2.0 / std::f64::consts::PI).sqrt();
+    let mut news = vec![0.0_f64; n];
+    let mut s2 = vec![0.0_f64; n];
+    let mut logh = omega;
+    for t in 0..n {
+        if t > 0 {
+            let prev = s2[t - 1].max(1e-12).sqrt();
+            let z = e[t - 1] / prev;
+            news[t] = alpha * (z.abs() - c) + gamma * z;
+            let mut frac = 0.0;
+            for k in 0..=t {
+                frac += w[k] * news[t - k];
+            }
+            logh = omega + frac + beta * logh;
+        }
+        s2[t] = logh.exp().max(1e-12);
+    }
+    s2
+}
+
+fn fiegarch_nll(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64, d: f64) -> f64 {
+    if !omega.is_finite() || beta.abs() >= 0.999 || !(0.0..0.5).contains(&d) {
+        return f64::INFINITY;
+    }
+    let s2 = fiegarch_sigma2(e, omega, alpha, gamma, beta, d);
+    let mut nll = 0.0;
+    for t in 0..e.len() {
+        let v = s2[t].max(1e-12);
+        nll += 0.5 * (v.ln() + e[t] * e[t] / v);
+    }
+    nll
+}
+
+impl FitSeries for Fiegarch {
+    type Fitted = FittedFiegarch;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedFiegarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("FIEGARCH QMLE needs a longer series")
+                    .build(),
+            );
+        }
+        let mean = y.mean();
+        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
+        let var = e.as_slice().iter().map(|v| v * v).sum::<f64>() / y.len().max(1) as f64;
+        let mut omega = var.max(1e-8).ln();
+        let mut alpha = 0.1;
+        let mut gamma = 0.0;
+        let mut beta = 0.7;
+        let mut d = 0.2;
+        let mut best = fiegarch_nll(e.as_slice(), omega, alpha, gamma, beta, d);
+        let mut step = 0.04;
+        for it in 0..self.max_iter {
+            let mut improved = false;
+            for (i, cur) in [omega, alpha, gamma, beta, d].into_iter().enumerate() {
+                for dir in [-step, step] {
+                    let mut cand = [omega, alpha, gamma, beta, d];
+                    cand[i] = if i == 4 {
+                        (cur + dir).clamp(0.01, 0.49)
+                    } else {
+                        cur + dir
+                    };
+                    let nll = fiegarch_nll(e.as_slice(), cand[0], cand[1], cand[2], cand[3], cand[4]);
+                    if nll < best {
+                        best = nll;
+                        omega = cand[0];
+                        alpha = cand[1];
+                        gamma = cand[2];
+                        beta = cand[3];
+                        d = cand[4];
+                        improved = true;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, best, None);
+            if !improved {
+                step *= 0.5;
+                if step < 1e-5 {
+                    ctx.session.converged("FIEGARCH coordinate search", it as u64);
+                    break;
+                }
+            }
+        }
+        if !best.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("FIEGARCH QMLE likelihood is non-finite")
+                    .build(),
+            );
+        }
+        let sigma2 = fiegarch_sigma2(e.as_slice(), omega, alpha, gamma, beta, d);
+        ctx.finish(FittedFiegarch {
+            omega,
+            alpha,
+            gamma,
+            beta,
+            d,
+            sigma2: Vector::from_iter(sigma2),
+            resid: e,
+        })
+    }
+}
+
+/// Historical value-at-risk at level `q` (arch `ValueAtRisk`).
+///
+/// The quantile level is not identification `p`.
+pub fn value_at_risk(y: &Vector, q: f64, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let qq = if q.is_finite() && q > 0.0 && q < 1.0 {
+        q
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("VaR q={q} is not in (0,1); using 0.05"))
+                .build(),
+        );
+        0.05
+    };
+    let mut v: Vec<f64> = y.as_slice().iter().copied().filter(|x| x.is_finite()).collect();
+    if v.len() < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("historical VaR needs n≥4")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((v.len() as f64 - 1.0) * qq).floor() as usize;
+    ctx.finish(*v.get(idx).unwrap_or(&v[0]))
+}
+
+/// Historical expected shortfall (arch `expected_shortfall`).
+///
+/// The tail level is not identification `p`.
+pub fn expected_shortfall(y: &Vector, q: f64, session: &Session) -> Result<Qualified<f64>> {
+    let var = value_at_risk(y, q, session)?;
+    let mut ctx = FitCtx::with_session(session.child("es"));
+    if !var.value.is_finite() {
+        return ctx.finish(f64::NAN);
+    }
+    let mut s = 0.0;
+    let mut c = 0.0;
+    for &v in y.as_slice() {
+        if v.is_finite() && v <= var.value {
+            s += v;
+            c += 1.0;
+        }
+    }
+    ctx.finish(if c > 0.0 { s / c } else { var.value })
 }
 
 /// GJR-GARCH(1,1) (Glosten–Jagannathan–Runkle / arch `GJR`).
@@ -14874,5 +15154,25 @@ mod tests {
         assert!(hg.value.statistic.is_finite() || hg.value.pvalue.is_nan());
         let ch = canova_hansen(&y, 4, &Session::new("ch", "t")).expect("ch");
         assert!(ch.value.statistic.is_finite() || ch.value.pvalue.is_nan());
+        let cv = ccovf(&y, &y, 3, &Session::new("ccov", "t")).expect("ccov");
+        assert_eq!(cv.value.len(), 4);
+        assert!(cv.value[0].is_finite());
+        let po = pacf_ols(&y, 3, &Session::new("pols", "t")).expect("pols");
+        assert_eq!(po.value.len(), 4);
+        assert!((po.value[0] - 1.0).abs() < 1e-12);
+        let fi = Fiegarch::new()
+            .fit_series(&y, &Session::new("fie", "fit"))
+            .expect("fie");
+        assert!(fi
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        assert!(fi.value.d > 0.0 && fi.value.d < 0.5);
+        let varr = value_at_risk(&y, 0.1, &Session::new("var", "t")).expect("var");
+        assert!(varr.value.is_finite());
+        let es = expected_shortfall(&y, 0.1, &Session::new("es", "t")).expect("es");
+        assert!(es.value <= varr.value + 1e-9);
     }
 }
