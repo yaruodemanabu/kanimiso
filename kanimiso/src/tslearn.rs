@@ -344,6 +344,13 @@ pub fn frechet(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f6
         );
         return ctx.finish(f64::NAN);
     }
+    ctx.finish(frechet_raw(a.as_slice(), b.as_slice()))
+}
+
+fn frechet_raw(a: &[f64], b: &[f64]) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return f64::NAN;
+    }
     let n = a.len();
     let m = b.len();
     let mut dp = vec![0.0; n * m];
@@ -361,7 +368,22 @@ pub fn frechet(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f6
             dp[at(i, j)] = prev.max((a[i] - b[j]).abs());
         }
     }
-    ctx.finish(dp[at(n - 1, m - 1)])
+    dp[at(n - 1, m - 1)]
+}
+
+/// Pairwise discrete Fréchet (tslearn `cdist` with Fréchet).
+///
+/// Series / pair counts are not identification `p`.
+pub fn cdist_frechet(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        frechet_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
 }
 
 /// Hausdorff distance between two series as point sets (tslearn `hausdorff`).
@@ -400,6 +422,44 @@ pub fn hausdorff(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<
         ba = ba.max(best);
     }
     ctx.finish(ab.max(ba))
+}
+
+fn hausdorff_raw(a: &[f64], b: &[f64]) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return f64::NAN;
+    }
+    let mut ab = 0.0_f64;
+    for &ai in a {
+        let mut best = f64::INFINITY;
+        for &bj in b {
+            best = best.min((ai - bj).abs());
+        }
+        ab = ab.max(best);
+    }
+    let mut ba = 0.0_f64;
+    for &bj in b {
+        let mut best = f64::INFINITY;
+        for &ai in a {
+            best = best.min((ai - bj).abs());
+        }
+        ba = ba.max(best);
+    }
+    ab.max(ba)
+}
+
+/// Pairwise Hausdorff distance (tslearn `cdist` with Hausdorff).
+///
+/// Series / pair counts are not identification `p`.
+pub fn cdist_hausdorff(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        hausdorff_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
 }
 
 fn embed_series(s: &[f64], d: usize) -> Matrix {
@@ -12798,6 +12858,12 @@ mod tests {
         assert_eq!(csb.shape(), (8, 8));
         assert!(csb.get(0, 0).abs() < 1e-8);
         assert!(csb.get(0, 1).is_finite());
+        let cfr = cdist_frechet(&x, &x, &Session::new("ts", "cfr")).unwrap().value;
+        assert_eq!(cfr.shape(), (8, 8));
+        assert!(cfr.get(0, 0).abs() < 1e-12);
+        let chd = cdist_hausdorff(&x, &x, &Session::new("ts", "chd")).unwrap().value;
+        assert_eq!(chd.shape(), (8, 8));
+        assert!(chd.get(0, 0).abs() < 1e-12);
     }
 
     #[test]

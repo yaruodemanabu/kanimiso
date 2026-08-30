@@ -16033,6 +16033,114 @@ pub fn freq_to_period(freq: &str, session: &Session) -> Result<Qualified<f64>> {
     ctx.finish(period)
 }
 
+/// ARMA process (statsmodels `ArmaProcess`).
+///
+/// Orders are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ArmaProcess {
+    /// Autoregressive coefficients \(\phi_1,\ldots,\phi_p\).
+    pub ar: Vector,
+    /// Moving-average coefficients \(\theta_1,\ldots,\theta_q\).
+    pub ma: Vector,
+}
+
+impl ArmaProcess {
+    /// ARMA(\(p,q\)) from coefficient vectors.
+    pub fn new(ar: Vector, ma: Vector) -> Self {
+        Self { ar, ma }
+    }
+
+    /// Theoretical ACF via [`arma_acf`].
+    pub fn acf(&self, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
+        arma_acf(&self.ar, &self.ma, nlags, session)
+    }
+
+    /// Impulse response \(\psi\) via [`arma2ma`].
+    pub fn impulse(&self, lags: usize, session: &Session) -> Result<Qualified<Vector>> {
+        arma2ma(&self.ar, &self.ma, lags, session)
+    }
+
+    /// Simulate `n` observations.
+    pub fn generate(&self, n: usize, seed: u64, session: &Session) -> Result<Qualified<Vector>> {
+        arma_generate_sample(&self.ar, &self.ma, n, seed, session)
+    }
+}
+
+/// Simulate an ARMA series (statsmodels `arma_generate_sample`).
+///
+/// Orders are not identification `p`.
+pub fn arma_generate_sample(
+    ar: &Vector,
+    ma: &Vector,
+    n: usize,
+    seed: u64,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, ar);
+    inspect_univariate(&mut ctx, ma);
+    let m = n.max(1);
+    if n == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message("arma_generate_sample n=0; using 1")
+                .build(),
+        );
+    }
+    let mut rng = Rng::new(seed);
+    let mut e = Vector::zeros(m);
+    let mut y = Vector::zeros(m);
+    for t in 0..m {
+        e[t] = rng.standard_normal();
+        let mut s = e[t];
+        for j in 0..ma.len() {
+            if t > j {
+                s += ma[j] * e[t - 1 - j];
+            }
+        }
+        for j in 0..ar.len() {
+            if t > j {
+                s += ar[j] * y[t - 1 - j];
+            }
+        }
+        if !s.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::CausalityViolated)
+                    .message("arma_generate_sample overflowed; later draws set to 0")
+                    .build(),
+            );
+            s = 0.0;
+        }
+        y[t] = s;
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("arma_generate_sample uses Gaussian innovations and zero pre-sample")
+            .compromise(NumericalCompromise::new(
+                "stationary start from the ARMA Lyapunov covariance",
+                "zero initial conditions plus N(0,1) innovations",
+                "the first max(p,q) draws are transient",
+                "discard a burn-in before treating the path as stationary",
+            ))
+            .build(),
+    );
+    ctx.finish(y)
+}
+
+/// Impulse-response coefficients (statsmodels `ArmaProcess.arma2ma`).
+///
+/// Alias of [`arma2ma`]. Orders are not identification `p`.
+pub fn arma_impulse_response(
+    ar: &Vector,
+    ma: &Vector,
+    lags: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    arma2ma(ar, ma, lags, session)
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -17221,5 +17329,29 @@ pub fn freq_to_period(freq: &str, session: &Session) -> Result<Qualified<f64>> {
         assert_eq!(al.value.shape(), (40, 6));
         let fp = freq_to_period("Q", &Session::new("ftp", "t")).expect("ftp");
         assert!((fp.value - 4.0).abs() < 1e-12);
+        let proc = ArmaProcess::new(Vector::from_slice(&[0.5]), Vector::from_slice(&[0.0]));
+        let pac = proc.acf(4, &Session::new("proc", "acf")).expect("procacf");
+        assert!((pac.value[0] - 1.0).abs() < 1e-9);
+        let pimp = proc.impulse(6, &Session::new("proc", "imp")).expect("procimp");
+        assert_eq!(pimp.value.len(), 6);
+        assert!((pimp.value[0] - 1.0).abs() < 1e-12);
+        let gen = arma_generate_sample(
+            &Vector::from_slice(&[0.4]),
+            &Vector::from_slice(&[0.2]),
+            32,
+            7,
+            &Session::new("agen", "t"),
+        )
+        .expect("agen");
+        assert_eq!(gen.value.len(), 32);
+        assert!(gen.value.as_slice().iter().all(|v| v.is_finite()));
+        let air = arma_impulse_response(
+            &Vector::from_slice(&[0.5]),
+            &Vector::from_slice(&[0.0]),
+            5,
+            &Session::new("air", "t"),
+        )
+        .expect("air");
+        assert!((air.value[1] - 0.5).abs() < 1e-12);
     }
 }

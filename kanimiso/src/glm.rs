@@ -5189,6 +5189,173 @@ impl Predict for FittedGlmGam {
     }
 }
 
+/// Linear model with Student-\(t\) errors (statsmodels `TLinearModel`).
+///
+/// Degrees of freedom \(\nu\) are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct TLinear {
+    /// Error degrees of freedom \(\nu > 2\).
+    pub df: f64,
+}
+
+impl Default for TLinear {
+    fn default() -> Self {
+        Self { df: 5.0 }
+    }
+}
+
+impl TLinear {
+    /// \(t_\nu\) errors.
+    pub fn new(df: f64) -> Self {
+        Self { df }
+    }
+}
+
+/// Fitted \(t\)-error linear model.
+#[derive(Clone, Debug)]
+pub struct FittedTLinear {
+    /// Slopes.
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+    /// Residual scale.
+    pub scale: f64,
+    /// Degrees of freedom used.
+    pub df: f64,
+}
+
+impl Predict for FittedTLinear {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() != self.coef.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("TLinear predict column count ≠ coef")
+                    .build(),
+            );
+        }
+        let yhat = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..self.coef.len().min(x.ncols()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        }));
+        ctx.finish(yhat)
+    }
+}
+
+impl Fit for TLinear {
+    type Fitted = FittedTLinear;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedTLinear>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let n = x.nrows().min(y.len());
+        let nu = if self.df.is_finite() && self.df > 2.0 {
+            self.df
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("TLinear ν={} is not >2; using 5", self.df))
+                    .build(),
+            );
+            5.0
+        };
+        let design = x.with_intercept();
+        let yn = Vector::from_iter(y.as_slice().iter().take(n).copied());
+        let d = Matrix::from_fn(n, design.ncols(), |i, j| design.get(i, j));
+        let mut scratch = signlred::Report::new("tlinear", "ols");
+        let mut beta = least_squares(&mut scratch, &d, &yn, &ctx.policy).unwrap_or_else(|| {
+            let mut v = Vector::zeros(d.ncols());
+            v[0] = yn.mean();
+            v
+        });
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::R2IsOne
+                    | IssueCode::RankZero
+                    | IssueCode::CholeskyFailed
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let mut scale = 1.0_f64;
+        for _ in 0..12 {
+            let fit = d.matvec(&beta);
+            let mut sse = 0.0_f64;
+            for i in 0..n {
+                let e = yn[i] - fit[i];
+                sse += e * e;
+            }
+            scale = (sse / n.max(1) as f64).sqrt().max(1e-12);
+            let mut ws = 0.0_f64;
+            let zw = Matrix::from_fn(n, d.ncols(), |i, j| {
+                let e = yn[i] - fit[i];
+                let w = ((nu + 1.0) / (nu + (e / scale) * (e / scale))).sqrt();
+                ws += w;
+                d.get(i, j) * w
+            });
+            let yw = Vector::from_iter((0..n).map(|i| {
+                let e = yn[i] - fit[i];
+                let w = ((nu + 1.0) / (nu + (e / scale) * (e / scale))).sqrt();
+                yn[i] * w
+            }));
+            let mut sc = signlred::Report::new("tlinear", "irls");
+            if let Some(b) = least_squares(&mut sc, &zw, &yw, &ctx.policy) {
+                beta = b;
+            } else {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .severity(Severity::Warning)
+                        .message("TLinear IRLS step failed; keeping the previous β")
+                        .build(),
+                );
+                break;
+            }
+            if ws <= 1e-12 {
+                ctx.push(
+                    Issue::builder(IssueCode::DegenerateDistribution)
+                        .message("TLinear weights collapsed")
+                        .build(),
+                );
+                break;
+            }
+        }
+        let intercept = beta[0];
+        let coef = Vector::from_iter((1..beta.len()).map(|j| beta[j]));
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("TLinear uses IRLS t-weights, not the full Student-t MLE")
+                .compromise(NumericalCompromise::new(
+                    "Student-t MLE with joint (β, σ, ν)",
+                    "IRLS with fixed ν and RMSE scale",
+                    "ν is not estimated",
+                    "treat coefficients as a robust location, not the exact t-MLE",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedTLinear {
+            coef,
+            intercept,
+            scale,
+            df: nu,
+        })
+    }
+}
+
 /// Scobit (skewed logit) binary GLM (statsmodels `Scobit`).
 ///
 /// \(P=\sigma(\eta)^\alpha\). The shape \(\alpha\) is not identification `p`.
@@ -5649,5 +5816,17 @@ mod tests {
             .as_slice()
             .iter()
             .all(|v| v.is_finite()));
+        let yline = Vector::from_iter((0..30).map(|i| 1.0 + 0.4 * (i % 6) as f64));
+        let tl = TLinear::new(5.0)
+            .fit(&x, &yline, &Session::new("tlin", "fit"))
+            .expect("tlinear");
+        assert!(tl.value.coef[0].is_finite());
+        assert!(tl.value.scale.is_finite() && tl.value.scale > 0.0);
+        let tlp = tl
+            .value
+            .predict(&x, &Session::new("tlin", "p"))
+            .unwrap()
+            .value;
+        assert!(tlp.as_slice().iter().all(|v| v.is_finite()));
     }
 }

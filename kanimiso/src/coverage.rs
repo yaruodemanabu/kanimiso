@@ -4930,6 +4930,42 @@ const INVENTORY: &[Algorithm] = &[
         "river.stats.RollingSpearmanCorr",
         "online",
     ),
+    a(
+        "stats.normal_ad",
+        "statsmodels.stats.diagnostic.normal_ad",
+        "stats",
+    ),
+    a(
+        "glm.TLinear",
+        "statsmodels.miscmodels.tmodel.TLinearModel",
+        "estimator",
+    ),
+    a(
+        "tsa.ArmaProcess",
+        "statsmodels.tsa.arima_process.ArmaProcess",
+        "forecast",
+    ),
+    a(
+        "tsa.arma_generate_sample",
+        "statsmodels.tsa.arima_process.arma_generate_sample",
+        "forecast",
+    ),
+    a(
+        "tsa.arma_impulse_response",
+        "statsmodels.tsa.arima_process.arma2ma",
+        "forecast",
+    ),
+    a(
+        "tslearn.cdist_frechet",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_hausdorff",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a("online.RollingMse", "river.metrics.MSE", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5264,6 +5300,10 @@ mod tests {
             "online.MinHash",
             "online.OnlineTweedieDeviance",
             "iv.cov_cluster",
+            "glm.TLinear",
+            "tsa.ArmaProcess",
+            "tslearn.cdist_frechet",
+            "online.RollingMse",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

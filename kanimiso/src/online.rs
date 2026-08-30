@@ -18816,6 +18816,102 @@ impl PartialFit for RollingSpearman {
     }
 }
 
+/// Rolling MSE (river `metrics.Rolling` + MSE).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingMse {
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingMse {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingMse {
+    /// Rolling MSE with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window mean squared error, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.buf.is_empty() {
+            f64::NAN
+        } else {
+            self.buf.iter().sum::<f64>() / self.buf.len() as f64
+        }
+    }
+}
+
+impl PartialFit for RollingMse {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no y for RollingMse"),
+            );
+        };
+        let before = self.score();
+        let cap = self.window.max(1);
+        for i in 0..x.nrows().min(y.len()) {
+            let pred = x.get(i, 0);
+            let truth = y[i];
+            if pred.is_finite() && truth.is_finite() {
+                let e = pred - truth;
+                rolling_push(&mut self.buf, e * e, cap);
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.buf.is_empty();
+        q.warmup = self.buf.is_empty();
+        q.explanation = format!("RollingMse={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed MSE",
+                "sliding mean of (pred−y)²; window is not identification p",
+                format!("mse={before:.6e}"),
+                format!("mse={after:.6e}"),
+            ),
+        )
+    }
+}
+
 /// ADWIN-resetting bag of perceptrons (river `ensemble.ADWINBaggingClassifier`).
 #[derive(Clone, Debug)]
 pub struct AdwinBagging {
@@ -27537,6 +27633,9 @@ mod tests {
         RollingSpearman::new(4)
             .partial_fit(&x, Some(&y), &session)
             .expect("rspear");
+        RollingMse::new(4)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("rmse2");
 
         let n_expl = session
             .ledger()

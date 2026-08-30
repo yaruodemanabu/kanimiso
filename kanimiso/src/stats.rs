@@ -10125,6 +10125,11 @@ pub fn anderson_darling(x: &Vector, session: &Session) -> Result<Qualified<Hypot
     })
 }
 
+/// Alias of [`anderson_darling`] (statsmodels `normal_ad`).
+pub fn normal_ad(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    anderson_darling(x, session)
+}
+
 /// Lilliefors normality test (KS after estimated mean/variance).
 pub fn lilliefors(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
@@ -13652,5 +13657,7 @@ mod tests {
             let s = (0..4).map(|q| dch.value[t * 4 + q]).sum::<f64>();
             assert!((s - totals[t]).abs() < 1e-4, "cholette year {t}");
         }
+        let nad = normal_ad(&y, &Session::new("nad", "t")).expect("nad");
+        assert!(nad.value.statistic.is_finite() || nad.value.pvalue.is_nan());
     }
 }
