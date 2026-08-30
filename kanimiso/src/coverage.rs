@@ -58,6 +58,26 @@ const INVENTORY: &[Algorithm] = &[
         "estimator",
     ),
     a(
+        "multinomial.MultinomialLogistic",
+        "sklearn.linear_model.LogisticRegression",
+        "estimator",
+    ),
+    a(
+        "linear_model.Lars",
+        "sklearn.linear_model.Lars",
+        "estimator",
+    ),
+    a(
+        "linear_model.TweedieRegressor",
+        "sklearn.linear_model.TweedieRegressor",
+        "estimator",
+    ),
+    a(
+        "classification.PlattCalibrator",
+        "sklearn.calibration.CalibratedClassifierCV",
+        "estimator",
+    ),
+    a(
         "linear_model.SgdRegressor",
         "sklearn.linear_model.SGDRegressor",
         "estimator",
@@ -128,11 +148,22 @@ const INVENTORY: &[Algorithm] = &[
         "estimator",
     ),
     a(
+        "vecm.Johansen",
+        "statsmodels.tsa.vector_ar.vecm.coint_johansen",
+        "forecast",
+    ),
+    a(
+        "vecm.Vecm",
+        "statsmodels.tsa.vector_ar.vecm.VECM",
+        "forecast",
+    ),
+    a(
         "cluster.MeanShift",
         "sklearn.cluster.MeanShift",
         "estimator",
     ),
     a("cluster.Optics", "sklearn.cluster.OPTICS", "estimator"),
+    a("cluster.Birch", "sklearn.cluster.Birch", "estimator"),
     a(
         "tslearn.Rocket",
         "sktime.transformations.panel.rocket.Rocket",
@@ -183,6 +214,21 @@ const INVENTORY: &[Algorithm] = &[
     a(
         "tree.ExtraTreesClassifier",
         "sklearn.ensemble.ExtraTreesClassifier",
+        "estimator",
+    ),
+    a(
+        "tree.ExtraTreesRegressor",
+        "sklearn.ensemble.ExtraTreesRegressor",
+        "estimator",
+    ),
+    a(
+        "histgb.HistGradientBoostingRegressor",
+        "sklearn.ensemble.HistGradientBoostingRegressor",
+        "estimator",
+    ),
+    a(
+        "histgb.HistGradientBoostingClassifier",
+        "sklearn.ensemble.HistGradientBoostingClassifier",
         "estimator",
     ),
     a(
@@ -661,6 +707,18 @@ const INVENTORY: &[Algorithm] = &[
         "river.time_series.HoltWinters",
         "online",
     ),
+    a("online.AdaptiveModelRules", "river.rules.AMRules", "online"),
+    a(
+        "bandit.EpsilonGreedy",
+        "river.bandit.EpsilonGreedy",
+        "online",
+    ),
+    a("bandit.Ucb1", "river.bandit.UCB", "online"),
+    a(
+        "bandit.ThompsonBernoulli",
+        "river.bandit.ThompsonSampling",
+        "online",
+    ),
     // linalg / special / validate
     a("linalg.least_squares", "numpy.linalg.lstsq", "function"),
     a(
@@ -982,6 +1040,11 @@ const INVENTORY: &[Algorithm] = &[
     a(
         "tslearn.TimeSeriesSvm",
         "tslearn.svm.TimeSeriesSVC",
+        "timeseries",
+    ),
+    a(
+        "tslearn.TimeSeriesForestClassifier",
+        "sktime.classification.interval_based.TimeSeriesForestClassifier",
         "timeseries",
     ),
     a("coverage.inventory", "sklearn.show_versions", "function"),

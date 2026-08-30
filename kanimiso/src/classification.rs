@@ -12,6 +12,7 @@ use crate::validate::{inspect_classes, inspect_xy};
 use ojizou_san::Session;
 use signlred::{Issue, IssueCode, Qualified, Result};
 
+pub use crate::histgb::{FittedHistGbc, HistGradientBoostingClassifier};
 pub use crate::linear_model::{FittedLogistic, LogisticRegression};
 pub use crate::naive_bayes::{
     BernoulliNB, ComplementNB, FittedBernoulliNB, FittedDiscreteNB, FittedGaussianNB, GaussianNB,
@@ -375,6 +376,73 @@ impl Fit for DummyClassifier {
     }
 }
 
+/// Platt scaling: \(P(y=1 \mid s) = \sigma(A s + B)\) (sklearn `CalibratedClassifierCV`).
+///
+/// `scores` are the uncalibrated decision values. A single class makes \(A, B\)
+/// unidentified.
+#[derive(Clone, Debug, Default)]
+pub struct PlattCalibrator {
+    /// Max IRLS iterations.
+    pub max_iter: usize,
+}
+
+impl PlattCalibrator {
+    /// Default Platt calibrator.
+    pub fn new() -> Self {
+        Self { max_iter: 40 }
+    }
+
+    /// Fit \(A, B\) on `(scores, labels)`.
+    pub fn fit(
+        &mut self,
+        scores: &Vector,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPlatt>> {
+        let x = Matrix::from_vector(scores);
+        let mut lr = crate::linear_model::LogisticRegression {
+            c_inv: 1e-6,
+            max_iter: self.max_iter.max(1),
+            ..crate::linear_model::LogisticRegression::default()
+        };
+        let q = lr.fit(&x, y, session)?;
+        Ok(q.map(|m| FittedPlatt {
+            a: if m.coef.is_empty() { 0.0 } else { m.coef[0] },
+            b: m.intercept,
+            classes: m.classes,
+        }))
+    }
+}
+
+/// Fitted Platt map.
+#[derive(Clone, Debug)]
+pub struct FittedPlatt {
+    /// Slope on the score.
+    pub a: f64,
+    /// Intercept.
+    pub b: f64,
+    /// Training classes.
+    pub classes: Vec<i64>,
+}
+
+impl FittedPlatt {
+    /// Calibrated \(P(\text{last class} \mid s)\).
+    pub fn predict_proba(&self, scores: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("predict"));
+        let out = Vector::from_iter(scores.as_slice().iter().map(|&s| {
+            let z = self.a * s + self.b;
+            if z >= 0.0 {
+                let e = (-z).exp();
+                1.0 / (1.0 + e)
+            } else {
+                let e = z.exp();
+                e / (1.0 + e)
+            }
+        }));
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +521,27 @@ mod tests {
         let _ = GaussianNB::default();
         let _ = DecisionTreeClassifier::default();
         let _ = LinearSvc::default();
+    }
+
+    #[test]
+    fn platt_maps_separated_scores() {
+        let scores = Vector::from_iter((0..20).map(|i| {
+            if i < 10 {
+                -1.0 + 0.15 * i as f64
+            } else {
+                0.4 + 0.15 * (i - 10) as f64
+            }
+        }));
+        let y = Vector::from_iter((0..20).map(|i| if i < 10 { 0.0 } else { 1.0 }));
+        let q = PlattCalibrator::new()
+            .fit(&scores, &y, &Session::new("platt", "fit"))
+            .expect("platt");
+        let p = q
+            .value
+            .predict_proba(&scores, &Session::new("platt", "p"))
+            .unwrap()
+            .value;
+        assert!(p[0] < 0.3, "p0={}", p[0]);
+        assert!(p[15] > 0.7, "p15={}", p[15]);
     }
 }

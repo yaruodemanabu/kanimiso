@@ -16,6 +16,7 @@
 #![deny(missing_docs)]
 
 pub mod anomaly;
+pub mod bandit;
 pub mod classification;
 pub mod cluster;
 pub mod compose;
@@ -27,6 +28,7 @@ pub mod decompose;
 pub mod discriminant;
 pub mod ensemble;
 pub mod feature;
+pub mod histgb;
 pub mod hmm;
 pub mod linalg;
 pub mod linear_model;
@@ -34,6 +36,7 @@ pub mod manifold;
 pub mod metrics;
 pub mod mixed;
 pub mod model_selection;
+pub mod multinomial;
 pub mod naive_bayes;
 pub mod neighbors;
 pub mod neural;
@@ -50,6 +53,7 @@ pub mod tree;
 pub mod tsa;
 pub mod tslearn;
 pub mod validate;
+pub mod vecm;
 
 pub use context::FitCtx;
 pub use coverage::{inventory, Algorithm};

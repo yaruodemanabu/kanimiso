@@ -2605,6 +2605,348 @@ fn top_moved(delta: &Vector, k: usize) -> Vec<(String, f64)> {
         .collect()
 }
 
+/// Adaptive model rules (river `AMRules`): a default RLS leaf that may split
+/// once when a Hoeffding-bound variance reduction is identified.
+///
+/// Each `partial_fit` names the leaf that moved, the candidate split (if any),
+/// and whether the post-update state is still a single unidentified intercept.
+#[derive(Clone, Debug)]
+pub struct AdaptiveModelRules {
+    /// Forgetting factor of each leaf RLS.
+    pub forgetting: f64,
+    /// Hoeffding δ.
+    pub delta: f64,
+    p: usize,
+    split: Option<(usize, f64)>,
+    default: RuleLeaf,
+    left: Option<RuleLeaf>,
+    right: Option<RuleLeaf>,
+    feat_mean: Vector,
+    feat_n: u64,
+    parent_sse: f64,
+    parent_n: u64,
+    left_sse: Vector,
+    left_n: Vector,
+    right_sse: Vector,
+    right_n: Vector,
+    updates: u64,
+    n_seen: u64,
+}
+
+#[derive(Clone, Debug)]
+struct RuleLeaf {
+    theta: Vector,
+    p_mat: Option<faer::Mat<f64>>,
+    n: u64,
+}
+
+impl RuleLeaf {
+    fn new(p: usize, p0: f64) -> Self {
+        Self {
+            theta: Vector::zeros(p),
+            p_mat: Some(faer::Mat::<f64>::from_fn(p, p, |i, j| {
+                if i == j {
+                    p0
+                } else {
+                    0.0
+                }
+            })),
+            n: 0,
+        }
+    }
+
+    fn predict(&self, z: &Vector) -> f64 {
+        if self.theta.len() != z.len() {
+            return 0.0;
+        }
+        self.theta.dot(z)
+    }
+
+    fn update(&mut self, z: &Vector, y: f64, lam: f64) -> f64 {
+        let p = z.len();
+        if self.theta.len() != p {
+            *self = Self::new(p, 1_000.0);
+        }
+        let pred = self.predict(z);
+        let Some(pm) = self.p_mat.as_mut() else {
+            return 0.0;
+        };
+        let mut px = Vector::zeros(p);
+        for i in 0..p {
+            let mut s = 0.0;
+            for j in 0..p {
+                s += pm[(i, j)] * z[j];
+            }
+            px[i] = s;
+        }
+        let denom = lam + z.dot(&px);
+        if denom.abs() <= 1e-18 {
+            return 0.0;
+        }
+        let err = y - pred;
+        let mut delta_n = 0.0;
+        for i in 0..p {
+            let d = px[i] * err / denom;
+            self.theta[i] += d;
+            delta_n += d * d;
+        }
+        for i in 0..p {
+            for j in 0..p {
+                pm[(i, j)] = (pm[(i, j)] - px[i] * px[j] / denom) / lam;
+            }
+        }
+        self.n += 1;
+        delta_n.sqrt()
+    }
+}
+
+impl Default for AdaptiveModelRules {
+    fn default() -> Self {
+        Self {
+            forgetting: 1.0,
+            delta: 0.01,
+            p: 0,
+            split: None,
+            default: RuleLeaf::new(0, 1_000.0),
+            left: None,
+            right: None,
+            feat_mean: Vector::zeros(0),
+            feat_n: 0,
+            parent_sse: 0.0,
+            parent_n: 0,
+            left_sse: Vector::zeros(0),
+            left_n: Vector::zeros(0),
+            right_sse: Vector::zeros(0),
+            right_n: Vector::zeros(0),
+            updates: 0,
+            n_seen: 0,
+        }
+    }
+}
+
+impl AdaptiveModelRules {
+    /// AMRules with forgetting `λ`.
+    pub fn new(forgetting: f64) -> Self {
+        Self {
+            forgetting,
+            ..Self::default()
+        }
+    }
+
+    fn ensure(&mut self, p_x: usize) {
+        let p = p_x + 1;
+        if self.p == p {
+            return;
+        }
+        self.p = p;
+        self.default = RuleLeaf::new(p, 1_000.0);
+        self.feat_mean = Vector::zeros(p_x);
+        self.left_sse = Vector::zeros(p_x);
+        self.left_n = Vector::zeros(p_x);
+        self.right_sse = Vector::zeros(p_x);
+        self.right_n = Vector::zeros(p_x);
+    }
+
+    fn row(x: &Matrix, i: usize) -> Vector {
+        let mut z = Vector::zeros(x.ncols() + 1);
+        z[0] = 1.0;
+        for j in 0..x.ncols() {
+            z[j + 1] = x.get(i, j);
+        }
+        z
+    }
+
+    fn route(&mut self, x: &Matrix, i: usize) -> &mut RuleLeaf {
+        match self.split {
+            Some((j, t)) if x.get(i, j) <= t => {
+                if self.left.is_none() {
+                    self.left = Some(RuleLeaf::new(self.p, 1_000.0));
+                }
+                self.left.as_mut().unwrap()
+            }
+            Some((_j, _)) => {
+                if self.right.is_none() {
+                    self.right = Some(RuleLeaf::new(self.p, 1_000.0));
+                }
+                self.right.as_mut().unwrap()
+            }
+            None => &mut self.default,
+        }
+    }
+
+    fn maybe_split(&mut self, ctx: &mut FitCtx) -> Option<(usize, f64, f64)> {
+        if self.split.is_some() || self.feat_mean.len() == 0 || self.parent_n < 20 {
+            return None;
+        }
+        let r2 = 1.0; // residual range bound used by Hoeffding
+        let eps =
+            (r2 * r2 * (1.0 / self.delta.max(1e-12)).ln() / (2.0 * self.parent_n as f64)).sqrt();
+        let parent_var = self.parent_sse / self.parent_n as f64;
+        let mut best = None;
+        let mut best_gain = 0.0;
+        let mut second = 0.0;
+        for j in 0..self.feat_mean.len() {
+            let nl = self.left_n[j];
+            let nr = self.right_n[j];
+            if nl < 5.0 || nr < 5.0 {
+                continue;
+            }
+            let vl = self.left_sse[j] / nl;
+            let vr = self.right_sse[j] / nr;
+            let gain = parent_var - (nl * vl + nr * vr) / (nl + nr);
+            if gain > best_gain {
+                second = best_gain;
+                best_gain = gain;
+                best = Some((j, self.feat_mean[j], gain));
+            } else if gain > second {
+                second = gain;
+            }
+        }
+        if let Some((j, t, gain)) = best {
+            if gain - second > eps && gain > 0.0 {
+                self.split = Some((j, t));
+                self.left = Some(RuleLeaf::new(self.p, 1_000.0));
+                self.right = Some(RuleLeaf::new(self.p, 1_000.0));
+                ctx.push(
+                    Issue::builder(IssueCode::ConceptDriftDetected)
+                        .severity(Severity::Advisory)
+                        .message(format!(
+                            "AMRules split on feature {j} at {t:.6e} (gain={gain:.6e}, ε={eps:.6e})"
+                        ))
+                        .build(),
+                );
+                return Some((j, t, gain));
+            }
+        }
+        None
+    }
+}
+
+impl PartialFit for AdaptiveModelRules {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            if self.n_seen == 0 {
+                ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            }
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, 0, self.n_seen, "AMRules needs a target"),
+            );
+        };
+        if x.nrows() != y.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("AMRules x rows ≠ y length")
+                    .build(),
+            );
+        }
+        self.ensure(x.ncols());
+        let mut dsum = 0.0;
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        let mut leaf_hits = [0u64; 3];
+        for i in 0..y.len() {
+            let z = Self::row(x, i);
+            let pred_b = match self.split {
+                Some((j, t)) if x.get(i, j) <= t => {
+                    self.left.as_ref().map(|l| l.predict(&z)).unwrap_or(0.0)
+                }
+                Some(_) => self.right.as_ref().map(|l| l.predict(&z)).unwrap_or(0.0),
+                None => self.default.predict(&z),
+            };
+            loss_before += (pred_b - y[i]) * (pred_b - y[i]);
+            let which = match self.split {
+                Some((j, t)) if x.get(i, j) <= t => 1,
+                Some(_) => 2,
+                None => 0,
+            };
+            leaf_hits[which] += 1;
+            let lam = self.forgetting;
+            let dn = self.route(x, i).update(&z, y[i], lam);
+            dsum += dn;
+            let pred_a = match self.split {
+                Some((j, t)) if x.get(i, j) <= t => {
+                    self.left.as_ref().map(|l| l.predict(&z)).unwrap_or(0.0)
+                }
+                Some(_) => self.right.as_ref().map(|l| l.predict(&z)).unwrap_or(0.0),
+                None => self.default.predict(&z),
+            };
+            let e = pred_a - y[i];
+            loss_after += e * e;
+            if self.split.is_none() {
+                self.parent_sse += e * e;
+                self.parent_n += 1;
+                self.feat_n += 1;
+                for j in 0..x.ncols() {
+                    let v = x.get(i, j);
+                    self.feat_mean[j] += (v - self.feat_mean[j]) / self.feat_n as f64;
+                    if v <= self.feat_mean[j] {
+                        self.left_sse[j] += e * e;
+                        self.left_n[j] += 1.0;
+                    } else {
+                        self.right_sse[j] += e * e;
+                        self.right_n[j] += 1.0;
+                    }
+                }
+            }
+        }
+        self.n_seen += y.len() as u64;
+        self.updates += 1;
+        let split = self.maybe_split(&mut ctx);
+        let identified = self.n_seen as usize > self.p.max(1);
+        let warmup = self.n_seen < 10;
+        let what = if let Some((j, t, g)) = split {
+            format!("split on x[{j}]≤{t:.4e} gain={g:.4e}; leaf hits {leaf_hits:?}")
+        } else if self.split.is_some() {
+            format!("updated split leaves; hits {leaf_hits:?}")
+        } else {
+            format!("updated default RLS; hits {leaf_hits:?}")
+        };
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            y.len(),
+            self.n_seen,
+            &Vector::from_slice(&[dsum]),
+            loss_before,
+            loss_after,
+            identified,
+            warmup,
+            &what,
+            "RLS leaf update; a Hoeffding test may grow a stump",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for AdaptiveModelRules {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.p == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let z = Self::row(x, i);
+            match self.split {
+                Some((j, t)) if x.get(i, j) <= t => {
+                    self.left.as_ref().map(|l| l.predict(&z)).unwrap_or(0.0)
+                }
+                Some(_) => self.right.as_ref().map(|l| l.predict(&z)).unwrap_or(0.0),
+                None => self.default.predict(&z),
+            }
+        }));
+        ctx.finish(out)
+    }
+}
+
 fn reject_explain(update: u64, batch: usize, n_seen: u64, why: &str) -> IncrementalExplain {
     IncrementalExplain::from_quality(
         IncrementalQuality::new(update, batch, n_seen),
@@ -2838,6 +3180,9 @@ mod tests {
         HoltWintersOnline::new(4)
             .partial_fit(&x, Some(&y), &session)
             .expect("hw");
+        AdaptiveModelRules::new(1.0)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("amrules");
         AdaptiveRandomForest::new(2)
             .partial_fit(&x, Some(&yb), &session)
             .expect("arf");
@@ -2852,7 +3197,7 @@ mod tests {
             .filter(|e| e.kind == EventKind::IncrementalExplanation)
             .count();
         assert!(
-            n_expl >= 14,
+            n_expl >= 15,
             "expected an IncrementalExplanation per partial_fit, got {n_expl}"
         );
     }

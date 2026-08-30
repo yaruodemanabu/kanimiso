@@ -38,6 +38,11 @@ fn sigmoid(z: f64) -> f64 {
 }
 
 fn logistic_proba(m: &FittedLogistic, x: &Matrix) -> Vector {
+    if let Some(sm) = &m.softmax {
+        let p = sm.predict_proba(x);
+        let last = sm.classes.len().saturating_sub(1);
+        return Vector::from_iter((0..x.nrows()).map(|i| p.get(i, last)));
+    }
     let mut s = x.matvec(&m.coef);
     for i in 0..s.len() {
         s[i] = sigmoid(s[i] + m.intercept);

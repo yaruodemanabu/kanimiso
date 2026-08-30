@@ -2195,6 +2195,248 @@ impl Optics {
     }
 }
 
+/// BIRCH: sequential clustering features, then optional k-means on CF centroids.
+///
+/// A leaf CF is \((N, LS, SS)\). Absorbing a point is allowed only when the
+/// resulting radius stays at or below `threshold`. Groups with \(n_g=1\) have
+/// an undefined radius and are kept as singleton CFs. Asking for more clusters
+/// than CFs is overparameterized.
+#[derive(Clone, Debug)]
+pub struct Birch {
+    /// Radius threshold \(T\).
+    pub threshold: f64,
+    /// Global clusters after the CF pass (`None` keeps every CF).
+    pub n_clusters: Option<usize>,
+}
+
+impl Default for Birch {
+    fn default() -> Self {
+        Self {
+            threshold: 0.5,
+            n_clusters: Some(3),
+        }
+    }
+}
+
+impl Birch {
+    /// BIRCH with radius `threshold` and optional global `k`.
+    pub fn new(threshold: f64, n_clusters: Option<usize>) -> Self {
+        Self {
+            threshold,
+            n_clusters,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ClusteringFeature {
+    n: f64,
+    ls: Vector,
+    ss: f64,
+}
+
+impl ClusteringFeature {
+    fn new(p: usize) -> Self {
+        Self {
+            n: 0.0,
+            ls: Vector::zeros(p),
+            ss: 0.0,
+        }
+    }
+
+    fn from_row(x: &Matrix, i: usize) -> Self {
+        let mut ls = Vector::zeros(x.ncols());
+        let mut ss = 0.0;
+        for j in 0..x.ncols() {
+            let v = x.get(i, j);
+            ls[j] = v;
+            ss += v * v;
+        }
+        Self { n: 1.0, ls, ss }
+    }
+
+    fn radius_after(&self, x: &Matrix, i: usize) -> f64 {
+        let n = self.n + 1.0;
+        let mut ss = self.ss;
+        let mut nrm = 0.0;
+        for j in 0..self.ls.len() {
+            let v = x.get(i, j);
+            ss += v * v;
+            let m = (self.ls[j] + v) / n;
+            nrm += m * m;
+        }
+        (ss / n - nrm).max(0.0).sqrt()
+    }
+
+    fn absorb(&mut self, x: &Matrix, i: usize) {
+        self.n += 1.0;
+        for j in 0..self.ls.len() {
+            let v = x.get(i, j);
+            self.ls[j] += v;
+            self.ss += v * v;
+        }
+    }
+
+    fn centroid(&self) -> Vector {
+        if self.n <= 0.0 {
+            self.ls.clone()
+        } else {
+            self.ls.scale(1.0 / self.n)
+        }
+    }
+
+    fn dist_row(&self, x: &Matrix, i: usize) -> f64 {
+        let c = self.centroid();
+        let mut s = 0.0;
+        for j in 0..c.len().min(x.ncols()) {
+            let d = x.get(i, j) - c[j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+}
+
+impl FitUnsupervised for Birch {
+    type Fitted = FittedBirch;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBirch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.nrows() == 0 || x.ncols() == 0 {
+            return ctx.finish(FittedBirch {
+                labels: Vector::zeros(x.nrows()),
+                centroids: Matrix::zeros(0, x.ncols()),
+                n_cf: 0,
+            });
+        }
+        if self.threshold < 0.0 || !self.threshold.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .message(format!(
+                        "BIRCH threshold={} is not a finite ≥0 radius",
+                        self.threshold
+                    ))
+                    .build(),
+            );
+        }
+        if all_rows_identical(x, ctx.policy.near_zero_variance) {
+            ctx.push(degenerate_cluster_issue(
+                "all observations are the same vector; BIRCH CFs collapse to one point",
+            ));
+        }
+        let mut cfs: Vec<ClusteringFeature> = Vec::new();
+        for i in 0..x.nrows() {
+            let mut best = None;
+            let mut best_d = f64::INFINITY;
+            for (k, cf) in cfs.iter().enumerate() {
+                let d = cf.dist_row(x, i);
+                if d < best_d {
+                    best_d = d;
+                    best = Some(k);
+                }
+            }
+            match best {
+                Some(k) if cfs[k].radius_after(x, i) <= self.threshold => {
+                    cfs[k].absorb(x, i);
+                }
+                _ => cfs.push(ClusteringFeature::from_row(x, i)),
+            }
+        }
+        if cfs.is_empty() {
+            cfs.push(ClusteringFeature::new(x.ncols()));
+        }
+        let n_cf = cfs.len();
+        if n_cf == 1 && x.nrows() > 1 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateClusters)
+                    .severity(signlred::Severity::Warning)
+                    .message("BIRCH produced a single CF; the threshold swallowed the whole sample")
+                    .meaninglessness(Meaninglessness::new(
+                        "BIRCH partition",
+                        "one micro-cluster is a constant assignment",
+                        signlred::InterpretiveValue::Misleading,
+                        "lower the threshold or skip the global k-means step",
+                    ))
+                    .build(),
+            );
+        }
+        let cf_cent = Matrix::from_fn(n_cf, x.ncols(), |i, j| cfs[i].centroid()[j]);
+        let k_req = self.n_clusters.unwrap_or(n_cf).max(1);
+        let k = k_req.min(n_cf);
+        if k < k_req {
+            ctx.push(
+                Issue::builder(IssueCode::Overparameterized)
+                    .message(format!(
+                        "requested {k_req} clusters but only {n_cf} CFs exist"
+                    ))
+                    .build(),
+            );
+        }
+        let centroids = if k == n_cf {
+            cf_cent.clone()
+        } else {
+            let mut km = KMeans {
+                k,
+                max_iter: 40,
+                seed: 3,
+                n_init: 2,
+            };
+            match km.fit(&cf_cent, &session.child("birch_kmeans")) {
+                Ok(q) => q.value.centroids,
+                Err(_) => cf_cent.clone(),
+            }
+        };
+        let (labels, _, _) = assign_lloyd(x, &centroids);
+        ctx.finish(FittedBirch {
+            labels,
+            centroids,
+            n_cf,
+        })
+    }
+}
+
+impl Birch {
+    /// Fit alias for [`FitUnsupervised::fit_unsupervised`].
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedBirch>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted BIRCH partition.
+#[derive(Clone, Debug)]
+pub struct FittedBirch {
+    /// Cluster id per row.
+    pub labels: Vector,
+    /// Global centroids (`k` × `p`).
+    pub centroids: Matrix,
+    /// Number of clustering features before the global k-means step.
+    pub n_cf: usize,
+}
+
+impl Predict for FittedBirch {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.ncols() != self.centroids.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message(format!(
+                        "predict X is n×{} but BIRCH centroids are k×{}",
+                        x.ncols(),
+                        self.centroids.ncols()
+                    ))
+                    .build(),
+            );
+        }
+        let (labels, _, _) = assign_lloyd(x, &self.centroids);
+        ctx.finish(labels)
+    }
+}
+
 /// Fitted OPTICS.
 #[derive(Clone, Debug)]
 pub struct FittedOptics {
@@ -2273,5 +2515,19 @@ mod tests {
         let q = m.partial_fit(&x, None, &session).expect("pf");
         assert!(!q.value.narrative.is_empty());
         assert!(q.value.quality.effective_sample_size > 0.0);
+    }
+
+    #[test]
+    fn birch_separates_two_blobs() {
+        let x = two_blobs();
+        let q = Birch {
+            threshold: 1.5,
+            n_clusters: Some(2),
+        }
+        .fit(&x, &Session::new("birch", "fit"))
+        .expect("birch");
+        assert!(q.value.n_cf >= 2, "n_cf={}", q.value.n_cf);
+        let lab = q.value.labels.as_slice();
+        assert_ne!(lab[0], lab[20], "blobs must differ: {lab:?}");
     }
 }

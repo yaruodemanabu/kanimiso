@@ -861,6 +861,195 @@ impl Rocket {
     }
 }
 
+/// Interval-feature forest (sktime `TimeSeriesForestClassifier`).
+///
+/// Each tree sees `n_intervals` random windows of every row-as-series. The
+/// features are mean, standard deviation, and OLS slope of the window. A
+/// series shorter than 3 samples cannot identify a slope.
+#[derive(Clone, Debug)]
+pub struct TimeSeriesForestClassifier {
+    /// Number of trees.
+    pub n_estimators: usize,
+    /// Random intervals per tree.
+    pub n_intervals: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for TimeSeriesForestClassifier {
+    fn default() -> Self {
+        Self {
+            n_estimators: 10,
+            n_intervals: 4,
+            max_depth: 6,
+            seed: 3,
+        }
+    }
+}
+
+impl TimeSeriesForestClassifier {
+    /// Default interval forest.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Interval {
+    start: usize,
+    end: usize,
+}
+
+/// Fitted interval forest.
+#[derive(Clone, Debug)]
+pub struct FittedTimeSeriesForest {
+    trees: Vec<crate::tree::FittedTreeClassifier>,
+    intervals: Vec<Vec<Interval>>,
+    /// Sorted class labels.
+    pub classes: Vec<i64>,
+}
+
+fn interval_feats(x: &Matrix, intervals: &[Interval]) -> Matrix {
+    let p = intervals.len() * 3;
+    Matrix::from_fn(x.nrows(), p, |i, j| {
+        let spec = &intervals[j / 3];
+        let kind = j % 3;
+        let a = spec.start.min(x.ncols());
+        let b = spec.end.min(x.ncols()).max(a + 1);
+        let len = b - a;
+        let mut mean = 0.0;
+        for t in a..b {
+            mean += x.get(i, t);
+        }
+        mean /= len as f64;
+        if kind == 0 {
+            return mean;
+        }
+        let mut ss = 0.0;
+        let mut num = 0.0;
+        let mut den = 0.0;
+        let tbar = (len.saturating_sub(1)) as f64 / 2.0;
+        for (u, t) in (a..b).enumerate() {
+            let d = x.get(i, t) - mean;
+            ss += d * d;
+            let dt = u as f64 - tbar;
+            num += dt * d;
+            den += dt * dt;
+        }
+        if kind == 1 {
+            if len <= 1 {
+                0.0
+            } else {
+                (ss / (len as f64 - 1.0)).sqrt()
+            }
+        } else if den > 0.0 {
+            num / den
+        } else {
+            0.0
+        }
+    })
+}
+
+impl Fit for TimeSeriesForestClassifier {
+    type Fitted = FittedTimeSeriesForest;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedTimeSeriesForest>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let classes: Vec<i64> = counts.iter().map(|(k, _)| *k).collect();
+        if x.ncols() < 3 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!(
+                        "TimeSeriesForest series length {} < 3; slope features are unidentified",
+                        x.ncols()
+                    ))
+                    .build(),
+            );
+        }
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        let mut intervals = Vec::new();
+        let tlen = x.ncols().max(1);
+        for e in 0..self.n_estimators.max(1) {
+            let mut iv = Vec::new();
+            for _ in 0..self.n_intervals.max(1) {
+                let a = rng.below(tlen);
+                let span = 1 + rng.below(tlen);
+                let b = (a + span).min(tlen);
+                iv.push(Interval {
+                    start: a,
+                    end: b.max(a + 1),
+                });
+            }
+            let feat = interval_feats(x, &iv);
+            let mut tree = crate::tree::DecisionTreeClassifier {
+                max_depth: self.max_depth,
+                seed: rng.next_u64(),
+                ..crate::tree::DecisionTreeClassifier::default()
+            };
+            match tree.fit(&feat, y, &session.child("tsf_tree")) {
+                Ok(q) => {
+                    trees.push(q.value);
+                    intervals.push(iv);
+                }
+                Err(err) => {
+                    for issue in err.report.issues() {
+                        ctx.push(issue.clone());
+                    }
+                }
+            }
+            ctx.session.step(e as u64, 0.0, None);
+        }
+        if trees.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("every TimeSeriesForest tree failed to fit")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedTimeSeriesForest {
+            trees,
+            intervals,
+            classes,
+        })
+    }
+}
+
+impl Predict for FittedTimeSeriesForest {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let mut votes = vec![std::collections::BTreeMap::<i64, usize>::new(); x.nrows()];
+        for (tree, iv) in self.trees.iter().zip(&self.intervals) {
+            let feat = interval_feats(x, iv);
+            match tree.predict(&feat, &session.child("tsf_pred")) {
+                Ok(q) => {
+                    for i in 0..x.nrows() {
+                        let lab = q.value[i].round() as i64;
+                        *votes[i].entry(lab).or_insert(0) += 1;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        let out = Vector::from_iter(votes.iter().map(|m| {
+            m.iter()
+                .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(k, _)| *k as f64)
+                .unwrap_or(self.classes.first().copied().unwrap_or(0) as f64)
+        }));
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -939,5 +1128,25 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(b.len(), 6);
+        let tsf = TimeSeriesForestClassifier {
+            n_estimators: 6,
+            n_intervals: 3,
+            max_depth: 4,
+            seed: 2,
+        }
+        .fit(&x, &y, &Session::new("ts", "tsf"))
+        .unwrap();
+        let pred = tsf
+            .value
+            .predict(&x, &Session::new("ts", "tsfp"))
+            .unwrap()
+            .value;
+        let mut ok = 0;
+        for i in 0..8 {
+            if (pred[i] - y[i]).abs() < 0.5 {
+                ok += 1;
+            }
+        }
+        assert!(ok >= 5, "tsf ok={ok}");
     }
 }

@@ -1293,6 +1293,96 @@ impl Fit for ExtraTreesClassifier {
     }
 }
 
+/// Extremely randomized MSE trees (random thresholds, full sample).
+#[derive(Clone, Debug)]
+pub struct ExtraTreesRegressor {
+    /// Number of trees.
+    pub n_estimators: usize,
+    /// Maximum tree depth.
+    pub max_depth: usize,
+    /// Minimum samples required to attempt a split.
+    pub min_samples_split: usize,
+    /// Feature subsample size (`None` ⇒ all features).
+    pub max_features: Option<usize>,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for ExtraTreesRegressor {
+    fn default() -> Self {
+        Self {
+            n_estimators: 20,
+            max_depth: 8,
+            min_samples_split: 2,
+            max_features: None,
+            seed: 0,
+        }
+    }
+}
+
+impl ExtraTreesRegressor {
+    /// Default extra-trees regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for ExtraTreesRegressor {
+    type Fitted = FittedForestRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedForestRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let ys = y.as_slice().to_vec();
+        let w = unit_weights(x.nrows());
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        let n_est = self.n_estimators.max(1);
+        let idx: Vec<usize> = (0..x.nrows()).collect();
+        for t in 0..n_est {
+            let mut trng = Rng::new(rng.next_u64());
+            trees.push(grow_reg(
+                x,
+                &ys,
+                &idx,
+                &w,
+                0,
+                self.max_depth,
+                self.min_samples_split,
+                self.max_features,
+                true,
+                &mut trng,
+                ctx.policy.near_zero_variance,
+            ));
+            ctx.session.step(t as u64, 0.0, None);
+        }
+        let fitted = FittedForestRegressor {
+            trees,
+            n_features: x.ncols(),
+        };
+        let pred = {
+            let mut out = Vector::zeros(x.nrows());
+            if !fitted.trees.is_empty() {
+                let inv = 1.0 / fitted.trees.len() as f64;
+                for i in 0..x.nrows() {
+                    let mut s = 0.0;
+                    for t in &fitted.trees {
+                        s += predict_reg_one(t, x, i);
+                    }
+                    out[i] = s * inv;
+                }
+            }
+            out
+        };
+        diagnose_constant_predictions(&mut ctx, &pred, y);
+        ctx.finish(fitted)
+    }
+}
+
 /// Friedman gradient boosting for squared error.
 #[derive(Clone, Debug)]
 pub struct GradientBoostingRegressor {
