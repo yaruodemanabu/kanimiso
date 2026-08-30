@@ -16,7 +16,7 @@ use crate::linalg::{chol_solve, least_squares, thin_svd};
 use crate::rng::Rng;
 
 pub use crate::filters::{
-    bk_filter, cf_filter, miso_lfilter, FittedLocalLinearTrend, LocalLinearTrend,
+    bk_filter, cf_filter, lfilter, miso_lfilter, FittedLocalLinearTrend, LocalLinearTrend,
 };
 use crate::stats::{HypothesisTest, KpssResult};
 use crate::traits::{Fit, FitSeries, PartialFit};
@@ -15729,6 +15729,310 @@ pub fn lagmat2ds(
     ctx.finish(out)
 }
 
+/// Seasonal means of length `period` (statsmodels `seasonal.seasonal_mean`).
+///
+/// Period is not identification `p`.
+pub fn seasonal_mean(
+    y: &Vector,
+    period: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let s = period.max(2);
+    if period < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("seasonal_mean period={period} < 2; using 2"))
+                .build(),
+        );
+    }
+    if y.len() < s {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSeasonalCycles)
+                .message(format!("seasonal_mean n={} < period {s}", y.len()))
+                .build(),
+        );
+    }
+    let out = Vector::from_iter((0..s).map(|k| {
+        let mut acc = 0.0_f64;
+        let mut n = 0.0_f64;
+        let mut t = k;
+        while t < y.len() {
+            if y[t].is_finite() {
+                acc += y[t];
+                n += 1.0;
+            }
+            t += s;
+        }
+        if n > 0.0 {
+            acc / n
+        } else {
+            f64::NAN
+        }
+    }));
+    ctx.finish(out)
+}
+
+/// Calendar Fourier terms (statsmodels `tsa.deterministic.CalendarFourier`).
+///
+/// Harmonic / period counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct CalendarFourier {
+    /// Seasonal period.
+    pub period: usize,
+    /// Number of harmonics.
+    pub order: usize,
+}
+
+impl Default for CalendarFourier {
+    fn default() -> Self {
+        Self {
+            period: 4,
+            order: 1,
+        }
+    }
+}
+
+impl CalendarFourier {
+    /// `order` sine/cosine pairs for `period`.
+    pub fn new(period: usize, order: usize) -> Self {
+        Self {
+            period: period.max(2),
+            order: order.max(1),
+        }
+    }
+
+    /// In-sample design of length `n`.
+    pub fn in_sample(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
+        let ctx = FitCtx::with_session(session.child("in_sample"));
+        let p = self.period.max(2);
+        let h = self.order.max(1);
+        let out = Matrix::from_fn(n, 2 * h, |t, j| {
+            let k = j / 2 + 1;
+            let ang = 2.0 * std::f64::consts::PI * (k as f64) * (t as f64) / p as f64;
+            if j % 2 == 0 {
+                ang.sin()
+            } else {
+                ang.cos()
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Theoretical ARMA ACF (statsmodels `arima_process.arma_acf`).
+///
+/// Uses a truncated MA(∞) expansion. Orders are not identification `p`.
+pub fn arma_acf(
+    ar: &Vector,
+    ma: &Vector,
+    nlags: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, ar);
+    inspect_univariate(&mut ctx, ma);
+    let h = nlags.max(1);
+    if nlags == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message("arma_acf nlags=0; using 1")
+                .build(),
+        );
+    }
+    let trunc = h.saturating_add(32).max(64);
+    let psi = match arma2ma(ar, ma, trunc, &session.child("arma_acf_psi")) {
+        Ok(q) => q.value,
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("arma_acf MA(∞) expansion failed")
+                    .build(),
+            );
+            return ctx.finish(Vector::from_iter((0..=h).map(|k| if k == 0 { 1.0 } else { 0.0 })));
+        }
+    };
+    let mut gamma0 = 0.0_f64;
+    for j in 0..psi.len() {
+        gamma0 += psi[j] * psi[j];
+    }
+    if gamma0.abs() <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::ScaleFactorZero)
+                .severity(Severity::Warning)
+                .message("arma_acf γ(0) vanished; returning a spike at lag 0")
+                .build(),
+        );
+        return ctx.finish(Vector::from_iter((0..=h).map(|k| if k == 0 { 1.0 } else { 0.0 })));
+    }
+    let acf = Vector::from_iter((0..=h).map(|k| {
+        let mut g = 0.0_f64;
+        for j in 0..psi.len().saturating_sub(k) {
+            g += psi[j] * psi[j + k];
+        }
+        g / gamma0
+    }));
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("arma_acf uses a truncated MA(∞) expansion, not the exact Yule–Walker Toeplitz")
+            .compromise(NumericalCompromise::new(
+                "exact ARMA autocovariance via the Lyapunov / Toeplitz system",
+                format!("MA({trunc}) truncation of ψ"),
+                "higher lags of ψ are dropped",
+                "use a longer truncation before reading far-lag ACF as exact",
+            ))
+            .build(),
+    );
+    ctx.finish(acf)
+}
+
+/// AR order selected by AIC via Burg (statsmodels `ar_model.ar_select_order`).
+///
+/// Candidate order is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ArOrderSelect {
+    /// Selected order (0 = intercept-only / white noise).
+    pub order: usize,
+    /// AIC for orders `0..=maxlag`.
+    pub aic: Vector,
+}
+
+/// Grid Burg AIC over AR(0)..AR(`maxlag`).
+pub fn ar_select_order(
+    y: &Vector,
+    maxlag: usize,
+    session: &Session,
+) -> Result<Qualified<ArOrderSelect>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let n = y.len();
+    let mut m = maxlag;
+    if m == 0 || m >= n {
+        m = (n.saturating_sub(1)).min(4).max(1);
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "ar_select_order maxlag={maxlag} is not in 1..n-1 (n={n}); using {m}"
+                ))
+                .build(),
+        );
+    }
+    let mut aic = Vector::zeros(m + 1);
+    let mut best_order = 0usize;
+    let mean = y.mean();
+    let mut sse0 = 0.0_f64;
+    for i in 0..n {
+        let e = y[i] - mean;
+        sse0 += e * e;
+    }
+    let s00 = (sse0 / n.max(1) as f64).max(1e-18);
+    aic[0] = n as f64 * s00.ln() + 2.0;
+    let mut best = aic[0];
+    for p in 1..=m {
+        match crate::stats::burg_ar(y, p, &session.child(format!("ar_sel_{p}"))) {
+            Ok(q) => {
+                let s2 = q.value.sigma2.max(1e-18);
+                let ic = n as f64 * s2.ln() + 2.0 * (p + 1) as f64;
+                aic[p] = ic;
+                if ic < best {
+                    best = ic;
+                    best_order = p;
+                }
+            }
+            Err(_) => {
+                aic[p] = f64::NAN;
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .severity(Severity::Warning)
+                        .message(format!("ar_select_order Burg AR({p}) failed"))
+                        .build(),
+                );
+            }
+        }
+    }
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .severity(Severity::Advisory)
+            .message("ar_select_order AIC uses Burg σ², not the exact Gaussian AR likelihood")
+            .compromise(NumericalCompromise::new(
+                "exact Gaussian AR MLE AIC",
+                "Burg residual variance plus 2(p+1)",
+                "the innovations likelihood is not evaluated",
+                "treat the selected order as a Burg-AIC index, not a proven AR degree",
+            ))
+            .build(),
+    );
+    ctx.finish(ArOrderSelect {
+        order: best_order,
+        aic,
+    })
+}
+
+/// Add contemporaneous and lagged copies of each column
+/// (statsmodels `tsatools.add_lags`).
+///
+/// Lag / column counts are not identification `p`.
+pub fn add_lags(x: &Matrix, lags: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    let n = x.nrows();
+    let k = x.ncols();
+    let p = lags;
+    if n <= p {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .severity(Severity::Warning)
+                .message(format!("add_lags lags={p} ≥ n={n}"))
+                .build(),
+        );
+    }
+    let width = k * (p + 1);
+    let out = Matrix::from_fn(n, width, |t, j| {
+        let col = j / (p + 1);
+        let lag = j % (p + 1);
+        if t >= lag {
+            x.get(t - lag, col)
+        } else {
+            0.0
+        }
+    });
+    ctx.finish(out)
+}
+
+/// Map a pandas / statsmodels frequency alias to a period
+/// (statsmodels `tsatools.freq_to_period`).
+pub fn freq_to_period(freq: &str, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let key = freq.trim().to_ascii_uppercase();
+    let period = match key.as_str() {
+        "A" | "Y" | "AS" | "YS" | "AE" | "YE" => 1.0,
+        "Q" | "QS" | "QE" => 4.0,
+        "M" | "MS" | "ME" => 12.0,
+        "W" | "W-SUN" | "W-MON" => 52.0,
+        "B" => 5.0,
+        "D" => 7.0,
+        "H" | "HR" => 24.0,
+        "T" | "MIN" => 60.0,
+        "S" => 60.0,
+        other => {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("freq_to_period alias {other:?} is unknown; using 1"))
+                    .build(),
+            );
+            1.0
+        }
+    };
+    ctx.finish(period)
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -16894,5 +17198,28 @@ pub fn lagmat2ds(
         let miso = miso_lfilter(&y2, &ker, &Session::new("miso", "t")).expect("miso");
         assert_eq!(miso.value.len(), 40);
         assert!(miso.value.as_slice().iter().all(|v| v.is_finite()));
+        let smn = seasonal_mean(&y, 4, &Session::new("smean", "t")).expect("smean");
+        assert_eq!(smn.value.len(), 4);
+        assert!(smn.value.as_slice().iter().all(|v| v.is_finite()));
+        let cfou = CalendarFourier::new(4, 2)
+            .in_sample(40, &Session::new("cfou", "t"))
+            .expect("cfou");
+        assert_eq!(cfou.value.shape(), (40, 4));
+        let ar1 = Vector::from_slice(&[0.5]);
+        let ma0 = Vector::from_slice(&[0.0]);
+        let aacf = arma_acf(&ar1, &ma0, 5, &Session::new("aacf", "t")).expect("aacf");
+        assert_eq!(aacf.value.len(), 6);
+        assert!((aacf.value[0] - 1.0).abs() < 1e-9);
+        assert!((aacf.value[1] - 0.5).abs() < 0.05);
+        let one = Vector::from_slice(&[1.0]);
+        let lf = lfilter(&ker, &one, &y, &Session::new("lf", "t")).expect("lf");
+        assert_eq!(lf.value.len(), 40);
+        let aro = ar_select_order(&y, 3, &Session::new("arsel", "t")).expect("arsel");
+        assert!(aro.value.order <= 3);
+        assert_eq!(aro.value.aic.len(), 4);
+        let al = add_lags(&y2, 2, &Session::new("alags", "t")).expect("alags");
+        assert_eq!(al.value.shape(), (40, 6));
+        let fp = freq_to_period("Q", &Session::new("ftp", "t")).expect("ftp");
+        assert!((fp.value - 4.0).abs() < 1e-12);
     }
 }

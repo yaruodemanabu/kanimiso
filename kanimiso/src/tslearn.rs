@@ -277,8 +277,15 @@ pub fn sbd(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> 
         );
         return ctx.finish(f64::NAN);
     }
-    let za = zscore_series(a.as_slice());
-    let zb = zscore_series(b.as_slice());
+    ctx.finish(sbd_raw(a.as_slice(), b.as_slice()))
+}
+
+fn sbd_raw(a: &[f64], b: &[f64]) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return f64::NAN;
+    }
+    let za = zscore_series(a);
+    let zb = zscore_series(b);
     let na = za.len();
     let nb = zb.len();
     let mut best = f64::NEG_INFINITY;
@@ -295,7 +302,22 @@ pub fn sbd(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> 
         }
     }
     let ncc = best / na.max(nb) as f64;
-    ctx.finish((1.0 - ncc).max(0.0))
+    (1.0 - ncc).max(0.0)
+}
+
+/// Pairwise shape-based distance (tslearn `cdist_sbd`).
+///
+/// Series / pair counts are not identification `p`.
+pub fn cdist_sbd(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        sbd_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
 }
 
 /// Pairwise canonical time warping (tslearn `ctw`).
@@ -12772,6 +12794,10 @@ mod tests {
                 .len(),
             8
         );
+        let csb = cdist_sbd(&x, &x, &Session::new("ts", "csbd")).unwrap().value;
+        assert_eq!(csb.shape(), (8, 8));
+        assert!(csb.get(0, 0).abs() < 1e-8);
+        assert!(csb.get(0, 1).is_finite());
     }
 
     #[test]

@@ -1929,6 +1929,140 @@ pub fn hc4(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Ma
     sandwich_hc(x, resid, SandwichKind::Hc4, session)
 }
 
+/// Cluster-robust sandwich (statsmodels `cov_cluster` / Arellano).
+///
+/// Meat is \(\sum_g (X_g^\top e_g)(X_g^\top e_g)^\top\). Cluster count is not
+/// identification `p`. `x` should already include an intercept if one was used.
+pub fn cov_cluster(
+    x: &Matrix,
+    resid: &Vector,
+    groups: &Vector,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    if let Some(issue) = signlred::scan_finite(resid.as_slice()).to_issue("resid") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(groups.as_slice()).to_issue("groups") {
+        ctx.push(issue);
+    }
+    let n = x.nrows().min(resid.len()).min(groups.len());
+    let p = x.ncols();
+    if resid.len() != x.nrows() || groups.len() != x.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "cov_cluster lengths resid={} groups={} n_x={}",
+                    resid.len(),
+                    groups.len(),
+                    x.nrows()
+                ))
+                .build(),
+        );
+    }
+    if n == 0 || p == 0 {
+        return ctx.finish(Matrix::zeros(p, p));
+    }
+    let xtx = x.gram();
+    let mut inv = Mat::<f64>::zeros(p, p);
+    let mut bread_ok = true;
+    for j in 0..p {
+        let mut e = Vector::zeros(p);
+        e[j] = 1.0;
+        let mut scratch = signlred::Report::new("cluster", "xtx");
+        match chol_solve(&mut scratch, &xtx, &e, &ctx.policy) {
+            Some(col) => {
+                for i in 0..p {
+                    inv[(i, j)] = col[i];
+                }
+            }
+            None => {
+                bread_ok = false;
+                break;
+            }
+        }
+    }
+    if !bread_ok {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("cov_cluster X'X is not SPD; sandwich is unidentified")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(p, p));
+    }
+    let mut keys: Vec<i64> = Vec::new();
+    let mut score: Vec<Vec<f64>> = Vec::new();
+    for i in 0..n {
+        if !groups[i].is_finite() {
+            continue;
+        }
+        let g = groups[i].round() as i64;
+        let slot = if let Some(k) = keys.iter().position(|&kk| kk == g) {
+            k
+        } else {
+            keys.push(g);
+            score.push(vec![0.0_f64; p]);
+            score.len() - 1
+        };
+        for a in 0..p {
+            score[slot][a] += x.get(i, a) * resid[i];
+        }
+    }
+    let g_n = keys.len();
+    if g_n < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("cov_cluster saw fewer than two clusters")
+                .build(),
+        );
+    }
+    let mut meat = Matrix::zeros(p, p);
+    for u in &score {
+        for a in 0..p {
+            for b in 0..p {
+                meat.set(a, b, meat.get(a, b) + u[a] * u[b]);
+            }
+        }
+    }
+    let mut out = Matrix::zeros(p, p);
+    for a in 0..p {
+        for b in 0..p {
+            let mut s = 0.0_f64;
+            for k in 0..p {
+                let mut t = 0.0_f64;
+                for m in 0..p {
+                    t += meat.get(k, m) * inv[(m, b)];
+                }
+                s += inv[(a, k)] * t;
+            }
+            out.set(a, b, s);
+        }
+    }
+    let g_f = g_n.max(2) as f64;
+    let scale = (g_f / (g_f - 1.0)) * ((n as f64 - 1.0) / (n as f64 - p as f64).max(1.0));
+    for a in 0..p {
+        for b in 0..p {
+            out.set(a, b, out.get(a, b) * scale);
+        }
+    }
+    ctx.push(
+        Issue::builder(IssueCode::Heteroscedasticity)
+            .severity(Severity::Advisory)
+            .message("cluster sandwich is not the OLS information covariance")
+            .compromise(NumericalCompromise::new(
+                "model-based OLS covariance σ²(X'X)⁻¹",
+                "Arellano / Liang–Zeger cluster meat",
+                "within-cluster scores are treated as one draw",
+                "do not read these as Gauss–Markov SEs",
+            ))
+            .build(),
+    );
+    ctx.finish(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1970,6 +2104,11 @@ mod tests {
         assert!(q2.value.get(0, 0).is_finite());
         let q4 = hc4(&x, &e, &Session::new("hc", "4")).expect("hc4");
         assert_eq!(q4.value.shape(), (2, 2));
+        let g = Vector::from_iter((0..16).map(|i| (i / 4) as f64));
+        let cl = cov_cluster(&x, &e, &g, &Session::new("hc", "cl")).expect("cl");
+        assert_eq!(cl.value.shape(), (2, 2));
+        assert!(cl.value.get(0, 0).is_finite());
+        assert!(cl.value.get(0, 0) >= 0.0);
     }
 
     #[test]

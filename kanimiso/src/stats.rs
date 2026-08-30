@@ -12629,6 +12629,463 @@ pub fn compare_cox(
     })
 }
 
+/// Alias of [`goldfeld_quandt`] (statsmodels `het_goldfeldquandt`).
+pub fn het_goldfeldquandt(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    goldfeld_quandt(x, y, session)
+}
+
+/// Alias of [`harvey_collier`] (statsmodels `linear_harvey_collier`).
+pub fn linear_harvey_collier(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    harvey_collier(x, y, session)
+}
+
+/// Alias of [`rainbow`] at the default central fraction 0.5
+/// (statsmodels `linear_rainbow`).
+pub fn linear_rainbow(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    rainbow(x, y, 0.5, session)
+}
+
+/// Alias of [`cusum_ols`] (statsmodels `breaks_cusumolsresid`).
+pub fn breaks_cusumolsresid(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    cusum_ols(x, y, session)
+}
+
+/// Two-sample comparison of right-censored survival curves
+/// (statsmodels `duration.survfunc.compare_survfunc`).
+///
+/// Concatenates `(t1, e1)` and `(t2, e2)` and runs the Mantel–Haenszel
+/// log-rank. Sample sizes are not identification `p`.
+pub fn compare_survfunc(
+    t1: &Vector,
+    e1: &Vector,
+    t2: &Vector,
+    e2: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let n1 = t1.len().min(e1.len());
+    let n2 = t2.len().min(e2.len());
+    if n1 == 0 || n2 == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("compare_survfunc needs two non-empty samples")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: (n1 + n2) as f64,
+        });
+    }
+    let n = n1 + n2;
+    let times = Vector::from_iter((0..n).map(|i| {
+        if i < n1 {
+            t1[i]
+        } else {
+            t2[i - n1]
+        }
+    }));
+    let events = Vector::from_iter((0..n).map(|i| {
+        if i < n1 {
+            e1[i]
+        } else {
+            e2[i - n1]
+        }
+    }));
+    let groups = Vector::from_iter((0..n).map(|i| if i < n1 { 0.0 } else { 1.0 }));
+    match logrank(&times, &events, &groups, &session.child("survfunc")) {
+        Ok(q) => ctx.finish(q.value),
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("compare_survfunc log-rank failed; statistic is unidentified")
+                    .build(),
+            );
+            ctx.finish(HypothesisTest {
+                statistic: f64::NAN,
+                pvalue: f64::NAN,
+                df: 1.0,
+                nobs: n as f64,
+            })
+        }
+    }
+}
+
+/// Cook's distances from an intercept-on OLS of `y` on `X`
+/// (statsmodels `OLSInfluence.cooks_distance`).
+///
+/// Observation count is not identification `p`.
+pub fn cooks_distance(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let infl = match ols_influence(x, y, &session.child("cooks")) {
+        Ok(q) => q.value,
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("cooks_distance: OLS influence failed")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(y.len()));
+        }
+    };
+    let n = infl.hat.len().min(infl.resid.len());
+    let p = infl.dfbetas.ncols().max(1);
+    let mut sse = 0.0_f64;
+    for i in 0..n {
+        sse += infl.resid[i] * infl.resid[i];
+    }
+    let df = (n as f64 - p as f64).max(1.0);
+    let s2 = (sse / df).max(1e-18);
+    let cooks = Vector::from_iter((0..n).map(|i| {
+        let h = infl.hat[i].clamp(0.0, 1.0 - 1e-12);
+        let denom = (1.0 - h).max(1e-12);
+        infl.resid[i] * infl.resid[i] / (p as f64 * s2) * h / (denom * denom)
+    }));
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .severity(Severity::Advisory)
+            .message("Cook's D uses the pooled residual scale, not s_{(i)}")
+            .compromise(NumericalCompromise::new(
+                "leave-one-out Cook's distance",
+                "hat-diagonal formula with the full-sample s²",
+                "s_{(i)} is not recomputed",
+                "rank cases by D, do not treat a 4/n cutoff as exact",
+            ))
+            .build(),
+    );
+    ctx.finish(cooks)
+}
+
+/// Savitzky–Golay local polynomial smoother (SciPy `savgol_filter`).
+///
+/// Window length and polynomial degree are not identification `p`.
+pub fn savgol_filter(
+    y: &Vector,
+    window: usize,
+    polyorder: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, y);
+    let n = y.len();
+    let mut w = window.max(3);
+    if window < 3 {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .severity(Severity::Warning)
+                .message(format!("savgol window={window} < 3; using 3"))
+                .build(),
+        );
+    }
+    if w % 2 == 0 {
+        w += 1;
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("savgol window must be odd; using {w}"))
+                .build(),
+        );
+    }
+    if w > n {
+        w = if n % 2 == 0 { n.saturating_sub(1).max(1) } else { n.max(1) };
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .severity(Severity::Warning)
+                .message(format!("savgol window longer than n={n}; using {w}"))
+                .build(),
+        );
+    }
+    let mut deg = polyorder;
+    if deg >= w {
+        deg = w.saturating_sub(1);
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "savgol polyorder={polyorder} ≥ window {w}; using {deg}"
+                ))
+                .build(),
+        );
+    }
+    let h = w / 2;
+    let out = Vector::from_iter((0..n).map(|t| savgol_at(y.as_slice(), t, h, deg)));
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("savgol_filter is a local polynomial smoother, not a causal filter")
+            .compromise(NumericalCompromise::new(
+                "causal one-sided Savitzky–Golay",
+                "centred window with edge truncation",
+                "the edges use a shorter design",
+                "do not read edge values as the same FIR as the interior",
+            ))
+            .build(),
+    );
+    ctx.finish(out)
+}
+
+fn savgol_at(y: &[f64], t: usize, h: usize, deg: usize) -> f64 {
+    let n = y.len();
+    if n == 0 {
+        return f64::NAN;
+    }
+    let lo = t.saturating_sub(h);
+    let hi = (t + h + 1).min(n);
+    let m = hi - lo;
+    if m == 0 {
+        return f64::NAN;
+    }
+    let d = deg.min(m.saturating_sub(1));
+    if d == 0 {
+        let mut s = 0.0_f64;
+        let mut c = 0.0_f64;
+        for v in y.iter().take(hi).skip(lo) {
+            if v.is_finite() {
+                s += *v;
+                c += 1.0;
+            }
+        }
+        return if c > 0.0 { s / c } else { f64::NAN };
+    }
+    let p = d + 1;
+    let mut g = vec![0.0_f64; p * p];
+    let mut rhs = vec![0.0_f64; p];
+    for i in 0..m {
+        let yi = y[lo + i];
+        if !yi.is_finite() {
+            continue;
+        }
+        let u = (lo + i) as f64 - t as f64;
+        let mut uk = 1.0_f64;
+        for k in 0..p {
+            rhs[k] += uk * yi;
+            let mut ul = 1.0_f64;
+            for l in 0..p {
+                g[k * p + l] += uk * ul;
+                ul *= u;
+            }
+            uk *= u;
+        }
+    }
+    // Gaussian elimination for β₀ (value at the window centre).
+    let mut a = g;
+    let mut b = rhs;
+    for k in 0..p {
+        let mut piv = k;
+        for i in (k + 1)..p {
+            if a[i * p + k].abs() > a[piv * p + k].abs() {
+                piv = i;
+            }
+        }
+        if a[piv * p + k].abs() <= 1e-14 {
+            let mut s = 0.0_f64;
+            let mut c = 0.0_f64;
+            for v in y.iter().take(hi).skip(lo) {
+                if v.is_finite() {
+                    s += *v;
+                    c += 1.0;
+                }
+            }
+            return if c > 0.0 { s / c } else { f64::NAN };
+        }
+        if piv != k {
+            for j in 0..p {
+                a.swap(k * p + j, piv * p + j);
+            }
+            b.swap(k, piv);
+        }
+        let diag = a[k * p + k];
+        for i in (k + 1)..p {
+            let f = a[i * p + k] / diag;
+            for j in k..p {
+                a[i * p + j] -= f * a[k * p + j];
+            }
+            b[i] -= f * b[k];
+        }
+    }
+    for i in (0..p).rev() {
+        let mut s = b[i];
+        for j in (i + 1)..p {
+            s -= a[i * p + j] * b[j];
+        }
+        b[i] = s / a[i * p + i];
+    }
+    b[0]
+}
+
+/// Proportional Denton–Cholette temporal disaggregation
+/// (statsmodels `denton_cholette`).
+///
+/// Minimizes first differences of \(x_t/I_t\) subject to the low-frequency
+/// aggregation. Period is not identification `p`.
+pub fn denton_cholette(
+    indicator: &Vector,
+    totals: &Vector,
+    period: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(indicator),
+        None,
+        &ctx.policy,
+    );
+    let s = period.max(2);
+    if period < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("Denton–Cholette period={period} is <2; using 2"))
+                .build(),
+        );
+    }
+    let m = totals.len();
+    let need = m.saturating_mul(s);
+    if indicator.len() != need {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "Denton–Cholette indicator n={} ≠ period {s} × {} totals",
+                    indicator.len(),
+                    m
+                ))
+                .build(),
+        );
+    }
+    let n = indicator.len().min(need);
+    let years = if s == 0 { 0 } else { n / s };
+    if years == 0 || m == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Denton–Cholette needs at least one complete low-frequency period")
+                .build(),
+        );
+        return ctx.finish(Vector::from_iter(indicator.as_slice().iter().copied()));
+    }
+    let mut w = vec![1.0_f64; years * s];
+    let mut skipped = 0usize;
+    for t in 0..years * s {
+        let v = indicator.as_slice().get(t).copied().unwrap_or(0.0);
+        if !v.is_finite() || v <= 0.0 {
+            skipped += 1;
+            w[t] = 1.0;
+        } else {
+            w[t] = v;
+        }
+    }
+    if skipped > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::NonPositiveSeries)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "Denton–Cholette replaced {skipped} non-positive indicator values with 1"
+                ))
+                .build(),
+        );
+    }
+    let mut z = vec![0.0_f64; years * s];
+    for t in 0..years {
+        let mut ws = 0.0_f64;
+        for q in 0..s {
+            ws += w[t * s + q];
+        }
+        let yt = totals.as_slice().get(t).copied().unwrap_or(0.0);
+        let z0 = if ws.abs() <= 1e-15 {
+            yt / s as f64
+        } else {
+            yt / ws
+        };
+        for q in 0..s {
+            z[t * s + q] = z0;
+        }
+    }
+    for _ in 0..48 {
+        let nn = z.len();
+        let mut g = vec![0.0_f64; nn];
+        if nn >= 2 {
+            g[0] = z[0] - z[1];
+            g[nn - 1] = z[nn - 1] - z[nn - 2];
+            for t in 1..nn - 1 {
+                g[t] = 2.0 * z[t] - z[t - 1] - z[t + 1];
+            }
+        }
+        for t in 0..years {
+            let mut mg = 0.0_f64;
+            let mut sw = 0.0_f64;
+            for q in 0..s {
+                mg += w[t * s + q] * g[t * s + q];
+                sw += w[t * s + q];
+            }
+            let mean = if sw.abs() <= 1e-15 {
+                0.0
+            } else {
+                mg / sw
+            };
+            for q in 0..s {
+                z[t * s + q] -= 0.25 * (g[t * s + q] - mean);
+            }
+        }
+        for t in 0..years {
+            let mut sum = 0.0_f64;
+            let mut sw = 0.0_f64;
+            for q in 0..s {
+                sum += w[t * s + q] * z[t * s + q];
+                sw += w[t * s + q];
+            }
+            let yt = totals.as_slice().get(t).copied().unwrap_or(0.0);
+            let add = if sw.abs() <= 1e-15 {
+                0.0
+            } else {
+                (yt - sum) / sw
+            };
+            for q in 0..s {
+                z[t * s + q] += add;
+            }
+        }
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("denton_cholette uses a projected first-difference smoother on x/I")
+            .compromise(NumericalCompromise::new(
+                "exact Denton–Cholette KKT system",
+                "iterated gradient projection on z = x/I",
+                "the KKT matrix is not assembled",
+                "treat the path as a proportional disaggregation, not the unique Cholette solution",
+            ))
+            .build(),
+    );
+    ctx.finish(Vector::from_iter((0..years * s).map(|i| z[i] * w[i])))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -13169,5 +13626,31 @@ mod tests {
         assert!(tfs.value.pvalue.is_finite() && tfs.value.pvalue < 0.05);
         let pwf = power_ftest(0.5, 2.0, 30.0, 0.05, &Session::new("pwf", "t")).expect("pwf");
         assert!(pwf.value.is_finite() && pwf.value > 0.0 && pwf.value <= 1.0);
+        let hgq = het_goldfeldquandt(&x, &y, &Session::new("hgq", "t")).expect("hgq");
+        assert!(hgq.value.statistic.is_finite() || hgq.value.pvalue.is_nan());
+        let lhc = linear_harvey_collier(&x, &y, &Session::new("lhc", "t")).expect("lhc");
+        assert!(lhc.value.nobs > 0.0);
+        let lrb = linear_rainbow(&x, &y, &Session::new("lrb", "t")).expect("lrb");
+        assert!(lrb.value.statistic.is_finite() || lrb.value.pvalue.is_nan());
+        let bcu = breaks_cusumolsresid(&x, &y, &Session::new("bcu", "t")).expect("bcu");
+        assert!(bcu.value.statistic.is_finite());
+        let t1 = Vector::from_iter((0..10).map(|i| dur[i]));
+        let e1 = Vector::from_iter((0..10).map(|i| ev[i]));
+        let t2 = Vector::from_iter((10..20).map(|i| dur[i]));
+        let e2 = Vector::from_iter((10..20).map(|i| ev[i]));
+        let csf = compare_survfunc(&t1, &e1, &t2, &e2, &Session::new("csf", "t")).expect("csf");
+        assert!(csf.value.df > 0.0);
+        let cd = cooks_distance(&x, &y, &Session::new("cook", "t")).expect("cook");
+        assert_eq!(cd.value.len(), 40);
+        assert!(cd.value.as_slice().iter().all(|v| v.is_finite() && *v >= 0.0));
+        let sg = savgol_filter(&y, 5, 2, &Session::new("sg", "t")).expect("sg");
+        assert_eq!(sg.value.len(), 40);
+        assert!(sg.value.as_slice().iter().all(|v| v.is_finite()));
+        let dch = denton_cholette(&y, &totals, 4, &Session::new("dch", "t")).expect("dch");
+        assert_eq!(dch.value.len(), 40);
+        for t in 0..10 {
+            let s = (0..4).map(|q| dch.value[t * 4 + q]).sum::<f64>();
+            assert!((s - totals[t]).abs() < 1e-4, "cholette year {t}");
+        }
     }
 }

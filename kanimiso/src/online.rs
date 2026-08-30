@@ -18375,6 +18375,447 @@ impl PartialFit for OnlineGammaDeviance {
     }
 }
 
+/// Streaming MinHash sketch (river `sketch.MinHash`).
+///
+/// Hash-function count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MinHash {
+    /// Number of hash functions.
+    pub k: usize,
+    mins: Vec<u64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for MinHash {
+    fn default() -> Self {
+        Self {
+            k: 8,
+            mins: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl MinHash {
+    /// `k`-wide MinHash of column 0.
+    pub fn new(k: usize) -> Self {
+        Self {
+            k: k.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Mean of the normalized minima, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.n_seen == 0 || self.mins.is_empty() {
+            f64::NAN
+        } else {
+            let s: f64 = self
+                .mins
+                .iter()
+                .map(|&m| m as f64 / u64::MAX as f64)
+                .sum();
+            s / self.mins.len() as f64
+        }
+    }
+}
+
+impl PartialFit for MinHash {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        if self.mins.is_empty() {
+            self.mins = vec![u64::MAX; self.k.max(1)];
+        }
+        let before = self.score();
+        let kk = self.mins.len();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            for j in 0..kk {
+                let h = mix_hash(v, (j as u64).wrapping_add(1));
+                if h < self.mins[j] {
+                    self.mins[j] = h;
+                }
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 1;
+        q.explanation = format!("MinHash k={kk} score={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "MinHash signature",
+                "k independent minima of hashed column-0 values; k is not identification p",
+                format!("mh={before:.6e}"),
+                format!("mh={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming Bernoulli probability (river `proba.Bernoulli`).
+///
+/// `y` is hard-thresholded at 0.5. Class count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct BernoulliProba {
+    successes: u64,
+    n: u64,
+    updates: u64,
+}
+
+impl BernoulliProba {
+    /// Empty Bernoulli accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// \(\hat p = n_1 / n\), or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.n == 0 {
+            f64::NAN
+        } else {
+            self.successes as f64 / self.n as f64
+        }
+    }
+
+    /// \(\hat p(k)\) for \(k\in\{0,1\}\).
+    pub fn pmf(&self, k: i64) -> f64 {
+        let p = self.score();
+        if !p.is_finite() {
+            f64::NAN
+        } else if k == 1 {
+            p
+        } else if k == 0 {
+            1.0 - p
+        } else {
+            0.0
+        }
+    }
+}
+
+impl PartialFit for BernoulliProba {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n, "no y for BernoulliProba"),
+            );
+        };
+        let before = self.score();
+        for i in 0..x.nrows().min(y.len()) {
+            let yi = y[i];
+            if !yi.is_finite() {
+                continue;
+            }
+            if yi >= 0.5 {
+                self.successes += 1;
+            }
+            self.n += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n);
+        q.effective_sample_size = self.n as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 1;
+        q.warmup = self.n < 1;
+        q.explanation = format!("BernoulliProba p={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Bernoulli success probability",
+                "hard 0.5 threshold on y; class count is not identification p",
+                format!("p={before:.6e}"),
+                format!("p={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming Tweedie deviance with power 1.5 (river `metrics.Tweedie`).
+///
+/// Non-positive pairs are skipped with a warning.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineTweedieDeviance {
+    acc: f64,
+    n: u64,
+    updates: u64,
+}
+
+impl OnlineTweedieDeviance {
+    /// Empty Tweedie deviance (power 1.5).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current mean deviance, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.n == 0 {
+            f64::NAN
+        } else {
+            self.acc / self.n as f64
+        }
+    }
+}
+
+impl PartialFit for OnlineTweedieDeviance {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n,
+                    "no y for OnlineTweedieDeviance",
+                ),
+            );
+        };
+        let before = self.score();
+        let mut skipped = 0usize;
+        for i in 0..x.nrows().min(y.len()) {
+            let mu = x.get(i, 0);
+            let yi = y[i];
+            if !mu.is_finite() || !yi.is_finite() || mu <= 0.0 || yi <= 0.0 {
+                skipped += 1;
+                continue;
+            }
+            // Power 1.5: 4 (√y − √μ)² / √μ.
+            let sy = yi.sqrt();
+            let sm = mu.sqrt();
+            self.acc += 4.0 * (sy - sm) * (sy - sm) / sm;
+            self.n += 1;
+        }
+        if skipped > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "OnlineTweedieDeviance skipped {skipped} pairs with μ≤0 or y≤0"
+                    ))
+                    .build(),
+            );
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n);
+        q.effective_sample_size = self.n as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 1;
+        q.warmup = self.n < 1;
+        q.explanation = format!("OnlineTweedieDeviance={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Tweedie deviance",
+                "power-1.5 mean 4(√y−√μ)²/√μ; non-positive pairs skipped",
+                format!("dev={before:.6e}"),
+                format!("dev={after:.6e}"),
+            ),
+        )
+    }
+}
+
+fn window_spearman(xs: &[f64], ys: &[f64]) -> f64 {
+    let n = xs.len().min(ys.len());
+    if n < 2 {
+        return f64::NAN;
+    }
+    let rx = window_ranks(&xs[..n]);
+    let ry = window_ranks(&ys[..n]);
+    let nf = n as f64;
+    let mx = rx.iter().sum::<f64>() / nf;
+    let my = ry.iter().sum::<f64>() / nf;
+    let mut c = 0.0_f64;
+    let mut vx = 0.0_f64;
+    let mut vy = 0.0_f64;
+    for i in 0..n {
+        let dx = rx[i] - mx;
+        let dy = ry[i] - my;
+        c += dx * dy;
+        vx += dx * dx;
+        vy += dy * dy;
+    }
+    let den = (vx * vy).sqrt();
+    if den <= 1e-18 {
+        f64::NAN
+    } else {
+        c / den
+    }
+}
+
+fn window_ranks(v: &[f64]) -> Vec<f64> {
+    let mut idx: Vec<usize> = (0..v.len()).collect();
+    idx.sort_by(|&a, &b| v[a].partial_cmp(&v[b]).unwrap_or(std::cmp::Ordering::Equal));
+    let mut r = vec![0.0_f64; v.len()];
+    let mut i = 0;
+    while i < idx.len() {
+        let mut j = i + 1;
+        while j < idx.len() && (v[idx[j]] - v[idx[i]]).abs() <= 1e-15 {
+            j += 1;
+        }
+        let avg = (i + j - 1) as f64 / 2.0 + 1.0;
+        for &k in idx[i..j].iter() {
+            r[k] = avg;
+        }
+        i = j;
+    }
+    r
+}
+
+/// Rolling Spearman correlation of column 0 and `y` (river `stats.RollingSpearmanCorr`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingSpearman {
+    /// Window capacity.
+    pub window: usize,
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingSpearman {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            xs: Vec::new(),
+            ys: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingSpearman {
+    /// Rolling Spearman with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Current Spearman correlation, or NaN when the window is degenerate.
+    pub fn score(&self) -> f64 {
+        window_spearman(&self.xs, &self.ys)
+    }
+}
+
+impl PartialFit for RollingSpearman {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "no y for RollingSpearman",
+                ),
+            );
+        };
+        let before = self.score();
+        let cap = self.window.max(2);
+        let n = x.nrows().min(y.len());
+        for i in 0..n {
+            let xv = x.get(i, 0);
+            let yv = y[i];
+            if xv.is_finite() && yv.is_finite() {
+                rolling_push(&mut self.xs, xv, cap);
+                rolling_push(&mut self.ys, yv, cap);
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.xs.len().min(self.ys.len()) as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.xs.len().min(self.ys.len()) >= 2;
+        q.warmup = self.xs.len().min(self.ys.len()) < 2;
+        q.explanation = format!("RollingSpearman={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed Spearman correlation",
+                "sliding rank-correlation of column 0 and y; window is not identification p",
+                format!("rho={before:.6e}"),
+                format!("rho={after:.6e}"),
+            ),
+        )
+    }
+}
+
 /// ADWIN-resetting bag of perceptrons (river `ensemble.ADWINBaggingClassifier`).
 #[derive(Clone, Debug)]
 pub struct AdwinBagging {
@@ -27084,6 +27525,18 @@ mod tests {
         OnlineGammaDeviance::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("ogam");
+        MinHash::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("minhash");
+        BernoulliProba::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("bernoulli");
+        OnlineTweedieDeviance::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("otwd");
+        RollingSpearman::new(4)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("rspear");
 
         let n_expl = session
             .ledger()

@@ -451,6 +451,80 @@ pub fn miso_lfilter(
     ctx.finish(out)
 }
 
+/// Single-input single-output linear filter (SciPy / statsmodels `lfilter`).
+///
+/// \(a_0 y_t = \sum_i b_i x_{t-i} - \sum_{j\ge 1} a_j y_{t-j}\). Filter length
+/// is not identification `p`.
+pub fn lfilter(
+    b: &Vector,
+    a: &Vector,
+    x: &Vector,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, x);
+    if b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("lfilter received an empty numerator")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(x.len()));
+    }
+    if !b.as_slice().iter().all(|v| v.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .message("lfilter numerator is non-finite")
+                .build(),
+        );
+    }
+    if !a.is_empty() && !a.as_slice().iter().all(|v| v.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .message("lfilter denominator is non-finite")
+                .build(),
+        );
+    }
+    let a0 = a.as_slice().first().copied().unwrap_or(1.0);
+    let scale = if !a0.is_finite() || a0.abs() <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::ScaleFactorZero)
+                .severity(Severity::Warning)
+                .message("lfilter a[0] vanished; using 1")
+                .build(),
+        );
+        1.0
+    } else {
+        a0
+    };
+    let mut y = Vector::zeros(x.len());
+    for t in 0..x.len() {
+        let mut s = 0.0_f64;
+        for i in 0..b.len() {
+            if t >= i {
+                s += b[i] * x[t - i];
+            }
+        }
+        for j in 1..a.len() {
+            if t >= j {
+                s -= a[j] * y[t - j];
+            }
+        }
+        let v = s / scale;
+        if !v.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::CausalityViolated)
+                    .message("lfilter overflowed; later outputs set to 0")
+                    .build(),
+            );
+            y[t] = 0.0;
+        } else {
+            y[t] = v;
+        }
+    }
+    ctx.finish(y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,6 +560,12 @@ mod tests {
             .value;
         assert_eq!(miso.len(), 48);
         assert!(miso.as_slice().iter().all(|v| v.is_finite()));
+        let one = Vector::from_slice(&[1.0]);
+        let lf = lfilter(&ker, &one, &y, &Session::new("lf", "fit"))
+            .expect("lfilter")
+            .value;
+        assert_eq!(lf.len(), 48);
+        assert!(lf.as_slice().iter().all(|v| v.is_finite()));
     }
 
     #[test]

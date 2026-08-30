@@ -4833,6 +4833,103 @@ const INVENTORY: &[Algorithm] = &[
         "river.metrics.GammaDeviance",
         "online",
     ),
+    a(
+        "stats.het_goldfeldquandt",
+        "statsmodels.stats.diagnostic.het_goldfeldquandt",
+        "stats",
+    ),
+    a(
+        "stats.linear_harvey_collier",
+        "statsmodels.stats.diagnostic.linear_harvey_collier",
+        "stats",
+    ),
+    a(
+        "stats.linear_rainbow",
+        "statsmodels.stats.diagnostic.linear_rainbow",
+        "stats",
+    ),
+    a(
+        "stats.breaks_cusumolsresid",
+        "statsmodels.stats.diagnostic.breaks_cusumolsresid",
+        "stats",
+    ),
+    a(
+        "stats.compare_survfunc",
+        "statsmodels.duration.survfunc.SurvfuncRight.compare_survfunc",
+        "stats",
+    ),
+    a(
+        "stats.cooks_distance",
+        "statsmodels.stats.outliers_influence.OLSInfluence.cooks_distance",
+        "stats",
+    ),
+    a(
+        "stats.savgol_filter",
+        "scipy.signal.savgol_filter",
+        "stats",
+    ),
+    a(
+        "stats.denton_cholette",
+        "statsmodels.tsa.interp.denton_cholette",
+        "stats",
+    ),
+    a(
+        "iv.cov_cluster",
+        "statsmodels.stats.sandwich_covariance.cov_cluster",
+        "estimator",
+    ),
+    a(
+        "filters.lfilter",
+        "statsmodels.tsa.filters.filtertools.lfilter",
+        "forecast",
+    ),
+    a(
+        "tsa.seasonal_mean",
+        "statsmodels.tsa.seasonal.seasonal_mean",
+        "forecast",
+    ),
+    a(
+        "tsa.CalendarFourier",
+        "statsmodels.tsa.deterministic.CalendarFourier",
+        "forecast",
+    ),
+    a(
+        "tsa.arma_acf",
+        "statsmodels.tsa.arima_process.arma_acf",
+        "forecast",
+    ),
+    a(
+        "tsa.ar_select_order",
+        "statsmodels.tsa.ar_model.ar_select_order",
+        "forecast",
+    ),
+    a(
+        "tsa.add_lags",
+        "statsmodels.tsa.tsatools.add_lags",
+        "forecast",
+    ),
+    a(
+        "tsa.freq_to_period",
+        "statsmodels.tsa.tsatools.freq_to_period",
+        "forecast",
+    ),
+    a("tslearn.cdist_sbd", "tslearn.metrics.cdist_sbd", "timeseries"),
+    a("online.MinHash", "river.sketch.MinHash", "online"),
+    a(
+        "online.BernoulliProba",
+        "river.proba.Bernoulli",
+        "online",
+    ),
+    a(
+        "online.OnlineTweedieDeviance",
+        "river.metrics.Tweedie",
+        "online",
+    ),
+    a(
+        "online.RollingSpearman",
+        "river.stats.RollingSpearmanCorr",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5159,6 +5256,14 @@ mod tests {
             "stats.linear_lm",
             "online.RollingCorr",
             "online.OnlineMatthews",
+            "stats.savgol_filter",
+            "stats.compare_survfunc",
+            "tsa.arma_acf",
+            "tsa.ar_select_order",
+            "tslearn.cdist_sbd",
+            "online.MinHash",
+            "online.OnlineTweedieDeviance",
+            "iv.cov_cluster",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
