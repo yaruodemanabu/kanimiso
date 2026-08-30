@@ -20584,6 +20584,272 @@ impl CrcSpline {
     }
 }
 
+/// Named two-sample log-rank (lifelines `logrank_test` / statsmodels `survdiff`).
+#[derive(Clone, Debug, Default)]
+pub struct LogrankTest;
+
+impl LogrankTest {
+    /// Default Mantel–Haenszel log-rank.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Two-sample log-rank on `groups` (extra codes are dropped by [`logrank`]).
+    pub fn test(
+        &self,
+        times: &Vector,
+        events: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<HypothesisTest>> {
+        logrank(times, events, groups, session)
+    }
+}
+
+/// k-sample Mantel–Haenszel log-rank (lifelines `multivariate_logrank_test`).
+///
+/// Group count is not identification `p`. Inspect times with `y=None`. Do not
+/// call [`kaplan_meier_fit`].
+pub fn multivariate_logrank(
+    times: &Vector,
+    events: &Vector,
+    groups: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(times),
+        None,
+        &ctx.policy,
+    );
+    if times.len() != events.len() || times.len() != groups.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "multivariate_logrank lengths time={} event={} group={}",
+                    times.len(),
+                    events.len(),
+                    groups.len()
+                ))
+                .build(),
+        );
+    }
+    if let Some(issue) = scan_finite(events.as_slice()).to_issue("events") {
+        ctx.push(issue);
+    }
+    let n = times.len().min(events.len()).min(groups.len());
+    let mut keys: Vec<i64> = (0..n)
+        .filter(|&i| groups[i].is_finite())
+        .map(|i| groups[i].round() as i64)
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let k = keys.len();
+    if k < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("multivariate log-rank needs two groups")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: n as f64,
+        });
+    }
+    let n_ev = (0..n)
+        .filter(|&i| events[i] > 0.5 && times[i].is_finite())
+        .count();
+    if n_ev == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("multivariate log-rank has zero events; the score is 0")
+                .build(),
+        );
+    }
+    let mut uniq: Vec<f64> = (0..n)
+        .filter(|&i| times[i].is_finite() && events[i] > 0.5)
+        .map(|i| times[i])
+        .collect();
+    uniq.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    uniq.dedup_by(|a, b| (*a - *b).abs() < 1e-15);
+    let mut u = vec![0.0_f64; k];
+    let mut v = vec![vec![0.0_f64; k]; k];
+    for &t in &uniq {
+        let mut r = vec![0.0_f64; k];
+        let mut d = vec![0.0_f64; k];
+        for i in 0..n {
+            if !times[i].is_finite() || !groups[i].is_finite() {
+                continue;
+            }
+            if times[i] + 1e-15 < t {
+                continue;
+            }
+            let g = groups[i].round() as i64;
+            let Some(gi) = keys.iter().position(|&kk| kk == g) else {
+                continue;
+            };
+            r[gi] += 1.0;
+            if events[i] > 0.5 && (times[i] - t).abs() < 1e-15 {
+                d[gi] += 1.0;
+            }
+        }
+        let rt: f64 = r.iter().sum();
+        let dt: f64 = d.iter().sum();
+        if rt <= 1.0 || dt <= 0.0 {
+            continue;
+        }
+        let scale = dt * (rt - dt) / (rt * (rt - 1.0));
+        for g in 0..k {
+            u[g] += d[g] - r[g] * dt / rt;
+            for h in 0..k {
+                let eye = if g == h { r[g] } else { 0.0 };
+                v[g][h] += scale * (eye - r[g] * r[h] / rt);
+            }
+        }
+    }
+    let m = k - 1;
+    let vm = Mat::<f64>::from_fn(m, m, |i, j| v[i][j]);
+    let mut uv = Vector::zeros(m);
+    for i in 0..m {
+        uv[i] = u[i];
+    }
+    let mut scratch = Report::new("mlr", "v");
+    let stat = if let Some(sol) = chol_solve(&mut scratch, &vm, &uv, &ctx.policy) {
+        (0..m).map(|c| uv[c] * sol[c]).sum::<f64>().max(0.0)
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InformationMatrixSingular)
+                .severity(Severity::Warning)
+                .message("multivariate log-rank V is not SPD; using a diagonal score")
+                .build(),
+        );
+        (0..m)
+            .map(|g| {
+                let den = v[g][g].abs().max(1e-12);
+                u[g] * u[g] / den
+            })
+            .sum::<f64>()
+    };
+    for issue in scratch.issues() {
+        if skip_aborting_inner(issue) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let df = m as f64;
+    let pvalue = chi2_pvalue(stat, df);
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df,
+        nobs: n as f64,
+    })
+}
+
+/// Named k-sample log-rank.
+#[derive(Clone, Debug, Default)]
+pub struct MultivariateLogrank;
+
+impl MultivariateLogrank {
+    /// Default k-sample log-rank.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Mantel–Haenszel k-sample test.
+    pub fn test(
+        &self,
+        times: &Vector,
+        events: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<HypothesisTest>> {
+        multivariate_logrank(times, events, groups, session)
+    }
+}
+
+/// Named counting-process Cox (lifelines `CoxTimeVaryingFitter`).
+#[derive(Clone, Debug, Default)]
+pub struct CoxTimeVaryingFitter {
+    inner: TimeVaryingCox,
+}
+
+impl CoxTimeVaryingFitter {
+    /// Default start/stop Cox.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit on interval starts, stops, events, and covariates.
+    pub fn fit(
+        &self,
+        start: &Vector,
+        stop: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCoxPH>> {
+        self.inner.fit(start, stop, events, x, session)
+    }
+}
+
+/// Named Weibull PH (lifelines / statsmodels `PHReg` Weibull).
+#[derive(Clone, Debug, Default)]
+pub struct WeibullPHFitter;
+
+impl WeibullPHFitter {
+    /// Default Weibull PH.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit \(h(t\mid x)=p t^{p-1}\exp(x\beta)\).
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedWeibullPH>> {
+        weibull_ph(durations, events, x, session)
+    }
+}
+
+/// Named Granger test (statsmodels `stattools.grangercausalitytests`).
+#[derive(Clone, Debug)]
+pub struct GrangerCausality {
+    /// VAR lag. Not identification `p` by itself; the unrestricted width is.
+    pub lag: usize,
+}
+
+impl Default for GrangerCausality {
+    fn default() -> Self {
+        Self { lag: 1 }
+    }
+}
+
+impl GrangerCausality {
+    /// Granger test at lag `lag`.
+    pub fn new(lag: usize) -> Self {
+        Self { lag: lag.max(1) }
+    }
+
+    /// Test whether `x` Granger-causes `y`.
+    pub fn test(
+        &self,
+        x: &Vector,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<GrangerResult>> {
+        granger_causality(x, y, self.lag, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -21481,5 +21747,26 @@ mod tests {
             .fit(&dur, &ev, &xcox, &Session::new("crc", "t"))
             .expect("crc");
         assert_eq!(crc.value.coef.len(), 1);
+        let lrt2 = LogrankTest::new()
+            .test(&dur, &ev, &grp, &Session::new("lrt2", "t"))
+            .expect("lrt2");
+        assert!(lrt2.value.statistic.is_finite() || lrt2.value.pvalue.is_nan());
+        let mlr = MultivariateLogrank::new()
+            .test(&dur, &ev, &fgrp, &Session::new("mlr", "t"))
+            .expect("mlr");
+        assert!(mlr.value.statistic.is_finite() || mlr.value.pvalue.is_nan());
+        let ctv = CoxTimeVaryingFitter::new()
+            .fit(&entry0, &dur, &ev, &xcox, &Session::new("ctv", "t"))
+            .expect("ctv");
+        assert_eq!(ctv.value.coef.len(), 1);
+        let wphf = WeibullPHFitter::new()
+            .fit(&dur, &ev, &xcox, &Session::new("wphf", "t"))
+            .expect("wphf");
+        assert_eq!(wphf.value.coef.len(), 1);
+        let xv = Vector::from_iter((0..40).map(|i| x.get(i, 0)));
+        let gc = GrangerCausality::new(1)
+            .test(&xv, &y, &Session::new("gc", "t"))
+            .expect("gc");
+        assert!(gc.value.f_stat.is_finite() || gc.value.pvalue.is_nan());
     }
 }

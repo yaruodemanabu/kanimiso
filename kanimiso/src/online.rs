@@ -34853,6 +34853,444 @@ impl Predict for OneCycleLrRegressor {
     }
 }
 
+/// Rectified Adam (river `optim.RAdam`).
+#[derive(Clone, Debug)]
+pub struct RAdamRegressor {
+    /// Step \(\eta\).
+    pub learning_rate: f64,
+    /// First-moment decay.
+    pub beta1: f64,
+    /// Second-moment decay.
+    pub beta2: f64,
+    /// Diagonal floor.
+    pub eps: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    m: Vector,
+    v: Vector,
+    t: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for RAdamRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            m: Vector::zeros(0),
+            v: Vector::zeros(0),
+            t: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl RAdamRegressor {
+    /// Default RAdam regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for RAdamRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.m = Vector::zeros(dim);
+            self.v = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.coef.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("RAdamRegressor learning_rate invalid; using 0.05")
+                    .build(),
+            );
+            0.05
+        };
+        let b1 = self.beta1.clamp(0.0, 0.999);
+        let b2 = self.beta2.clamp(0.0, 0.999);
+        let eps = if self.eps.is_finite() && self.eps > 0.0 {
+            self.eps
+        } else {
+            1e-8
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        let rho_inf = 2.0 / (1.0 - b2).max(1e-12) - 1.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            self.t += 1.0;
+            let corr1 = 1.0 - b1.powf(self.t);
+            let corr2 = 1.0 - b2.powf(self.t);
+            let rho_t = rho_inf - 2.0 * self.t * b2.powf(self.t) / (1.0 - b2.powf(self.t)).max(1e-18);
+            let rect = if rho_t > 4.0 {
+                let num = (rho_t - 4.0) * (rho_t - 2.0) * rho_inf;
+                let den = (rho_inf - 4.0) * (rho_inf - 2.0) * rho_t;
+                (num / den.max(1e-18)).max(0.0).sqrt()
+            } else {
+                1.0
+            };
+            for j in 0..dim {
+                let g = err * z[j];
+                self.m[j] = b1 * self.m[j] + (1.0 - b1) * g;
+                self.v[j] = b2 * self.v[j] + (1.0 - b2) * g * g;
+                let mhat = self.m[j] / corr1.max(1e-18);
+                if rho_t > 4.0 {
+                    let vhat = self.v[j] / corr2.max(1e-18);
+                    self.coef[j] -= eta * rect * mhat / (vhat.sqrt() + eps);
+                } else {
+                    self.coef[j] -= eta * mhat;
+                }
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "RAdam linear weights",
+            "rectified second-moment warmup; β is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for RAdamRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
+/// LAMB (You et al.) trust-ratio Adam (river `optim.LAMB`).
+#[derive(Clone, Debug)]
+pub struct LambRegressor {
+    /// Step \(\eta\).
+    pub learning_rate: f64,
+    /// First-moment decay.
+    pub beta1: f64,
+    /// Second-moment decay.
+    pub beta2: f64,
+    /// Diagonal floor.
+    pub eps: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    m: Vector,
+    v: Vector,
+    t: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for LambRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            m: Vector::zeros(0),
+            v: Vector::zeros(0),
+            t: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl LambRegressor {
+    /// Default LAMB regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for LambRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.m = Vector::zeros(dim);
+            self.v = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.coef.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("LambRegressor learning_rate invalid; using 0.05")
+                    .build(),
+            );
+            0.05
+        };
+        let b1 = self.beta1.clamp(0.0, 0.999);
+        let b2 = self.beta2.clamp(0.0, 0.999);
+        let eps = if self.eps.is_finite() && self.eps > 0.0 {
+            self.eps
+        } else {
+            1e-8
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            self.t += 1.0;
+            let corr1 = 1.0 - b1.powf(self.t);
+            let corr2 = 1.0 - b2.powf(self.t);
+            let mut u = Vector::zeros(dim);
+            for j in 0..dim {
+                let g = err * z[j];
+                self.m[j] = b1 * self.m[j] + (1.0 - b1) * g;
+                self.v[j] = b2 * self.v[j] + (1.0 - b2) * g * g;
+                let mhat = self.m[j] / corr1.max(1e-18);
+                let vhat = self.v[j] / corr2.max(1e-18);
+                u[j] = mhat / (vhat.sqrt() + eps);
+            }
+            let wn = self.coef.norm();
+            let un = u.norm();
+            let trust = if wn > 1e-12 && un > 1e-12 {
+                wn / un
+            } else {
+                1.0
+            };
+            for j in 0..dim {
+                self.coef[j] -= eta * trust * u[j];
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "LAMB linear weights",
+            "Adam direction scaled by ||w||/||u||; the trust ratio is not p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for LambRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
+/// Named Hoeffding tree classifier (river `tree.HoeffdingTreeClassifier`).
+#[derive(Clone, Debug)]
+pub struct HoeffdingTreeClassifier {
+    inner: HoeffdingTree,
+}
+
+impl Default for HoeffdingTreeClassifier {
+    fn default() -> Self {
+        Self {
+            inner: HoeffdingTree::default(),
+        }
+    }
+}
+
+impl HoeffdingTreeClassifier {
+    /// Default VFDT classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for HoeffdingTreeClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for HoeffdingTreeClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+/// Named adaptive random forest classifier (river `ensemble.AdaptiveRandomForestClassifier`).
+#[derive(Clone, Debug)]
+pub struct AdaptiveRandomForestClassifier {
+    inner: AdaptiveRandomForest,
+}
+
+impl Default for AdaptiveRandomForestClassifier {
+    fn default() -> Self {
+        Self {
+            inner: AdaptiveRandomForest::default(),
+        }
+    }
+}
+
+impl AdaptiveRandomForestClassifier {
+    /// Default ARF classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for AdaptiveRandomForestClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for AdaptiveRandomForestClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -35408,6 +35846,18 @@ mod tests {
         OneCycleLrRegressor::new(12)
             .partial_fit(&x, Some(&y), &session)
             .expect("onecycle");
+        RAdamRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("radam");
+        LambRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("lamb");
+        HoeffdingTreeClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("htc");
+        AdaptiveRandomForestClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("arfc");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

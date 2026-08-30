@@ -5743,6 +5743,40 @@ const INVENTORY: &[Algorithm] = &[
         "statsmodels.tsa.regime_switching.markov_regression.MarkovRegression",
         "forecast",
     ),
+    a("stats.LogrankTest", "lifelines.statistics.logrank_test", "function"),
+    a(
+        "stats.multivariate_logrank",
+        "lifelines.statistics.multivariate_logrank_test",
+        "function",
+    ),
+    a(
+        "stats.MultivariateLogrank",
+        "lifelines.statistics.multivariate_logrank_test",
+        "estimator",
+    ),
+    a(
+        "stats.CoxTimeVaryingFitter",
+        "lifelines.CoxTimeVaryingFitter",
+        "estimator",
+    ),
+    a("stats.WeibullPHFitter", "lifelines.WeibullAFTFitter", "estimator"),
+    a(
+        "stats.GrangerCausality",
+        "statsmodels.tsa.stattools.grangercausalitytests",
+        "estimator",
+    ),
+    a("online.RAdamRegressor", "river.optim.RAdam", "online"),
+    a("online.LambRegressor", "river.optim.LAMB", "online"),
+    a(
+        "online.HoeffdingTreeClassifier",
+        "river.tree.HoeffdingTreeClassifier",
+        "online",
+    ),
+    a(
+        "online.AdaptiveRandomForestClassifier",
+        "river.forest.ARFClassifier",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6190,6 +6224,12 @@ mod tests {
             "tsa.MstlForecaster",
             "stats.PiecewiseExponentialFitter",
             "stats.KernelReg",
+            "stats.multivariate_logrank",
+            "stats.CoxTimeVaryingFitter",
+            "online.RAdamRegressor",
+            "online.LambRegressor",
+            "online.HoeffdingTreeClassifier",
+            "stats.GrangerCausality",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
