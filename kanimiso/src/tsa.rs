@@ -16414,6 +16414,166 @@ pub fn arma_pacf(
     ctx.finish(pacf)
 }
 
+/// Kim (1994) two-regime smoother (statsmodels `MarkovRegression` smoother).
+///
+/// Regime count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct KimSmoother {
+    /// Stay probability.
+    pub stay: f64,
+}
+
+impl Default for KimSmoother {
+    fn default() -> Self {
+        Self { stay: 0.9 }
+    }
+}
+
+impl KimSmoother {
+    /// Two-regime Kim smoother with stay probability `stay`.
+    pub fn new(stay: f64) -> Self {
+        Self { stay }
+    }
+
+    /// Fit alias.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedKimSmoother>> {
+        let mut s = self.clone();
+        s.fit_series(y, session)
+    }
+}
+
+/// Smoothed two-regime probabilities.
+#[derive(Clone, Debug)]
+pub struct FittedKimSmoother {
+    /// \(P(s_t=1 \mid y_{1:T})\).
+    pub smoothed: Vector,
+    /// Filtered \(P(s_t=1 \mid y_{1:t})\).
+    pub filtered: Vector,
+    /// Emission means.
+    pub mu: [f64; 2],
+}
+
+impl FitSeries for KimSmoother {
+    type Fitted = FittedKimSmoother;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedKimSmoother>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        if n < 4 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("KimSmoother needs n≥4")
+                    .build(),
+            );
+            return ctx.finish(FittedKimSmoother {
+                smoothed: Vector::filled(n, 0.5),
+                filtered: Vector::filled(n, 0.5),
+                mu: [0.0, 0.0],
+            });
+        }
+        let mut vals: Vec<f64> = y
+            .as_slice()
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .collect();
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let third = (vals.len() / 3).max(1);
+        let mu0 = vals.iter().take(third).sum::<f64>() / third as f64;
+        let mu1 = vals.iter().rev().take(third).sum::<f64>() / third as f64;
+        if (mu1 - mu0).abs() <= 1e-12 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateDistribution)
+                    .message("KimSmoother tertile means coincide")
+                    .build(),
+            );
+        }
+        let mut var = 0.0_f64;
+        let m = y.mean();
+        for i in 0..n {
+            if y[i].is_finite() {
+                let d = y[i] - m;
+                var += d * d;
+            }
+        }
+        var = (var / n.max(1) as f64).max(1e-6);
+        let stay = if self.stay.is_finite() && self.stay > 0.0 && self.stay < 1.0 {
+            self.stay
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("KimSmoother stay was outside (0,1); using 0.9")
+                    .build(),
+            );
+            0.9
+        };
+        let switch = 1.0 - stay;
+        let gauss = |yt: f64, mu: f64| {
+            let z = (yt - mu) / var.sqrt();
+            (-0.5 * z * z).exp() / (std::f64::consts::TAU * var).sqrt()
+        };
+        let mut filt = vec![0.5_f64; n];
+        let mut pred1 = vec![0.5_f64; n];
+        let mut p = 0.5_f64;
+        for t in 0..n {
+            if !y[t].is_finite() {
+                filt[t] = p;
+                pred1[t] = stay * p + switch * (1.0 - p);
+                continue;
+            }
+            let pr1 = stay * p + switch * (1.0 - p);
+            pred1[t] = pr1;
+            let l1 = gauss(y[t], mu1).max(1e-300);
+            let l0 = gauss(y[t], mu0).max(1e-300);
+            let num = pr1 * l1;
+            let den = num + (1.0 - pr1) * l0;
+            p = if den > 0.0 { num / den } else { pr1 };
+            filt[t] = p;
+        }
+        let mut sm = filt.clone();
+        for t in (0..n.saturating_sub(1)).rev() {
+            let p1 = filt[t];
+            let pr1 = pred1[t + 1];
+            let s1 = sm[t + 1];
+            let a = if pr1 > 1e-18 { stay * s1 / pr1 } else { stay };
+            let pr0 = 1.0 - pr1;
+            let b = if pr0 > 1e-18 {
+                switch * (1.0 - s1) / pr0
+            } else {
+                switch
+            };
+            sm[t] = p1 * a + (1.0 - p1) * b;
+            if !sm[t].is_finite() {
+                sm[t] = p1;
+            }
+            sm[t] = sm[t].clamp(0.0, 1.0);
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("KimSmoother is a two-mean HMM smoother, not MS-AR")
+                .compromise(NumericalCompromise::new(
+                    "Markov-switching AR with Kim smoother",
+                    "two Gaussian means from tertiles and a constant stay probability",
+                    "autoregressive coefficients and EM are omitted",
+                    "read P(s=1) as a two-regime sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedKimSmoother {
+            smoothed: Vector::from_iter(sm),
+            filtered: Vector::from_iter(filt),
+            mu: [mu0, mu1],
+        })
+    }
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -17645,5 +17805,15 @@ pub fn arma_pacf(
             .value;
         assert_eq!(cdz.len(), y.len());
         assert!(cdz.as_slice().iter().all(|v| v.is_finite()));
+        let kim = KimSmoother::new(0.9)
+            .fit(&y, &Session::new("kim", "t"))
+            .expect("kim");
+        assert_eq!(kim.value.smoothed.len(), 40);
+        assert!(kim
+            .value
+            .smoothed
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0));
     }
 }

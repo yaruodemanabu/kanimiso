@@ -8,8 +8,8 @@
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linear_model::{
-    ElasticNet, FittedMultiTask, FittedPenalized, Lars, Lasso, LassoLars, LinearRegression,
-    LogisticRegression, MultiTaskElasticNet, MultiTaskLasso, Ridge,
+    ElasticNet, FittedKernelRidge, FittedMultiTask, FittedPenalized, KernelRidge, Lars, Lasso,
+    LassoLars, LinearRegression, LogisticRegression, MultiTaskElasticNet, MultiTaskLasso, Ridge,
 };
 use crate::metrics::{accuracy, r2};
 use crate::rng::Rng;
@@ -3826,6 +3826,159 @@ pub fn fit_transform_full(x: &Matrix, session: &Session) -> Result<Qualified<Mat
     ctx.finish(out)
 }
 
+/// Kernel ridge with a held-out α grid (sklearn `KernelRidge` + CV).
+///
+/// Grid size is not identification `p`. Inner Cholesky failures are skipped.
+#[derive(Clone, Debug)]
+pub struct KernelRidgeCV {
+    /// Candidate ridge penalties.
+    pub alphas: Vec<f64>,
+    /// RBF length scale.
+    pub gamma: f64,
+}
+
+impl Default for KernelRidgeCV {
+    fn default() -> Self {
+        Self {
+            alphas: vec![0.1, 1.0, 10.0],
+            gamma: 1.0,
+        }
+    }
+}
+
+impl KernelRidgeCV {
+    /// Grid `alphas` at RBF `gamma`.
+    pub fn new(alphas: Vec<f64>, gamma: f64) -> Self {
+        Self {
+            alphas,
+            gamma: if gamma.is_finite() && gamma > 0.0 {
+                gamma
+            } else {
+                1.0
+            },
+        }
+    }
+}
+
+/// Fitted kernel-ridge CV.
+#[derive(Clone, Debug)]
+pub struct FittedKernelRidgeCV {
+    /// Chosen α.
+    pub best_alpha: f64,
+    /// Held-out \(R^2\) at `best_alpha`.
+    pub best_score: f64,
+    /// Refit on all rows.
+    pub fitted: FittedKernelRidge,
+}
+
+impl Fit for KernelRidgeCV {
+    type Fitted = FittedKernelRidgeCV;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedKernelRidgeCV>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let n = y.len().min(x.nrows());
+        let split = (n * 3 / 4).max(2).min(n.saturating_sub(1).max(1));
+        let alphas = if self.alphas.is_empty() {
+            vec![1.0]
+        } else {
+            self.alphas.clone()
+        };
+        let mut best_alpha = alphas[0];
+        let mut best_score = f64::NEG_INFINITY;
+        let mut any = false;
+        for (k, &alpha) in alphas.iter().enumerate() {
+            let a = if alpha.is_finite() && alpha > 0.0 {
+                alpha
+            } else {
+                ctx.push(
+                    Issue::builder(IssueCode::InvalidWeight)
+                        .severity(Severity::Warning)
+                        .message(format!("KernelRidgeCV alpha={alpha} invalid; skip"))
+                        .build(),
+                );
+                continue;
+            };
+            let xtr = Matrix::from_fn(split, x.ncols(), |i, j| x.get(i, j));
+            let ytr = Vector::from_iter((0..split).map(|i| y[i]));
+            let xte = Matrix::from_fn(n - split, x.ncols(), |i, j| x.get(split + i, j));
+            let yte = Vector::from_iter((split..n).map(|i| y[i]));
+            let mut kr = KernelRidge {
+                alpha: a,
+                gamma: self.gamma,
+            };
+            match kr.fit(&xtr, &ytr, &session.child(format!("krcv-{k}"))) {
+                Ok(q) => {
+                    for issue in q.report.issues() {
+                        if matches!(
+                            issue.code,
+                            IssueCode::CholeskyFailed
+                                | IssueCode::ResidualTooLarge
+                                | IssueCode::NearSingular
+                                | IssueCode::R2IsOne
+                                | IssueCode::RankZero
+                                | IssueCode::KernelNotPd
+                        ) {
+                            continue;
+                        }
+                        ctx.push(issue.clone());
+                    }
+                    match q.value.predict(&xte, &session.child(format!("krcvp-{k}"))) {
+                        Ok(p) => {
+                            if let Ok(sc) = r2(&yte, &p.value, &session.child(format!("krcvs-{k}")))
+                            {
+                                if sc.value.is_finite() && sc.value > best_score {
+                                    best_score = sc.value;
+                                    best_alpha = a;
+                                    any = true;
+                                }
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+                Err(_) => {
+                    ctx.push(
+                        Issue::builder(IssueCode::DidNotConverge)
+                            .message(format!("KernelRidgeCV alpha={a:.6e} failed"))
+                            .build(),
+                    );
+                }
+            }
+        }
+        if !any {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("KernelRidgeCV every grid point failed; using α=1")
+                    .build(),
+            );
+            best_alpha = 1.0;
+            best_score = f64::NAN;
+        }
+        let mut kr = KernelRidge {
+            alpha: best_alpha,
+            gamma: self.gamma,
+        };
+        let fitted = match kr.fit(x, y, &session.child("krcv-full")) {
+            Ok(q) => q.value,
+            Err(_) => FittedKernelRidge {
+                x_train: x.clone(),
+                dual: Vector::zeros(n),
+                gamma: self.gamma,
+            },
+        };
+        ctx.finish(FittedKernelRidgeCV {
+            best_alpha,
+            best_score,
+            fitted,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3971,6 +4124,11 @@ mod tests {
             .fit(&x, &y2, &Session::new("ms", "mtlcv"))
             .unwrap();
         assert!(mtl.value.best_alpha.is_finite());
+        let krcv = KernelRidgeCV::new(vec![0.1, 1.0], 0.5)
+            .fit(&x, &y, &Session::new("ms", "krcv"))
+            .unwrap();
+        assert!(krcv.value.best_alpha.is_finite());
+        assert_eq!(krcv.value.fitted.dual.len(), 20);
     }
 
     #[test]

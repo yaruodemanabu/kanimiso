@@ -5657,6 +5657,38 @@ const INVENTORY: &[Algorithm] = &[
     a("tslearn.BossVs", "sktime.classification.dictionary_based.BOSSVS", "estimator"),
     a("tslearn.PeltAnnotator", "sktime.annotation.clasp.Pelt", "estimator"),
     a("tslearn.ClaSPAnnotator", "sktime.annotation.clasp.ClaSP", "estimator"),
+    a("stats.KaplanMeierFitter", "lifelines.KaplanMeierFitter", "estimator"),
+    a("stats.NelsonAalenFitter", "lifelines.NelsonAalenFitter", "estimator"),
+    a("stats.AalenJohansenFitter", "lifelines.AalenJohansenFitter", "estimator"),
+    a("stats.CoxPHFitter", "lifelines.CoxPHFitter", "estimator"),
+    a("stats.FineGray", "lifelines.CoxPHFitter", "estimator"),
+    a("stats.CauseSpecificCox", "sksurv.linear_model.CoxPHSurvivalAnalysis", "estimator"),
+    a("stats.oaxaca", "statsmodels.stats.oaxaca.OaxacaBlinder", "function"),
+    a("stats.knockoff", "statsmodels.stats.knockoff_regeffects", "function"),
+    a("panel.FirstDifferenceIv", "linearmodels.IV2SLS", "estimator"),
+    a("panel.Pooled2Sls", "linearmodels.IV2SLS", "estimator"),
+    a(
+        "online.LinearDecayRegressor",
+        "river.optim.schedulers.Linear",
+        "online",
+    ),
+    a("online.CyclicLrRegressor", "river.optim.schedulers.CyclicLR", "online"),
+    a(
+        "tslearn.HydraMultiRocketClassifier",
+        "sktime.classification.hybrid.HydraMultiRocketClassifier",
+        "estimator",
+    ),
+    a(
+        "tslearn.RiseRegressor",
+        "sktime.regression.interval_based.RandomIntervalSpectralEnsemble",
+        "estimator",
+    ),
+    a(
+        "tsa.KimSmoother",
+        "statsmodels.tsa.regime_switching.markov_regression.MarkovRegression",
+        "estimator",
+    ),
+    a("model_selection.KernelRidgeCV", "sklearn.kernel_ridge.KernelRidge", "estimator"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6084,6 +6116,13 @@ mod tests {
             "panel.ClusteredFamaMacBeth",
             "online.PolynomialFm",
             "tslearn.BossVs",
+            "stats.CoxPHFitter",
+            "stats.oaxaca",
+            "panel.FirstDifferenceIv",
+            "online.LinearDecayRegressor",
+            "tslearn.RiseRegressor",
+            "tsa.KimSmoother",
+            "model_selection.KernelRidgeCV",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

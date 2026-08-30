@@ -34057,6 +34057,313 @@ impl Predict for PolynomialFm {
     }
 }
 
+/// SGD with linear decay \(\eta_0(1-t/T)\) (river `optim.schedulers.Linear`).
+///
+/// Period \(T\) is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct LinearDecayRegressor {
+    /// Base step.
+    pub eta0: f64,
+    /// Decay period.
+    pub period: usize,
+    w: Vector,
+    b: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for LinearDecayRegressor {
+    fn default() -> Self {
+        Self {
+            eta0: 0.1,
+            period: 12,
+            w: Vector::zeros(0),
+            b: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl LinearDecayRegressor {
+    /// Linear-decay SGD with period `period`.
+    pub fn new(period: usize) -> Self {
+        Self {
+            period: period.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let mut s = self.b;
+        for j in 0..x.ncols().min(self.w.len()) {
+            s += self.w[j] * x.get(i, j);
+        }
+        s
+    }
+}
+
+impl PartialFit for LinearDecayRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let p = x.ncols().max(1);
+        if !self.initialized {
+            self.w = Vector::zeros(p);
+            self.initialized = true;
+        } else if self.w.len() != p {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message("LinearDecayRegressor feature dim changed")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let eta0 = if self.eta0.is_finite() && self.eta0 > 0.0 {
+            self.eta0
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("LinearDecayRegressor eta0 invalid; using 0.1")
+                    .build(),
+            );
+            0.1
+        };
+        let period = self.period.max(1);
+        let mut sse0 = 0.0_f64;
+        let mut sse1 = 0.0_f64;
+        let mut moved = 0.0_f64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let yhat = self.predict_row(x, i);
+            let err = yhat - y[i];
+            sse0 += err * err;
+            self.n_seen += 1;
+            let t = ((self.n_seen - 1) as usize % period) as f64 / period as f64;
+            let eta = eta0 * (1.0 - t).max(0.01);
+            self.b -= eta * err;
+            for j in 0..x.ncols().min(self.w.len()) {
+                let d = eta * err * x.get(i, j);
+                self.w[j] -= d;
+                moved += d.abs();
+            }
+            let after = self.predict_row(x, i);
+            sse1 += (after - y[i]) * (after - y[i]);
+        }
+        self.updates += 1;
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &Vector::filled(1, moved),
+            sse0,
+            sse1,
+            self.n_seen >= 2,
+            self.n_seen < 2,
+            "linear-decay SGD",
+            "η = η0 (1 − t/T); period is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for LinearDecayRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
+/// SGD with a triangular cyclic step (river `optim.schedulers.Cyclic`).
+///
+/// Period length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct CyclicLrRegressor {
+    /// Peak step.
+    pub eta_max: f64,
+    /// Floor step.
+    pub eta_min: f64,
+    /// Cycle length.
+    pub period: usize,
+    w: Vector,
+    b: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for CyclicLrRegressor {
+    fn default() -> Self {
+        Self {
+            eta_max: 0.1,
+            eta_min: 0.01,
+            period: 8,
+            w: Vector::zeros(0),
+            b: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl CyclicLrRegressor {
+    /// Cyclic triangular SGD with period `period`.
+    pub fn new(period: usize) -> Self {
+        Self {
+            period: period.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let mut s = self.b;
+        for j in 0..x.ncols().min(self.w.len()) {
+            s += self.w[j] * x.get(i, j);
+        }
+        s
+    }
+}
+
+impl PartialFit for CyclicLrRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let p = x.ncols().max(1);
+        if !self.initialized {
+            self.w = Vector::zeros(p);
+            self.initialized = true;
+        } else if self.w.len() != p {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message("CyclicLrRegressor feature dim changed")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let t_max = if self.eta_max.is_finite() && self.eta_max > 0.0 {
+            self.eta_max
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("CyclicLrRegressor eta_max invalid; using 0.1")
+                    .build(),
+            );
+            0.1
+        };
+        let t_min = if self.eta_min.is_finite() && self.eta_min >= 0.0 {
+            self.eta_min.min(t_max)
+        } else {
+            0.01_f64.min(t_max)
+        };
+        let period = self.period.max(1);
+        let mut sse0 = 0.0_f64;
+        let mut sse1 = 0.0_f64;
+        let mut moved = 0.0_f64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let yhat = self.predict_row(x, i);
+            let err = yhat - y[i];
+            sse0 += err * err;
+            self.n_seen += 1;
+            let phase = ((self.n_seen - 1) as usize % period) as f64 / period as f64;
+            let tri = 1.0 - (2.0 * phase - 1.0).abs();
+            let eta = t_min + (t_max - t_min) * tri;
+            self.b -= eta * err;
+            for j in 0..x.ncols().min(self.w.len()) {
+                let d = eta * err * x.get(i, j);
+                self.w[j] -= d;
+                moved += d.abs();
+            }
+            let after = self.predict_row(x, i);
+            sse1 += (after - y[i]) * (after - y[i]);
+        }
+        self.updates += 1;
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &Vector::filled(1, moved),
+            sse0,
+            sse1,
+            self.n_seen >= 2,
+            self.n_seen < 2,
+            "cyclic triangular SGD",
+            "η follows a triangle over `period`; period is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for CyclicLrRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -34597,6 +34904,12 @@ mod tests {
         PolynomialFm::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("polyfm");
+        LinearDecayRegressor::new(12)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("lindec");
+        CyclicLrRegressor::new(8)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("cyclr");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

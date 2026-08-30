@@ -1907,6 +1907,255 @@ impl Between2Sls {
     }
 }
 
+/// First-difference 2SLS (linearmodels `IV2SLS` on \(\Delta y,\Delta X,\Delta Z\)).
+///
+/// Group count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct FirstDifferenceIv;
+
+impl FirstDifferenceIv {
+    /// Default first-difference IV.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit \(\Delta y\) on \(\widehat{\Delta X}(\Delta Z)\) within group.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        z: &Matrix,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPanel>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if groups.len() != y.len() || z.nrows() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("FirstDifferenceIv groups/Z length ≠ n")
+                    .build(),
+            );
+        }
+        let sizes = group_sizes(groups);
+        warn_panel_groups(&mut ctx, &sizes, "FirstDifferenceIv");
+        let n = y.len().min(x.nrows()).min(groups.len()).min(z.nrows());
+        let p = x.ncols();
+        let q = z.ncols();
+        let mut xd = Vec::new();
+        let mut zd = Vec::new();
+        let mut yd = Vec::new();
+        for i in 1..n {
+            if !groups[i].is_finite() || !groups[i - 1].is_finite() {
+                continue;
+            }
+            if groups[i].round() as i64 != groups[i - 1].round() as i64 {
+                continue;
+            }
+            yd.push(y[i] - y[i - 1]);
+            xd.push((0..p).map(|j| x.get(i, j) - x.get(i - 1, j)).collect::<Vec<_>>());
+            zd.push((0..q).map(|j| z.get(i, j) - z.get(i - 1, j)).collect::<Vec<_>>());
+        }
+        if xd.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("FirstDifferenceIv has no consecutive within-group pairs")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "first-difference IV slopes",
+                        "the panel has no adjacent repeats in row order",
+                        "sort by group then time",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(empty_panel(p));
+        }
+        let m = xd.len();
+        let xm = Matrix::from_fn(m, p, |i, j| xd[i][j]);
+        let zm = Matrix::from_fn(m, q, |i, j| zd[i][j]);
+        let ym = Vector::from_iter(yd);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("FirstDifferenceIv is collapsed FD 2SLS, not GMM")
+                .compromise(NumericalCompromise::new(
+                    "Arellano–Bond / FD GMM",
+                    "2SLS on first differences with contemporaneous ΔZ",
+                    "lagged-level instruments and Windmeijer SE are omitted",
+                    "read the slope as a planning FD-IV sketch",
+                ))
+                .build(),
+        );
+        let z1 = zm.with_intercept();
+        let mut xhat = Matrix::zeros(m, p);
+        for j in 0..p {
+            let xj = Vector::from_iter((0..m).map(|i| xm.get(i, j)));
+            let mut scratch = signlred::Report::new("fdiv", "fs");
+            if let Some(pi) = least_squares(&mut scratch, &z1, &xj, &ctx.policy) {
+                for i in 0..m {
+                    let mut s = 0.0_f64;
+                    for k in 0..pi.len().min(z1.ncols()) {
+                        s += z1.get(i, k) * pi[k];
+                    }
+                    xhat.set(i, j, s);
+                }
+            }
+            for issue in scratch.issues() {
+                if matches!(
+                    issue.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::R2IsOne
+                        | IssueCode::RankZero
+                        | IssueCode::CholeskyFailed
+                        | IssueCode::PerfectCollinearity
+                ) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+        }
+        let mut scratch = signlred::Report::new("fdiv", "ss");
+        let Some(coef) = least_squares(&mut scratch, &xhat, &ym, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("FirstDifferenceIv second stage failed")
+                    .build(),
+            );
+            return ctx.finish(empty_panel(p));
+        };
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::R2IsOne
+                    | IssueCode::RankZero
+                    | IssueCode::CholeskyFailed
+                    | IssueCode::PerfectCollinearity
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedPanel {
+            coef,
+            intercept: 0.0,
+            n_groups: sizes.len(),
+            n_eff: m,
+        })
+    }
+}
+
+/// Pooled 2SLS (linearmodels `IV2SLS` without group demeaning).
+///
+/// Group count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct Pooled2Sls;
+
+impl Pooled2Sls {
+    /// Default pooled IV.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit \(y\) on \(\widehat X(Z)\) with an intercept.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        z: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedPanel>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let n = y.len().min(x.nrows()).min(z.nrows());
+        let p = x.ncols();
+        if z.nrows() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("Pooled2Sls Z rows ≠ X rows")
+                    .build(),
+            );
+        }
+        let y_use = Vector::from_iter((0..n).map(|i| y[i]));
+        let z1 = Matrix::from_fn(n, z.ncols(), |i, j| z.get(i, j)).with_intercept();
+        let mut xhat = Matrix::zeros(n, p);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Pooled2Sls is 2SLS, not limited-information ML")
+                .compromise(NumericalCompromise::new(
+                    "LIML / clustered IV",
+                    "pooled first and second stage OLS",
+                    "group structure is ignored",
+                    "read the slope as a pooled-IV sketch",
+                ))
+                .build(),
+        );
+        for j in 0..p {
+            let xj = Vector::from_iter((0..n).map(|i| x.get(i, j)));
+            let mut scratch = signlred::Report::new("p2sls", "fs");
+            if let Some(pi) = least_squares(&mut scratch, &z1, &xj, &ctx.policy) {
+                for i in 0..n {
+                    let mut s = 0.0_f64;
+                    for k in 0..pi.len().min(z1.ncols()) {
+                        s += z1.get(i, k) * pi[k];
+                    }
+                    xhat.set(i, j, s);
+                }
+            }
+            for issue in scratch.issues() {
+                if matches!(
+                    issue.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::R2IsOne
+                        | IssueCode::RankZero
+                        | IssueCode::CholeskyFailed
+                        | IssueCode::PerfectCollinearity
+                ) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+        }
+        let design = xhat.with_intercept();
+        let mut scratch = signlred::Report::new("p2sls", "ss");
+        let Some(beta) = least_squares(&mut scratch, &design, &y_use, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("Pooled2Sls second stage failed")
+                    .build(),
+            );
+            return ctx.finish(empty_panel(p));
+        };
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::R2IsOne
+                    | IssueCode::RankZero
+                    | IssueCode::CholeskyFailed
+                    | IssueCode::PerfectCollinearity
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedPanel {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            coef: Vector::from_iter((0..p).map(|j| {
+                beta.as_slice().get(j + 1).copied().unwrap_or(0.0)
+            })),
+            n_groups: 1,
+            n_eff: n,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2030,5 +2279,13 @@ mod tests {
             .fit(&xfm, &y, &xfm, &g, &Session::new("b2s", "fit"))
             .expect("b2s");
         assert!(b2.value.coef[0].is_finite());
+        let fdiv = FirstDifferenceIv::new()
+            .fit(&x, &y, &x, &g, &Session::new("fdiv", "fit"))
+            .expect("fdiv");
+        assert!(fdiv.value.coef[0].is_finite());
+        let p2 = Pooled2Sls::new()
+            .fit(&x, &y, &x, &Session::new("p2s", "fit"))
+            .expect("p2s");
+        assert!(p2.value.coef[0].is_finite());
     }
 }

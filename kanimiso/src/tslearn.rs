@@ -14264,6 +14264,187 @@ impl ClaSPAnnotator {
     }
 }
 
+/// Named Hydra+MultiROCKET classifier (sktime `HydraMultiRocketClassifier`).
+#[derive(Clone, Debug)]
+pub struct HydraMultiRocketClassifier {
+    inner: HydraMultiRocket,
+}
+
+impl Default for HydraMultiRocketClassifier {
+    fn default() -> Self {
+        Self {
+            inner: HydraMultiRocket::default(),
+        }
+    }
+}
+
+impl HydraMultiRocketClassifier {
+    /// Default Hydra+MultiROCKET classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for HydraMultiRocketClassifier {
+    type Fitted = FittedHydraMultiRocket;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedHydraMultiRocket>> {
+        self.inner.fit(x, y, session)
+    }
+}
+
+/// RISE regressor (sktime `RandomIntervalSpectralEnsemble` regression).
+///
+/// Interval count is not identification `p`. ExtraTrees may abort as a vacuous
+/// stump; ridge on the same interval map is the fallback.
+#[derive(Clone, Debug)]
+pub struct RiseRegressor {
+    /// ExtraTrees count.
+    pub n_estimators: usize,
+    /// Random intervals.
+    pub n_intervals: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for RiseRegressor {
+    fn default() -> Self {
+        Self {
+            n_estimators: 8,
+            n_intervals: 3,
+            max_depth: 4,
+            seed: 19,
+        }
+    }
+}
+
+impl RiseRegressor {
+    /// Default RISE regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted RISE forest or ridge fallback.
+#[derive(Clone, Debug)]
+pub struct FittedRiseRegressor {
+    forest: Option<crate::tree::FittedForestRegressor>,
+    ridge: Option<FittedPenalized>,
+    intervals: Vec<Interval>,
+}
+
+impl Fit for RiseRegressor {
+    type Fitted = FittedRiseRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRiseRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let mut rng = Rng::new(self.seed);
+        let tlen = x.ncols().max(1);
+        let mut intervals = Vec::new();
+        for _ in 0..self.n_intervals.max(1) {
+            let a = rng.below(tlen);
+            let span = 1 + rng.below(tlen);
+            intervals.push(Interval {
+                start: a,
+                end: (a + span).min(tlen).max(a + 1),
+            });
+        }
+        let feat = interval_feats_rise(x, &intervals);
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .severity(Severity::Advisory)
+                .message("RiseRegressor uses interval DFT plus ExtraTrees, not the full RISE map")
+                .compromise(NumericalCompromise::new(
+                    "sktime RISE spectral + extra-trees regressor",
+                    "RISE-style interval DFT then ExtraTreesRegressor",
+                    "ACF / periodogram members are omitted",
+                    "do not read as a published RISE accuracy",
+                ))
+                .build(),
+        );
+        let mut et = crate::tree::ExtraTreesRegressor {
+            n_estimators: self.n_estimators.max(1),
+            max_depth: self.max_depth.max(1),
+            min_samples_split: 2,
+            max_features: Some(4),
+            seed: self.seed,
+        };
+        match et.fit(&feat, y, &session.child("riser-et")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::R2IsOne
+                            | IssueCode::RankZero
+                            | IssueCode::MeaninglessFit
+                            | IssueCode::PredictionsAreConstant
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                ctx.finish(FittedRiseRegressor {
+                    forest: Some(q.value),
+                    ridge: None,
+                    intervals,
+                })
+            }
+            Err(_) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("RiseRegressor ExtraTrees failed; falling back to interval ridge")
+                        .build(),
+                );
+                let ridge = ridge_reg_from_features(&feat, y, 0.5, &ctx.policy, "riser");
+                ctx.finish(FittedRiseRegressor {
+                    forest: None,
+                    ridge: Some(ridge),
+                    intervals,
+                })
+            }
+        }
+    }
+}
+
+impl Predict for FittedRiseRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let feat = interval_feats_rise(x, &self.intervals);
+        if let Some(f) = &self.forest {
+            return f.predict(&feat, session);
+        }
+        if let Some(r) = &self.ridge {
+            let mut ctx = FitCtx::with_session(session.child("predict"));
+            let out = if feat.ncols() == r.coef.len() {
+                let mut yhat = feat.matvec(&r.coef);
+                for i in 0..yhat.len() {
+                    yhat[i] += r.intercept;
+                }
+                yhat
+            } else {
+                Vector::filled(x.nrows(), r.intercept)
+            };
+            return ctx.finish(out);
+        }
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+        ctx.finish(Vector::zeros(x.nrows()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -14672,6 +14853,25 @@ mod tests {
             .fit(&yann, &Session::new("ts", "claspa"))
             .unwrap();
         assert!(claspa.value.is_finite() || claspa.value.is_nan());
+        let riser = RiseRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "riser"))
+            .unwrap();
+        let priser = riser
+            .value
+            .predict(&x, &Session::new("ts", "riserp"))
+            .unwrap()
+            .value;
+        assert_eq!(priser.len(), 8);
+        assert!(priser.as_slice().iter().all(|v| v.is_finite()));
+        let hmrc = HydraMultiRocketClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "hmrc"))
+            .unwrap();
+        let phmrc = hmrc
+            .value
+            .predict(&x, &Session::new("ts", "hmrcp"))
+            .unwrap()
+            .value;
+        assert_eq!(phmrc.len(), 8);
         let rst = Rstsf::new()
             .fit(&x, &y, &Session::new("ts", "rstsf"))
             .unwrap();

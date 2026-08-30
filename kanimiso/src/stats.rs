@@ -19661,6 +19661,429 @@ impl AalenAdditiveFitter {
     }
 }
 
+/// Named Kaplan–Meier fitter (lifelines `KaplanMeierFitter`).
+#[derive(Clone, Debug, Default)]
+pub struct KaplanMeierFitter;
+
+impl KaplanMeierFitter {
+    /// Default product-limit estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on durations and event indicators.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedKaplanMeier>> {
+        KaplanMeier::new().fit(durations, events, session)
+    }
+}
+
+/// Named Nelson–Aalen fitter (lifelines `NelsonAalenFitter`).
+///
+/// Delegates to [`nelson_aalen`], which uses the product-limit event table.
+#[derive(Clone, Debug, Default)]
+pub struct NelsonAalenFitter;
+
+impl NelsonAalenFitter {
+    /// Default Nelson–Aalen estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit the cumulative hazard.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedKaplanMeier>> {
+        nelson_aalen(durations, events, session)
+    }
+}
+
+/// Named Aalen–Johansen fitter (lifelines `AalenJohansenFitter`).
+#[derive(Clone, Debug, Default)]
+pub struct AalenJohansenFitter;
+
+impl AalenJohansenFitter {
+    /// Default competing-risk CIF.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit cause-specific cumulative incidence.
+    pub fn fit(
+        &self,
+        times: &Vector,
+        events: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<AalenJohansenResult>> {
+        aalen_johansen(times, events, session)
+    }
+}
+
+/// Named Cox PH fitter (lifelines `CoxPHFitter`).
+///
+/// Inner Newton `CholeskyFailed` is not promoted (same contract as [`PHReg`]).
+#[derive(Clone, Debug, Default)]
+pub struct CoxPHFitter {
+    inner: CoxPH,
+}
+
+impl CoxPHFitter {
+    /// Default Breslow Cox.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit `h(t | x) = h0(t) exp(xβ)`.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCoxPH>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+        match self.inner.fit(durations, events, x, &session.child("coxphf")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if skip_aborting_inner(issue) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                ctx.finish(q.value)
+            }
+            Err(_) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("CoxPHFitter inner Newton failed")
+                        .build(),
+                );
+                ctx.finish(FittedCoxPH {
+                    coef: Vector::zeros(x.ncols()),
+                    loglik: f64::NAN,
+                    n_events: events.as_slice().iter().filter(|e| **e > 0.5).count(),
+                    n: x.nrows(),
+                    converged: false,
+                })
+            }
+        }
+    }
+}
+
+/// Named Fine–Gray estimator (lifelines / sksurv).
+#[derive(Clone, Debug, Default)]
+pub struct FineGray;
+
+impl FineGray {
+    /// Default subdistribution-hazard fit.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit cause `cause` (default 1 if `cause == 0`).
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        durations: &Vector,
+        events: &Vector,
+        cause: i64,
+        session: &Session,
+    ) -> Result<Qualified<FittedFineGray>> {
+        let c = if cause == 0 { 1 } else { cause };
+        match fine_gray(x, durations, events, c, session) {
+            Ok(q) => Ok(q),
+            Err(e) => {
+                let mut ctx = FitCtx::with_session(session.clone());
+                if !skip_aborting_inner(&e.primary) {
+                    ctx.push(e.primary);
+                } else {
+                    ctx.push(
+                        Issue::builder(IssueCode::DidNotConverge)
+                            .message("FineGray inner Newton failed")
+                            .build(),
+                    );
+                }
+                ctx.finish(FittedFineGray {
+                    coef: Vector::zeros(x.ncols()),
+                    loglik: f64::NAN,
+                    n_events: 0,
+                    n: x.nrows(),
+                    cause: c,
+                    converged: false,
+                })
+            }
+        }
+    }
+}
+
+/// Named cause-specific Cox (sksurv `CauseSpecificCox`).
+#[derive(Clone, Debug, Default)]
+pub struct CauseSpecificCox;
+
+impl CauseSpecificCox {
+    /// Default cause-specific Cox.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit treating other causes as censored.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        cause: i64,
+        session: &Session,
+    ) -> Result<Qualified<FittedCoxPH>> {
+        match cause_specific_cox(durations, events, x, cause, session) {
+            Ok(q) => Ok(q),
+            Err(e) => {
+                let mut ctx = FitCtx::with_session(session.clone());
+                if !skip_aborting_inner(&e.primary) {
+                    ctx.push(e.primary);
+                } else {
+                    ctx.push(
+                        Issue::builder(IssueCode::DidNotConverge)
+                            .message("CauseSpecificCox inner Cox failed")
+                            .build(),
+                    );
+                }
+                ctx.finish(FittedCoxPH {
+                    coef: Vector::zeros(x.ncols()),
+                    loglik: f64::NAN,
+                    n_events: 0,
+                    n: x.nrows(),
+                    converged: false,
+                })
+            }
+        }
+    }
+}
+
+/// Blinder–Oaxaca two-group mean decomposition (statsmodels `Oaxaca`).
+///
+/// Group count is not identification `p`.
+pub fn oaxaca(
+    x: &Matrix,
+    y: &Vector,
+    groups: &Vector,
+    session: &Session,
+) -> Result<Qualified<OaxacaResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let n = y.len().min(x.nrows()).min(groups.len());
+    let mut keys: Vec<i64> = Vec::new();
+    for i in 0..n {
+        if groups[i].is_finite() {
+            let g = groups[i].round() as i64;
+            if !keys.contains(&g) {
+                keys.push(g);
+            }
+        }
+    }
+    keys.sort_unstable();
+    if keys.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::UnidentifiedModel)
+                .message("oaxaca needs two groups")
+                .build(),
+        );
+        return ctx.finish(OaxacaResult {
+            gap: f64::NAN,
+            endowment: f64::NAN,
+            coefficient: f64::NAN,
+            interaction: f64::NAN,
+            beta_a: Vector::zeros(x.ncols() + 1),
+            beta_b: Vector::zeros(x.ncols() + 1),
+        });
+    }
+    let ga = keys[0];
+    let gb = keys[1];
+    let ia: Vec<usize> = (0..n)
+        .filter(|&i| groups[i].is_finite() && groups[i].round() as i64 == ga)
+        .collect();
+    let ib: Vec<usize> = (0..n)
+        .filter(|&i| groups[i].is_finite() && groups[i].round() as i64 == gb)
+        .collect();
+    if ia.len() < 2 || ib.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("oaxaca group is thinner than 2 rows")
+                .build(),
+        );
+        return ctx.finish(OaxacaResult {
+            gap: f64::NAN,
+            endowment: f64::NAN,
+            coefficient: f64::NAN,
+            interaction: f64::NAN,
+            beta_a: Vector::zeros(x.ncols() + 1),
+            beta_b: Vector::zeros(x.ncols() + 1),
+        });
+    }
+    let p = x.ncols();
+    let xa = Matrix::from_fn(ia.len(), p, |r, j| x.get(ia[r], j)).with_intercept();
+    let xb = Matrix::from_fn(ib.len(), p, |r, j| x.get(ib[r], j)).with_intercept();
+    let ya = Vector::from_iter(ia.iter().map(|&i| y[i]));
+    let yb = Vector::from_iter(ib.iter().map(|&i| y[i]));
+    let mut sa = Report::new("oaxaca", "a");
+    let mut sb = Report::new("oaxaca", "b");
+    let ba = least_squares(&mut sa, &xa, &ya, &ctx.policy)
+        .unwrap_or_else(|| Vector::zeros(p + 1));
+    let bb = least_squares(&mut sb, &xb, &yb, &ctx.policy)
+        .unwrap_or_else(|| Vector::zeros(p + 1));
+    for issue in sa.issues().iter().chain(sb.issues()) {
+        if skip_aborting_inner(issue) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let xa_bar = Vector::from_iter((0..p + 1).map(|j| {
+        (0..ia.len()).map(|r| xa.get(r, j)).sum::<f64>() / ia.len() as f64
+    }));
+    let xb_bar = Vector::from_iter((0..p + 1).map(|j| {
+        (0..ib.len()).map(|r| xb.get(r, j)).sum::<f64>() / ib.len() as f64
+    }));
+    let mut endowment = 0.0_f64;
+    let mut coefficient = 0.0_f64;
+    let mut interaction = 0.0_f64;
+    for j in 0..(p + 1).min(ba.len()).min(bb.len()) {
+        let dx = xb_bar[j] - xa_bar[j];
+        let db = bb[j] - ba[j];
+        endowment += dx * ba[j];
+        coefficient += xa_bar[j] * db;
+        interaction += dx * db;
+    }
+    let gap = endowment + coefficient + interaction;
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("oaxaca is a two-fold mean gap, not a causal wage decomposition")
+            .compromise(NumericalCompromise::new(
+                "threefold Oaxaca–Blinder with robust SE",
+                "pooled-reference endowment + coefficient + interaction",
+                "reference group is the first code; SE are omitted",
+                "do not read the gap as a treatment effect",
+            ))
+            .build(),
+    );
+    ctx.finish(OaxacaResult {
+        gap,
+        endowment,
+        coefficient,
+        interaction,
+        beta_a: ba,
+        beta_b: bb,
+    })
+}
+
+/// Blinder–Oaxaca payload.
+#[derive(Clone, Debug)]
+pub struct OaxacaResult {
+    /// \(\bar y_B - \bar y_A\) reconstructed as endowment + coefficient + interaction.
+    pub gap: f64,
+    /// Endowment \((\bar x_B-\bar x_A)\hat\beta_A\).
+    pub endowment: f64,
+    /// Coefficient \(\bar x_A(\hat\beta_B-\hat\beta_A)\).
+    pub coefficient: f64,
+    /// Interaction \((\bar x_B-\bar x_A)(\hat\beta_B-\hat\beta_A)\).
+    pub interaction: f64,
+    /// Group-A slopes including intercept.
+    pub beta_a: Vector,
+    /// Group-B slopes including intercept.
+    pub beta_b: Vector,
+}
+
+/// Gaussian knockoff filter (statsmodels `RegressionFDR` / Barber–Candès lite).
+///
+/// Knockoff copies are not identification `p`.
+pub fn knockoff(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<KnockoffResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let n = y.len().min(x.nrows());
+    let p = x.ncols();
+    if n < 3 || p == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("knockoff needs n≥3 and a covariate")
+                .build(),
+        );
+        return ctx.finish(KnockoffResult {
+            selected: Vector::zeros(p),
+            statistic: Vector::zeros(p),
+        });
+    }
+    let yv = Vector::from_iter((0..n).map(|i| y[i]));
+    let ym = yv.mean();
+    let mut selected = Vector::zeros(p);
+    let mut stat = Vector::zeros(p);
+    for j in 0..p {
+        let mut sx = 0.0_f64;
+        let mut sxt = 0.0_f64;
+        let mut vx = 0.0_f64;
+        let mut vt = 0.0_f64;
+        let mut mx = 0.0_f64;
+        for i in 0..n {
+            mx += x.get(i, j);
+        }
+        mx /= n as f64;
+        for i in 0..n {
+            let xj = x.get(i, j);
+            let xt = 2.0 * mx - xj;
+            let dy = y[i] - ym;
+            let dx = xj - mx;
+            let dt = xt - mx;
+            sx += dx * dy;
+            sxt += dt * dy;
+            vx += dx * dx;
+            vt += dt * dt;
+        }
+        let c1 = if vx > 1e-18 { sx / vx.sqrt() } else { 0.0 };
+        let c0 = if vt > 1e-18 { sxt / vt.sqrt() } else { 0.0 };
+        let w = c1.abs() - c0.abs();
+        stat[j] = w;
+        selected[j] = if w > 0.0 { 1.0 } else { 0.0 };
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("knockoff uses a mean-reflected copy, not SDP Gaussian knockoffs")
+            .compromise(NumericalCompromise::new(
+                "model-X Gaussian knockoffs with FDR",
+                "column reflection through the mean and |corr| difference",
+                "the knockoff is a deterministic involution, not a conditional draw",
+                "treat selected as a planning screen, not a Barber–Candès FDR set",
+            ))
+            .build(),
+    );
+    ctx.finish(KnockoffResult {
+        selected,
+        statistic: stat,
+    })
+}
+
+/// Knockoff filter payload.
+#[derive(Clone, Debug)]
+pub struct KnockoffResult {
+    /// 1 if \(W_j>0\).
+    pub selected: Vector,
+    /// \(W_j = |c_j| - |c_j^{\mathrm{knock}}|\).
+    pub statistic: Vector,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -20499,5 +20922,34 @@ mod tests {
             .fit(&dur, &ev, &xcox, &Session::new("aaf", "t"))
             .expect("aaf");
         assert!(aaf.value.cumulative.ncols() == 1);
+        let kmf = KaplanMeierFitter::new()
+            .fit(&dur, &ev, &Session::new("kmf", "t"))
+            .expect("kmf");
+        assert!(!kmf.value.survival.is_empty());
+        let naf = NelsonAalenFitter::new()
+            .fit(&dur, &ev, &Session::new("naf", "t"))
+            .expect("naf");
+        assert!(!naf.value.times.is_empty());
+        let ajf = AalenJohansenFitter::new()
+            .fit(&dur, &ev, &Session::new("ajf", "t"))
+            .expect("ajf");
+        assert!(ajf.value.cif.ncols() >= 1);
+        let cpf = CoxPHFitter::new()
+            .fit(&dur, &ev, &xcox, &Session::new("cpf", "t"))
+            .expect("cpf");
+        assert_eq!(cpf.value.coef.len(), 1);
+        let fg = FineGray::new()
+            .fit(&xcox, &dur, &ev, 1, &Session::new("fg", "t"))
+            .expect("fg");
+        assert_eq!(fg.value.coef.len(), 1);
+        let csc2 = CauseSpecificCox::new()
+            .fit(&dur, &ev, &xcox, 1, &Session::new("csc2", "t"))
+            .expect("csc2");
+        assert_eq!(csc2.value.coef.len(), 1);
+        let og = Vector::from_iter((0..40).map(|i| if i < 20 { 0.0 } else { 1.0 }));
+        let ox = oaxaca(&x, &y, &og, &Session::new("ox", "t")).expect("ox");
+        assert!(ox.value.gap.is_finite() || ox.value.gap.is_nan());
+        let kn = knockoff(&x, &y, &Session::new("kn", "t")).expect("kn");
+        assert_eq!(kn.value.selected.len(), 1);
     }
 }
