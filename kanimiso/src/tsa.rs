@@ -12,7 +12,7 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linalg::{chol_solve, least_squares, thin_svd};
+use crate::linalg::{chol_solve, least_squares, ridge_solve, thin_svd};
 use crate::rng::Rng;
 
 pub use crate::filters::{
@@ -17447,6 +17447,505 @@ impl FitSeries for TimesNetForecaster {
     }
 }
 
+fn window_ridge_forecast(
+    y: &Vector,
+    window: usize,
+    featurize: impl Fn(&[f64]) -> Vec<f64>,
+    alpha: f64,
+    policy: &signlred::Policy,
+) -> (Vector, f64, Vec<f64>) {
+    let n = y.len();
+    let w = window.max(2).min(n.max(2));
+    let mut rows: Vec<Vec<f64>> = Vec::new();
+    let mut targets: Vec<f64> = Vec::new();
+    if n > w {
+        for t in w..n {
+            if !y[t].is_finite() {
+                continue;
+            }
+            let win = &y.as_slice()[t - w..t];
+            if win.iter().all(|v| v.is_finite()) {
+                rows.push(featurize(win));
+                targets.push(y[t]);
+            }
+        }
+    }
+    let last = if n >= w {
+        y.as_slice()[n - w..n].to_vec()
+    } else {
+        y.as_slice().to_vec()
+    };
+    if rows.is_empty() {
+        return (Vector::zeros(1), last.last().copied().unwrap_or(0.0), last);
+    }
+    let p = rows[0].len().max(1);
+    let z = Matrix::from_fn(rows.len(), p, |i, j| rows[i].get(j).copied().unwrap_or(0.0));
+    let yt = Vector::from_iter(targets);
+    let design = z.with_intercept();
+    let mut scratch = Report::new("win-ridge", "fit");
+    let sol = ridge_solve(&mut scratch, &design, &yt, alpha.max(0.0), policy)
+        .unwrap_or_else(|| Vector::zeros(p + 1));
+    (
+        Vector::from_iter((1..sol.len()).map(|j| sol[j])),
+        sol.as_slice().first().copied().unwrap_or(0.0),
+        last,
+    )
+}
+
+fn apply_window_ridge(coef: &Vector, intercept: f64, feat: &[f64]) -> f64 {
+    let mut s = intercept;
+    for j in 0..coef.len().min(feat.len()) {
+        s += coef[j] * feat[j];
+    }
+    s
+}
+
+fn rocket_window(win: &[f64], kernels: &[Vec<f64>]) -> Vec<f64> {
+    let t = win.len();
+    let mut out = Vec::with_capacity(kernels.len() * 2);
+    for ker in kernels {
+        let w = ker.len();
+        if w == 0 || t < w {
+            out.push(0.0);
+            out.push(0.0);
+            continue;
+        }
+        let mut mx = f64::NEG_INFINITY;
+        let mut pos = 0.0_f64;
+        let mut cnt = 0.0_f64;
+        for start in 0..=t - w {
+            let mut acc = 0.0;
+            for u in 0..w {
+                acc += ker[u] * win[start + u];
+            }
+            if acc > mx {
+                mx = acc;
+            }
+            if acc > 0.0 {
+                pos += 1.0;
+            }
+            cnt += 1.0;
+        }
+        out.push(if cnt > 0.0 { pos / cnt } else { 0.0 });
+        out.push(if mx.is_finite() { mx } else { 0.0 });
+    }
+    out
+}
+
+fn cnn_window(win: &[f64], kernels: &[Vec<f64>]) -> Vec<f64> {
+    let t = win.len();
+    kernels
+        .iter()
+        .map(|ker| {
+            let w = ker.len();
+            if w == 0 || t < w {
+                return 0.0;
+            }
+            let mut mx = f64::NEG_INFINITY;
+            for start in 0..=t - w {
+                let mut acc = 0.0;
+                for u in 0..w {
+                    acc += ker[u] * win[start + u];
+                }
+                if acc > mx {
+                    mx = acc;
+                }
+            }
+            if mx.is_finite() {
+                mx
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+fn catch22_window(win: &[f64]) -> Vec<f64> {
+    let n = win.len();
+    let mut s = 0.0_f64;
+    let mut c = 0.0_f64;
+    for &v in win {
+        if v.is_finite() {
+            s += v;
+            c += 1.0;
+        }
+    }
+    let mean = if c > 0.0 { s / c } else { 0.0 };
+    let mut var = 0.0_f64;
+    for &v in win {
+        if v.is_finite() {
+            let d = v - mean;
+            var += d * d;
+        }
+    }
+    let std = if c > 1.0 { (var / (c - 1.0)).sqrt() } else { 0.0 };
+    let mut ac = 0.0_f64;
+    let mut k = 0.0_f64;
+    if n > 1 && std > 0.0 {
+        for t in 1..n {
+            if win[t].is_finite() && win[t - 1].is_finite() {
+                ac += (win[t] - mean) * (win[t - 1] - mean);
+                k += 1.0;
+            }
+        }
+    }
+    let acf1 = if k > 0.0 && std > 0.0 {
+        ac / (k * std * std)
+    } else {
+        0.0
+    };
+    let mut xtx = 0.0_f64;
+    let mut xty = 0.0_f64;
+    let tmean = (n.saturating_sub(1)) as f64 / 2.0;
+    for (i, &v) in win.iter().enumerate() {
+        if !v.is_finite() {
+            continue;
+        }
+        let t = i as f64 - tmean;
+        xtx += t * t;
+        xty += t * (v - mean);
+    }
+    let slope = if xtx > 0.0 { xty / xtx } else { 0.0 };
+    let mut crossings = 0.0_f64;
+    for t in 1..n {
+        if (win[t] - mean) * (win[t - 1] - mean) < 0.0 {
+            crossings += 1.0;
+        }
+    }
+    let zcr = if n > 1 {
+        crossings / (n - 1) as f64
+    } else {
+        0.0
+    };
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for &v in win {
+        if v.is_finite() {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    }
+    let range = if hi.is_finite() && lo.is_finite() {
+        hi - lo
+    } else {
+        0.0
+    };
+    vec![mean, std, acf1, slope, zcr, range]
+}
+
+fn recurse_features(
+    last: &[f64],
+    h: usize,
+    featurize: impl Fn(&[f64]) -> Vec<f64>,
+    coef: &Vector,
+    intercept: f64,
+) -> Vector {
+    let mut hist = last.to_vec();
+    Vector::from_iter((0..h).map(|_| {
+        let w = hist.len();
+        let feat = featurize(&hist);
+        let yhat = apply_window_ridge(coef, intercept, &feat);
+        hist.push(yhat);
+        if hist.len() > w {
+            hist.remove(0);
+        }
+        yhat
+    }))
+}
+
+/// ROCKET reduction forecaster (sktime `RocketForecaster` lite).
+///
+/// Kernel count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RocketForecaster {
+    /// Lag window. Not identification `p`.
+    pub window: usize,
+    /// Random kernels.
+    pub n_kernels: usize,
+    /// Kernel width.
+    pub kernel_len: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for RocketForecaster {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            n_kernels: 4,
+            kernel_len: 3,
+            alpha: 0.1,
+            seed: 13,
+        }
+    }
+}
+
+impl RocketForecaster {
+    /// Default ROCKET-lite forecaster.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted ROCKET-window ridge.
+#[derive(Clone, Debug)]
+pub struct FittedRocketForecaster {
+    kernels: Vec<Vec<f64>>,
+    coef: Vector,
+    intercept: f64,
+    last: Vec<f64>,
+}
+
+impl FittedRocketForecaster {
+    /// Recursive ROCKET-window forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let out = recurse_features(
+            &self.last,
+            h,
+            |w| rocket_window(w, &self.kernels),
+            &self.coef,
+            self.intercept,
+        );
+        ctx.finish(out)
+    }
+}
+
+impl FitSeries for RocketForecaster {
+    type Fitted = FittedRocketForecaster;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRocketForecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let wlen = self.kernel_len.max(1).min(self.window.max(1));
+        if y.len() <= self.window.max(2) {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .message("RocketForecaster needs n > window")
+                    .build(),
+            );
+        }
+        let mut rng = Rng::new(self.seed);
+        let kernels: Vec<Vec<f64>> = (0..self.n_kernels.max(1))
+            .map(|_| {
+                let mut k: Vec<f64> = (0..wlen).map(|_| rng.standard_normal()).collect();
+                let m: f64 = k.iter().sum::<f64>() / wlen.max(1) as f64;
+                for v in &mut k {
+                    *v -= m;
+                }
+                k
+            })
+            .collect();
+        let (coef, intercept, last) = window_ridge_forecast(
+            y,
+            self.window,
+            |win| rocket_window(win, &kernels),
+            self.alpha,
+            &ctx.policy,
+        );
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("RocketForecaster is window ROCKET + ridge, not the sktime pipeline")
+                .compromise(NumericalCompromise::new(
+                    "sktime RocketForecaster",
+                    "random-kernel PPV/max on rolling windows, then ridge",
+                    "the published dilation search and sklearn head are omitted",
+                    "read the path as a convolutional-window sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedRocketForecaster {
+            kernels,
+            coef,
+            intercept,
+            last,
+        })
+    }
+}
+
+/// 1-D CNN reduction forecaster (sktime `CNNForecaster` lite).
+///
+/// Kernel count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct CnnForecaster {
+    /// Lag window.
+    pub window: usize,
+    /// Random kernels.
+    pub n_kernels: usize,
+    /// Kernel width.
+    pub width: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for CnnForecaster {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            n_kernels: 3,
+            width: 3,
+            alpha: 0.1,
+            seed: 17,
+        }
+    }
+}
+
+impl CnnForecaster {
+    /// Default CNN-lite forecaster.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted CNN-window ridge.
+#[derive(Clone, Debug)]
+pub struct FittedCnnForecaster {
+    kernels: Vec<Vec<f64>>,
+    coef: Vector,
+    intercept: f64,
+    last: Vec<f64>,
+}
+
+impl FittedCnnForecaster {
+    /// Recursive CNN-window forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(recurse_features(
+            &self.last,
+            h,
+            |w| cnn_window(w, &self.kernels),
+            &self.coef,
+            self.intercept,
+        ))
+    }
+}
+
+impl FitSeries for CnnForecaster {
+    type Fitted = FittedCnnForecaster;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedCnnForecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let wlen = self.width.max(1).min(self.window.max(1));
+        let mut rng = Rng::new(self.seed);
+        let kernels: Vec<Vec<f64>> = (0..self.n_kernels.max(1))
+            .map(|_| (0..wlen).map(|_| rng.standard_normal()).collect())
+            .collect();
+        let (coef, intercept, last) = window_ridge_forecast(
+            y,
+            self.window,
+            |win| cnn_window(win, &kernels),
+            self.alpha,
+            &ctx.policy,
+        );
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("CnnForecaster is max-pooled window conv + ridge")
+                .compromise(NumericalCompromise::new(
+                    "sktime CNNForecaster",
+                    "random 1-D kernels on rolling windows, then ridge",
+                    "learned filters and the published decoder are omitted",
+                    "read the path as a conv-window sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedCnnForecaster {
+            kernels,
+            coef,
+            intercept,
+            last,
+        })
+    }
+}
+
+/// Catch22 reduction forecaster (sktime `Catch22Forecaster` lite).
+///
+/// Feature count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Catch22Forecaster {
+    /// Lag window.
+    pub window: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for Catch22Forecaster {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            alpha: 0.1,
+        }
+    }
+}
+
+impl Catch22Forecaster {
+    /// Default Catch22-lite forecaster.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted Catch22-window ridge.
+#[derive(Clone, Debug)]
+pub struct FittedCatch22Forecaster {
+    coef: Vector,
+    intercept: f64,
+    last: Vec<f64>,
+}
+
+impl FittedCatch22Forecaster {
+    /// Recursive Catch22-window forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(recurse_features(
+            &self.last,
+            h,
+            catch22_window,
+            &self.coef,
+            self.intercept,
+        ))
+    }
+}
+
+impl FitSeries for Catch22Forecaster {
+    type Fitted = FittedCatch22Forecaster;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCatch22Forecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let (coef, intercept, last) =
+            window_ridge_forecast(y, self.window, catch22_window, self.alpha, &ctx.policy);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Catch22Forecaster is a 6-feature window sketch + ridge")
+                .compromise(NumericalCompromise::new(
+                    "sktime Catch22Forecaster",
+                    "mean/std/acf/slope/zcr/range on rolling windows, then ridge",
+                    "the published 22-feature catch22 set is omitted",
+                    "read the path as a summary-window sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedCatch22Forecaster {
+            coef,
+            intercept,
+            last,
+        })
+    }
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -18752,5 +19251,31 @@ impl FitSeries for TimesNetForecaster {
             .expect("tnfp");
         assert_eq!(tnp.value.len(), 3);
         assert!(tnp.value.as_slice().iter().all(|v| v.is_finite()));
+        let rkf = RocketForecaster::new()
+            .fit_series(&y, &Session::new("rkf", "t"))
+            .expect("rkf");
+        let rkp = rkf
+            .value
+            .forecast(3, &Session::new("rkfp", "t"))
+            .expect("rkfp");
+        assert_eq!(rkp.value.len(), 3);
+        assert!(rkp.value.as_slice().iter().all(|v| v.is_finite()));
+        let cnf = CnnForecaster::new()
+            .fit_series(&y, &Session::new("cnf", "t"))
+            .expect("cnf");
+        let cnp = cnf
+            .value
+            .forecast(2, &Session::new("cnfp", "t"))
+            .expect("cnfp");
+        assert_eq!(cnp.value.len(), 2);
+        let c22f = Catch22Forecaster::new()
+            .fit_series(&y, &Session::new("c22f", "t"))
+            .expect("c22f");
+        let c22p = c22f
+            .value
+            .forecast(2, &Session::new("c22fp", "t"))
+            .expect("c22fp");
+        assert_eq!(c22p.value.len(), 2);
+        assert!(c22p.value.as_slice().iter().all(|v| v.is_finite()));
     }
 }

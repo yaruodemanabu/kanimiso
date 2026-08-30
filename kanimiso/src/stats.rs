@@ -26336,6 +26336,782 @@ impl Promax {
     }
 }
 
+fn ols_arm(x: &Matrix, y: &Vector, idx: &[usize], policy: &signlred::Policy) -> (Vector, f64) {
+    let p = x.ncols();
+    if idx.len() < 2 {
+        return (Vector::zeros(p), 0.0);
+    }
+    let xa = Matrix::from_fn(idx.len(), p, |r, j| x.get(idx[r], j)).with_intercept();
+    let ya = Vector::from_iter(idx.iter().map(|&i| y[i]));
+    let mut scratch = Report::new("meta", "ols");
+    match least_squares(&mut scratch, &xa, &ya, policy) {
+        Some(sol) if sol.len() == p + 1 => (
+            Vector::from_iter((1..sol.len()).map(|j| sol[j])),
+            sol.as_slice().first().copied().unwrap_or(0.0),
+        ),
+        _ => (Vector::zeros(p), 0.0),
+    }
+}
+
+fn mu_lin(x: &Matrix, i: usize, intercept: f64, coef: &Vector) -> f64 {
+    let mut s = intercept;
+    for j in 0..x.ncols().min(coef.len()) {
+        s += x.get(i, j) * coef[j];
+    }
+    s
+}
+
+fn both_arms(treat: &Vector, idx: &[usize]) -> bool {
+    let mut n1 = 0usize;
+    let mut n0 = 0usize;
+    for &i in idx {
+        if treat[i] >= 0.5 {
+            n1 += 1;
+        } else {
+            n0 += 1;
+        }
+    }
+    n1 > 0 && n0 > 0
+}
+
+/// S-learner CATE: one outcome model on \([X, D, X\odot D]\) (Künzel et al.).
+///
+/// Treatment / interaction counts are not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct SLearner;
+
+/// Fitted S-learner.
+#[derive(Clone, Debug)]
+pub struct FittedSLearner {
+    /// Slopes on \(X\).
+    pub coef_x: Vector,
+    /// Treatment main effect.
+    pub coef_d: f64,
+    /// Slopes on \(X\odot D\).
+    pub coef_xd: Vector,
+    /// Intercept.
+    pub intercept: f64,
+}
+
+impl SLearner {
+    /// Default S-learner.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit \(Y\sim 1+X+D+X D\).
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSLearner>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let p = x.ncols();
+        if !both_arms(treat, &(0..n).collect::<Vec<_>>()) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("SLearner needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "S-learner CATE",
+                        "a missing arm cannot identify the D / XD block",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedSLearner {
+                coef_x: Vector::zeros(p),
+                coef_d: 0.0,
+                coef_xd: Vector::zeros(p),
+                intercept: 0.0,
+            });
+        }
+        let design = Matrix::from_fn(n, 1 + p + 1 + p, |i, j| {
+            let d = if treat[i] >= 0.5 { 1.0 } else { 0.0 };
+            if j == 0 {
+                1.0
+            } else if j <= p {
+                x.get(i, j - 1)
+            } else if j == p + 1 {
+                d
+            } else {
+                x.get(i, j - p - 2) * d
+            }
+        });
+        let yn = Vector::from_iter((0..n).map(|i| y[i]));
+        let mut scratch = Report::new("s-learner", "ols");
+        let sol = least_squares(&mut scratch, &design, &yn, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(2 + 2 * p));
+        for issue in scratch.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SLearner is OLS on [X, D, XD], not a published metalearner stack")
+                .compromise(NumericalCompromise::new(
+                    "Künzel S-learner",
+                    "single linear outcome with treatment interactions",
+                    "cross-fitting and a nonparametric base learner are omitted",
+                    "read CATE as β_D + X β_{XD}",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedSLearner {
+            intercept: sol.as_slice().first().copied().unwrap_or(0.0),
+            coef_x: Vector::from_iter((0..p).map(|j| sol.as_slice().get(1 + j).copied().unwrap_or(0.0))),
+            coef_d: sol.as_slice().get(1 + p).copied().unwrap_or(0.0),
+            coef_xd: Vector::from_iter(
+                (0..p).map(|j| sol.as_slice().get(2 + p + j).copied().unwrap_or(0.0)),
+            ),
+        })
+    }
+}
+
+impl FittedSLearner {
+    /// \(\hat\tau(x)=\beta_D + x^\top\beta_{XD}\).
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let p = x.ncols().min(self.coef_xd.len());
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.coef_d;
+            for j in 0..p {
+                s += x.get(i, j) * self.coef_xd[j];
+            }
+            s
+        })))
+    }
+}
+
+/// T-learner CATE: separate outcome regressions per arm (Künzel et al.).
+#[derive(Clone, Debug, Default)]
+pub struct TLearner;
+
+/// Fitted T-learner.
+#[derive(Clone, Debug)]
+pub struct FittedTLearner {
+    /// Treated slopes.
+    pub coef1: Vector,
+    /// Treated intercept.
+    pub intercept1: f64,
+    /// Control slopes.
+    pub coef0: Vector,
+    /// Control intercept.
+    pub intercept0: f64,
+}
+
+impl TLearner {
+    /// Default T-learner.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit two OLS outcome models.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedTLearner>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let p = x.ncols();
+        let treated: Vec<usize> = (0..n).filter(|&i| treat[i] >= 0.5).collect();
+        let control: Vec<usize> = (0..n).filter(|&i| treat[i] < 0.5).collect();
+        if treated.is_empty() || control.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("TLearner needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "T-learner CATE",
+                        "each arm needs its own outcome regression",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedTLearner {
+                coef1: Vector::zeros(p),
+                intercept1: 0.0,
+                coef0: Vector::zeros(p),
+                intercept0: 0.0,
+            });
+        }
+        let (coef1, intercept1) = ols_arm(x, y, &treated, &ctx.policy);
+        let (coef0, intercept0) = ols_arm(x, y, &control, &ctx.policy);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("TLearner is two scratch OLS arms, not a published metalearner")
+                .compromise(NumericalCompromise::new(
+                    "Künzel T-learner",
+                    "separate linear outcome models on each arm",
+                    "cross-fitting and a nonparametric base learner are omitted",
+                    "read CATE as μ₁(x)−μ₀(x)",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedTLearner {
+            coef1,
+            intercept1,
+            coef0,
+            intercept0,
+        })
+    }
+}
+
+impl FittedTLearner {
+    /// \(\hat\mu_1(x)-\hat\mu_0(x)\).
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            mu_lin(x, i, self.intercept1, &self.coef1) - mu_lin(x, i, self.intercept0, &self.coef0)
+        })))
+    }
+}
+
+/// X-learner CATE: imputed treatment effects plus propensity mix (Künzel et al.).
+///
+/// Propensity is ISTA logistic. Arm counts are not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct XLearner;
+
+/// Fitted X-learner.
+#[derive(Clone, Debug)]
+pub struct FittedXLearner {
+    /// Imputed-effect slopes on the treated.
+    pub tau1: Vector,
+    /// Treated intercept.
+    pub intercept1: f64,
+    /// Imputed-effect slopes on the control.
+    pub tau0: Vector,
+    /// Control intercept.
+    pub intercept0: f64,
+    /// Propensity slopes.
+    pub prop_coef: Vector,
+    /// Propensity intercept.
+    pub prop_intercept: f64,
+}
+
+impl XLearner {
+    /// Default X-learner.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit T-learner means, impute τ, then mix with propensity.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedXLearner>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let p = x.ncols();
+        let treated: Vec<usize> = (0..n).filter(|&i| treat[i] >= 0.5).collect();
+        let control: Vec<usize> = (0..n).filter(|&i| treat[i] < 0.5).collect();
+        if treated.is_empty() || control.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("XLearner needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "X-learner CATE",
+                        "imputed effects need both arms",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedXLearner {
+                tau1: Vector::zeros(p),
+                intercept1: 0.0,
+                tau0: Vector::zeros(p),
+                intercept0: 0.0,
+                prop_coef: Vector::zeros(p),
+                prop_intercept: 0.0,
+            });
+        }
+        let (b1, a1) = ols_arm(x, y, &treated, &ctx.policy);
+        let (b0, a0) = ols_arm(x, y, &control, &ctx.policy);
+        let d1 = Vector::from_iter(treated.iter().map(|&i| y[i] - mu_lin(x, i, a0, &b0)));
+        let d0 = Vector::from_iter(control.iter().map(|&i| mu_lin(x, i, a1, &b1) - y[i]));
+        let x1 = Matrix::from_fn(treated.len(), p, |r, j| x.get(treated[r], j));
+        let x0 = Matrix::from_fn(control.len(), p, |r, j| x.get(control[r], j));
+        let (tau1, intercept1) = ols_arm(&x1, &d1, &(0..treated.len()).collect::<Vec<_>>(), &ctx.policy);
+        let (tau0, intercept0) = ols_arm(&x0, &d0, &(0..control.len()).collect::<Vec<_>>(), &ctx.policy);
+        let (prop_coef, prop_intercept) = ista_logit(x, treat, 40);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("XLearner is imputed OLS CATE plus ISTA propensity, not Künzel's published stack")
+                .compromise(NumericalCompromise::new(
+                    "Künzel X-learner",
+                    "T-learner means, imputed τ regressions, propensity mix",
+                    "cross-fitting and a nonparametric base learner are omitted",
+                    "read CATE as e τ₀ + (1−e) τ₁",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedXLearner {
+            tau1,
+            intercept1,
+            tau0,
+            intercept0,
+            prop_coef,
+            prop_intercept,
+        })
+    }
+}
+
+impl FittedXLearner {
+    /// \(e(x)\hat\tau_0(x)+(1-e(x))\hat\tau_1(x)\).
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let e = propensity_row(x, i, &self.prop_coef, self.prop_intercept);
+            let t1 = mu_lin(x, i, self.intercept1, &self.tau1);
+            let t0 = mu_lin(x, i, self.intercept0, &self.tau0);
+            e * t0 + (1.0 - e) * t1
+        })))
+    }
+}
+
+/// R-learner CATE: residual-on-residual (Nie–Wager / Robinson).
+///
+/// \((Y-m(X))=(D-e(X))\,x^\top\beta\). Propensity is ISTA logistic.
+#[derive(Clone, Debug, Default)]
+pub struct RLearner;
+
+/// Fitted R-learner.
+#[derive(Clone, Debug)]
+pub struct FittedRLearner {
+    /// CATE slopes on \([1, X]\).
+    pub coef: Vector,
+}
+
+impl RLearner {
+    /// Default R-learner.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit Robinson residual-on-residual CATE.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRLearner>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let p = x.ncols();
+        if !both_arms(treat, &(0..n).collect::<Vec<_>>()) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("RLearner needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "R-learner CATE",
+                        "D−e is unidentified with a single arm",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedRLearner {
+                coef: Vector::zeros(p + 1),
+            });
+        }
+        let (bm, am) = ols_arm(x, y, &(0..n).collect::<Vec<_>>(), &ctx.policy);
+        let (pe, pb) = ista_logit(x, treat, 40);
+        let design = Matrix::from_fn(n, p + 1, |i, j| {
+            let e = propensity_row(x, i, &pe, pb);
+            let d = if treat[i] >= 0.5 { 1.0 } else { 0.0 };
+            let r = d - e;
+            if j == 0 {
+                r
+            } else {
+                r * x.get(i, j - 1)
+            }
+        });
+        let yres = Vector::from_iter((0..n).map(|i| y[i] - mu_lin(x, i, am, &bm)));
+        let mut scratch = Report::new("r-learner", "ols");
+        let coef = least_squares(&mut scratch, &design, &yres, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(p + 1));
+        for issue in scratch.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("RLearner is residual-on-residual OLS, not Nie–Wager's published R-learner")
+                .compromise(NumericalCompromise::new(
+                    "Robinson / Nie–Wager R-learner",
+                    "OLS of Y−m on (D−e)[1, X]",
+                    "cross-fitting, kernel / forest τ, and the published penalty are omitted",
+                    "read CATE as [1, x] β",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedRLearner { coef })
+    }
+}
+
+impl FittedRLearner {
+    /// Linear CATE.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.coef.as_slice().first().copied().unwrap_or(0.0);
+            for j in 0..x.ncols() {
+                if 1 + j < self.coef.len() {
+                    s += x.get(i, j) * self.coef[1 + j];
+                }
+            }
+            s
+        })))
+    }
+}
+
+/// Partially linear double ML ATE (Chernozhukov et al.).
+///
+/// \(\hat\theta=\sum(D-\hat e)(Y-\hat m)/\sum(D-\hat e)^2\). Distinct from AIPW.
+#[derive(Clone, Debug, Default)]
+pub struct DoubleMl;
+
+/// Fitted DML ATE.
+#[derive(Clone, Debug)]
+pub struct FittedDoubleMl {
+    /// Residual-on-residual ATE.
+    pub ate: f64,
+}
+
+impl DoubleMl {
+    /// Default DML ATE.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit the partially linear DML ATE (no cross-fit).
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedDoubleMl>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        if !both_arms(treat, &(0..n).collect::<Vec<_>>()) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("DoubleMl needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "DML ATE",
+                        "D−e is unidentified with a single arm",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedDoubleMl { ate: f64::NAN });
+        }
+        let (bm, am) = ols_arm(x, y, &(0..n).collect::<Vec<_>>(), &ctx.policy);
+        let (pe, pb) = ista_logit(x, treat, 40);
+        let mut num = 0.0_f64;
+        let mut den = 0.0_f64;
+        for i in 0..n {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let e = propensity_row(x, i, &pe, pb);
+            let d = if treat[i] >= 0.5 { 1.0 } else { 0.0 };
+            let r = d - e;
+            num += r * (y[i] - mu_lin(x, i, am, &bm));
+            den += r * r;
+        }
+        if den <= 1e-15 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("DoubleMl residual treatment has no variance")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "DML ATE",
+                        "D−e≈0 leaves θ unidentified",
+                        "need overlap in the propensity",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("DoubleMl is one-shot residual-on-residual, not cross-fit DML")
+                .compromise(NumericalCompromise::new(
+                    "Chernozhukov DML",
+                    "θ = Σ(D−e)(Y−m) / Σ(D−e)²",
+                    "cross-fitting, influence SE, and Neyman orthogonality diagnostics are omitted",
+                    "read θ as a residual-on-residual sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedDoubleMl {
+            ate: if den > 1e-15 { num / den } else { f64::NAN },
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+enum CateNode {
+    Leaf {
+        cate: f64,
+    },
+    Split {
+        feat: usize,
+        thresh: f64,
+        left: Box<CateNode>,
+        right: Box<CateNode>,
+    },
+}
+
+fn leaf_cate(y: &Vector, treat: &Vector, idx: &[usize]) -> f64 {
+    let mut s1 = 0.0_f64;
+    let mut n1 = 0.0_f64;
+    let mut s0 = 0.0_f64;
+    let mut n0 = 0.0_f64;
+    for &i in idx {
+        if !y[i].is_finite() {
+            continue;
+        }
+        if treat[i] >= 0.5 {
+            s1 += y[i];
+            n1 += 1.0;
+        } else {
+            s0 += y[i];
+            n0 += 1.0;
+        }
+    }
+    if n1 > 0.0 && n0 > 0.0 {
+        s1 / n1 - s0 / n0
+    } else {
+        0.0
+    }
+}
+
+fn grow_cate_tree(
+    x: &Matrix,
+    y: &Vector,
+    treat: &Vector,
+    idx: &[usize],
+    depth: usize,
+    max_depth: usize,
+    min_leaf: usize,
+    rng: &mut Rng,
+) -> CateNode {
+    let cate = leaf_cate(y, treat, idx);
+    if depth >= max_depth || idx.len() < min_leaf.saturating_mul(2) || !both_arms(treat, idx) {
+        return CateNode::Leaf { cate };
+    }
+    let p = x.ncols();
+    if p == 0 {
+        return CateNode::Leaf { cate };
+    }
+    let mut best_gain = 0.0_f64;
+    let mut best: Option<(usize, f64, Vec<usize>, Vec<usize>)> = None;
+    for _ in 0..8 {
+        let feat = rng.below(p);
+        let a = idx[rng.below(idx.len())];
+        let b = idx[rng.below(idx.len())];
+        let thresh = 0.5 * (x.get(a, feat) + x.get(b, feat));
+        if !thresh.is_finite() {
+            continue;
+        }
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for &i in idx {
+            if x.get(i, feat) <= thresh {
+                left.push(i);
+            } else {
+                right.push(i);
+            }
+        }
+        if left.len() < min_leaf || right.len() < min_leaf {
+            continue;
+        }
+        if !both_arms(treat, &left) || !both_arms(treat, &right) {
+            continue;
+        }
+        let cl = leaf_cate(y, treat, &left);
+        let cr = leaf_cate(y, treat, &right);
+        let gain = (cl - cr).abs() * ((left.len() * right.len()) as f64).sqrt();
+        if gain > best_gain {
+            best_gain = gain;
+            best = Some((feat, thresh, left, right));
+        }
+    }
+    match best {
+        Some((feat, thresh, left, right)) => CateNode::Split {
+            feat,
+            thresh,
+            left: Box::new(grow_cate_tree(
+                x, y, treat, &left, depth + 1, max_depth, min_leaf, rng,
+            )),
+            right: Box::new(grow_cate_tree(
+                x, y, treat, &right, depth + 1, max_depth, min_leaf, rng,
+            )),
+        },
+        None => CateNode::Leaf { cate },
+    }
+}
+
+fn walk_cate(node: &CateNode, x: &Matrix, i: usize) -> f64 {
+    match node {
+        CateNode::Leaf { cate } => *cate,
+        CateNode::Split {
+            feat,
+            thresh,
+            left,
+            right,
+        } => {
+            if *feat < x.ncols() && x.get(i, *feat) <= *thresh {
+                walk_cate(left, x, i)
+            } else {
+                walk_cate(right, x, i)
+            }
+        }
+    }
+}
+
+/// Causal forest CATE (Wager–Athey extra-trees lite).
+///
+/// Tree / try counts are not identification `p`. Split score is the
+/// \(\sqrt{n_L n_R}\,|\hat\tau_L-\hat\tau_R|\) gap; leaves store arm-mean gaps.
+#[derive(Clone, Debug)]
+pub struct CausalForest {
+    /// Trees. Not identification `p`.
+    pub n_estimators: usize,
+    /// Depth cap.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for CausalForest {
+    fn default() -> Self {
+        Self {
+            n_estimators: 8,
+            max_depth: 3,
+            seed: 11,
+        }
+    }
+}
+
+impl CausalForest {
+    /// Default causal forest.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted CATE forest.
+#[derive(Clone, Debug)]
+pub struct FittedCausalForest {
+    trees: Vec<CateNode>,
+}
+
+impl CausalForest {
+    /// Grow extra-trees CATE forest.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCausalForest>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let idx: Vec<usize> = (0..n).collect();
+        if !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("CausalForest needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "causal-forest CATE",
+                        "a leaf CATE is undefined without both arms",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedCausalForest { trees: Vec::new() });
+        }
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        for _ in 0..self.n_estimators.max(1) {
+            trees.push(grow_cate_tree(
+                x,
+                y,
+                treat,
+                &idx,
+                0,
+                self.max_depth.max(1),
+                2,
+                &mut rng,
+            ));
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("CausalForest is extra-trees CATE gaps, not Wager–Athey honest forests")
+                .compromise(NumericalCompromise::new(
+                    "Wager–Athey causal forest",
+                    "random-split trees with arm-mean leaf CATE",
+                    "honesty, subsample weights, and asymptotic SE are omitted",
+                    "read CATE as an ensemble leaf gap, not a published CF",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedCausalForest { trees })
+    }
+}
+
+impl FittedCausalForest {
+    /// Ensemble-mean leaf CATE.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let m = self.trees.len().max(1) as f64;
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            if self.trees.is_empty() {
+                0.0
+            } else {
+                self.trees.iter().map(|t| walk_cate(t, x, i)).sum::<f64>() / m
+            }
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -27511,5 +28287,61 @@ mod tests {
             .rotate(&loads, &Session::new("prx", "t"))
             .expect("prx");
         assert_eq!(prx.value.shape(), (20, 2));
+        let sln = SLearner::new()
+            .fit(&xate, &dur, &grp, &Session::new("sln", "t"))
+            .expect("sln");
+        let psl = sln
+            .value
+            .predict_cate(&xate, &Session::new("slnp", "t"))
+            .expect("slnp");
+        assert_eq!(psl.value.len(), 20);
+        let tln = TLearner::new()
+            .fit(&xate, &dur, &grp, &Session::new("tln", "t"))
+            .expect("tln");
+        assert_eq!(
+            tln.value
+                .predict_cate(&xate, &Session::new("tlnp", "t"))
+                .expect("tlnp")
+                .value
+                .len(),
+            20
+        );
+        let xln = XLearner::new()
+            .fit(&xate, &dur, &grp, &Session::new("xln", "t"))
+            .expect("xln");
+        assert_eq!(
+            xln.value
+                .predict_cate(&xate, &Session::new("xlnp", "t"))
+                .expect("xlnp")
+                .value
+                .len(),
+            20
+        );
+        let rln = RLearner::new()
+            .fit(&xate, &dur, &grp, &Session::new("rln", "t"))
+            .expect("rln");
+        assert_eq!(
+            rln.value
+                .predict_cate(&xate, &Session::new("rlnp", "t"))
+                .expect("rlnp")
+                .value
+                .len(),
+            20
+        );
+        let dml = DoubleMl::new()
+            .fit(&xate, &dur, &grp, &Session::new("dml", "t"))
+            .expect("dml");
+        assert!(dml.value.ate.is_finite() || dml.value.ate.is_nan());
+        let cfr = CausalForest::new()
+            .fit(&xate, &dur, &grp, &Session::new("cfr", "t"))
+            .expect("cfr");
+        assert_eq!(
+            cfr.value
+                .predict_cate(&xate, &Session::new("cfrp", "t"))
+                .expect("cfrp")
+                .value
+                .len(),
+            20
+        );
     }
 }

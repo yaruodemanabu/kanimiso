@@ -6316,6 +6316,31 @@ const INVENTORY: &[Algorithm] = &[
         "statsmodels.treatment.api",
         "estimator",
     ),
+    a("stats.SLearner", "econml.metalearners.SLearner", "estimator"),
+    a("stats.TLearner", "econml.metalearners.TLearner", "estimator"),
+    a("stats.XLearner", "econml.metalearners.XLearner", "estimator"),
+    a("stats.RLearner", "econml.metalearners.DomainAdaptationLearner", "estimator"),
+    a("stats.DoubleMl", "econml.dml.LinearDML", "estimator"),
+    a(
+        "stats.CausalForest",
+        "econml.grf.CausalForest",
+        "estimator",
+    ),
+    a(
+        "tsa.RocketForecaster",
+        "sktime.forecasting.compose.make_reduction",
+        "forecast",
+    ),
+    a(
+        "tsa.CnnForecaster",
+        "sktime.forecasting.cnn.CNNForecaster",
+        "forecast",
+    ),
+    a(
+        "tsa.Catch22Forecaster",
+        "sktime.forecasting.catch22.Catch22Forecaster",
+        "forecast",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6828,6 +6853,14 @@ mod tests {
             "tslearn.TcnClassifier",
             "panel.SunAbraham",
             "stats.Varimax",
+            "stats.SLearner",
+            "stats.TLearner",
+            "stats.XLearner",
+            "stats.RLearner",
+            "stats.DoubleMl",
+            "stats.CausalForest",
+            "tsa.RocketForecaster",
+            "tsa.CnnForecaster",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
