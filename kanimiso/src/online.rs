@@ -5567,6 +5567,167 @@ impl Predict for StreamingRandomPatches {
     }
 }
 
+/// Streaming Random Patches regressor (river `ensemble.SRPRegressor`).
+///
+/// Estimator count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SrpRegressor {
+    /// Number of patch trees.
+    pub n_estimators: usize,
+    trees: Vec<HoeffdingRegressor>,
+    masks: Vec<Vec<usize>>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+    rng: Rng,
+}
+
+impl Default for SrpRegressor {
+    fn default() -> Self {
+        Self {
+            n_estimators: 3,
+            trees: Vec::new(),
+            masks: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+            rng: Rng::new(23),
+        }
+    }
+}
+
+impl SrpRegressor {
+    /// Forest with `n_estimators` patch regressors.
+    pub fn new(n_estimators: usize) -> Self {
+        Self {
+            n_estimators: n_estimators.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn ensure(&mut self, p: usize) {
+        if self.initialized {
+            return;
+        }
+        let k = ((p as f64).sqrt().ceil() as usize).clamp(1, p.max(1));
+        self.masks = (0..self.n_estimators)
+            .map(|_| {
+                let mut idx: Vec<usize> = (0..p).collect();
+                self.rng.shuffle(&mut idx);
+                idx.truncate(k);
+                if idx.is_empty() {
+                    idx.push(0);
+                }
+                idx
+            })
+            .collect();
+        self.trees = (0..self.n_estimators)
+            .map(|_| HoeffdingRegressor::new())
+            .collect();
+        self.initialized = true;
+    }
+}
+
+impl PartialFit for SrpRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        inspect_online_xy(&mut ctx, x, Some(y));
+        self.ensure(x.ncols());
+        let mut n_up = 0u64;
+        for t in 0..self.trees.len() {
+            let mask = &self.masks[t];
+            let xs = Matrix::from_fn(x.nrows(), mask.len(), |i, j| {
+                let c = mask[j];
+                if c < x.ncols() {
+                    x.get(i, c)
+                } else {
+                    0.0
+                }
+            });
+            let _ = self.trees[t].partial_fit(&xs, Some(y), &session.child("srpr"));
+            n_up += 1;
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(n_up as f64);
+        q.information_gain = Some(n_up as f64);
+        q.still_identified = self.n_seen >= 15;
+        q.warmup = self.n_seen < 15;
+        q.explanation = format!(
+            "SRPRegressor: {} patch trees, each on {} random features",
+            self.trees.len(),
+            self.masks.first().map(|m| m.len()).unwrap_or(0)
+        );
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("SRPRegressor is still warming up")
+                    .build(),
+            );
+        }
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("{n_up} patch-regressor updates"),
+                "each Hoeffding regressor sees a random feature subspace",
+                "pre-batch SRPRegressor",
+                "post-batch SRPRegressor",
+            ),
+        )
+    }
+}
+
+impl Predict for SrpRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let n_t = self.trees.len().max(1) as f64;
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = 0.0;
+            for (t, mask) in self.masks.iter().enumerate() {
+                let xs = Matrix::from_fn(1, mask.len(), |_, j| {
+                    let c = mask[j];
+                    if c < x.ncols() {
+                        x.get(i, c)
+                    } else {
+                        0.0
+                    }
+                });
+                s += self.trees[t].predict_one(&xs, 0);
+            }
+            s / n_t
+        }));
+        ctx.finish(out)
+    }
+}
+
 /// Funk / biased SVD matrix factorization (river `reco.FunkMF`).
 ///
 /// `X` has two columns: user id and item id (rounded). `y` is the rating.
@@ -6689,6 +6850,85 @@ impl Predict for PopularReco {
             }
         }));
         ctx.finish(out)
+    }
+}
+
+/// Gaussian rating prior (river `reco.RandomNormal`).
+///
+/// Predicts the running mean; sampling noise is not used at predict time.
+#[derive(Clone, Debug, Default)]
+pub struct RandomNormalReco {
+    mean: f64,
+    m2: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl RandomNormalReco {
+    /// Empty Gaussian rating model.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for RandomNormalReco {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no ratings"),
+            );
+        };
+        let before = self.mean;
+        for i in 0..y.len() {
+            if !y[i].is_finite() {
+                continue;
+            }
+            self.n_seen += 1;
+            let d = y[i] - self.mean;
+            self.mean += d / self.n_seen as f64;
+            self.m2 += d * (y[i] - self.mean);
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.mean - before).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("RandomNormalReco μ={:.4e} n={}", self.mean, self.n_seen);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Gaussian rating mean",
+                "Welford mean/variance of ratings; predict returns μ, not a draw",
+                format!("μ={before:.4e}"),
+                format!("μ={:.4e}", self.mean),
+            ),
+        )
+    }
+}
+
+impl Predict for RandomNormalReco {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.n_seen == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::filled(x.nrows(), self.mean))
     }
 }
 
@@ -7848,6 +8088,80 @@ impl PartialFit for OnlineSmape {
                 if den > 1e-12 {
                     self.acc += 2.0 * (pred - truth).abs() / den;
                 }
+                self.updates += 1;
+                self.score()
+            },
+        )
+    }
+}
+
+/// Rolling Huber loss (river `metrics.Huber`).
+#[derive(Clone, Debug)]
+pub struct OnlineHuber {
+    /// Huber threshold.
+    pub delta: f64,
+    acc: f64,
+    n: u64,
+    updates: u64,
+}
+
+impl Default for OnlineHuber {
+    fn default() -> Self {
+        Self {
+            delta: 1.0,
+            acc: 0.0,
+            n: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlineHuber {
+    /// Huber metric with threshold `delta`.
+    pub fn new(delta: f64) -> Self {
+        Self {
+            delta,
+            ..Self::default()
+        }
+    }
+
+    /// Current mean Huber loss, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.n == 0 {
+            f64::NAN
+        } else {
+            self.acc / self.n as f64
+        }
+    }
+}
+
+impl PartialFit for OnlineHuber {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let d = if self.delta.is_finite() && self.delta > 0.0 {
+            self.delta
+        } else {
+            1.0
+        };
+        metric_partial(
+            session,
+            "huber",
+            x,
+            y,
+            self.updates,
+            self.n,
+            |pred, truth| {
+                self.n += 1;
+                let e = (pred - truth).abs();
+                self.acc += if e <= d {
+                    0.5 * e * e
+                } else {
+                    d * (e - 0.5 * d)
+                };
                 self.updates += 1;
                 self.score()
             },
@@ -14847,6 +15161,91 @@ impl Transform for TransformerUnion {
     }
 }
 
+/// Online scaler → SGD pipeline (river `compose.Pipeline`).
+#[derive(Clone, Debug, Default)]
+pub struct ComposePipeline {
+    scaler: OnlineStandardScaler,
+    inner: SgdRegressor,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl ComposePipeline {
+    /// Empty scaler-then-SGD pipeline.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for ComposePipeline {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let _ = self
+            .scaler
+            .partial_fit(x, None, &session.child("pipe_scale"));
+        let z = match self.scaler.transform(x, &session.child("pipe_zt")) {
+            Ok(q) => q.value,
+            Err(_) => x.clone(),
+        };
+        let _ = self
+            .inner
+            .partial_fit(&z, Some(y), &session.child("pipe_sgd"));
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(x.nrows() as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!("ComposePipeline n={}", self.n_seen);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "scale then SGD",
+                "online StandardScaler followed by SgdRegressor",
+                "pre-batch pipeline",
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for ComposePipeline {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.n_seen == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let z = match self.scaler.transform(x, &session.child("pipe_pred_z")) {
+            Ok(q) => q.value,
+            Err(_) => x.clone(),
+        };
+        match self.inner.predict(&z, session) {
+            Ok(q) => ctx.finish(q.value),
+            Err(_) => ctx.finish(Vector::zeros(x.nrows())),
+        }
+    }
+}
+
 /// Named elementwise map (river `compose.FuncTransformer`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ElementwiseMap {
@@ -15140,6 +15539,206 @@ impl PartialFit for FactorizationMachine {
 }
 
 impl Predict for FactorizationMachine {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.predict_row(x, i)),
+        ))
+    }
+}
+
+/// Field-aware factorization machine (river `facto.FFMRegressor`).
+///
+/// Field count is not identification `p`. Field of column `j` is `j mod n_fields`.
+#[derive(Clone, Debug)]
+pub struct FfmRegressor {
+    /// Latent width \(k\).
+    pub n_factors: usize,
+    /// Number of fields.
+    pub n_fields: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    w0: f64,
+    w: Vector,
+    v: Matrix,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for FfmRegressor {
+    fn default() -> Self {
+        Self {
+            n_factors: 2,
+            n_fields: 2,
+            learning_rate: 0.05,
+            w0: 0.0,
+            w: Vector::zeros(0),
+            v: Matrix::zeros(0, 0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl FfmRegressor {
+    /// FFM with `k` factors and `n_fields` fields.
+    pub fn new(n_factors: usize, n_fields: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            n_fields: n_fields.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn vid(&self, feat: usize, field: usize) -> usize {
+        feat * self.n_fields.max(1) + field.min(self.n_fields.saturating_sub(1))
+    }
+
+    fn field(&self, j: usize) -> usize {
+        j % self.n_fields.max(1)
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let p = x.ncols().min(self.w.len());
+        let mut s = self.w0;
+        for j in 0..p {
+            s += self.w[j] * x.get(i, j);
+        }
+        let k = self.v.ncols();
+        if k == 0 || self.v.nrows() == 0 || p < 2 {
+            return s;
+        }
+        for a in 0..p {
+            for b in (a + 1)..p {
+                let xa = x.get(i, a);
+                let xb = x.get(i, b);
+                let ia = self.vid(a, self.field(b));
+                let ib = self.vid(b, self.field(a));
+                if ia >= self.v.nrows() || ib >= self.v.nrows() {
+                    continue;
+                }
+                let mut dot = 0.0;
+                for f in 0..k {
+                    dot += self.v.get(ia, f) * self.v.get(ib, f);
+                }
+                s += xa * xb * dot;
+            }
+        }
+        s
+    }
+}
+
+impl PartialFit for FfmRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let p = x.ncols();
+        let k = self.n_factors.max(1);
+        let nf = self.n_fields.max(1);
+        if !self.initialized {
+            self.w = Vector::zeros(p);
+            self.v = Matrix::from_fn(p.max(1) * nf, k, |_, _| 0.01);
+            self.initialized = true;
+        } else if self.w.len() != p {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message("FfmRegressor feature dim changed")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let mut sse = 0.0;
+        let mut moved = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            sse += err * err;
+            self.w0 -= eta * err;
+            moved += err.abs();
+            for j in 0..p.min(self.w.len()) {
+                self.w[j] -= eta * err * x.get(i, j);
+            }
+            if p >= 2 && self.v.ncols() > 0 {
+                for a in 0..p {
+                    for b in (a + 1)..p {
+                        let xa = x.get(i, a);
+                        let xb = x.get(i, b);
+                        let ia = self.vid(a, self.field(b));
+                        let ib = self.vid(b, self.field(a));
+                        if ia >= self.v.nrows() || ib >= self.v.nrows() {
+                            continue;
+                        }
+                        for f in 0..k.min(self.v.ncols()) {
+                            let va = self.v.get(ia, f);
+                            let vb = self.v.get(ib, f);
+                            self.v.set(ia, f, va - eta * err * xb * vb);
+                            self.v.set(ib, f, vb - eta * err * xa * va);
+                        }
+                    }
+                }
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(moved);
+        q.information_gain = Some(x.nrows() as f64);
+        q.loss_after = Some(if x.nrows() > 0 {
+            sse / x.nrows() as f64
+        } else {
+            f64::NAN
+        });
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!("FFM k={k} fields={nf} sse={sse:.4e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "field-aware factor update",
+                "SGD on pairwise interactions that depend on the other feature's field",
+                "pre-batch FFM",
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for FfmRegressor {
     type Output = Vector;
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
@@ -19507,6 +20106,21 @@ mod tests {
         OnlineComplementNb::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("cnb");
+        SrpRegressor::new(2)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("srpr");
+        FfmRegressor::new(2, 2)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("ffm");
+        OnlineHuber::new(1.0)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("ohuber");
+        RandomNormalReco::new()
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("rnorm");
+        ComposePipeline::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("cpipe");
 
         let n_expl = session
             .ledger()

@@ -2202,6 +2202,8 @@ pub struct GmmHmm {
     pub seed: u64,
     /// If true, transitions to earlier states are zeroed (hmmlearn `left_right`).
     pub left_right: bool,
+    /// If true, each mixture component shares one variance across dimensions.
+    pub spherical: bool,
 }
 
 impl Default for GmmHmm {
@@ -2212,6 +2214,7 @@ impl Default for GmmHmm {
             max_iter: 40,
             seed: 0,
             left_right: false,
+            spherical: false,
         }
     }
 }
@@ -2232,6 +2235,16 @@ impl GmmHmm {
             n_states,
             n_mix,
             left_right: true,
+            ..Self::default()
+        }
+    }
+
+    /// Spherical-covariance GMM-HMM (one variance per mixture component).
+    pub fn spherical(n_states: usize, n_mix: usize) -> Self {
+        Self {
+            n_states,
+            n_mix,
+            spherical: true,
             ..Self::default()
         }
     }
@@ -2539,6 +2552,16 @@ impl FitUnsupervised for GmmHmm {
                         }
                         vars.set(r, dim, (s / nj).max(COV_FLOOR));
                     }
+                    if self.spherical && d > 0 {
+                        let mut acc = 0.0_f64;
+                        for dim in 0..d {
+                            acc += vars.get(r, dim);
+                        }
+                        let shared = (acc / d as f64).max(COV_FLOOR);
+                        for dim in 0..d {
+                            vars.set(r, dim, shared);
+                        }
+                    }
                 }
                 if wsum > 0.0 {
                     for m in 0..nm {
@@ -2595,6 +2618,9 @@ impl FitUnsupervised for GmmHmm {
         })
     }
 }
+
+/// Spherical-covariance GMM-HMM (hmmlearn `GMMHMM` with `covariance_type="spherical"`).
+pub type GmmHmmSpherical = GmmHmm;
 
 /// Poisson HMM (hmmlearn `PoissonHMM`): integer counts in column 0.
 ///
@@ -3428,6 +3454,11 @@ mod tests {
             .fit(&x, &Session::new("glr_hmm", "fit"))
             .expect("glr");
         assert!(glr.value.trans.get(1, 0) <= 1e-8);
+        let gsph = GmmHmm::spherical(2, 1)
+            .fit(&x, &Session::new("gsph_hmm", "fit"))
+            .expect("gsph");
+        assert_eq!(gsph.value.vars.ncols(), 1);
+        assert!(gsph.value.vars.get(0, 0).is_finite());
         let full = GaussianHmmFull::new(2)
             .fit(&x, &Session::new("full_hmm", "fit"))
             .expect("full");

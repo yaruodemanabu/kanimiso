@@ -5388,6 +5388,255 @@ impl FitSeries for Aparch {
     }
 }
 
+/// Heterogeneous ARCH (Müller / arch `HARCH`).
+///
+/// \(h_t=\omega+\alpha_1\varepsilon_{t-1}^2+\alpha_5\bar\varepsilon_{t,5}^2+\alpha_{22}\bar\varepsilon_{t,22}^2\).
+/// Window lengths are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Harch {
+    /// Coordinate-search iterations.
+    pub max_iter: usize,
+}
+
+impl Default for Harch {
+    fn default() -> Self {
+        Self { max_iter: 24 }
+    }
+}
+
+impl Harch {
+    /// Default HARCH(1, 5, 22).
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted HARCH variances.
+#[derive(Clone, Debug)]
+pub struct FittedHarch {
+    /// ω.
+    pub omega: f64,
+    /// Daily ARCH weight.
+    pub alpha1: f64,
+    /// Weekly ARCH weight.
+    pub alpha5: f64,
+    /// Monthly ARCH weight.
+    pub alpha22: f64,
+    /// In-sample conditional variances.
+    pub sigma2: Vector,
+    /// Demeaned residuals.
+    pub resid: Vector,
+}
+
+fn harch_mean_sq(e: &[f64], t: usize, w: usize) -> f64 {
+    let lo = t.saturating_sub(w);
+    let sl = &e[lo..t];
+    if sl.is_empty() {
+        return 0.0;
+    }
+    sl.iter().map(|v| v * v).sum::<f64>() / sl.len() as f64
+}
+
+fn harch_sigma2(e: &[f64], omega: f64, a1: f64, a5: f64, a22: f64) -> Vec<f64> {
+    let var0 = e.iter().map(|v| v * v).sum::<f64>() / e.len().max(1) as f64;
+    let mut s2 = vec![var0.max(omega).max(1e-12); e.len()];
+    for t in 1..e.len() {
+        s2[t] = omega
+            + a1 * e[t - 1] * e[t - 1]
+            + a5 * harch_mean_sq(e, t, 5)
+            + a22 * harch_mean_sq(e, t, 22);
+        if !s2[t].is_finite() || s2[t] <= 0.0 {
+            s2[t] = omega.max(1e-12);
+        }
+    }
+    s2
+}
+
+fn harch_nll(e: &[f64], omega: f64, a1: f64, a5: f64, a22: f64) -> f64 {
+    if omega <= 0.0 || a1 < 0.0 || a5 < 0.0 || a22 < 0.0 {
+        return f64::INFINITY;
+    }
+    let s2 = harch_sigma2(e, omega, a1, a5, a22);
+    let mut nll = 0.0;
+    for t in 0..e.len() {
+        let v = s2[t].max(1e-12);
+        nll += 0.5 * (v.ln() + e[t] * e[t] / v);
+    }
+    nll
+}
+
+impl FitSeries for Harch {
+    type Fitted = FittedHarch;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedHarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("HARCH QMLE needs a longer series")
+                    .metric("n", y.len() as f64)
+                    .build(),
+            );
+        }
+        let mean = y.mean();
+        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
+        let var = e.as_slice().iter().map(|v| v * v).sum::<f64>() / y.len().max(1) as f64;
+        let mut omega = 0.05 * var.max(1e-8);
+        let mut a1 = 0.10;
+        let mut a5 = 0.10;
+        let mut a22 = 0.10;
+        let mut best = harch_nll(e.as_slice(), omega, a1, a5, a22);
+        let mut step = 0.05;
+        for it in 0..self.max_iter {
+            let mut improved = false;
+            for (i, cur) in [omega, a1, a5, a22].into_iter().enumerate() {
+                for dir in [-step, step] {
+                    let mut cand = [omega, a1, a5, a22];
+                    cand[i] = (cur + dir).max(1e-8);
+                    let nll = harch_nll(e.as_slice(), cand[0], cand[1], cand[2], cand[3]);
+                    if nll < best {
+                        best = nll;
+                        omega = cand[0];
+                        a1 = cand[1];
+                        a5 = cand[2];
+                        a22 = cand[3];
+                        improved = true;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, best, None);
+            if !improved {
+                step *= 0.5;
+                if step < 1e-5 {
+                    ctx.session.converged("HARCH coordinate search", it as u64);
+                    break;
+                }
+            }
+        }
+        let sigma2 = harch_sigma2(e.as_slice(), omega, a1, a5, a22);
+        ctx.finish(FittedHarch {
+            omega,
+            alpha1: a1,
+            alpha5: a5,
+            alpha22: a22,
+            sigma2: Vector::from_iter(sigma2),
+            resid: e,
+        })
+    }
+}
+
+/// RiskMetrics / EWMA variance (arch `EWMAVariance`).
+///
+/// \(h_t=\lambda h_{t-1}+(1-\lambda)\varepsilon_{t-1}^2\).
+#[derive(Clone, Debug)]
+pub struct EwmaVol {
+    /// Fixed decay; `None` QMLE-tunes \(\lambda\).
+    pub lambda: Option<f64>,
+}
+
+impl Default for EwmaVol {
+    fn default() -> Self {
+        Self { lambda: None }
+    }
+}
+
+impl EwmaVol {
+    /// RiskMetrics \(\lambda=0.94\).
+    pub fn riskmetrics() -> Self {
+        Self { lambda: Some(0.94) }
+    }
+
+    /// QMLE \(\lambda\).
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted EWMA variances.
+#[derive(Clone, Debug)]
+pub struct FittedEwmaVol {
+    /// Decay \(\lambda\).
+    pub lambda: f64,
+    /// In-sample conditional variances.
+    pub sigma2: Vector,
+    /// Demeaned residuals.
+    pub resid: Vector,
+}
+
+fn ewma_sigma2(e: &[f64], lam: f64) -> Vec<f64> {
+    let var0 = e.iter().map(|v| v * v).sum::<f64>() / e.len().max(1) as f64;
+    let mut s2 = vec![var0.max(1e-12); e.len()];
+    let l = lam.clamp(1e-4, 0.999);
+    for t in 1..e.len() {
+        s2[t] = l * s2[t - 1] + (1.0 - l) * e[t - 1] * e[t - 1];
+        if !s2[t].is_finite() || s2[t] <= 0.0 {
+            s2[t] = var0.max(1e-12);
+        }
+    }
+    s2
+}
+
+fn ewma_nll(e: &[f64], lam: f64) -> f64 {
+    if !(0.0..1.0).contains(&lam) {
+        return f64::INFINITY;
+    }
+    let s2 = ewma_sigma2(e, lam);
+    let mut nll = 0.0;
+    for t in 0..e.len() {
+        let v = s2[t].max(1e-12);
+        nll += 0.5 * (v.ln() + e[t] * e[t] / v);
+    }
+    nll
+}
+
+impl FitSeries for EwmaVol {
+    type Fitted = FittedEwmaVol;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedEwmaVol>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let mean = y.mean();
+        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
+        let mut lam = self.lambda.unwrap_or(0.94);
+        if !(0.0..1.0).contains(&lam) {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("EWMA λ={lam} not in (0,1); using 0.94"))
+                    .build(),
+            );
+            lam = 0.94;
+        }
+        if self.lambda.is_none() {
+            let mut best = ewma_nll(e.as_slice(), lam);
+            let mut step = 0.05;
+            for _ in 0..20 {
+                let mut improved = false;
+                for dir in [-step, step] {
+                    let cand = (lam + dir).clamp(0.5, 0.999);
+                    let nll = ewma_nll(e.as_slice(), cand);
+                    if nll < best {
+                        best = nll;
+                        lam = cand;
+                        improved = true;
+                    }
+                }
+                if !improved {
+                    step *= 0.5;
+                    if step < 1e-4 {
+                        break;
+                    }
+                }
+            }
+        }
+        ctx.finish(FittedEwmaVol {
+            lambda: lam,
+            sigma2: Vector::from_iter(ewma_sigma2(e.as_slice(), lam)),
+            resid: e,
+        })
+    }
+}
+
 /// Croston intermittent-demand smoother.
 #[derive(Clone, Debug)]
 pub struct Croston {
@@ -5476,6 +5725,99 @@ impl FitSeries for Croston {
             );
         }
         ctx.finish(FittedCroston { z, p, alpha: a })
+    }
+}
+
+/// Teunter–Syntetos–Babai Croston variant (sktime `TSB`).
+///
+/// Demand probability is updated on every step; demand size only on positives.
+#[derive(Clone, Debug)]
+pub struct TsbCroston {
+    /// Demand-size smoothing.
+    pub alpha: f64,
+    /// Demand-probability smoothing.
+    pub beta: f64,
+}
+
+impl Default for TsbCroston {
+    fn default() -> Self {
+        Self {
+            alpha: 0.1,
+            beta: 0.1,
+        }
+    }
+}
+
+impl TsbCroston {
+    /// TSB with demand/probability smoothers `alpha` / `beta`.
+    pub fn new(alpha: f64, beta: f64) -> Self {
+        Self { alpha, beta }
+    }
+}
+
+/// Fitted TSB state.
+#[derive(Clone, Debug)]
+pub struct FittedTsbCroston {
+    /// Smoothed demand size.
+    pub z: f64,
+    /// Smoothed demand probability.
+    pub p: f64,
+}
+
+impl FittedTsbCroston {
+    /// Constant `z·p` forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(Vector::filled(h, self.z * self.p))
+    }
+}
+
+impl FitSeries for TsbCroston {
+    type Fitted = FittedTsbCroston;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedTsbCroston>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.as_slice().iter().any(|&v| v < 0.0) {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message("TSB expected non-negative intermittent demand")
+                    .build(),
+            );
+        }
+        let a = self.alpha.clamp(1e-6, 1.0);
+        let b = self.beta.clamp(1e-6, 1.0);
+        let mut z = 0.0;
+        let mut p = 0.0;
+        let mut init = false;
+        for &yt in y.as_slice() {
+            let occ = if yt > 0.0 { 1.0 } else { 0.0 };
+            if !init {
+                if occ > 0.0 {
+                    z = yt;
+                    p = 1.0;
+                    init = true;
+                }
+                continue;
+            }
+            p += b * (occ - p);
+            if occ > 0.0 {
+                z += a * (yt - z);
+            }
+        }
+        if !init {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("TSB saw no positive demand")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "TSB z·p",
+                        "every observation is zero; demand size is unidentified",
+                        "this is a zero series, not intermittent demand",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(FittedTsbCroston { z, p })
     }
 }
 
@@ -10134,6 +10476,35 @@ mod tests {
             .iter()
             .all(|v| v.is_finite() && *v > 0.0));
         assert!(ap.value.delta > 0.0);
+        let ha = Harch::new()
+            .fit_series(&y, &Session::new("harch", "fit"))
+            .expect("harch");
+        assert!(ha
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        let ew = EwmaVol::riskmetrics()
+            .fit_series(&y, &Session::new("ewma", "fit"))
+            .expect("ewma");
+        assert!((ew.value.lambda - 0.94).abs() < 1e-12);
+        assert!(ew
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        let tsb = TsbCroston::new(0.2, 0.2)
+            .fit_series(&ypos, &Session::new("tsb", "fit"))
+            .expect("tsb");
+        let tsbf = tsb
+            .value
+            .forecast(3, &Session::new("tsb", "fc"))
+            .expect("tsbf")
+            .value;
+        assert_eq!(tsbf.len(), 3);
+        assert!(tsbf.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
         let uc = UnobservedComponents::with_seasonal(4)
             .fit_series(&y, &Session::new("uc", "fit"))
             .expect("uc");

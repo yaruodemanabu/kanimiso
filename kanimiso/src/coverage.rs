@@ -3929,6 +3929,35 @@ const INVENTORY: &[Algorithm] = &[
         "river.naive_bayes.ComplementNB",
         "online",
     ),
+    a("hmm.GmmHmmSpherical", "hmmlearn.hmm.GMMHMM", "hmm"),
+    a("tsa.Harch", "arch.univariate.HARCH", "forecast"),
+    a("tsa.EwmaVol", "arch.univariate.EWMAVariance", "forecast"),
+    a(
+        "tsa.TsbCroston",
+        "sktime.forecasting.croston.TSB",
+        "forecast",
+    ),
+    a(
+        "online.SrpRegressor",
+        "river.ensemble.SRPRegressor",
+        "online",
+    ),
+    a(
+        "online.FfmRegressor",
+        "river.facto.FFMRegressor",
+        "online",
+    ),
+    a("online.OnlineHuber", "river.metrics.Huber", "online"),
+    a(
+        "online.RandomNormalReco",
+        "river.reco.RandomNormal",
+        "online",
+    ),
+    a(
+        "online.ComposePipeline",
+        "river.compose.Pipeline",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4166,6 +4195,15 @@ mod tests {
             "tsa.DeterministicProcess",
             "online.DummyDrift",
             "online.OnlineComplementNb",
+            "hmm.GmmHmmSpherical",
+            "tsa.Harch",
+            "tsa.EwmaVol",
+            "tsa.TsbCroston",
+            "online.SrpRegressor",
+            "online.FfmRegressor",
+            "online.OnlineHuber",
+            "online.RandomNormalReco",
+            "online.ComposePipeline",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
