@@ -602,6 +602,33 @@ impl Fit for PassiveAggressive {
     }
 }
 
+/// sklearn `PassiveAggressiveClassifier` name for [`PassiveAggressive`].
+#[derive(Clone, Debug, Default)]
+pub struct PassiveAggressiveClassifier {
+    inner: PassiveAggressive,
+}
+
+impl PassiveAggressiveClassifier {
+    /// PA-I with aggressiveness `c`.
+    pub fn new(c: f64) -> Self {
+        Self {
+            inner: PassiveAggressive::new(c),
+        }
+    }
+}
+
+impl Fit for PassiveAggressiveClassifier {
+    type Fitted = FittedLinearClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLinearClassifier>> {
+        self.inner.fit(x, y, session)
+    }
+}
+
 /// Dummy classifier: always predict the most frequent training label.
 #[derive(Clone, Debug, Default)]
 pub struct DummyClassifier {}
@@ -963,6 +990,16 @@ mod tests {
                 "pa",
                 PassiveAggressive::new(1.0)
                     .fit(&x, &y, &Session::new("clf", "pa"))
+                    .unwrap()
+                    .value
+                    .predict(&x, &Session::new("clf", "p"))
+                    .unwrap()
+                    .value,
+            ),
+            (
+                "pac",
+                PassiveAggressiveClassifier::new(1.0)
+                    .fit(&x, &y, &Session::new("clf", "pac"))
                     .unwrap()
                     .value
                     .predict(&x, &Session::new("clf", "p"))

@@ -5830,6 +5830,61 @@ const INVENTORY: &[Algorithm] = &[
         "sktime.classification.feature_based.Catch22Classifier",
         "estimator",
     ),
+    a(
+        "stats.RandomSurvivalForest",
+        "sksurv.ensemble.RandomSurvivalForest",
+        "estimator",
+    ),
+    a(
+        "stats.ExtraSurvivalTrees",
+        "sksurv.ensemble.ExtraSurvivalTrees",
+        "estimator",
+    ),
+    a(
+        "stats.Coxnet",
+        "sksurv.linear_model.CoxnetSurvivalAnalysis",
+        "estimator",
+    ),
+    a(
+        "stats.CoxnetFitter",
+        "sksurv.linear_model.CoxnetSurvivalAnalysis",
+        "estimator",
+    ),
+    a(
+        "stats.SurvivalSvm",
+        "sksurv.svm.FastSurvivalSVM",
+        "estimator",
+    ),
+    a(
+        "stats.FastSurvivalSvm",
+        "sksurv.svm.FastSurvivalSVM",
+        "estimator",
+    ),
+    a(
+        "stats.GradientBoostingSurvival",
+        "sksurv.ensemble.GradientBoostingSurvivalAnalysis",
+        "estimator",
+    ),
+    a(
+        "stats.ComponentwiseGradientBoostingSurvival",
+        "sksurv.ensemble.ComponentwiseGradientBoostingSurvivalAnalysis",
+        "estimator",
+    ),
+    a(
+        "ensemble.RotationForestRegressor",
+        "sktime.regression.interval_based.TimeSeriesForestRegressor",
+        "estimator",
+    ),
+    a(
+        "tslearn.RotationForestRegressor",
+        "sktime.regression.interval_based.TimeSeriesForestRegressor",
+        "estimator",
+    ),
+    a(
+        "classification.PassiveAggressiveClassifier",
+        "sklearn.linear_model.PassiveAggressiveClassifier",
+        "estimator",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6290,6 +6345,13 @@ mod tests {
             "online.HoeffdingAdaptiveTreeClassifier",
             "online.ExtremelyFastDecisionTreeClassifier",
             "tslearn.Catch22ForestClassifier",
+            "stats.RandomSurvivalForest",
+            "stats.Coxnet",
+            "stats.SurvivalSvm",
+            "stats.GradientBoostingSurvival",
+            "ensemble.RotationForestRegressor",
+            "tslearn.RotationForestRegressor",
+            "classification.PassiveAggressiveClassifier",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

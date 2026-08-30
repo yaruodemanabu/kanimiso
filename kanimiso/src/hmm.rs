@@ -4662,6 +4662,91 @@ impl FitUnsupervised for VariationalGmmHmm {
     }
 }
 
+/// Left-right (Bakis) Gaussian HMM (hmmlearn `GaussianHMM` with `left_right`).
+///
+/// State count is not treated as an extra identification `p` beyond the
+/// inner [`GaussianHmm`] fit.
+#[derive(Clone, Debug)]
+pub struct GaussianHmmLeftRight {
+    inner: GaussianHmm,
+}
+
+impl Default for GaussianHmmLeftRight {
+    fn default() -> Self {
+        Self {
+            inner: GaussianHmm::left_right(2),
+        }
+    }
+}
+
+impl GaussianHmmLeftRight {
+    /// Left-right Gaussian HMM with `n_states` states.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            inner: GaussianHmm::left_right(n_states),
+        }
+    }
+
+    /// Fit alias for [`FitUnsupervised::fit_unsupervised`].
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGaussianHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+impl FitUnsupervised for GaussianHmmLeftRight {
+    type Fitted = FittedGaussianHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedGaussianHmm>> {
+        self.inner.fit_unsupervised(x, session)
+    }
+}
+
+/// Left-right multinomial HMM (hmmlearn `MultinomialHMM` / `CategoricalHMM`).
+#[derive(Clone, Debug)]
+pub struct MultinomialHmmLeftRight {
+    inner: MultinomialHmm,
+}
+
+impl Default for MultinomialHmmLeftRight {
+    fn default() -> Self {
+        Self {
+            inner: MultinomialHmm::left_right(2),
+        }
+    }
+}
+
+impl MultinomialHmmLeftRight {
+    /// Left-right multinomial HMM with `n_states` states.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            inner: MultinomialHmm::left_right(n_states),
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedMultinomialHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+impl FitUnsupervised for MultinomialHmmLeftRight {
+    type Fitted = FittedMultinomialHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedMultinomialHmm>> {
+        self.inner.fit_unsupervised(x, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4718,11 +4803,19 @@ mod tests {
             .expect("lr");
         assert!(lr.value.trans.get(1, 0) <= 1e-8);
         assert!(lr.value.start[0] >= lr.value.start[1] - 1e-9);
+        let glrn = GaussianHmmLeftRight::new(2)
+            .fit(&x, &Session::new("glrn_hmm", "fit"))
+            .expect("glrn");
+        assert!(glrn.value.trans.get(1, 0) <= 1e-8);
         let cat = Matrix::from_fn(40, 1, |i, _| if i < 20 { 0.0 } else { 1.0 });
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
         assert!(mlr.value.trans.get(1, 0) <= 1e-8);
+        let mlrn = MultinomialHmmLeftRight::new(2)
+            .fit(&cat, &Session::new("mlrn_hmm", "fit"))
+            .expect("mlrn");
+        assert!(mlrn.value.trans.get(1, 0) <= 1e-8);
         let glr = GmmHmm::left_right(2, 1)
             .fit(&x, &Session::new("glr_hmm", "fit"))
             .expect("glr");

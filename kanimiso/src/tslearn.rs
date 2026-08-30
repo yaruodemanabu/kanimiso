@@ -14875,6 +14875,128 @@ impl Fit for Catch22ForestClassifier {
     }
 }
 
+/// Catch22 + rotation-forest regressor (sktime `RotationForest` regression lite).
+///
+/// Catch22 width and tree count are not identification `p`. ExtraTrees /
+/// rotation failures fall back to ridge. Do not call `inspect_classes`.
+#[derive(Clone, Debug)]
+pub struct RotationForestRegressor {
+    /// Rotation-forest members.
+    pub n_estimators: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for RotationForestRegressor {
+    fn default() -> Self {
+        Self {
+            n_estimators: 4,
+            max_depth: 4,
+            seed: 37,
+        }
+    }
+}
+
+impl RotationForestRegressor {
+    /// Default Catch22–rotation-forest regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted Catch22 rotation forest or ridge fallback.
+#[derive(Clone, Debug)]
+pub struct FittedRotationForestRegressor {
+    forest: Option<crate::ensemble::FittedRotationForestRegressor>,
+    ridge: Option<FittedPenalized>,
+}
+
+impl Fit for RotationForestRegressor {
+    type Fitted = FittedRotationForestRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRotationForestRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let z = catch22_rows(x, session, &mut ctx);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("tslearn RotationForestRegressor is Catch22 plus rotated CART")
+                .compromise(NumericalCompromise::new(
+                    "sktime RotationForest on the raw series",
+                    "catch22_rows then ensemble RotationForestRegressor",
+                    "PCA rotations are on Catch22, not on the time axis",
+                    "do not read as a published Rotation Forest accuracy",
+                ))
+                .build(),
+        );
+        let mut rf = crate::ensemble::RotationForestRegressor {
+            n_estimators: self.n_estimators.max(1),
+            max_depth: self.max_depth.max(1),
+            seed: self.seed,
+        };
+        match rf.fit(&z, y, &session.child("rotfr-c22")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::R2IsOne
+                            | IssueCode::RankZero
+                            | IssueCode::MeaninglessFit
+                            | IssueCode::PredictionsAreConstant
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                ctx.finish(FittedRotationForestRegressor {
+                    forest: Some(q.value),
+                    ridge: None,
+                })
+            }
+            Err(_) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("RotationForestRegressor failed; falling back to Catch22 ridge")
+                        .build(),
+                );
+                let ridge = ridge_reg_from_features(&z, y, 0.5, &ctx.policy, "rotfr");
+                ctx.finish(FittedRotationForestRegressor {
+                    forest: None,
+                    ridge: Some(ridge),
+                })
+            }
+        }
+    }
+}
+
+impl Predict for FittedRotationForestRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = {
+            let mut ctx = FitCtx::with_session(session.child("rotfr-z"));
+            catch22_rows(x, session, &mut ctx)
+        };
+        if let Some(f) = &self.forest {
+            return f.predict(&z, session);
+        }
+        if let Some(r) = &self.ridge {
+            return r.predict(&z, session);
+        }
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+        ctx.finish(Vector::zeros(x.nrows()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -15339,6 +15461,16 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(phmrc.len(), 8);
+        let rotfr = RotationForestRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "rotfr"))
+            .unwrap();
+        let protfr = rotfr
+            .value
+            .predict(&x, &Session::new("ts", "rotfrp"))
+            .unwrap()
+            .value;
+        assert_eq!(protfr.len(), 8);
+        assert!(protfr.as_slice().iter().all(|v| v.is_finite()));
         let rst = Rstsf::new()
             .fit(&x, &y, &Session::new("ts", "rstsf"))
             .unwrap();

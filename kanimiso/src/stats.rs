@@ -17736,10 +17736,12 @@ impl IntervalCensoredPH {
     }
 }
 
-/// Profiled-\(\theta\) gamma frailty (grid over the shared-frailty EM).
+/// Profiled-\(\theta\) gamma frailty (finite-difference Newton on the EM loglik).
 ///
-/// Group / grid counts are not identification `p`. Inner EM uses
-/// [`shared_frailty`]; aborting inner codes are not promoted.
+/// Group / Newton-step counts are not identification `p`. Inner EM uses
+/// [`shared_frailty`]; aborting inner codes are not promoted. The score is
+/// a central difference of the fixed-\(\theta\) EM log-likelihood, not the
+/// analytic penalized-partial-likelihood derivative.
 pub fn profile_frailty(
     durations: &Vector,
     events: &Vector,
@@ -17753,26 +17755,28 @@ pub fn profile_frailty(
     ctx.push(
         Issue::builder(IssueCode::CausalClaimUnidentified)
             .severity(Severity::Advisory)
-            .message("profile_frailty is a coarse θ grid, not a profiled PPL Newton")
+            .message("profile_frailty is finite-difference Newton on EM loglik, not an analytic PPL score")
             .compromise(NumericalCompromise::new(
                 "penalized partial likelihood with a continuous θ score",
-                "max log-likelihood over {0.1, 0.25, 0.5, 1, 2}",
-                "the grid is coarse and each node is fixed-θ EM",
-                "read θ as a discrete empirical-Bayes pick, not the unique PPL MLE",
+                "central-difference Newton on shared_frailty's EM log-likelihood",
+                "each node is still fixed-θ EM; the difference is not the PPL gradient",
+                "read θ as a one-dimensional profile of the EM proxy, not the unique PPL MLE",
             ))
             .build(),
     );
-    let grid = [0.1_f64, 0.25, 0.5, 1.0, 2.0];
+    let mut theta = 0.5_f64;
     let mut best: Option<FittedSharedFrailty> = None;
     let mut best_ll = f64::NEG_INFINITY;
-    for (k, &th) in grid.iter().enumerate() {
+    let mut eval_k = 0u64;
+    let mut eval = |th: f64, ctx: &mut FitCtx| -> Option<FittedSharedFrailty> {
+        eval_k += 1;
         match shared_frailty(
             durations,
             events,
             x,
             groups,
             th,
-            &session.child(format!("pfr-{k}")),
+            &session.child(format!("pfr-{eval_k}")),
         ) {
             Ok(q) => {
                 for issue in q.report.issues() {
@@ -17781,10 +17785,7 @@ pub fn profile_frailty(
                     }
                     ctx.push(issue.clone());
                 }
-                if q.value.loglik.is_finite() && q.value.loglik >= best_ll {
-                    best_ll = q.value.loglik;
-                    best = Some(q.value);
-                }
+                Some(q.value)
             }
             Err(err) => {
                 for issue in err.report.issues() {
@@ -17793,6 +17794,57 @@ pub fn profile_frailty(
                     }
                     ctx.push(issue.clone());
                 }
+                None
+            }
+        }
+    };
+    for _it in 0..6 {
+        let Some(f0) = eval(theta, &mut ctx) else {
+            theta = (theta * 1.4).clamp(1e-4, 8.0);
+            continue;
+        };
+        if f0.loglik.is_finite() && f0.loglik >= best_ll {
+            best_ll = f0.loglik;
+            best = Some(f0.clone());
+        }
+        let h = (0.08 * theta).clamp(1e-3, 0.35);
+        let th_p = (theta + h).min(8.0);
+        let th_m = (theta - h).max(1e-4);
+        let fp = eval(th_p, &mut ctx);
+        let fm = eval(th_m, &mut ctx);
+        let score = match (fp.as_ref(), fm.as_ref()) {
+            (Some(a), Some(b)) if a.loglik.is_finite() && b.loglik.is_finite() => {
+                (a.loglik - b.loglik) / (th_p - th_m).max(1e-8)
+            }
+            (Some(a), _) if a.loglik.is_finite() && f0.loglik.is_finite() => {
+                (a.loglik - f0.loglik) / h
+            }
+            (_, Some(b)) if b.loglik.is_finite() && f0.loglik.is_finite() => {
+                (f0.loglik - b.loglik) / h
+            }
+            _ => 0.0,
+        };
+        let hess = match (fp.as_ref(), fm.as_ref()) {
+            (Some(a), Some(b))
+                if a.loglik.is_finite() && b.loglik.is_finite() && f0.loglik.is_finite() =>
+            {
+                (a.loglik - 2.0 * f0.loglik + b.loglik) / (h * h).max(1e-12)
+            }
+            _ => -1.0,
+        };
+        if score.abs() < 1e-4 {
+            break;
+        }
+        let step = if hess < -1e-8 {
+            -score / hess
+        } else {
+            0.2 * score.signum()
+        };
+        theta = (theta + step.clamp(-1.2, 1.2)).clamp(1e-4, 8.0);
+        if let Some(fit) = fp.or(fm) {
+            if fit.loglik.is_finite() && fit.loglik > best_ll {
+                best_ll = fit.loglik;
+                best = Some(fit);
             }
         }
     }
@@ -17801,13 +17853,13 @@ pub fn profile_frailty(
     }
     ctx.push(
         Issue::builder(IssueCode::DidNotConverge)
-            .message("profile_frailty grid produced no finite log-likelihood")
+            .message("profile_frailty Newton produced no finite log-likelihood")
             .build(),
     );
     ctx.finish(FittedSharedFrailty {
         coef: Vector::zeros(x.ncols()),
         frailty: Vector::filled(x.nrows(), 1.0),
-        theta: 0.5,
+        theta,
         loglik: f64::NAN,
         n_events: 0,
         n_groups: 0,
@@ -17820,12 +17872,12 @@ pub fn profile_frailty(
 pub struct ProfileFrailty;
 
 impl ProfileFrailty {
-    /// Default θ-grid frailty.
+    /// Default finite-difference θ Newton.
     pub fn new() -> Self {
         Self
     }
 
-    /// Fit the coarse θ grid.
+    /// Fit the profiled-θ frailty proxy.
     pub fn fit(
         &self,
         durations: &Vector,
@@ -21114,6 +21166,1082 @@ impl FinkelsteinIcm {
     }
 }
 
+fn soft_threshold(z: f64, lam: f64) -> f64 {
+    if z > lam {
+        z - lam
+    } else if z < -lam {
+        z + lam
+    } else {
+        0.0
+    }
+}
+
+fn nelson_aalen_idx(times: &Vector, events: &Vector, idx: &[usize]) -> f64 {
+    let mut ev_t: Vec<f64> = idx
+        .iter()
+        .copied()
+        .filter(|&i| i < events.len() && i < times.len() && events[i] > 0.5 && times[i].is_finite())
+        .map(|i| times[i])
+        .collect();
+    ev_t.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ev_t.dedup_by(|a, b| (*a - *b).abs() <= 0.0);
+    let mut h = 0.0_f64;
+    for &t in &ev_t {
+        let mut r = 0.0_f64;
+        let mut d = 0.0_f64;
+        for &i in idx {
+            if i >= times.len() || !times[i].is_finite() {
+                continue;
+            }
+            if times[i] + 1e-15 >= t {
+                r += 1.0;
+            }
+            if i < events.len() && events[i] > 0.5 && (times[i] - t).abs() <= 0.0 {
+                d += 1.0;
+            }
+        }
+        if r > 1e-15 {
+            h += d / r;
+        }
+    }
+    h
+}
+
+fn mh_split_stat(times: &Vector, events: &Vector, left: &[usize], right: &[usize]) -> f64 {
+    let mut ev_t: Vec<f64> = left
+        .iter()
+        .chain(right.iter())
+        .copied()
+        .filter(|&i| i < events.len() && i < times.len() && events[i] > 0.5 && times[i].is_finite())
+        .map(|i| times[i])
+        .collect();
+    ev_t.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ev_t.dedup_by(|a, b| (*a - *b).abs() <= 0.0);
+    let mut oe = 0.0_f64;
+    let mut var = 0.0_f64;
+    for &t in &ev_t {
+        let mut n0 = 0.0_f64;
+        let mut n1 = 0.0_f64;
+        let mut d0 = 0.0_f64;
+        let mut d1 = 0.0_f64;
+        for &i in left {
+            if i >= times.len() || !times[i].is_finite() {
+                continue;
+            }
+            if times[i] + 1e-15 >= t {
+                n0 += 1.0;
+                if i < events.len() && events[i] > 0.5 && (times[i] - t).abs() <= 0.0 {
+                    d0 += 1.0;
+                }
+            }
+        }
+        for &i in right {
+            if i >= times.len() || !times[i].is_finite() {
+                continue;
+            }
+            if times[i] + 1e-15 >= t {
+                n1 += 1.0;
+                if i < events.len() && events[i] > 0.5 && (times[i] - t).abs() <= 0.0 {
+                    d1 += 1.0;
+                }
+            }
+        }
+        let n = n0 + n1;
+        let d = d0 + d1;
+        if n <= 1.0 || d <= 0.0 {
+            continue;
+        }
+        oe += d0 - d * n0 / n;
+        var += d * (n - d) * n0 * n1 / (n * n * (n - 1.0));
+    }
+    if var <= 1e-15 {
+        0.0
+    } else {
+        oe * oe / var
+    }
+}
+
+#[derive(Clone, Debug)]
+enum SurvNode {
+    Leaf {
+        risk: f64,
+    },
+    Split {
+        feat: usize,
+        thresh: f64,
+        left: Box<SurvNode>,
+        right: Box<SurvNode>,
+    },
+}
+
+fn grow_surv_tree(
+    x: &Matrix,
+    times: &Vector,
+    events: &Vector,
+    idx: &[usize],
+    depth: usize,
+    max_depth: usize,
+    min_samples: usize,
+    n_try: usize,
+    rng: &mut Rng,
+) -> SurvNode {
+    let n_ev = idx
+        .iter()
+        .filter(|&&i| i < events.len() && events[i] > 0.5)
+        .count();
+    if depth >= max_depth || idx.len() < min_samples.saturating_mul(2) || n_ev == 0 {
+        return SurvNode::Leaf {
+            risk: nelson_aalen_idx(times, events, idx),
+        };
+    }
+    let p = x.ncols().max(1);
+    let mut best: Option<(f64, usize, f64, Vec<usize>, Vec<usize>)> = None;
+    for _ in 0..n_try.max(1) {
+        let j = rng.below(p);
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for &i in idx {
+            let v = x.get(i, j);
+            if v.is_finite() {
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+        }
+        if !lo.is_finite() || hi - lo <= 1e-15 {
+            continue;
+        }
+        let t = lo + rng.uniform() * (hi - lo);
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for &i in idx {
+            if x.get(i, j) <= t {
+                left.push(i);
+            } else {
+                right.push(i);
+            }
+        }
+        if left.len() < min_samples || right.len() < min_samples {
+            continue;
+        }
+        let stat = mh_split_stat(times, events, &left, &right);
+        if !stat.is_finite() {
+            continue;
+        }
+        if best.as_ref().map(|b| stat > b.0).unwrap_or(true) {
+            best = Some((stat, j, t, left, right));
+        }
+    }
+    match best {
+        None => SurvNode::Leaf {
+            risk: nelson_aalen_idx(times, events, idx),
+        },
+        Some((_, j, t, left, right)) => SurvNode::Split {
+            feat: j,
+            thresh: t,
+            left: Box::new(grow_surv_tree(
+                x, times, events, &left, depth + 1, max_depth, min_samples, n_try, rng,
+            )),
+            right: Box::new(grow_surv_tree(
+                x, times, events, &right, depth + 1, max_depth, min_samples, n_try, rng,
+            )),
+        },
+    }
+}
+
+fn surv_node_risk(node: &SurvNode, x: &Matrix, i: usize) -> f64 {
+    match node {
+        SurvNode::Leaf { risk } => *risk,
+        SurvNode::Split {
+            feat,
+            thresh,
+            left,
+            right,
+        } => {
+            if x.get(i, *feat) <= *thresh {
+                surv_node_risk(left, x, i)
+            } else {
+                surv_node_risk(right, x, i)
+            }
+        }
+    }
+}
+
+/// Random survival forest (sksurv `RandomSurvivalForest` lite).
+///
+/// Extra-trees log-rank splits; leaves store a local Nelson–Aalen
+/// \(H(\infty)\). Tree / try counts are not identification `p`. Does not call
+/// [`nelson_aalen`]. Inspect times via `X` (durations are not a class).
+#[derive(Clone, Debug)]
+pub struct RandomSurvivalForest {
+    /// Trees. Not identification `p`.
+    pub n_estimators: usize,
+    /// Maximum depth.
+    pub max_depth: usize,
+    /// Minimum samples on each child.
+    pub min_samples_split: usize,
+    /// Random split tries per node. Not identification `p`.
+    pub n_try: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for RandomSurvivalForest {
+    fn default() -> Self {
+        Self {
+            n_estimators: 8,
+            max_depth: 3,
+            min_samples_split: 2,
+            n_try: 6,
+            seed: 19,
+        }
+    }
+}
+
+impl RandomSurvivalForest {
+    /// Default extra-trees survival forest.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit log-rank extra-trees on durations, events, and covariates.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedRandomSurvivalForest>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(durations.len()).min(events.len());
+        let n_events = (0..n).filter(|&i| events[i] > 0.5).count();
+        if n_events == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("RandomSurvivalForest has no events")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "ensemble cumulative hazard",
+                        "zero events ⇒ empty log-rank and empty Nelson–Aalen",
+                        "collect events",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("RandomSurvivalForest is extra-trees log-rank, not Ishwaran et al. RSF")
+                .compromise(NumericalCompromise::new(
+                    "Ishwaran random survival forest with log-rank splitting",
+                    "extra-trees thresholds and a scalar Nelson–Aalen leaf risk",
+                    "time-dependent ensemble CHF and OOB C-index are omitted",
+                    "read the score as a ranking proxy, not a published RSF CHF",
+                ))
+                .build(),
+        );
+        let idx: Vec<usize> = (0..n).collect();
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        for _ in 0..self.n_estimators.max(1) {
+            let mut trng = Rng::new(rng.next_u64());
+            trees.push(grow_surv_tree(
+                x,
+                durations,
+                events,
+                &idx,
+                0,
+                self.max_depth.max(1),
+                self.min_samples_split.max(1),
+                self.n_try.max(1),
+                &mut trng,
+            ));
+        }
+        ctx.finish(FittedRandomSurvivalForest {
+            trees,
+            n_features: x.ncols(),
+        })
+    }
+}
+
+/// Fitted extra-trees survival forest (leaf Nelson–Aalen risk).
+#[derive(Clone, Debug)]
+pub struct FittedRandomSurvivalForest {
+    trees: Vec<SurvNode>,
+    /// Training feature count.
+    pub n_features: usize,
+}
+
+impl FittedRandomSurvivalForest {
+    /// Ensemble-mean leaf Nelson–Aalen risk.
+    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.ncols() != self.n_features {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("RandomSurvivalForest predict width ≠ training p")
+                    .build(),
+            );
+        }
+        let inv = if self.trees.is_empty() {
+            0.0
+        } else {
+            1.0 / self.trees.len() as f64
+        };
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            self.trees
+                .iter()
+                .map(|t| surv_node_risk(t, x, i))
+                .sum::<f64>()
+                * inv
+        })))
+    }
+}
+
+/// Extra-trees survival forest (sksurv `ExtraSurvivalTrees`).
+#[derive(Clone, Debug)]
+pub struct ExtraSurvivalTrees {
+    inner: RandomSurvivalForest,
+}
+
+impl Default for ExtraSurvivalTrees {
+    fn default() -> Self {
+        Self {
+            inner: RandomSurvivalForest {
+                n_estimators: 10,
+                max_depth: 3,
+                min_samples_split: 2,
+                n_try: 8,
+                seed: 23,
+            },
+        }
+    }
+}
+
+impl ExtraSurvivalTrees {
+    /// Default extra-trees survival forest.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit the extra-trees survival forest.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedRandomSurvivalForest>> {
+        self.inner.fit(durations, events, x, session)
+    }
+}
+
+/// Elastic-net Cox (sksurv `CoxnetSurvivalAnalysis` / glmnet `coxnet`).
+///
+/// ISTA on the Breslow partial likelihood. Penalty / iteration counts are not
+/// identification `p`. Inner information is never Cholesky-factorized.
+#[derive(Clone, Debug)]
+pub struct Coxnet {
+    /// Elastic-net \(\alpha\).
+    pub alpha: f64,
+    /// L1 fraction in \([0,1]\).
+    pub l1_ratio: f64,
+    /// ISTA steps. Not identification `p`.
+    pub max_iter: usize,
+}
+
+impl Default for Coxnet {
+    fn default() -> Self {
+        Self {
+            alpha: 0.1,
+            l1_ratio: 0.5,
+            max_iter: 40,
+        }
+    }
+}
+
+impl Coxnet {
+    /// Default elastic-net Cox.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit \(\hat\beta\) by ISTA on the Breslow partial likelihood.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCoxnet>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(durations.len()).min(events.len());
+        let p = x.ncols();
+        let n_events = (0..n).filter(|&i| events[i] > 0.5).count();
+        if n_events == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("Coxnet has no events")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "elastic-net Cox coefficients",
+                        "zero events ⇒ empty partial likelihood",
+                        "collect events",
+                    ))
+                    .build(),
+            );
+        }
+        let alpha = if self.alpha.is_finite() && self.alpha >= 0.0 {
+            self.alpha
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("Coxnet α={} is not a finite ≥0; using 0.1", self.alpha))
+                    .build(),
+            );
+            0.1
+        };
+        let l1 = if self.l1_ratio.is_finite() {
+            self.l1_ratio.clamp(0.0, 1.0)
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("Coxnet l1_ratio is non-finite; using 0.5")
+                    .build(),
+            );
+            0.5
+        };
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Coxnet is ISTA on Breslow PL, not glmnet coordinate descent")
+                .compromise(NumericalCompromise::new(
+                    "coordinate-descent Coxnet / glmnet",
+                    "ISTA with a scalar step and a soft-threshold",
+                    "the Hessian diagonal and active-set rules are omitted",
+                    "read β as a shrinkage ranking, not a published Coxnet path",
+                ))
+                .build(),
+        );
+        let mut idx: Vec<usize> = (0..n).collect();
+        idx.sort_by(|&a, &b| {
+            durations[a]
+                .partial_cmp(&durations[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut xss = 0.0_f64;
+        for i in 0..n {
+            for j in 0..p {
+                let v = x.get(i, j);
+                xss += v * v;
+            }
+        }
+        let lr = 0.08 / (1.0 + xss / n.max(1) as f64);
+        let mut beta = Vector::zeros(p);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut converged = false;
+        for it in 0..self.max_iter.max(1) {
+            let (ll, grad, _) = cox_grad_hess(&idx, durations, events, x, &beta);
+            loglik = ll;
+            if !grad.as_slice().iter().all(|v| v.is_finite()) {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("Coxnet gradient became non-finite")
+                        .build(),
+                );
+                break;
+            }
+            let mut gnorm = 0.0_f64;
+            for j in 0..p {
+                let u = beta[j] + lr * grad[j];
+                beta[j] = soft_threshold(u, lr * alpha * l1) / (1.0 + lr * alpha * (1.0 - l1));
+                beta[j] = beta[j].clamp(-20.0, 20.0);
+                gnorm += grad[j] * grad[j];
+            }
+            if gnorm.sqrt() < 1e-6 {
+                converged = true;
+                break;
+            }
+            let _ = it;
+        }
+        if !beta.as_slice().iter().all(|v| v.is_finite()) {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("Coxnet coefficients are non-finite")
+                    .build(),
+            );
+            beta = Vector::zeros(p);
+        }
+        ctx.finish(FittedCoxnet {
+            coef: beta,
+            alpha,
+            l1_ratio: l1,
+            loglik,
+            n_events,
+            converged,
+        })
+    }
+}
+
+/// Fitted elastic-net Cox coefficients.
+#[derive(Clone, Debug)]
+pub struct FittedCoxnet {
+    /// Penalized log-hazard slopes.
+    pub coef: Vector,
+    /// Elastic-net \(\alpha\).
+    pub alpha: f64,
+    /// L1 fraction.
+    pub l1_ratio: f64,
+    /// Last Breslow partial log-likelihood.
+    pub loglik: f64,
+    /// Uncensored events.
+    pub n_events: usize,
+    /// Whether the ISTA gradient norm fell below tolerance.
+    pub converged: bool,
+}
+
+impl FittedCoxnet {
+    /// Linear predictor \(x\hat\beta\).
+    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(x.matvec(&self.coef))
+    }
+}
+
+/// Named Coxnet wrapper (sksurv `CoxnetSurvivalAnalysis`).
+#[derive(Clone, Debug, Default)]
+pub struct CoxnetFitter {
+    inner: Coxnet,
+}
+
+impl CoxnetFitter {
+    /// Default elastic-net Cox wrapper.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit the ISTA Coxnet.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCoxnet>> {
+        self.inner.fit(durations, events, x, session)
+    }
+}
+
+/// Ranking survival SVM (sksurv `FastSurvivalSVM` linear lite).
+///
+/// Comparable pairs are \((i,j)\) with \(T_i<T_j\) and \(i\) uncensored.
+/// Pair count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SurvivalSvm {
+    /// SGD step size.
+    pub eta: f64,
+    /// Passes over the pair list. Not identification `p`.
+    pub max_iter: usize,
+}
+
+impl Default for SurvivalSvm {
+    fn default() -> Self {
+        Self {
+            eta: 0.08,
+            max_iter: 8,
+        }
+    }
+}
+
+impl SurvivalSvm {
+    /// Default linear ranking survival SVM.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit a linear ranking SVM on comparable pairs.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedSurvivalSvm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(durations.len()).min(events.len());
+        let p = x.ncols();
+        let mut pairs: Vec<(usize, usize)> = Vec::new();
+        for i in 0..n {
+            if events[i] <= 0.5 || !durations[i].is_finite() {
+                continue;
+            }
+            for j in 0..n {
+                if i == j || !durations[j].is_finite() {
+                    continue;
+                }
+                if durations[j] > durations[i] + 1e-15 {
+                    pairs.push((i, j));
+                }
+            }
+        }
+        if pairs.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("SurvivalSvm has no comparable pairs")
+                    .build(),
+            );
+            return ctx.finish(FittedSurvivalSvm {
+                coef: Vector::zeros(p),
+                n_pairs: 0,
+            });
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SurvivalSvm is hinge SGD on comparable pairs, not Van Belle / Pölsterl")
+                .compromise(NumericalCompromise::new(
+                    "ranking survival SVM / FastSurvivalSVM",
+                    "PA-style hinge steps on (event, later time) pairs",
+                    "kernel expansion and the efficient objective are omitted",
+                    "read w as a linear ranking, not a published survival-SVM fit",
+                ))
+                .build(),
+        );
+        let eta = if self.eta.is_finite() && self.eta > 0.0 {
+            self.eta
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("SurvivalSvm η={} is not a finite >0; using 0.08", self.eta))
+                    .build(),
+            );
+            0.08
+        };
+        let mut w = Vector::zeros(p);
+        for _ep in 0..self.max_iter.max(1) {
+            for &(i, j) in &pairs {
+                let mut si = 0.0_f64;
+                let mut sj = 0.0_f64;
+                for k in 0..p {
+                    si += w[k] * x.get(i, k);
+                    sj += w[k] * x.get(j, k);
+                }
+                if 1.0 - (si - sj) > 0.0 {
+                    for k in 0..p {
+                        w[k] += eta * (x.get(i, k) - x.get(j, k));
+                        w[k] = w[k].clamp(-20.0, 20.0);
+                    }
+                }
+            }
+            for k in 0..p {
+                w[k] *= 1.0 - eta * 0.01;
+            }
+        }
+        ctx.finish(FittedSurvivalSvm {
+            coef: w,
+            n_pairs: pairs.len(),
+        })
+    }
+}
+
+/// Fitted linear ranking survival SVM.
+#[derive(Clone, Debug)]
+pub struct FittedSurvivalSvm {
+    /// Ranking slopes (higher score ⇒ earlier event).
+    pub coef: Vector,
+    /// Comparable-pair count used in the hinge.
+    pub n_pairs: usize,
+}
+
+impl FittedSurvivalSvm {
+    /// Linear ranking score \(xw\).
+    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(x.matvec(&self.coef))
+    }
+}
+
+/// Named FastSurvivalSVM wrapper.
+#[derive(Clone, Debug, Default)]
+pub struct FastSurvivalSvm {
+    inner: SurvivalSvm,
+}
+
+impl FastSurvivalSvm {
+    /// Default linear ranking SVM.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit the ranking SVM.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedSurvivalSvm>> {
+        self.inner.fit(durations, events, x, session)
+    }
+}
+
+fn cox_eta_score(durations: &Vector, events: &Vector, eta: &[f64]) -> (f64, Vec<f64>) {
+    let n = durations.len().min(events.len()).min(eta.len());
+    let mut score = vec![0.0_f64; n];
+    let mut ll = 0.0_f64;
+    for i in 0..n {
+        if events[i] <= 0.5 || !durations[i].is_finite() {
+            continue;
+        }
+        let t = durations[i];
+        let mut s0 = 0.0_f64;
+        for k in 0..n {
+            if durations[k].is_finite() && durations[k] + 1e-15 >= t {
+                s0 += eta[k].clamp(-20.0, 20.0).exp();
+            }
+        }
+        if s0 <= 1e-300 {
+            continue;
+        }
+        ll += eta[i] - s0.ln();
+        score[i] += 1.0;
+        for k in 0..n {
+            if durations[k].is_finite() && durations[k] + 1e-15 >= t {
+                score[k] -= eta[k].clamp(-20.0, 20.0).exp() / s0;
+            }
+        }
+    }
+    (ll, score)
+}
+
+#[derive(Clone, Debug)]
+struct SurvStump {
+    feat: usize,
+    thresh: f64,
+    left: f64,
+    right: f64,
+}
+
+fn apply_surv_stumps(stumps: &[SurvStump], x: &Matrix) -> Vector {
+    Vector::from_iter((0..x.nrows()).map(|i| {
+        let mut s = 0.0_f64;
+        for st in stumps {
+            s += if x.get(i, st.feat) <= st.thresh {
+                st.left
+            } else {
+                st.right
+            };
+        }
+        s
+    }))
+}
+
+/// Gradient-boosting survival (sksurv `GradientBoostingSurvivalAnalysis` lite).
+///
+/// Each step fits an extra-trees stump to the Breslow PL score \(\partial\ell/\partial\eta\).
+/// Tree count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct GradientBoostingSurvival {
+    /// Stumps. Not identification `p`.
+    pub n_estimators: usize,
+    /// Shrinkage.
+    pub learning_rate: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for GradientBoostingSurvival {
+    fn default() -> Self {
+        Self {
+            n_estimators: 8,
+            learning_rate: 0.25,
+            seed: 29,
+        }
+    }
+}
+
+impl GradientBoostingSurvival {
+    /// Default componentwise-stump Cox booster.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit stumps on the Breslow score.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedGradientBoostingSurvival>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(durations.len()).min(events.len());
+        let p = x.ncols().max(1);
+        let n_events = (0..n).filter(|&i| events[i] > 0.5).count();
+        if n_events == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("GradientBoostingSurvival has no events")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "boosted log-hazard",
+                        "zero events ⇒ empty partial-likelihood score",
+                        "collect events",
+                    ))
+                    .build(),
+            );
+        }
+        let lr = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("GradientBoostingSurvival learning_rate is not a finite >0; using 0.25")
+                    .build(),
+            );
+            0.25
+        };
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("GradientBoostingSurvival is PL-score stumps, not sksurv GBSA")
+                .compromise(NumericalCompromise::new(
+                    "componentwise / tree gradient boosting on the Cox PL",
+                    "extra-trees stumps on ∂ℓ/∂η",
+                    "regression-tree line search and subsampled Hessians are omitted",
+                    "read η as a boosted ranking, not a published GBSA CHF",
+                ))
+                .build(),
+        );
+        let mut eta = vec![0.0_f64; n];
+        let mut stumps = Vec::new();
+        let mut rng = Rng::new(self.seed);
+        for _m in 0..self.n_estimators.max(1) {
+            let (_ll, score) = cox_eta_score(durations, events, &eta);
+            let j = rng.below(p);
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
+            for i in 0..n {
+                let v = x.get(i, j);
+                if v.is_finite() {
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+            }
+            if !lo.is_finite() || hi - lo <= 1e-15 {
+                continue;
+            }
+            let thresh = lo + rng.uniform() * (hi - lo);
+            let mut sl = 0.0_f64;
+            let mut sr = 0.0_f64;
+            let mut nl = 0.0_f64;
+            let mut nr = 0.0_f64;
+            for i in 0..n {
+                if x.get(i, j) <= thresh {
+                    sl += score.get(i).copied().unwrap_or(0.0);
+                    nl += 1.0;
+                } else {
+                    sr += score.get(i).copied().unwrap_or(0.0);
+                    nr += 1.0;
+                }
+            }
+            let left = lr * sl / nl.max(1.0);
+            let right = lr * sr / nr.max(1.0);
+            for i in 0..n {
+                eta[i] += if x.get(i, j) <= thresh { left } else { right };
+            }
+            stumps.push(SurvStump {
+                feat: j,
+                thresh,
+                left,
+                right,
+            });
+        }
+        if stumps.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("GradientBoostingSurvival grew no stumps")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedGradientBoostingSurvival {
+            stumps,
+            n_features: x.ncols(),
+        })
+    }
+}
+
+/// Fitted PL-score survival booster.
+#[derive(Clone, Debug)]
+pub struct FittedGradientBoostingSurvival {
+    stumps: Vec<SurvStump>,
+    /// Training feature count.
+    pub n_features: usize,
+}
+
+impl FittedGradientBoostingSurvival {
+    /// Boosted log-hazard \(\hat\eta(x)\).
+    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.ncols() != self.n_features {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("GradientBoostingSurvival predict width ≠ training p")
+                    .build(),
+            );
+        }
+        ctx.finish(apply_surv_stumps(&self.stumps, x))
+    }
+}
+
+/// Componentwise Cox boosting (sksurv `ComponentwiseGradientBoostingSurvivalAnalysis`).
+///
+/// Each step updates a single coordinate of \(\beta\) by the PL score. Step
+/// count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ComponentwiseGradientBoostingSurvival {
+    /// Coordinate steps. Not identification `p`.
+    pub n_estimators: usize,
+    /// Shrinkage.
+    pub learning_rate: f64,
+}
+
+impl Default for ComponentwiseGradientBoostingSurvival {
+    fn default() -> Self {
+        Self {
+            n_estimators: 12,
+            learning_rate: 0.2,
+        }
+    }
+}
+
+impl ComponentwiseGradientBoostingSurvival {
+    /// Default componentwise booster.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit by greedy one-coordinate PL steps.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedComponentwiseGbs>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(durations.len()).min(events.len());
+        let p = x.ncols();
+        let n_events = (0..n).filter(|&i| events[i] > 0.5).count();
+        if n_events == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("ComponentwiseGradientBoostingSurvival has no events")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "componentwise log-hazard",
+                        "zero events ⇒ empty partial-likelihood score",
+                        "collect events",
+                    ))
+                    .build(),
+            );
+        }
+        let lr = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("componentwise GB survival learning_rate is not a finite >0; using 0.2")
+                    .build(),
+            );
+            0.2
+        };
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("componentwise GBSA is greedy PL coordinate steps, not mboost Cox")
+                .compromise(NumericalCompromise::new(
+                    "Bühlmann componentwise boosting on the Cox PL",
+                    "one-coordinate least-squares step on ∂ℓ/∂η",
+                    "offset line search and AIC stopping are omitted",
+                    "read β as a sparse ranking, not a published mboost Cox path",
+                ))
+                .build(),
+        );
+        let mut beta = Vector::zeros(p);
+        for _m in 0..self.n_estimators.max(1) {
+            let eta: Vec<f64> = (0..n)
+                .map(|i| {
+                    let mut s = 0.0_f64;
+                    for j in 0..p {
+                        s += x.get(i, j) * beta[j];
+                    }
+                    s
+                })
+                .collect();
+            let (_ll, score) = cox_eta_score(durations, events, &eta);
+            let mut best_j = 0usize;
+            let mut best_abs = -1.0_f64;
+            let mut best_step = 0.0_f64;
+            for j in 0..p {
+                let mut num = 0.0_f64;
+                let mut den = 0.0_f64;
+                for i in 0..n {
+                    let v = x.get(i, j);
+                    num += v * score.get(i).copied().unwrap_or(0.0);
+                    den += v * v;
+                }
+                if den <= 1e-15 {
+                    continue;
+                }
+                let step = num / den;
+                if step.abs() > best_abs {
+                    best_abs = step.abs();
+                    best_j = j;
+                    best_step = step;
+                }
+            }
+            if best_abs <= 0.0 {
+                break;
+            }
+            beta[best_j] = (beta[best_j] + lr * best_step).clamp(-20.0, 20.0);
+        }
+        ctx.finish(FittedComponentwiseGbs { coef: beta })
+    }
+}
+
+/// Fitted componentwise Cox booster.
+#[derive(Clone, Debug)]
+pub struct FittedComponentwiseGbs {
+    /// Accumulated linear log-hazard slopes.
+    pub coef: Vector,
+}
+
+impl FittedComponentwiseGbs {
+    /// Linear predictor \(x\hat\beta\).
+    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(x.matvec(&self.coef))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -22051,5 +23179,50 @@ mod tests {
             .as_slice()
             .iter()
             .all(|s| *s >= 0.0 && *s <= 1.0));
+        let rsf = RandomSurvivalForest::new()
+            .fit(&dur, &ev, &xcox, &Session::new("rsf", "t"))
+            .expect("rsf");
+        let prsf = rsf
+            .value
+            .predict(&xcox, &Session::new("rsf", "p"))
+            .expect("rsfp");
+        assert_eq!(prsf.value.len(), 20);
+        assert!(prsf.value.as_slice().iter().all(|v| v.is_finite()));
+        let est = ExtraSurvivalTrees::new()
+            .fit(&dur, &ev, &xcox, &Session::new("est", "t"))
+            .expect("est");
+        assert_eq!(est.value.n_features, 1);
+        let cn = Coxnet::new()
+            .fit(&dur, &ev, &xcox, &Session::new("cn", "t"))
+            .expect("cn");
+        assert_eq!(cn.value.coef.len(), 1);
+        let cnf = CoxnetFitter::new()
+            .fit(&dur, &ev, &xcox, &Session::new("cnf", "t"))
+            .expect("cnf");
+        assert_eq!(cnf.value.coef.len(), 1);
+        let ssvm = SurvivalSvm::new()
+            .fit(&dur, &ev, &xcox, &Session::new("ssvm", "t"))
+            .expect("ssvm");
+        assert_eq!(ssvm.value.coef.len(), 1);
+        let fss = FastSurvivalSvm::new()
+            .fit(&dur, &ev, &xcox, &Session::new("fss", "t"))
+            .expect("fss");
+        let pfss = fss
+            .value
+            .predict(&xcox, &Session::new("fss", "p"))
+            .expect("fssp");
+        assert_eq!(pfss.value.len(), 20);
+        let gbs = GradientBoostingSurvival::new()
+            .fit(&dur, &ev, &xcox, &Session::new("gbs", "t"))
+            .expect("gbs");
+        let pgbs = gbs
+            .value
+            .predict(&xcox, &Session::new("gbs", "p"))
+            .expect("gbsp");
+        assert_eq!(pgbs.value.len(), 20);
+        let cgbs = ComponentwiseGradientBoostingSurvival::new()
+            .fit(&dur, &ev, &xcox, &Session::new("cgbs", "t"))
+            .expect("cgbs");
+        assert_eq!(cgbs.value.coef.len(), 1);
     }
 }

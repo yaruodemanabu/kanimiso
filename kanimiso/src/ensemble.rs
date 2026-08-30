@@ -830,6 +830,171 @@ impl Predict for FittedRotationForest {
     }
 }
 
+/// Rotation-forest regressor (sktime / sklearn-contrib `RotationForest` regression).
+///
+/// Feature-group count is not identification `p`. Inner CART trees that abort
+/// on vacuous constant predictions are skipped, not promoted.
+#[derive(Clone, Debug)]
+pub struct RotationForestRegressor {
+    /// Trees. Not identification `p`.
+    pub n_estimators: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for RotationForestRegressor {
+    fn default() -> Self {
+        Self {
+            n_estimators: 4,
+            max_depth: 4,
+            seed: 31,
+        }
+    }
+}
+
+impl RotationForestRegressor {
+    /// Default rotation-forest regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted rotation-forest regressor.
+#[derive(Clone, Debug)]
+pub struct FittedRotationForestRegressor {
+    trees: Vec<crate::tree::FittedTreeRegressor>,
+    rots: Vec<Matrix>,
+    /// Fallback mean response.
+    pub default_value: f64,
+}
+
+impl Fit for RotationForestRegressor {
+    type Fitted = FittedRotationForestRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRotationForestRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::JitterInjected)
+                    .message("RotationForestRegressor p<2; each tree sees the unrotated map")
+                    .compromise(NumericalCompromise::new(
+                        "random feature rotation",
+                        "identity embedding",
+                        "a 1-d design has no subspace to rotate",
+                        "do not treat the ensemble as a published Rotation Forest",
+                    ))
+                    .build(),
+            );
+        }
+        let n = x.nrows().min(y.len());
+        let default_value = if n == 0 {
+            0.0
+        } else {
+            y.as_slice().iter().take(n).sum::<f64>() / n as f64
+        };
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        let mut rots = Vec::new();
+        for _ in 0..self.n_estimators.max(1) {
+            let rot = rotation_matrix(x.ncols().max(1), rng.next_u64());
+            let z = apply_feature_rotation(x, &rot);
+            let mut tree = crate::tree::DecisionTreeRegressor {
+                max_depth: self.max_depth.max(1),
+                seed: rng.next_u64(),
+                ..crate::tree::DecisionTreeRegressor::default()
+            };
+            match tree.fit(&z, y, &session.child("rot_reg")) {
+                Ok(q) => {
+                    for issue in q.report.issues() {
+                        if matches!(
+                            issue.code,
+                            IssueCode::ResidualTooLarge
+                                | IssueCode::NearSingular
+                                | IssueCode::RankZero
+                                | IssueCode::R2IsOne
+                                | IssueCode::MeaninglessFit
+                                | IssueCode::PredictionsAreConstant
+                        ) {
+                            continue;
+                        }
+                        ctx.push(issue.clone());
+                    }
+                    trees.push(q.value);
+                    rots.push(rot);
+                }
+                Err(err) => {
+                    for issue in err.report.issues() {
+                        if matches!(
+                            issue.code,
+                            IssueCode::ResidualTooLarge
+                                | IssueCode::NearSingular
+                                | IssueCode::RankZero
+                                | IssueCode::R2IsOne
+                                | IssueCode::MeaninglessFit
+                                | IssueCode::PredictionsAreConstant
+                                | IssueCode::CholeskyFailed
+                        ) {
+                            continue;
+                        }
+                        ctx.push(issue.clone());
+                    }
+                }
+            }
+        }
+        if trees.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("RotationForestRegressor: every rotated tree failed")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedRotationForestRegressor {
+            trees,
+            rots,
+            default_value,
+        })
+    }
+}
+
+impl Predict for FittedRotationForestRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("predict"));
+        if self.trees.is_empty() {
+            return ctx.finish(Vector::filled(x.nrows(), self.default_value));
+        }
+        let mut acc = vec![0.0_f64; x.nrows()];
+        let mut used = 0usize;
+        for (tree, rot) in self.trees.iter().zip(&self.rots) {
+            let zr = apply_feature_rotation(x, rot);
+            match tree.predict(&zr, &session.child("rotrp")) {
+                Ok(q) => {
+                    for i in 0..x.nrows().min(q.value.len()) {
+                        acc[i] += q.value[i];
+                    }
+                    used += 1;
+                }
+                Err(_) => {}
+            }
+        }
+        let scale = if used == 0 { 0.0 } else { 1.0 / used as f64 };
+        ctx.finish(Vector::from_iter(acc.iter().map(|v| {
+            if used == 0 {
+                self.default_value
+            } else {
+                *v * scale
+            }
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -941,5 +1106,16 @@ mod tests {
             .value;
         assert_eq!(rp.len(), 20);
         assert!(rp.as_slice().iter().all(|v| v.is_finite()));
+        let (xr, yr) = line(20);
+        let rfr = RotationForestRegressor::new()
+            .fit(&xr, &yr, &Session::new("ens", "rotr"))
+            .unwrap();
+        let rpr = rfr
+            .value
+            .predict(&xr, &Session::new("ens", "rotrp"))
+            .unwrap()
+            .value;
+        assert_eq!(rpr.len(), 20);
+        assert!(rpr.as_slice().iter().all(|v| v.is_finite()));
     }
 }
