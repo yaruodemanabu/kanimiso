@@ -1202,6 +1202,209 @@ pub fn pairwise_kernels(
     }
 }
 
+/// Pairwise NaN-aware Euclidean distances (sklearn `nan_euclidean_distances`).
+///
+/// Missing entries are skipped and the squared distance is rescaled by
+/// `p / n_shared`. This function does **not** call [`inspect_xy`]: NaN is
+/// allowed. An all-missing pair is recorded as a warning, not a fatal
+/// non-finite input.
+pub fn nan_euclidean_distances(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("nan_euclidean_distances column mismatch")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    let p = a.ncols() as f64;
+    let mut empty = 0u64;
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let mut s = 0.0;
+        let mut shared = 0.0;
+        for k in 0..a.ncols() {
+            let u = a.get(i, k);
+            let v = b.get(j, k);
+            if u.is_finite() && v.is_finite() {
+                let d = u - v;
+                s += d * d;
+                shared += 1.0;
+            }
+        }
+        if shared <= 0.0 {
+            empty += 1;
+            f64::NAN
+        } else {
+            (s * (p / shared)).sqrt()
+        }
+    });
+    if empty > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::AllMissing)
+                .message(format!("{empty} NaN-Euclidean pairs shared no finite coordinates"))
+                .build(),
+        );
+    }
+    ctx.finish(out)
+}
+
+/// Paired Manhattan distances of aligned rows (sklearn `paired_manhattan_distances`).
+pub fn paired_manhattan_distances(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if a.nrows() != b.nrows() || a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("paired_manhattan_distances shape mismatch")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(a.nrows().min(b.nrows())));
+    }
+    ctx.finish(Vector::from_iter((0..a.nrows()).map(|i| {
+        let mut s = 0.0;
+        for k in 0..a.ncols() {
+            s += (a.get(i, k) - b.get(i, k)).abs();
+        }
+        s
+    })))
+}
+
+/// Paired cosine distances of aligned rows (sklearn `paired_cosine_distances`).
+///
+/// A zero-norm row is a numerical compromise and contributes 1.
+pub fn paired_cosine_distances(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if a.nrows() != b.nrows() || a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("paired_cosine_distances shape mismatch")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(a.nrows().min(b.nrows())));
+    }
+    let mut saw_zero = false;
+    let out = Vector::from_iter((0..a.nrows()).map(|i| {
+        let mut ab = 0.0;
+        let mut na = 0.0;
+        let mut nb = 0.0;
+        for k in 0..a.ncols() {
+            let u = a.get(i, k);
+            let v = b.get(i, k);
+            ab += u * v;
+            na += u * u;
+            nb += v * v;
+        }
+        let da = na.sqrt();
+        let db = nb.sqrt();
+        if da <= 1e-18 || db <= 1e-18 {
+            saw_zero = true;
+            1.0
+        } else {
+            (1.0 - ab / (da * db)).clamp(0.0, 2.0)
+        }
+    }));
+    if saw_zero {
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .message("paired_cosine_distances saw a zero-norm row; that entry is 1")
+                .compromise(NumericalCompromise::new(
+                    "unit-length rows",
+                    "zero-norm cosine distance set to 1",
+                    "the inner product is undefined after L2 normalisation",
+                    "do not read 1 as orthogonality when a row vanished",
+                ))
+                .build(),
+        );
+    }
+    ctx.finish(out)
+}
+
+/// Contingency table of two label vectors (sklearn `contingency_matrix`).
+///
+/// Class count is not identification `p`.
+pub fn contingency_matrix(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "contingency_matrix") {
+        return ctx.finish(Matrix::zeros(0, 0));
+    }
+    warn_constant_target(&mut ctx, y_true, true);
+    let yt = labels_of(y_true);
+    let yp = labels_of(y_pred);
+    let (table, _, _, _) = contingency(&yt, &yp);
+    if table.is_empty() {
+        return ctx.finish(Matrix::zeros(0, 0));
+    }
+    let r = table.len();
+    let c = table[0].len();
+    ctx.finish(Matrix::from_fn(r, c, |i, j| table[i][j]))
+}
+
+/// Row-wise nearest neighbour in Euclidean distance (sklearn `pairwise_distances_argmin`).
+///
+/// Neighbor count is not identification `p`.
+pub fn pairwise_distances_argmin(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("pairwise_distances_argmin column mismatch")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(a.nrows()));
+    }
+    if b.nrows() == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("pairwise_distances_argmin received an empty reference set")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(a.nrows()));
+    }
+    let out = Vector::from_iter((0..a.nrows()).map(|i| {
+        let mut best = 0usize;
+        let mut best_d = f64::INFINITY;
+        for j in 0..b.nrows() {
+            let mut s = 0.0;
+            for k in 0..a.ncols() {
+                let d = a.get(i, k) - b.get(j, k);
+                s += d * d;
+            }
+            if s < best_d {
+                best_d = s;
+                best = j;
+            }
+        }
+        best as f64
+    }));
+    ctx.finish(out)
+}
+
 /// Maximum residual (sklearn `max_error`).
 pub fn max_error(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
@@ -3956,5 +4159,32 @@ mod tests {
             .unwrap()
             .value;
         assert!(pwk.get(1, 1).is_finite());
+        let ned = nan_euclidean_distances(&xb, &xb, &Session::new("m", "ned"))
+            .unwrap()
+            .value;
+        assert!((ned.get(1, 1) - ed.get(1, 1)).abs() < 1e-12);
+        let mut xnan = xb.clone();
+        xnan.set(0, 0, f64::NAN);
+        let ned2 = nan_euclidean_distances(&xnan, &xb, &Session::new("m", "ned2"))
+            .unwrap()
+            .value;
+        assert!(ned2.get(1, 1).is_finite());
+        let pman = paired_manhattan_distances(&xb, &xb, &Session::new("m", "pman"))
+            .unwrap()
+            .value;
+        assert!(pman[1].abs() < 1e-12);
+        let pcos = paired_cosine_distances(&xb, &xb, &Session::new("m", "pcos"))
+            .unwrap()
+            .value;
+        assert!(pcos[1].abs() < 1e-9);
+        let ctg = contingency_matrix(&y, &y, &Session::new("m", "ctg"))
+            .unwrap()
+            .value;
+        assert_eq!(ctg.shape(), (2, 2));
+        assert!((ctg.get(0, 0) - 2.0).abs() < 1e-12);
+        let arg = pairwise_distances_argmin(&xb, &xb, &Session::new("m", "arg"))
+            .unwrap()
+            .value;
+        assert!((arg[1] - 1.0).abs() < 1e-12);
     }
 }

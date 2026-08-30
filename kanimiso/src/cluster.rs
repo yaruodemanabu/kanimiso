@@ -3282,6 +3282,68 @@ impl FitUnsupervised for SpectralBiclustering {
     }
 }
 
+/// Quantile of pairwise Euclidean distances (sklearn `estimate_bandwidth`).
+///
+/// `quantile` is not identification `p`. Neighbor count is not `p`.
+pub fn estimate_bandwidth(
+    x: &Matrix,
+    quantile: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    let q = if quantile.is_finite() && quantile > 0.0 && quantile < 1.0 {
+        quantile
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("estimate_bandwidth quantile={quantile} not in (0,1); using 0.3"))
+                .build(),
+        );
+        0.3
+    };
+    let n = x.nrows();
+    if n < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("estimate_bandwidth needs at least two rows")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let mut dists = Vec::with_capacity(n * (n - 1) / 2);
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let mut s = 0.0;
+            for k in 0..x.ncols() {
+                let d = x.get(i, k) - x.get(j, k);
+                s += d * d;
+            }
+            dists.push(s.sqrt());
+        }
+    }
+    dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pos = q * (dists.len().saturating_sub(1)) as f64;
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    let t = pos - lo as f64;
+    let bw = if dists.is_empty() {
+        f64::NAN
+    } else {
+        (1.0 - t) * dists[lo] + t * dists[hi.min(dists.len() - 1)]
+    };
+    if bw.is_finite() && bw <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::NearZeroVariance)
+                .message("estimate_bandwidth collapsed to 0; every pair is coincident")
+                .build(),
+        );
+    }
+    ctx.finish(bw)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3325,6 +3387,10 @@ mod tests {
             .predict(&x, &Session::new("kmeans", "predict"))
             .expect("predict");
         assert_eq!(pred.value.len(), 40);
+        let bw = estimate_bandwidth(&x, 0.3, &Session::new("bw", "fit"))
+            .expect("bw")
+            .value;
+        assert!(bw.is_finite() && bw > 0.0);
     }
 
     #[test]

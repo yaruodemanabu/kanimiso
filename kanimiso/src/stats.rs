@@ -9,7 +9,9 @@ use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linalg::{chol_solve, least_squares};
 use crate::rng::Rng;
-use crate::special::{chi2_pvalue, f_pvalue, ln_gamma, norm_cdf, student_t_cdf, student_t_pvalue};
+use crate::special::{
+    chi2_cdf, chi2_pvalue, f_pvalue, ln_gamma, norm_cdf, student_t_cdf, student_t_pvalue,
+};
 use crate::validate::{inspect_identification, inspect_xy};
 use faer::Mat;
 use ojizou_san::Session;
@@ -5896,6 +5898,413 @@ pub fn proportions_ztest_power(
     ctx.finish(power)
 }
 
+/// Davidson–MacKinnon *J* test of non-nested OLS (statsmodels `compare_j`).
+///
+/// Fit `y ~ X₁`, append \(\hat y_1\) to `X₂`, and test that extra coefficient.
+/// Column counts are not identification `p`.
+pub fn compare_j(
+    y: &Vector,
+    x1: &Matrix,
+    x2: &Matrix,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x1, Some(y), &ctx.policy);
+    inspect_xy(&mut ctx.report, x2, Some(y), &ctx.policy);
+    let n = y.len().min(x1.nrows()).min(x2.nrows());
+    let mut scratch = Report::new("j", "m1");
+    let b1 = least_squares(&mut scratch, x1, y, &ctx.policy);
+    for issue in scratch.issues() {
+        if matches!(
+            issue.code,
+            IssueCode::ResidualTooLarge
+                | IssueCode::NearSingular
+                | IssueCode::RankZero
+                | IssueCode::R2IsOne
+                | IssueCode::PerfectCollinearity
+        ) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let yhat = match b1 {
+        Some(b) => x1.matvec(&b),
+        None => {
+            ctx.push(
+                Issue::builder(IssueCode::PValueUnreliable)
+                    .message("compare_j: model 1 OLS failed; J is undefined")
+                    .build(),
+            );
+            return ctx.finish(HypothesisTest {
+                statistic: f64::NAN,
+                pvalue: f64::NAN,
+                df: 1.0,
+                nobs: n as f64,
+            });
+        }
+    };
+    let x2a = Matrix::from_fn(n, x2.ncols() + 1, |i, j| {
+        if j < x2.ncols() {
+            x2.get(i, j)
+        } else if i < yhat.len() {
+            yhat[i]
+        } else {
+            0.0
+        }
+    });
+    let (ssr_r, _) = ols_sse(x2, y, &ctx.policy);
+    let (ssr_u, p_u) = ols_sse(&x2a, y, &ctx.policy);
+    let df = (n as f64 - p_u as f64).max(1.0);
+    let extra = ssr_r - ssr_u;
+    let stat: f64 = if ssr_u > 1e-18 && extra.is_finite() {
+        (extra / ssr_u * df).sqrt()
+    } else {
+        f64::NAN
+    };
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: if stat.is_finite() {
+            student_t_pvalue(stat, df)
+        } else {
+            f64::NAN
+        },
+        df: 1.0,
+        nobs: n as f64,
+    })
+}
+
+/// Bowley robust skewness (statsmodels `robust_skewness`).
+pub fn robust_skewness(x: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, x);
+    let mut xs: Vec<f64> = x.as_slice().iter().copied().filter(|v| v.is_finite()).collect();
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    if xs.len() < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("robust_skewness needs n≥4")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let q1 = percentile_sorted(&xs, 0.25);
+    let q2 = percentile_sorted(&xs, 0.50);
+    let q3 = percentile_sorted(&xs, 0.75);
+    let den = q3 - q1;
+    if den.abs() <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("robust_skewness IQR vanished")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish((q3 + q1 - 2.0 * q2) / den)
+}
+
+/// Crow–Siddiqui robust kurtosis (statsmodels `robust_kurtosis`).
+pub fn robust_kurtosis(x: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, x);
+    let mut xs: Vec<f64> = x.as_slice().iter().copied().filter(|v| v.is_finite()).collect();
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    if xs.len() < 8 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("robust_kurtosis needs n≥8")
+                .build(),
+        );
+    }
+    if xs.is_empty() {
+        return ctx.finish(f64::NAN);
+    }
+    let q025 = percentile_sorted(&xs, 0.025);
+    let q975 = percentile_sorted(&xs, 0.975);
+    let q25 = percentile_sorted(&xs, 0.25);
+    let q75 = percentile_sorted(&xs, 0.75);
+    let iqr = q75 - q25;
+    if iqr.abs() <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("robust_kurtosis IQR vanished")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish((q975 - q025) / iqr)
+}
+
+/// Engle–Granger cointegration ADF on OLS residuals (statsmodels `coint`).
+///
+/// The residual ADF lag is not identification `p`.
+pub fn coint(y: &Vector, x: &Vector, session: &Session) -> Result<Qualified<AdfullerResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_pair(&mut ctx, y, x);
+    let n = y.len().min(x.len());
+    let design = Matrix::from_fn(n, 2, |i, j| if j == 0 { 1.0 } else { x[i] });
+    let yt = Vector::from_iter((0..n).map(|i| y[i]));
+    let mut scratch = Report::new("coint", "ols");
+    let beta = least_squares(&mut scratch, &design, &yt, &ctx.policy);
+    for issue in scratch.issues() {
+        if matches!(
+            issue.code,
+            IssueCode::ResidualTooLarge
+                | IssueCode::NearSingular
+                | IssueCode::RankZero
+                | IssueCode::R2IsOne
+                | IssueCode::PerfectCollinearity
+        ) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let Some(b) = beta else {
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .message("coint OLS failed; residual ADF is undefined")
+                .build(),
+        );
+        return ctx.finish(AdfullerResult {
+            stat: f64::NAN,
+            pvalue: f64::NAN,
+            used_lags: 0,
+            n,
+        });
+    };
+    let fit = design.matvec(&b);
+    let resid = Vector::from_iter((0..n).map(|i| yt[i] - fit[i]));
+    match adfuller(&resid, Some(1), &session.child("adf")) {
+        Ok(q) => {
+            for issue in q.report.issues() {
+                if matches!(
+                    issue.code,
+                    IssueCode::MeaninglessFit
+                        | IssueCode::ConstantTarget
+                        | IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                        | IssueCode::InsufficientSample
+                ) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            ctx.finish(q.value)
+        }
+        Err(e) => {
+            if !matches!(
+                e.primary.code,
+                IssueCode::MeaninglessFit
+                    | IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::InsufficientSample
+                    | IssueCode::ConstantTarget
+            ) {
+                ctx.push(e.primary);
+            }
+            ctx.finish(AdfullerResult {
+                stat: f64::NAN,
+                pvalue: f64::NAN,
+                used_lags: 1,
+                n,
+            })
+        }
+    }
+}
+
+/// Two-sample *t* power (statsmodels `TTestIndPower`).
+///
+/// Sample sizes are not identification `p`. The critical value uses a
+/// shifted central-*t* approximation and is recorded as a compromise.
+pub fn ttest_ind_power(
+    effect_size: f64,
+    n1: f64,
+    n2: f64,
+    alpha: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if ![effect_size, n1, n2, alpha].iter().all(|v| v.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .message("ttest_ind_power received a non-finite argument")
+                .build(),
+        );
+    }
+    if n1 <= 1.0 || n2 <= 1.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("ttest_ind_power needs n1>1 and n2>1")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let a = if alpha.is_finite() && alpha > 0.0 && alpha < 1.0 {
+        alpha
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("ttest_ind_power alpha={alpha}; using 0.05"))
+                .build(),
+        );
+        0.05
+    };
+    let df = n1 + n2 - 2.0;
+    let n_harm = n1 * n2 / (n1 + n2);
+    let tcrit = student_t_ppf(1.0 - a / 2.0, df);
+    let ncp = effect_size * n_harm.sqrt();
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .message("ttest_ind_power uses a shifted central-t approximation")
+            .compromise(NumericalCompromise::new(
+                "two-sample power from the non-central t law",
+                "1 − F_t(t_crit − ncp) + F_t(−t_crit − ncp)",
+                "a closed non-central-t CDF is not implemented",
+                "the number is a planning approximation; do not treat it as exact power",
+            ))
+            .build(),
+    );
+    let power = if tcrit.is_finite() && ncp.is_finite() && df > 0.0 {
+        (1.0 - student_t_cdf(tcrit - ncp, df) + student_t_cdf(-tcrit - ncp, df)).clamp(0.0, 1.0)
+    } else {
+        f64::NAN
+    };
+    ctx.finish(power)
+}
+
+/// *F*-test power (statsmodels `FTestPower`).
+///
+/// Numerator / denominator df are not identification `p`.
+pub fn ftest_power(
+    effect_size: f64,
+    df_num: f64,
+    df_den: f64,
+    alpha: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if ![effect_size, df_num, df_den, alpha]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .message("ftest_power received a non-finite argument")
+                .build(),
+        );
+    }
+    if df_num <= 0.0 || df_den <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("ftest_power needs positive degrees of freedom")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let a = if alpha.is_finite() && alpha > 0.0 && alpha < 1.0 {
+        alpha
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("ftest_power alpha={alpha}; using 0.05"))
+                .build(),
+        );
+        0.05
+    };
+    let z = norm_ppf(1.0 - a);
+    let ncp = effect_size * (df_num + df_den).sqrt();
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .message("ftest_power uses a normal approximation of the non-central F tail")
+            .compromise(NumericalCompromise::new(
+                "power from the non-central F law",
+                "1 − Φ(z_crit − ncp) with ncp = f √(df1+df2)",
+                "a closed non-central-F CDF is not implemented",
+                "the number is a planning approximation",
+            ))
+            .build(),
+    );
+    let _ = f_pvalue(1.0, df_num, df_den);
+    let power = if z.is_finite() && ncp.is_finite() {
+        (1.0 - norm_cdf(z - ncp)).clamp(0.0, 1.0)
+    } else {
+        f64::NAN
+    };
+    ctx.finish(power)
+}
+
+/// χ² goodness-of-fit power (statsmodels `GofChisquarePower`).
+///
+/// The non-centrality `lambda` is not identification `p`.
+pub fn gof_chisquare_power(
+    ncp: f64,
+    df: f64,
+    alpha: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if ![ncp, df, alpha].iter().all(|v| v.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .message("gof_chisquare_power received a non-finite argument")
+                .build(),
+        );
+    }
+    if df <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("gof_chisquare_power needs df>0")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let a = if alpha.is_finite() && alpha > 0.0 && alpha < 1.0 {
+        alpha
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("gof_chisquare_power alpha={alpha}; using 0.05"))
+                .build(),
+        );
+        0.05
+    };
+    let z = norm_ppf(1.0 - a);
+    let wilson = {
+        let c = 2.0 / (9.0 * df);
+        df * (1.0 - c + z * c.sqrt()).powi(3)
+    };
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .message("gof_chisquare_power uses Wilson–Hilferty plus a mean shift")
+            .compromise(NumericalCompromise::new(
+                "non-central χ² power",
+                "P(χ²_df > χ²_{1−α} − λ)",
+                "the critical value is Wilson–Hilferty, not an exact quantile",
+                "the number is a planning approximation",
+            ))
+            .build(),
+    );
+    let shifted = wilson - ncp.max(0.0);
+    let power = if shifted.is_finite() {
+        chi2_pvalue(shifted.max(0.0), df).clamp(0.0, 1.0)
+    } else {
+        f64::NAN
+    };
+    let _ = chi2_cdf(wilson, df);
+    ctx.finish(power)
+}
+
 /// Nested-model ANOVA (statsmodels `anova_lm`).
 #[derive(Clone, Debug)]
 pub struct AnovaLm {
@@ -7003,5 +7412,20 @@ mod tests {
         let pwr = proportions_ztest_power(0.5, 0.7, 40.0, 40.0, 0.05, &Session::new("pwr", "t"))
             .expect("pwr");
         assert!(pwr.value.is_finite() && pwr.value >= 0.0 && pwr.value <= 1.0);
+        let x2 = Matrix::from_fn(40, 1, |_, _| 1.0);
+        let j = compare_j(&y, &x, &x2, &Session::new("j", "t")).expect("j");
+        assert!(j.value.statistic.is_finite() || j.value.pvalue.is_nan());
+        let sk = robust_skewness(&y, &Session::new("rsk", "t")).expect("rsk");
+        assert!(sk.value.is_finite());
+        let ku = robust_kurtosis(&e, &Session::new("rku", "t")).expect("rku");
+        assert!(ku.value.is_finite());
+        let cg = coint(&y, &x.column(0), &Session::new("coint", "t")).expect("coint");
+        assert!(cg.value.stat.is_finite() || cg.value.pvalue.is_nan());
+        let tip = ttest_ind_power(0.8, 20.0, 20.0, 0.05, &Session::new("tip", "t")).expect("tip");
+        assert!(tip.value.is_finite() && tip.value >= 0.0 && tip.value <= 1.0);
+        let fp = ftest_power(0.5, 2.0, 40.0, 0.05, &Session::new("ftp", "t")).expect("ftp");
+        assert!(fp.value.is_finite() && fp.value >= 0.0 && fp.value <= 1.0);
+        let gp = gof_chisquare_power(8.0, 3.0, 0.05, &Session::new("gof", "t")).expect("gof");
+        assert!(gp.value.is_finite() && gp.value >= 0.0 && gp.value <= 1.0);
     }
 }

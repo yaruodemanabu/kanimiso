@@ -3217,6 +3217,130 @@ const INVENTORY: &[Algorithm] = &[
     ),
     a("tslearn.cdist_erp", "tslearn.metrics.cdist_erp", "timeseries"),
     a("online.OnlineSum", "river.stats.Sum", "online"),
+    a(
+        "metrics.nan_euclidean_distances",
+        "sklearn.metrics.pairwise.nan_euclidean_distances",
+        "metric",
+    ),
+    a(
+        "metrics.paired_manhattan_distances",
+        "sklearn.metrics.pairwise.paired_manhattan_distances",
+        "metric",
+    ),
+    a(
+        "metrics.paired_cosine_distances",
+        "sklearn.metrics.pairwise.paired_cosine_distances",
+        "metric",
+    ),
+    a(
+        "metrics.contingency_matrix",
+        "sklearn.metrics.cluster.contingency_matrix",
+        "metric",
+    ),
+    a(
+        "metrics.pairwise_distances_argmin",
+        "sklearn.metrics.pairwise.pairwise_distances_argmin",
+        "metric",
+    ),
+    a(
+        "cluster.estimate_bandwidth",
+        "sklearn.cluster.estimate_bandwidth",
+        "estimator",
+    ),
+    a(
+        "filters.convolution_filter",
+        "statsmodels.tsa.filters.filtertools.convolution_filter",
+        "forecast",
+    ),
+    a(
+        "filters.recursive_filter",
+        "statsmodels.tsa.filters.filtertools.recursive_filter",
+        "forecast",
+    ),
+    a(
+        "stats.compare_j",
+        "statsmodels.stats.diagnostic.compare_j",
+        "stats",
+    ),
+    a(
+        "stats.robust_skewness",
+        "statsmodels.stats.stattools.robust_skewness",
+        "stats",
+    ),
+    a(
+        "stats.robust_kurtosis",
+        "statsmodels.stats.stattools.robust_kurtosis",
+        "stats",
+    ),
+    a("stats.coint", "statsmodels.tsa.stattools.coint", "stats"),
+    a(
+        "stats.ttest_ind_power",
+        "statsmodels.stats.power.TTestIndPower",
+        "stats",
+    ),
+    a(
+        "stats.ftest_power",
+        "statsmodels.stats.power.FTestPower",
+        "stats",
+    ),
+    a(
+        "stats.gof_chisquare_power",
+        "statsmodels.stats.power.GofChisquarePower",
+        "stats",
+    ),
+    a("tslearn.cdist_lcss", "tslearn.metrics.cdist_lcss", "timeseries"),
+    a(
+        "tslearn.CnnClassifier",
+        "sktime.classification.deep_learning.cnn.CNNClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.TimeSeriesImputer",
+        "sktime.transformations.series.impute.Imputer",
+        "timeseries",
+    ),
+    a(
+        "tslearn.InceptionTimeClassifier",
+        "sktime.classification.deep_learning.inceptiontime.InceptionTimeClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.clasp_change_point",
+        "sktime.annotation.clasp.ClaSPSegmentation",
+        "timeseries",
+    ),
+    a(
+        "tslearn.Catch22Transformer",
+        "sktime.transformations.panel.catch22.Catch22",
+        "timeseries",
+    ),
+    a(
+        "online.TransformerUnion",
+        "river.compose.TransformerUnion",
+        "online",
+    ),
+    a(
+        "online.FuncTransformer",
+        "river.compose.FuncTransformer",
+        "online",
+    ),
+    a(
+        "online.FactorizationMachine",
+        "river.facto.FMRegressor",
+        "online",
+    ),
+    a(
+        "online.AdaGradRegressor",
+        "river.optim.AdaGrad",
+        "online",
+    ),
+    a("online.AdamRegressor", "river.optim.Adam", "online"),
+    a("online.RmsPropRegressor", "river.optim.RMSProp", "online"),
+    a("online.OnlineLof", "river.anomaly.LocalOutlierFactor", "online"),
+    a("online.OnlineBeta", "river.proba.Beta", "online"),
+    a("online.OnlineGamma", "river.proba.Gamma", "online"),
+    a("online.ColumnSelect", "river.compose.Select", "online"),
+    a("online.ColumnDiscard", "river.compose.Discard", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -3357,6 +3481,14 @@ mod tests {
             "tsa.arma2ar",
             "tslearn.cdist_erp",
             "online.OnlineSum",
+            "metrics.nan_euclidean_distances",
+            "stats.compare_j",
+            "tslearn.CnnClassifier",
+            "filters.convolution_filter",
+            "online.TransformerUnion",
+            "stats.ftest_power",
+            "tslearn.InceptionTimeClassifier",
+            "online.AdaGradRegressor",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

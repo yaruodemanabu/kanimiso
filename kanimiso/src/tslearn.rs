@@ -7668,6 +7668,404 @@ impl Predict for FittedTsKMedoids {
     }
 }
 
+/// Pairwise LCSS (tslearn `cdist_lcss`).
+///
+/// `eps` is not identification `p`.
+pub fn cdist_lcss(
+    a: &Matrix,
+    b: &Matrix,
+    eps: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let e = if eps.is_finite() && eps >= 0.0 {
+        eps
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("cdist_lcss ε={eps}; using |ε|"))
+                .build(),
+        );
+        eps.abs()
+    };
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        1.0 - lcss_raw(a.row(i).as_slice(), b.row(j).as_slice(), e, None)
+    });
+    ctx.finish(out)
+}
+
+/// 1-D convolutional + ridge classifier (sktime `CNNClassifier` lite).
+///
+/// Kernel count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct CnnClassifier {
+    /// Random kernels.
+    pub n_kernels: usize,
+    /// Kernel width.
+    pub width: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for CnnClassifier {
+    fn default() -> Self {
+        Self {
+            n_kernels: 4,
+            width: 3,
+            alpha: 0.1,
+            seed: 11,
+        }
+    }
+}
+
+impl CnnClassifier {
+    /// Default CNN-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted CNN-lite ridge.
+#[derive(Clone, Debug)]
+pub struct FittedCnnClassifier {
+    kernels: Vec<Vec<f64>>,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+fn conv_maxpool(x: &Matrix, kernels: &[Vec<f64>]) -> Matrix {
+    Matrix::from_fn(x.nrows(), kernels.len().max(1), |i, k| {
+        if kernels.is_empty() {
+            return 0.0;
+        }
+        let w = &kernels[k];
+        let mut acc_max: f64 = f64::NEG_INFINITY;
+        if w.is_empty() || x.ncols() < w.len() {
+            return 0.0;
+        }
+        for t in 0..=x.ncols() - w.len() {
+            let mut s = 0.0;
+            for u in 0..w.len() {
+                s += w[u] * x.get(i, t + u);
+            }
+            if s > acc_max {
+                acc_max = s;
+            }
+        }
+        if acc_max.is_finite() {
+            acc_max
+        } else {
+            0.0
+        }
+    })
+}
+
+impl Fit for CnnClassifier {
+    type Fitted = FittedCnnClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCnnClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let w = self.width.max(1).min(x.ncols().max(1));
+        if x.ncols() < self.width {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!("CnnClassifier width={} > T={}", self.width, x.ncols()))
+                    .build(),
+            );
+        }
+        let mut rng = Rng::new(self.seed);
+        let kernels: Vec<Vec<f64>> = (0..self.n_kernels.max(1))
+            .map(|_| (0..w).map(|_| rng.standard_normal()).collect())
+            .collect();
+        let z = conv_maxpool(x, &kernels);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "cnn");
+        ctx.finish(FittedCnnClassifier { kernels, inner })
+    }
+}
+
+impl Predict for FittedCnnClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = conv_maxpool(x, &self.kernels);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Per-row forward-fill then column-mean imputer (sktime `TimeSeriesImputer`).
+///
+/// Does **not** call [`inspect_xy`]: NaN is the point of the transform.
+#[derive(Clone, Debug)]
+pub struct TimeSeriesImputer {
+    col_mean: Vector,
+}
+
+impl Default for TimeSeriesImputer {
+    fn default() -> Self {
+        Self {
+            col_mean: Vector::zeros(0),
+        }
+    }
+}
+
+impl TimeSeriesImputer {
+    /// Empty imputer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl FitUnsupervised for TimeSeriesImputer {
+    type Fitted = Self;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let mut means = vec![0.0; x.ncols()];
+        for j in 0..x.ncols() {
+            let mut s = 0.0;
+            let mut n = 0.0;
+            for i in 0..x.nrows() {
+                let v = x.get(i, j);
+                if v.is_finite() {
+                    s += v;
+                    n += 1.0;
+                }
+            }
+            if n <= 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::ImputationUndefined)
+                        .severity(Severity::Warning)
+                        .message(format!("TimeSeriesImputer column {j} is all missing"))
+                        .build(),
+                );
+                means[j] = 0.0;
+            } else {
+                means[j] = s / n;
+            }
+        }
+        self.col_mean = Vector::from_slice(&means);
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for TimeSeriesImputer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        let out = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            let v = x.get(i, j);
+            if v.is_finite() {
+                return v;
+            }
+            let mut last = f64::NAN;
+            for t in 0..=j {
+                let u = x.get(i, t);
+                if u.is_finite() {
+                    last = u;
+                }
+            }
+            if last.is_finite() {
+                last
+            } else if j < self.col_mean.len() {
+                self.col_mean[j]
+            } else {
+                0.0
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Multi-scale random-convolution classifier (sktime `InceptionTimeClassifier` lite).
+///
+/// Kernel count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct InceptionTimeClassifier {
+    /// Kernels per width.
+    pub n_kernels: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for InceptionTimeClassifier {
+    fn default() -> Self {
+        Self {
+            n_kernels: 4,
+            alpha: 0.1,
+            seed: 17,
+        }
+    }
+}
+
+impl InceptionTimeClassifier {
+    /// Default InceptionTime-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted InceptionTime-lite ridge.
+#[derive(Clone, Debug)]
+pub struct FittedInceptionTimeClassifier {
+    kernels: Vec<Vec<f64>>,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for InceptionTimeClassifier {
+    type Fitted = FittedInceptionTimeClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedInceptionTimeClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let t = x.ncols().max(1);
+        let widths = [3usize, 5, t.min(7)].into_iter().filter(|&w| w <= t && w > 0);
+        let mut rng = Rng::new(self.seed);
+        let mut kernels: Vec<Vec<f64>> = Vec::new();
+        for w in widths {
+            for _ in 0..self.n_kernels.max(1) {
+                kernels.push((0..w).map(|_| rng.standard_normal()).collect());
+            }
+        }
+        if kernels.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message("InceptionTimeClassifier has no kernel that fits T")
+                    .build(),
+            );
+            kernels.push(vec![1.0]);
+        }
+        let z = conv_maxpool(x, &kernels);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "inception");
+        ctx.finish(FittedInceptionTimeClassifier { kernels, inner })
+    }
+}
+
+impl Predict for FittedInceptionTimeClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = conv_maxpool(x, &self.kernels);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// ClaSP change-point index (sktime `ClaSPSegmentation` lite).
+///
+/// Split count is not identification `p`.
+pub fn clasp_change_point(y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, &Matrix::from_vector(y), Some(y), &ctx.policy);
+    let n = y.len();
+    if n < 6 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("clasp_change_point needs n≥6")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let mut best_t = 2usize;
+    let mut best_s = f64::NEG_INFINITY;
+    for t in 2..n - 2 {
+        let mut sl = 0.0;
+        let mut sr = 0.0;
+        for i in 0..t {
+            sl += y[i];
+        }
+        for i in t..n {
+            sr += y[i];
+        }
+        let ml = sl / t as f64;
+        let mr = sr / (n - t) as f64;
+        let mut ql = 0.0;
+        let mut qr = 0.0;
+        for i in 0..t {
+            let d = y[i] - ml;
+            ql += d * d;
+        }
+        for i in t..n {
+            let d = y[i] - mr;
+            qr += d * d;
+        }
+        let pool = ((ql + qr) / (n as f64 - 2.0)).max(1e-18);
+        let stat: f64 = (ml - mr) * (ml - mr) / pool;
+        if stat > best_s {
+            best_s = stat;
+            best_t = t;
+        }
+    }
+    if !best_s.is_finite() {
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .message("clasp_change_point score was non-finite")
+                .build(),
+        );
+    }
+    ctx.finish(best_t as f64)
+}
+
+/// Catch22 feature transformer (sktime `Catch22`).
+///
+/// Feature count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct Catch22Transformer {
+    fitted: bool,
+}
+
+impl Catch22Transformer {
+    /// Empty Catch22 transformer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl FitUnsupervised for Catch22Transformer {
+    type Fitted = Self;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for Catch22Transformer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(
+                Issue::builder(IssueCode::PartialFitBeforeInit)
+                    .message("Catch22Transformer.transform before fit")
+                    .build(),
+            );
+        }
+        let z = catch22_rows(x, session, &mut ctx);
+        ctx.finish(z)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8342,5 +8740,50 @@ mod tests {
             .value;
         assert_eq!(cer.shape(), (6, 6));
         assert!(cer.get(0, 0).abs() < 1e-12);
+        let cl = cdist_lcss(&x, &x, 0.5, &Session::new("ts", "lcssd"))
+            .unwrap()
+            .value;
+        assert_eq!(cl.shape(), (6, 6));
+        assert!(cl.get(0, 0).abs() < 1e-12);
+        let cnn = CnnClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "cnn"))
+            .unwrap();
+        let cnnp = cnn
+            .value
+            .predict(&x, &Session::new("ts", "cnnp"))
+            .unwrap()
+            .value;
+        assert_eq!(cnnp.len(), 6);
+        let mut ximp = x.clone();
+        ximp.set(0, 1, f64::NAN);
+        let mut imp = TimeSeriesImputer::new();
+        imp.fit_unsupervised(&ximp, &Session::new("ts", "imp"))
+            .unwrap();
+        let xi = imp
+            .transform(&ximp, &Session::new("ts", "impt"))
+            .unwrap()
+            .value;
+        assert!(xi.get(0, 1).is_finite());
+        let itc = InceptionTimeClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "inc"))
+            .unwrap();
+        let itp = itc
+            .value
+            .predict(&x, &Session::new("ts", "incp"))
+            .unwrap()
+            .value;
+        assert_eq!(itp.len(), 6);
+        let cp = clasp_change_point(&yramp, &Session::new("ts", "clasp"))
+            .unwrap()
+            .value;
+        assert!(cp.is_finite());
+        let mut c22t = Catch22Transformer::new();
+        c22t.fit_unsupervised(&x, &Session::new("ts", "c22t"))
+            .unwrap();
+        let zc = c22t
+            .transform(&x, &Session::new("ts", "c22tt"))
+            .unwrap()
+            .value;
+        assert_eq!(zc.nrows(), 6);
     }
 }

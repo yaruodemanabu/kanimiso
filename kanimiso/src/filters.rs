@@ -341,6 +341,75 @@ impl FitSeries for LocalLinearTrend {
     }
 }
 
+/// FIR convolution (statsmodels `tsa.filters.filtertools.convolution_filter`).
+///
+/// Kernel length is not identification `p`.
+pub fn convolution_filter(
+    y: &Vector,
+    kernel: &Vector,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    if kernel.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("convolution_filter received an empty kernel")
+                .build(),
+        );
+        return ctx.finish(y.clone());
+    }
+    if !kernel.as_slice().iter().all(|v| v.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .message("convolution_filter kernel is non-finite")
+                .build(),
+        );
+    }
+    let k = kernel.len();
+    let out = Vector::from_iter((0..y.len()).map(|t| {
+        let mut s = 0.0;
+        for j in 0..k {
+            if t >= j {
+                s += kernel[j] * y[t - j];
+            }
+        }
+        s
+    }));
+    ctx.finish(out)
+}
+
+/// IIR recursion \(y_t = x_t + \sum_j a_j y_{t-j}\) (statsmodels `recursive_filter`).
+///
+/// AR coefficient count is not identification `p`.
+pub fn recursive_filter(
+    x: &Vector,
+    ar: &Vector,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, x);
+    let mut y = Vector::zeros(x.len());
+    for t in 0..x.len() {
+        let mut s = x[t];
+        for j in 0..ar.len() {
+            if t > j {
+                s += ar[j] * y[t - 1 - j];
+            }
+        }
+        if !s.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::CausalityViolated)
+                    .message("recursive_filter overflowed; later outputs set to 0")
+                    .build(),
+            );
+            s = 0.0;
+        }
+        y[t] = s;
+    }
+    ctx.finish(y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,6 +422,17 @@ mod tests {
             .value;
         let mid: f64 = (8..40).map(|i| c[i].abs()).sum::<f64>() / 32.0;
         assert!(mid < 0.5, "cycle mean abs={mid}");
+        let ker = Vector::from_slice(&[0.25, 0.5, 0.25]);
+        let conv = convolution_filter(&y, &ker, &Session::new("conv", "fit"))
+            .expect("conv")
+            .value;
+        assert_eq!(conv.len(), 48);
+        assert!(conv.as_slice().iter().all(|v| v.is_finite()));
+        let ar = Vector::from_slice(&[0.1]);
+        let rec = recursive_filter(&y, &ar, &Session::new("rec", "fit"))
+            .expect("rec")
+            .value;
+        assert!(rec.as_slice().iter().all(|v| v.is_finite()));
     }
 
     #[test]

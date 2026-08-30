@@ -13257,6 +13257,1367 @@ impl Predict for HardSamplingClassifier {
     }
 }
 
+/// Concatenate an online StandardScaler and MinMaxScaler (river `compose.TransformerUnion`).
+#[derive(Clone, Debug, Default)]
+pub struct TransformerUnion {
+    standard: OnlineStandardScaler,
+    minmax: OnlineMinMaxScaler,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl TransformerUnion {
+    /// Empty union of the two scalers.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for TransformerUnion {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let _ = self
+            .standard
+            .partial_fit(x, None, &session.child("union_std"));
+        let _ = self.minmax.partial_fit(x, None, &session.child("union_mm"));
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(x.nrows() as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("TransformerUnion fitted both scalers on {} rows", x.nrows());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "StandardScaler ∥ MinMaxScaler",
+                "each child updates its own sufficient statistics, then columns are concatenated",
+                "previous child states",
+                "updated child states",
+            ),
+        )
+    }
+}
+
+impl Transform for TransformerUnion {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        let z1 = match self.standard.transform(x, &session.child("union_std_t")) {
+            Ok(q) => q.value,
+            Err(_) => Matrix::zeros(x.nrows(), x.ncols()),
+        };
+        let z2 = match self.minmax.transform(x, &session.child("union_mm_t")) {
+            Ok(q) => q.value,
+            Err(_) => Matrix::zeros(x.nrows(), x.ncols()),
+        };
+        let p = z1.ncols() + z2.ncols();
+        ctx.finish(Matrix::from_fn(x.nrows(), p.max(1), |i, j| {
+            if j < z1.ncols() {
+                z1.get(i, j)
+            } else if j - z1.ncols() < z2.ncols() {
+                z2.get(i, j - z1.ncols())
+            } else {
+                0.0
+            }
+        }))
+    }
+}
+
+/// Named elementwise map (river `compose.FuncTransformer`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElementwiseMap {
+    /// \(\log(1+x)\) on \(x > -1\).
+    Log1p,
+    /// Absolute value.
+    Abs,
+    /// Square.
+    Square,
+    /// Identity.
+    Identity,
+}
+
+/// Streaming function transformer (river `compose.FuncTransformer`).
+#[derive(Clone, Debug)]
+pub struct FuncTransformer {
+    /// Elementwise map.
+    pub map: ElementwiseMap,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for FuncTransformer {
+    fn default() -> Self {
+        Self {
+            map: ElementwiseMap::Identity,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl FuncTransformer {
+    /// Transformer for `map`.
+    pub fn new(map: ElementwiseMap) -> Self {
+        Self {
+            map,
+            ..Self::default()
+        }
+    }
+}
+
+fn apply_map(map: ElementwiseMap, v: f64) -> f64 {
+    match map {
+        ElementwiseMap::Log1p => {
+            if v > -1.0 {
+                (1.0 + v).ln()
+            } else {
+                f64::NAN
+            }
+        }
+        ElementwiseMap::Abs => v.abs(),
+        ElementwiseMap::Square => v * v,
+        ElementwiseMap::Identity => v,
+    }
+}
+
+impl PartialFit for FuncTransformer {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if matches!(self.map, ElementwiseMap::Log1p) {
+            let mut bad = 0u64;
+            for i in 0..x.nrows() {
+                for j in 0..x.ncols() {
+                    let v = x.get(i, j);
+                    if v.is_finite() && v <= -1.0 {
+                        bad += 1;
+                    }
+                }
+            }
+            if bad > 0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .severity(Severity::Warning)
+                        .message(format!(
+                            "FuncTransformer::Log1p is undefined on {bad} entries ≤ −1"
+                        ))
+                        .build(),
+                );
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(0.0);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen > 0;
+        q.warmup = self.n_seen == 0;
+        q.explanation = format!("FuncTransformer::{:?} saw {} rows", self.map, x.nrows());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("{:?}", self.map),
+                "stateless elementwise map; partial_fit only records the stream length",
+                format!("n={}", self.n_seen.saturating_sub(x.nrows() as u64)),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Transform for FuncTransformer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        if matches!(self.map, ElementwiseMap::Log1p) {
+            let mut bad = 0u64;
+            for i in 0..x.nrows() {
+                for j in 0..x.ncols() {
+                    if x.get(i, j).is_finite() && x.get(i, j) <= -1.0 {
+                        bad += 1;
+                    }
+                }
+            }
+            if bad > 0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .severity(Severity::Warning)
+                        .message(format!(
+                            "FuncTransformer::Log1p left {bad} cells undefined"
+                        ))
+                        .build(),
+                );
+            }
+        }
+        ctx.finish(Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            apply_map(self.map, x.get(i, j))
+        }))
+    }
+}
+
+/// Online factorization machine (river `facto.FMRegressor`).
+///
+/// Factor count is not identification `p`. A one-column design has no
+/// pairwise interactions and degrades to a linear SGD update.
+#[derive(Clone, Debug)]
+pub struct FactorizationMachine {
+    /// Latent factor width \(k\).
+    pub n_factors: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    w0: f64,
+    w: Vector,
+    v: Matrix,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for FactorizationMachine {
+    fn default() -> Self {
+        Self {
+            n_factors: 2,
+            learning_rate: 0.05,
+            w0: 0.0,
+            w: Vector::zeros(0),
+            v: Matrix::zeros(0, 0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl FactorizationMachine {
+    /// FM with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let p = x.ncols().min(self.w.len());
+        let mut s = self.w0;
+        for j in 0..p {
+            s += self.w[j] * x.get(i, j);
+        }
+        let k = self.v.ncols();
+        if k == 0 || self.v.nrows() == 0 {
+            return s;
+        }
+        for f in 0..k {
+            let mut sum_vx = 0.0;
+            let mut sum_v2x2 = 0.0;
+            for j in 0..p.min(self.v.nrows()) {
+                let vjf = self.v.get(j, f);
+                let xj = x.get(i, j);
+                sum_vx += vjf * xj;
+                sum_v2x2 += vjf * vjf * xj * xj;
+            }
+            s += 0.5 * (sum_vx * sum_vx - sum_v2x2);
+        }
+        s
+    }
+}
+
+impl PartialFit for FactorizationMachine {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        if !self.initialized {
+            self.w = Vector::zeros(x.ncols());
+            let k = self.n_factors.max(1);
+            let mut rng = Rng::new(19);
+            self.v = Matrix::from_fn(x.ncols(), k, |_, _| 0.01 * rng.standard_normal());
+            self.initialized = true;
+        } else if self.w.len() != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.w.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let mut sse = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            sse += err * err;
+            self.w0 -= eta * err;
+            for j in 0..x.ncols() {
+                self.w[j] -= eta * err * x.get(i, j);
+            }
+            let k = self.v.ncols();
+            let p = x.ncols().min(self.v.nrows());
+            for f in 0..k {
+                let mut sum_vx = 0.0;
+                for j in 0..p {
+                    sum_vx += self.v.get(j, f) * x.get(i, j);
+                }
+                for j in 0..p {
+                    let xj = x.get(i, j);
+                    let vjf = self.v.get(j, f);
+                    let g = err * (xj * (sum_vx - vjf * xj));
+                    self.v.set(j, f, vjf - eta * g);
+                }
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.w.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            sse,
+            sse,
+            self.n_seen >= 2,
+            self.n_seen < 4,
+            "factorization machine",
+            "SGD on the pairwise-interaction residual; a 1-column design has no pairs",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for FactorizationMachine {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
+fn online_linear_dim(fit_intercept: bool, p: usize) -> usize {
+    p + if fit_intercept { 1 } else { 0 }
+}
+
+fn row_aug(x: &Matrix, i: usize, fit_intercept: bool) -> Vector {
+    let p = online_linear_dim(fit_intercept, x.ncols());
+    let mut v = Vector::zeros(p);
+    if fit_intercept {
+        v[0] = 1.0;
+        for j in 0..x.ncols() {
+            v[j + 1] = x.get(i, j);
+        }
+    } else {
+        for j in 0..x.ncols() {
+            v[j] = x.get(i, j);
+        }
+    }
+    v
+}
+
+/// AdaGrad linear regressor (river `optim.AdaGrad` + `linear_model.LinearRegression`).
+#[derive(Clone, Debug)]
+pub struct AdaGradRegressor {
+    /// Global step \(\eta\).
+    pub learning_rate: f64,
+    /// Diagonal floor \(\varepsilon\).
+    pub eps: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    g2: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for AdaGradRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.5,
+            eps: 1e-8,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            g2: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl AdaGradRegressor {
+    /// Default AdaGrad regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for AdaGradRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.g2 = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.coef.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.5
+        };
+        let eps = if self.eps.is_finite() && self.eps > 0.0 {
+            self.eps
+        } else {
+            1e-8
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            for j in 0..dim {
+                let g = err * z[j];
+                self.g2[j] += g * g;
+                let den = self.g2[j].sqrt() + eps;
+                self.coef[j] -= eta * g / den;
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "AdaGrad linear weights",
+            "diagonal accumulator √(Σ g²) rescales each coordinate",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for AdaGradRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
+/// Adam linear regressor (river `optim.Adam`).
+#[derive(Clone, Debug)]
+pub struct AdamRegressor {
+    /// Step \(\eta\).
+    pub learning_rate: f64,
+    /// First-moment decay.
+    pub beta1: f64,
+    /// Second-moment decay.
+    pub beta2: f64,
+    /// Diagonal floor.
+    pub eps: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    m: Vector,
+    v: Vector,
+    t: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for AdamRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            m: Vector::zeros(0),
+            v: Vector::zeros(0),
+            t: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl AdamRegressor {
+    /// Default Adam regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for AdamRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.m = Vector::zeros(dim);
+            self.v = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.coef.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let b1 = self.beta1.clamp(0.0, 0.999);
+        let b2 = self.beta2.clamp(0.0, 0.999);
+        let eps = if self.eps.is_finite() && self.eps > 0.0 {
+            self.eps
+        } else {
+            1e-8
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            self.t += 1.0;
+            let corr1 = 1.0 - b1.powf(self.t);
+            let corr2 = 1.0 - b2.powf(self.t);
+            for j in 0..dim {
+                let g = err * z[j];
+                self.m[j] = b1 * self.m[j] + (1.0 - b1) * g;
+                self.v[j] = b2 * self.v[j] + (1.0 - b2) * g * g;
+                let mhat = self.m[j] / corr1.max(1e-18);
+                let vhat = self.v[j] / corr2.max(1e-18);
+                self.coef[j] -= eta * mhat / (vhat.sqrt() + eps);
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "Adam linear weights",
+            "bias-corrected first and second moments rescale the residual gradient",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for AdamRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
+/// RMSProp linear regressor (river `optim.RMSProp`).
+#[derive(Clone, Debug)]
+pub struct RmsPropRegressor {
+    /// Step \(\eta\).
+    pub learning_rate: f64,
+    /// Second-moment decay \(\rho\).
+    pub rho: f64,
+    /// Diagonal floor.
+    pub eps: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    acc: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for RmsPropRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            rho: 0.9,
+            eps: 1e-8,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            acc: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl RmsPropRegressor {
+    /// Default RMSProp regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for RmsPropRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.acc = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.coef.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let rho = self.rho.clamp(0.0, 0.999);
+        let eps = if self.eps.is_finite() && self.eps > 0.0 {
+            self.eps
+        } else {
+            1e-8
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            for j in 0..dim {
+                let g = err * z[j];
+                self.acc[j] = rho * self.acc[j] + (1.0 - rho) * g * g;
+                self.coef[j] -= eta * g / (self.acc[j].sqrt() + eps);
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "RMSProp linear weights",
+            "decaying second-moment accumulator rescales the residual gradient",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for RmsPropRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
+/// Streaming local outlier factor on a sliding window (river `anomaly.LocalOutlierFactor`).
+///
+/// Neighbor count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct OnlineLof {
+    /// Neighbors used for the k-distance.
+    pub k: usize,
+    /// Window capacity.
+    pub window: usize,
+    xs: Vec<Vec<f64>>,
+    last_score: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OnlineLof {
+    fn default() -> Self {
+        Self {
+            k: 3,
+            window: 32,
+            xs: Vec::new(),
+            last_score: f64::NAN,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlineLof {
+    /// LOF memory with `k` neighbors.
+    pub fn new(k: usize) -> Self {
+        Self {
+            k: k.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn score_row(&self, row: &[f64]) -> f64 {
+        if self.xs.len() <= self.k {
+            return f64::NAN;
+        }
+        let mut dists: Vec<f64> = self
+            .xs
+            .iter()
+            .map(|o| {
+                let mut s = 0.0;
+                let p = row.len().min(o.len());
+                for j in 0..p {
+                    let d = row[j] - o[j];
+                    s += d * d;
+                }
+                s.sqrt()
+            })
+            .collect();
+        dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let kk = self.k.min(dists.len().saturating_sub(1));
+        if kk == 0 {
+            f64::NAN
+        } else {
+            dists[kk]
+        }
+    }
+}
+
+impl PartialFit for OnlineLof {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.n_seen > 0 {
+            if let Some(first) = self.xs.first() {
+                if first.len() != x.ncols() {
+                    ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+                    return finish_explain(
+                        ctx,
+                        reject_explain(
+                            self.updates,
+                            x.nrows(),
+                            self.n_seen,
+                            "feature space changed",
+                        ),
+                    );
+                }
+            }
+        }
+        let before = self.last_score;
+        for i in 0..x.nrows() {
+            let row: Vec<f64> = (0..x.ncols()).map(|j| x.get(i, j)).collect();
+            self.last_score = self.score_row(&row);
+            self.xs.push(row);
+            while self.xs.len() > self.window.max(1) {
+                self.xs.remove(0);
+            }
+            self.n_seen += 1;
+        }
+        if self.xs.len() <= self.k {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!(
+                        "OnlineLof window={} ≤ k={}; k-distance is undefined",
+                        self.xs.len(),
+                        self.k
+                    ))
+                    .build(),
+            );
+        }
+        self.updates += 1;
+        let after = self.last_score;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.xs.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.xs.len() > self.k;
+        q.warmup = self.xs.len() <= self.k;
+        q.explanation = format!("OnlineLof k-distance={after:.6e} window={}", self.xs.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "sliding-window k-distance",
+                "each new row is scored against the retained window, then appended",
+                format!("score={before:.6e}"),
+                format!("score={after:.6e}"),
+            ),
+        )
+    }
+}
+
+impl Predict for OnlineLof {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.xs.len() <= self.k {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let row: Vec<f64> = (0..x.ncols()).map(|j| x.get(i, j)).collect();
+            self.score_row(&row)
+        })))
+    }
+}
+
+/// Streaming Beta (river `proba.Beta`) updated from a binary label stream.
+#[derive(Clone, Debug)]
+pub struct OnlineBeta {
+    alpha: f64,
+    beta: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OnlineBeta {
+    fn default() -> Self {
+        Self {
+            alpha: 1.0,
+            beta: 1.0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlineBeta {
+    /// Uniform Beta(1, 1) prior.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Posterior mean \(\alpha/(\alpha+\beta)\).
+    pub fn score(&self) -> f64 {
+        let z = self.alpha + self.beta;
+        if z <= 0.0 {
+            f64::NAN
+        } else {
+            self.alpha / z
+        }
+    }
+}
+
+impl PartialFit for OnlineBeta {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        let before = self.score();
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            if y[i] >= 0.5 {
+                self.alpha += 1.0;
+            } else {
+                self.beta += 1.0;
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        if self.alpha <= 0.0 || self.beta <= 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateDistribution)
+                    .message("OnlineBeta posterior hit a zero concentration")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!(
+            "OnlineBeta α={:.3} β={:.3} mean={after:.6e}",
+            self.alpha, self.beta
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Beta concentrations",
+                "successes increment α and failures increment β",
+                format!("mean={before:.6e}"),
+                format!("mean={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming Gamma via method of moments (river `proba.Gamma`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineGamma {
+    n: f64,
+    mean: f64,
+    m2: f64,
+    updates: u64,
+}
+
+impl OnlineGamma {
+    /// Empty Gamma accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Moment shape \(\mu^2 / s^2\), or NaN during warmup.
+    pub fn shape(&self) -> f64 {
+        if self.n < 2.0 {
+            return f64::NAN;
+        }
+        let var = self.m2 / (self.n - 1.0);
+        if var <= 1e-18 {
+            f64::NAN
+        } else {
+            (self.mean * self.mean) / var
+        }
+    }
+}
+
+impl PartialFit for OnlineGamma {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.shape();
+        let mut nonpos = 0u64;
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            if v <= 0.0 {
+                nonpos += 1;
+                continue;
+            }
+            self.n += 1.0;
+            let d = v - self.mean;
+            self.mean += d / self.n;
+            self.m2 += d * (v - self.mean);
+        }
+        if nonpos > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "OnlineGamma skipped {nonpos} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        self.updates += 1;
+        let after = self.shape();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 2.0 && after.is_finite();
+        q.warmup = self.n < 2.0;
+        q.explanation = format!("OnlineGamma shape={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Gamma moment shape",
+                "Welford mean/variance of positive column-0 values",
+                format!("shape={before:.6e}"),
+                format!("shape={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Keep a named subset of columns (river `compose.Select`).
+///
+/// Column count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ColumnSelect {
+    /// Columns to keep.
+    pub cols: Vec<usize>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl ColumnSelect {
+    /// Keep `cols`.
+    pub fn new(cols: Vec<usize>) -> Self {
+        Self {
+            cols,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl PartialFit for ColumnSelect {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.cols.iter().any(|&j| j >= x.ncols()) {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ColumnSelect index is out of range for this batch")
+                    .build(),
+            );
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(0.0);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen > 0 && !self.cols.is_empty();
+        q.warmup = self.n_seen == 0;
+        q.explanation = format!("ColumnSelect kept {} columns", self.cols.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "column mask",
+                "stateless projection; partial_fit only records stream length",
+                format!("n={}", self.n_seen.saturating_sub(x.nrows() as u64)),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Transform for ColumnSelect {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        let cols: Vec<usize> = self.cols.iter().copied().filter(|&j| j < x.ncols()).collect();
+        if cols.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .message("ColumnSelect kept no in-range columns")
+                    .build(),
+            );
+            return ctx.finish(Matrix::zeros(x.nrows(), 0));
+        }
+        ctx.finish(Matrix::from_fn(x.nrows(), cols.len(), |i, j| {
+            x.get(i, cols[j])
+        }))
+    }
+}
+
+/// Drop a named subset of columns (river `compose.Discard`).
+///
+/// Column count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ColumnDiscard {
+    /// Columns to drop.
+    pub cols: Vec<usize>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl ColumnDiscard {
+    /// Drop `cols`.
+    pub fn new(cols: Vec<usize>) -> Self {
+        Self {
+            cols,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl PartialFit for ColumnDiscard {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(0.0);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen > 0;
+        q.warmup = self.n_seen == 0;
+        q.explanation = format!("ColumnDiscard drops {} columns", self.cols.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "column drop mask",
+                "stateless projection; partial_fit only records stream length",
+                format!("n={}", self.n_seen.saturating_sub(x.nrows() as u64)),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Transform for ColumnDiscard {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        let keep: Vec<usize> = (0..x.ncols())
+            .filter(|j| !self.cols.contains(j))
+            .collect();
+        if keep.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .message("ColumnDiscard dropped every column")
+                    .build(),
+            );
+            return ctx.finish(Matrix::zeros(x.nrows(), 0));
+        }
+        ctx.finish(Matrix::from_fn(x.nrows(), keep.len(), |i, j| {
+            x.get(i, keep[j])
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -13626,6 +14987,39 @@ mod tests {
         OnlineSum::new()
             .partial_fit(&x, None, &session)
             .expect("osum");
+        TransformerUnion::new()
+            .partial_fit(&x, None, &session)
+            .expect("tunion");
+        FuncTransformer::new(ElementwiseMap::Log1p)
+            .partial_fit(&x, None, &session)
+            .expect("func");
+        FactorizationMachine::new(2)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("fm");
+        AdaGradRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("adagrad");
+        OnlineLof::new(3)
+            .partial_fit(&x, None, &session)
+            .expect("olof");
+        OnlineBeta::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("obeta");
+        AdamRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("adam");
+        RmsPropRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("rms");
+        OnlineGamma::new()
+            .partial_fit(&x, None, &session)
+            .expect("ogamma");
+        ColumnSelect::new(vec![0])
+            .partial_fit(&x, None, &session)
+            .expect("csel");
+        ColumnDiscard::new(vec![])
+            .partial_fit(&x, None, &session)
+            .expect("cdis");
 
         let n_expl = session
             .ledger()
