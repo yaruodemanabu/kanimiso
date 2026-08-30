@@ -2709,6 +2709,117 @@ fn gee_moments(
     (sigma2, rho)
 }
 
+/// Famoye / Consul generalized Poisson (log mean, moment-updated α).
+///
+/// Variance is `μ(1+αμ)²`. Inner IRLS residual issues are not promoted.
+#[derive(Clone, Debug)]
+pub struct GeneralizedPoisson {
+    /// Max IRLS iterations.
+    pub max_iter: usize,
+    /// Intercept.
+    pub fit_intercept: bool,
+}
+
+impl Default for GeneralizedPoisson {
+    fn default() -> Self {
+        Self {
+            max_iter: 40,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl GeneralizedPoisson {
+    /// Default generalized Poisson.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for GeneralizedPoisson {
+    type Fitted = FittedGlm;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        for (i, &yi) in y.as_slice().iter().enumerate() {
+            if yi < 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .message(format!("GeneralizedPoisson y[{i}]={yi} < 0"))
+                        .build(),
+                );
+                break;
+            }
+        }
+        let design = if self.fit_intercept {
+            x.with_intercept()
+        } else {
+            x.clone()
+        };
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let mut beta = Vector::zeros(design.ncols());
+        beta[0] = y.mean().max(1e-6).ln();
+        let mut alpha: f64 = 0.0;
+        for it in 0..self.max_iter {
+            let eta = design.matvec(&beta);
+            let mut xs = Matrix::zeros(design.nrows(), design.ncols());
+            let mut zs = Vector::zeros(y.len());
+            let mut sse: f64 = 0.0;
+            let mut mu_sum: f64 = 0.0;
+            let mut used: f64 = 0.0;
+            for i in 0..y.len() {
+                let mu = eta[i].clamp(-20.0, 20.0).exp().max(1e-8);
+                let a = alpha.max(0.0);
+                let v = mu * (1.0 + a * mu) * (1.0 + a * mu);
+                let w = (mu * mu / v.max(1e-12)).max(1e-12);
+                let z = eta[i] + (y[i] - mu) / mu;
+                let sw = w.sqrt();
+                zs[i] = z * sw;
+                for j in 0..design.ncols() {
+                    xs.set(i, j, design.get(i, j) * sw);
+                }
+                sse += (y[i] - mu) * (y[i] - mu);
+                mu_sum += mu;
+                used += 1.0;
+            }
+            let mu_bar = (mu_sum / used.max(1.0)).max(1e-6);
+            let s2 = sse / used.max(1.0);
+            let next_a = (s2 / mu_bar).sqrt() - 1.0;
+            alpha = (next_a / mu_bar).max(0.0);
+            let mut scratch = signlred::Report::new("gp", "irls");
+            let Some(next) = least_squares(&mut scratch, &xs, &zs, &ctx.policy) else {
+                break;
+            };
+            let d = next.sub(&beta).norm();
+            beta = next;
+            ctx.session.step(it as u64, d, None);
+            if d < 1e-8 {
+                ctx.session.converged("generalized Poisson IRLS", it as u64);
+                break;
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(Severity::Advisory)
+                .message("GeneralizedPoisson uses moment-updated α, not the full GP MLE")
+                .build(),
+        );
+        let (intercept, coef) = if self.fit_intercept {
+            (
+                beta.as_slice().first().copied().unwrap_or(0.0),
+                Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            )
+        } else {
+            (0.0, beta)
+        };
+        ctx.finish(FittedGlm {
+            coef,
+            intercept,
+            dispersion: alpha,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2893,5 +3004,11 @@ mod tests {
             .expect("clogit");
         assert_eq!(cl.value.n_groups, 10);
         assert!(cl.value.coef[0].is_finite());
+        let yg = Vector::from_iter((0..30).map(|i| (0.2 * (i % 6) as f64).exp().round()));
+        let gp = GeneralizedPoisson::new()
+            .fit(&x, &yg, &Session::new("gp", "fit"))
+            .expect("gp");
+        assert!(gp.value.coef[0].is_finite());
+        assert!(gp.value.dispersion >= 0.0);
     }
 }

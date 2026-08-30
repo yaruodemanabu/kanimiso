@@ -108,6 +108,113 @@ fn predict_shape_guard(ctx: &mut FitCtx, x: &Matrix, n_features: usize) {
     }
 }
 
+/// Unsupervised k-nearest-neighbor graph (sklearn `NearestNeighbors`).
+///
+/// Neighbor count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct NearestNeighbors {
+    /// Neighbors returned by [`FittedNearestNeighbors::kneighbors`].
+    pub n_neighbors: usize,
+}
+
+impl Default for NearestNeighbors {
+    fn default() -> Self {
+        Self { n_neighbors: 5 }
+    }
+}
+
+impl NearestNeighbors {
+    /// Graph with `k` neighbors.
+    pub fn new(k: usize) -> Self {
+        Self { n_neighbors: k }
+    }
+}
+
+/// Fitted neighbor graph (stores the training set).
+#[derive(Clone, Debug)]
+pub struct FittedNearestNeighbors {
+    /// Training features.
+    pub x_train: Matrix,
+    /// Neighbors requested.
+    pub n_neighbors: usize,
+}
+
+/// Distances and indices from [`FittedNearestNeighbors::kneighbors`].
+#[derive(Clone, Debug)]
+pub struct NeighborGraph {
+    /// `n_query × k` Euclidean distances.
+    pub distances: Matrix,
+    /// Row indices into the training set.
+    pub indices: Vec<Vec<usize>>,
+}
+
+impl FittedNearestNeighbors {
+    /// k-NN of each query row.
+    pub fn kneighbors(
+        &self,
+        query: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<NeighborGraph>> {
+        let mut ctx = FitCtx::with_session(session.child("kneighbors"));
+        predict_shape_guard(&mut ctx, query, self.x_train.ncols());
+        let k = self.n_neighbors.max(1).min(self.x_train.nrows().max(1));
+        if self.n_neighbors == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("n_neighbors=0; using 1")
+                    .build(),
+            );
+        }
+        if self.x_train.nrows() == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .message("NearestNeighbors has an empty training set")
+                    .build(),
+            );
+            return ctx.finish(NeighborGraph {
+                distances: Matrix::zeros(query.nrows(), 0),
+                indices: vec![Vec::new(); query.nrows()],
+            });
+        }
+        let mut distances = Matrix::zeros(query.nrows(), k);
+        let mut indices = Vec::with_capacity(query.nrows());
+        for i in 0..query.nrows() {
+            let order = knn_order(&self.x_train, query, i);
+            let mut idx = Vec::with_capacity(k);
+            for (t, &(d2, j)) in order.iter().take(k).enumerate() {
+                distances.set(i, t, d2.max(0.0).sqrt());
+                idx.push(j);
+            }
+            indices.push(idx);
+        }
+        ctx.finish(NeighborGraph { distances, indices })
+    }
+}
+
+impl FitUnsupervised for NearestNeighbors {
+    type Fitted = FittedNearestNeighbors;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedNearestNeighbors>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.nrows() == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .message("NearestNeighbors fit on an empty design")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedNearestNeighbors {
+            x_train: x.clone(),
+            n_neighbors: self.n_neighbors.max(1),
+        })
+    }
+}
+
 /// k-nearest-neighbor classifier (majority vote, Euclidean).
 #[derive(Clone, Debug)]
 pub struct KNeighborsClassifier {
@@ -1266,5 +1373,22 @@ mod tests {
             .value;
         assert_eq!(z.shape(), (40, 2));
         assert!(z.get(0, 0).is_finite());
+    }
+
+    #[test]
+    fn nearest_neighbors_graph() {
+        let x = Matrix::from_fn(8, 1, |i, _| i as f64);
+        let q = NearestNeighbors::new(2)
+            .fit_unsupervised(&x, &Session::new("nn", "fit"))
+            .expect("nn");
+        let g = q
+            .value
+            .kneighbors(&x, &Session::new("nn", "k"))
+            .expect("k")
+            .value;
+        assert_eq!(g.distances.ncols(), 2);
+        assert_eq!(g.indices.len(), 8);
+        assert_eq!(g.indices[0][0], 0);
+        assert!(g.distances.get(0, 0).abs() < 1e-12);
     }
 }

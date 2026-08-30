@@ -20,6 +20,7 @@ use crate::traits::{PartialFit, Predict, Transform};
 use faer::Mat;
 use ojizou_san::{IncrementalExplain, Session};
 use signlred::{IncrementalQuality, Issue, IssueCode, Qualified, Result, Severity};
+use std::collections::HashMap;
 
 pub use crate::linear_model::SgdRegressor;
 
@@ -861,6 +862,13 @@ impl Gauss {
             (self.m2 / (self.n - 1.0)).max(0.0).sqrt().max(1e-6)
         }
     }
+    fn var(&self) -> f64 {
+        if self.n < 2.0 {
+            0.0
+        } else {
+            (self.m2 / (self.n - 1.0)).max(0.0)
+        }
+    }
 }
 
 impl HtLeaf {
@@ -1192,6 +1200,496 @@ impl Predict for HoeffdingTree {
         ctx.finish(Vector::from_iter(
             (0..x.nrows()).map(|i| self.predict_one(x, i)),
         ))
+    }
+}
+
+/// Hoeffding tree regressor (river `HoeffdingTreeRegressor`).
+///
+/// Leaves predict a running mean. A split is taken when the variance-reduction
+/// gap exceeds the Hoeffding bound, or the bound itself falls below `tau`.
+#[derive(Clone, Debug)]
+pub struct HoeffdingRegressor {
+    /// Split-confidence `δ`.
+    pub delta: f64,
+    /// Minimum observations in a leaf before a split is considered.
+    pub min_samples: usize,
+    /// Tie-break threshold on the Hoeffding bound.
+    pub tau: f64,
+    root: HrNode,
+    n_seen: u64,
+    updates: u64,
+    n_features: usize,
+    initialized: bool,
+    last_split: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+enum HrNode {
+    Leaf(HrLeaf),
+    Split {
+        feature: usize,
+        threshold: f64,
+        left: Box<HrNode>,
+        right: Box<HrNode>,
+        n: u64,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct HrLeaf {
+    id: u64,
+    y: Gauss,
+    bins: Vec<HrBin>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct HrBin {
+    gx: Gauss,
+    left: Gauss,
+    right: Gauss,
+}
+
+impl HrLeaf {
+    fn new(id: u64, p: usize) -> Self {
+        Self {
+            id,
+            y: Gauss::default(),
+            bins: vec![HrBin::default(); p],
+        }
+    }
+
+    fn push(&mut self, x: &Matrix, i: usize, yi: f64) {
+        self.y.push(yi);
+        for j in 0..x.ncols().min(self.bins.len()) {
+            let xv = x.get(i, j);
+            let t = if self.bins[j].gx.n < 1.0 {
+                xv
+            } else {
+                self.bins[j].gx.mean
+            };
+            if xv <= t {
+                self.bins[j].left.push(yi);
+            } else {
+                self.bins[j].right.push(yi);
+            }
+            self.bins[j].gx.push(xv);
+        }
+    }
+
+    fn maybe_split(
+        &self,
+        min_samples: usize,
+        delta: f64,
+        tau: f64,
+    ) -> Option<(usize, f64, f64, f64)> {
+        if (self.y.n as usize) < min_samples {
+            return None;
+        }
+        let parent_var = self.y.var();
+        if parent_var <= 1e-18 {
+            return None;
+        }
+        let mut best = (0usize, 0.0, -1.0);
+        let mut second = -1.0;
+        for (j, bin) in self.bins.iter().enumerate() {
+            let nl = bin.left.n;
+            let nr = bin.right.n;
+            if nl < 2.0 || nr < 2.0 {
+                continue;
+            }
+            let n = self.y.n.max(1.0);
+            let red = parent_var - (nl * bin.left.var() + nr * bin.right.var()) / n;
+            if red > best.2 {
+                second = best.2;
+                best = (j, bin.gx.mean, red);
+            } else if red > second {
+                second = red;
+            }
+        }
+        let eps = (0.5 * (1.0 / delta.max(1e-12)).ln() / self.y.n.max(1.0)).sqrt();
+        if best.2 < 0.0 {
+            return None;
+        }
+        if best.2 - second.max(0.0) > eps || eps < tau {
+            Some((best.0, best.1, best.2, eps))
+        } else {
+            None
+        }
+    }
+}
+
+impl Default for HoeffdingRegressor {
+    fn default() -> Self {
+        Self {
+            delta: 1e-7,
+            min_samples: 20,
+            tau: 0.05,
+            root: HrNode::Leaf(HrLeaf::new(0, 0)),
+            n_seen: 0,
+            updates: 0,
+            n_features: 0,
+            initialized: false,
+            last_split: None,
+        }
+    }
+}
+
+impl HoeffdingRegressor {
+    /// Default Hoeffding regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_one(&self, x: &Matrix, i: usize) -> f64 {
+        let mut node = &self.root;
+        loop {
+            match node {
+                HrNode::Leaf(l) => return l.y.mean,
+                HrNode::Split {
+                    feature,
+                    threshold,
+                    left,
+                    right,
+                    ..
+                } => {
+                    let v = if *feature < x.ncols() {
+                        x.get(i, *feature)
+                    } else {
+                        0.0
+                    };
+                    node = if v <= *threshold { left } else { right };
+                }
+            }
+        }
+    }
+}
+
+fn hr_update(
+    node: &mut HrNode,
+    x: &Matrix,
+    i: usize,
+    yi: f64,
+    min_samples: usize,
+    delta: f64,
+    tau: f64,
+    next_id: u64,
+) -> Option<String> {
+    match node {
+        HrNode::Split {
+            feature,
+            threshold,
+            left,
+            right,
+            n,
+        } => {
+            *n += 1;
+            if x.get(i, *feature) <= *threshold {
+                hr_update(left, x, i, yi, min_samples, delta, tau, next_id)
+            } else {
+                hr_update(right, x, i, yi, min_samples, delta, tau, next_id)
+            }
+        }
+        HrNode::Leaf(leaf) => {
+            leaf.push(x, i, yi);
+            if let Some((feat, thr, gain, eps)) = leaf.maybe_split(min_samples, delta, tau) {
+                let p = leaf.bins.len();
+                let narrative = format!(
+                    "leaf {} split on feature {feat} at {thr:.6e} (var-red {gain:.4e}, ε={eps:.4e}, n={})",
+                    leaf.id, leaf.y.n
+                );
+                *node = HrNode::Split {
+                    feature: feat,
+                    threshold: thr,
+                    left: Box::new(HrNode::Leaf(HrLeaf::new(next_id, p))),
+                    right: Box::new(HrNode::Leaf(HrLeaf::new(next_id + 1, p))),
+                    n: leaf.y.n as u64,
+                };
+                Some(narrative)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+impl PartialFit for HoeffdingRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        if !self.initialized {
+            if x.ncols() == 0 {
+                ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+                return finish_explain(
+                    ctx,
+                    reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+                );
+            }
+            self.n_features = x.ncols();
+            self.root = HrNode::Leaf(HrLeaf::new(0, x.ncols()));
+            self.initialized = true;
+        } else if x.ncols() != self.n_features {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        inspect_online_xy(&mut ctx, x, Some(y));
+        let mut split_note = None;
+        for i in 0..x.nrows() {
+            let nid = self.n_seen + 17 + i as u64;
+            if let Some(s) = hr_update(
+                &mut self.root,
+                x,
+                i,
+                y[i],
+                self.min_samples,
+                self.delta,
+                self.tau,
+                nid,
+            ) {
+                split_note = Some(s);
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        if let Some(s) = &split_note {
+            self.last_split = Some(s.clone());
+        }
+        let warmup = self.n_seen < self.min_samples as u64;
+        if warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message(format!(
+                        "HoeffdingRegressor has seen {} < min_samples={}",
+                        self.n_seen, self.min_samples
+                    ))
+                    .build(),
+            );
+        }
+        let info = if split_note.is_some() { 1.0 } else { 0.0 };
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if split_note.is_some() { 1.0 } else { 0.0 });
+        q.information_gain = Some(info);
+        q.still_identified = !warmup;
+        q.warmup = warmup;
+        q.explanation = split_note
+            .clone()
+            .unwrap_or_else(|| format!("leaf means updated on {} rows; no split", x.nrows()));
+        if q.is_uninformative(ctx.policy.uninformative_info_eps) && !warmup {
+            ctx.push(
+                Issue::builder(IssueCode::UpdateWithZeroInformation)
+                    .incremental(q.clone())
+                    .message("HoeffdingRegressor update did not split")
+                    .build(),
+            );
+        }
+        let what = split_note
+            .clone()
+            .unwrap_or_else(|| "per-leaf mean and variance-reduction candidates".into());
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                what,
+                "Hoeffding-bound variance-reduction split test",
+                "pre-batch tree",
+                "post-batch tree",
+            ),
+        )
+    }
+}
+
+impl Predict for HoeffdingRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.predict_one(x, i)),
+        ))
+    }
+}
+
+/// Online one-hot encoder (river `preprocessing.OneHotEncoder`).
+///
+/// Width is capped at `n_features × max_categories`. New categories after the
+/// first update are a warned feature-space change, not an abort.
+#[derive(Clone, Debug)]
+pub struct OnlineOneHotEncoder {
+    /// Cap on distinct codes per column.
+    pub max_categories: usize,
+    maps: Vec<HashMap<i64, usize>>,
+    n_features: usize,
+    initialized: bool,
+    updates: u64,
+    n_seen: u64,
+    new_cats: u64,
+}
+
+impl Default for OnlineOneHotEncoder {
+    fn default() -> Self {
+        Self {
+            max_categories: 8,
+            maps: Vec::new(),
+            n_features: 0,
+            initialized: false,
+            updates: 0,
+            n_seen: 0,
+            new_cats: 0,
+        }
+    }
+}
+
+impl OnlineOneHotEncoder {
+    /// Encoder with `max_categories` slots per column.
+    pub fn new(max_categories: usize) -> Self {
+        Self {
+            max_categories: max_categories.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineOneHotEncoder {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        if !self.initialized {
+            self.n_features = x.ncols();
+            self.maps = vec![HashMap::new(); x.ncols()];
+            self.initialized = true;
+        } else if x.ncols() != self.n_features {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let mut added = 0u64;
+        for j in 0..x.ncols() {
+            for i in 0..x.nrows() {
+                let v = x.get(i, j);
+                if !v.is_finite() {
+                    continue;
+                }
+                let key = v.round() as i64;
+                if self.maps[j].contains_key(&key) {
+                    continue;
+                }
+                if self.maps[j].len() >= self.max_categories {
+                    ctx.push(
+                        Issue::builder(IssueCode::InvalidWeight)
+                            .severity(Severity::Warning)
+                            .message(format!(
+                                "OnlineOneHotEncoder column {j} exceeded max_categories={}",
+                                self.max_categories
+                            ))
+                            .build(),
+                    );
+                    continue;
+                }
+                let slot = self.maps[j].len();
+                self.maps[j].insert(key, slot);
+                added += 1;
+                if self.updates > 0 {
+                    ctx.push(
+                        Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                            .severity(Severity::Warning)
+                            .message(format!("new category {key} on column {j}"))
+                            .build(),
+                    );
+                }
+            }
+        }
+        self.new_cats += added;
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(added as f64);
+        q.information_gain = Some((added as f64).max(1.0 / self.n_seen.max(1) as f64));
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!(
+            "online one-hot added {added} categories on {} rows",
+            x.nrows()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "category maps per column",
+                "integer-code one-hot with a fixed width cap",
+                "previous category maps",
+                "updated category maps",
+            ),
+        )
+    }
+}
+
+impl Transform for OnlineOneHotEncoder {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), 0));
+        }
+        let width = self.n_features * self.max_categories;
+        let out = Matrix::from_fn(x.nrows(), width, |i, j| {
+            let col = j / self.max_categories;
+            let slot = j % self.max_categories;
+            if col >= x.ncols() || col >= self.maps.len() {
+                return 0.0;
+            }
+            let v = x.get(i, col);
+            if !v.is_finite() {
+                return 0.0;
+            }
+            match self.maps[col].get(&(v.round() as i64)) {
+                Some(&s) if s == slot => 1.0,
+                _ => 0.0,
+            }
+        });
+        ctx.finish(out)
     }
 }
 
@@ -6480,6 +6978,12 @@ mod tests {
         OnlineGaussianNb::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("ognb");
+        HoeffdingRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("htr");
+        OnlineOneHotEncoder::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("ohe");
 
         let n_expl = session
             .ledger()
@@ -6488,7 +6992,7 @@ mod tests {
             .filter(|e| e.kind == EventKind::IncrementalExplanation)
             .count();
         assert!(
-            n_expl >= 40,
+            n_expl >= 42,
             "expected an IncrementalExplanation per partial_fit, got {n_expl}"
         );
     }

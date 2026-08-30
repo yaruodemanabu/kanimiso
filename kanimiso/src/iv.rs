@@ -7,12 +7,15 @@
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linalg::{chol_solve, least_squares};
+use crate::special::chi2_pvalue;
 use crate::stats::{adfuller, phillips_perron};
 use crate::traits::Predict;
 use crate::validate::{inspect_identification, inspect_xy};
 use faer::Mat;
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result};
+use signlred::{
+    Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result, Severity,
+};
 
 /// Two-stage least squares: \(X\) endogenous, \(Z\) instruments.
 #[derive(Clone, Debug, Default)]
@@ -190,6 +193,152 @@ fn empty_2sls(x: &Matrix) -> FittedTwoSls {
         intercept: 0.0,
         first_stage_f: f64::NAN,
     }
+}
+
+/// One-step IV-GMM with Hansen *J* / Sargan overidentification.
+///
+/// The weighting matrix is `(Z′Z)⁻¹`, so the point equals 2SLS. `J = n R²`
+/// from the residual regression on `Z`. Residual-kind inner failures are not
+/// promoted.
+#[derive(Clone, Debug, Default)]
+pub struct IvGmm {
+    /// Include an intercept in both stages.
+    pub fit_intercept: bool,
+}
+
+impl IvGmm {
+    /// Default IV-GMM.
+    pub fn new() -> Self {
+        Self {
+            fit_intercept: true,
+        }
+    }
+
+    /// Fit `y` on `x` using instruments `z`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        z: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedIvGmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let q = match (TwoSls {
+            fit_intercept: self.fit_intercept,
+        })
+        .fit(x, y, z, &session.child("ivgmm-2sls"))
+        {
+            Ok(q) => q,
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                ) {
+                    ctx.push(e.primary);
+                }
+                return ctx.finish(FittedIvGmm {
+                    coef: Vector::zeros(x.ncols()),
+                    intercept: 0.0,
+                    hansen_j: f64::NAN,
+                    hansen_p: f64::NAN,
+                    sargan: f64::NAN,
+                    df_overid: 0,
+                    first_stage_f: f64::NAN,
+                });
+            }
+        };
+        for issue in q.report.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let mut pred = x.matvec(&q.value.coef);
+        for i in 0..pred.len() {
+            pred[i] += q.value.intercept;
+        }
+        let e = Vector::from_iter(y.as_slice().iter().zip(pred.as_slice()).map(|(a, b)| a - b));
+        let zdes = if self.fit_intercept {
+            z.with_intercept()
+        } else {
+            z.clone()
+        };
+        let xdes_cols = x.ncols() + if self.fit_intercept { 1 } else { 0 };
+        let df = zdes.ncols().saturating_sub(xdes_cols);
+        let mut hansen_j = f64::NAN;
+        let mut hansen_p = f64::NAN;
+        if df == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::CausalClaimUnidentified)
+                    .severity(Severity::Advisory)
+                    .message("IV-GMM is just-identified; Hansen J is unidentified")
+                    .build(),
+            );
+            hansen_j = 0.0;
+        } else {
+            let mut scratch = signlred::Report::new("ivgmm", "sargan");
+            if let Some(g) = least_squares(&mut scratch, &zdes, &e, &ctx.policy) {
+                let fit = zdes.matvec(&g);
+                let mut sse = 0.0;
+                let mut sst = 0.0;
+                let m = e.mean();
+                for i in 0..e.len() {
+                    let r = e[i] - fit[i];
+                    sse += r * r;
+                    let d = e[i] - m;
+                    sst += d * d;
+                }
+                if sst > 1e-18 {
+                    let r2 = (1.0 - sse / sst).clamp(0.0, 1.0);
+                    hansen_j = e.len() as f64 * r2;
+                    hansen_p = chi2_pvalue(hansen_j.max(0.0), df as f64);
+                }
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(Severity::Advisory)
+                .message("Hansen J uses the homoskedastic 2SLS weight, not two-step GMM")
+                .build(),
+        );
+        ctx.finish(FittedIvGmm {
+            coef: q.value.coef,
+            intercept: q.value.intercept,
+            hansen_j,
+            hansen_p,
+            sargan: hansen_j,
+            df_overid: df,
+            first_stage_f: q.value.first_stage_f,
+        })
+    }
+}
+
+/// Fitted IV-GMM.
+#[derive(Clone, Debug)]
+pub struct FittedIvGmm {
+    /// Structural slopes.
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+    /// Hansen *J*.
+    pub hansen_j: f64,
+    /// χ² p-value of *J*.
+    pub hansen_p: f64,
+    /// Sargan *nR²* (same as *J* under this weight).
+    pub sargan: f64,
+    /// Overidentification degrees of freedom.
+    pub df_overid: usize,
+    /// Smallest first-stage *F*.
+    pub first_stage_f: f64,
 }
 
 /// Limited-information maximum likelihood (k-class).
@@ -1105,5 +1254,21 @@ mod tests {
             .expect("po");
         assert!(po.value.coef.is_finite());
         assert!(po.value.adf_stat.is_finite());
+        let ziv = Matrix::from_fn(40, 2, |i, j| {
+            if j == 0 {
+                i as f64
+            } else {
+                0.3 * i as f64 + (i % 3) as f64
+            }
+        });
+        let xiv = Matrix::from_fn(40, 1, |i, _| i as f64 + 0.2 * ((i % 3) as f64));
+        let yiv =
+            Vector::from_iter((0..40).map(|i| 1.0 + 2.0 * xiv.get(i, 0) + 0.05 * ((i % 4) as f64)));
+        let gmm = IvGmm::new()
+            .fit(&xiv, &yiv, &ziv, &Session::new("ivgmm", "fit"))
+            .expect("ivgmm");
+        assert!(gmm.value.coef[0].is_finite());
+        assert_eq!(gmm.value.df_overid, 1);
+        assert!(gmm.value.hansen_j.is_finite());
     }
 }

@@ -325,6 +325,154 @@ impl ShuffleSplit {
     }
 }
 
+/// Stratified random train/test draws (sklearn `StratifiedShuffleSplit`).
+#[derive(Clone, Debug)]
+pub struct StratifiedShuffleSplit {
+    /// Number of splits.
+    pub n_splits: usize,
+    /// Test fraction.
+    pub test_size: f64,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for StratifiedShuffleSplit {
+    fn default() -> Self {
+        Self {
+            n_splits: 5,
+            test_size: 0.25,
+            seed: 0,
+        }
+    }
+}
+
+impl StratifiedShuffleSplit {
+    /// `n_splits` stratified random partitions.
+    pub fn new(n_splits: usize) -> Self {
+        Self {
+            n_splits,
+            ..Self::default()
+        }
+    }
+
+    /// Materialize train/test index pairs that preserve class proportions of `y`.
+    pub fn split(&self, y: &Vector, session: &Session) -> Result<Qualified<Vec<Split>>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        crate::validate::inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let labs = labels_of(y);
+        let mut by_class: Vec<(i64, Vec<usize>)> = Vec::new();
+        for (i, &lab) in labs.iter().enumerate() {
+            if let Some((_, rows)) = by_class.iter_mut().find(|(c, _)| *c == lab) {
+                rows.push(i);
+            } else {
+                by_class.push((lab, vec![i]));
+            }
+        }
+        let k = self.n_splits.max(1);
+        if self.n_splits < 1 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("StratifiedShuffleSplit.n_splits < 1; using 1")
+                    .build(),
+            );
+        }
+        let frac = if self.test_size.is_finite() {
+            self.test_size.clamp(0.05, 0.5)
+        } else {
+            0.25
+        };
+        if !self.test_size.is_finite() || self.test_size <= 0.0 || self.test_size >= 1.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "StratifiedShuffleSplit.test_size={} is not in (0,1); clamped",
+                        self.test_size
+                    ))
+                    .build(),
+            );
+        }
+        let mut rng = Rng::new(self.seed);
+        let mut folds = Vec::with_capacity(k);
+        for _ in 0..k {
+            let mut test = Vec::new();
+            let mut train = Vec::new();
+            for (_, rows) in &mut by_class {
+                rng.shuffle(rows);
+                let mut n_te = (frac * rows.len() as f64).round() as usize;
+                if rows.len() > 1 {
+                    n_te = n_te.clamp(1, rows.len() - 1);
+                }
+                test.extend_from_slice(&rows[..n_te]);
+                train.extend_from_slice(&rows[n_te..]);
+            }
+            folds.push(Split { train, test });
+        }
+        ctx.finish(folds)
+    }
+}
+
+/// Repeated stratified K-fold.
+#[derive(Clone, Debug)]
+pub struct RepeatedStratifiedKFold {
+    /// Folds per repeat.
+    pub n_splits: usize,
+    /// Independent shuffles.
+    pub n_repeats: usize,
+    /// Base PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for RepeatedStratifiedKFold {
+    fn default() -> Self {
+        Self {
+            n_splits: 5,
+            n_repeats: 2,
+            seed: 0,
+        }
+    }
+}
+
+impl RepeatedStratifiedKFold {
+    /// `n_splits` folds, `n_repeats` times.
+    pub fn new(n_splits: usize, n_repeats: usize) -> Self {
+        Self {
+            n_splits,
+            n_repeats,
+            seed: 0,
+        }
+    }
+
+    /// Materialize all stratified train/test index pairs.
+    pub fn split(&self, y: &Vector, session: &Session) -> Result<Qualified<Vec<Split>>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let k = self.n_splits.max(2);
+        let r = self.n_repeats.max(1);
+        if self.n_splits < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("RepeatedStratifiedKFold.n_splits < 2; using 2")
+                    .build(),
+            );
+        }
+        let mut folds = Vec::new();
+        for rep in 0..r {
+            let inner = StratifiedKFold {
+                n_splits: k,
+                shuffle: true,
+                seed: self.seed.wrapping_add(rep as u64),
+            };
+            match inner.split(y, &session.child(format!("rskf_{rep}"))) {
+                Ok(q) => folds.extend(q.value),
+                Err(e) => ctx.push(e.primary),
+            }
+        }
+        ctx.finish(folds)
+    }
+}
+
 /// Stratified K-fold: each class is split independently so fold prevalences match.
 #[derive(Clone, Debug)]
 pub struct StratifiedKFold {
@@ -584,6 +732,377 @@ pub fn cross_val_predict(
         );
     }
     ctx.finish(out)
+}
+
+/// Train/test R² as a function of training-set size (sklearn `learning_curve`).
+///
+/// Each point is a Ridge(α=10⁻³) diagnostic, not a generic estimator protocol.
+#[derive(Clone, Debug)]
+pub struct LearningCurve {
+    /// Absolute training sizes used.
+    pub train_sizes: Vec<usize>,
+    /// Mean in-sample R².
+    pub train_scores: Vector,
+    /// Mean held-out R².
+    pub test_scores: Vector,
+}
+
+/// Learning curve of a lightly-penalized ridge over `train_sizes` fractions.
+pub fn learning_curve(
+    x: &Matrix,
+    y: &Vector,
+    train_sizes: &[f64],
+    n_splits: usize,
+    session: &Session,
+) -> Result<Qualified<LearningCurve>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let k = n_splits.max(2);
+    if n_splits < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message("learning_curve n_splits < 2; using 2")
+                .build(),
+        );
+    }
+    let folds = match (KFold {
+        n_splits: k,
+        shuffle: true,
+        seed: 3,
+    })
+    .split(x.nrows(), &session.child("lc_kfold"))
+    {
+        Ok(q) => q.value,
+        Err(e) => {
+            ctx.push(e.primary);
+            Vec::new()
+        }
+    };
+    let mut sizes = Vec::new();
+    let mut tr_sc = Vec::new();
+    let mut te_sc = Vec::new();
+    for &frac in train_sizes {
+        let f = if frac.is_finite() {
+            frac.clamp(0.1, 1.0)
+        } else {
+            1.0
+        };
+        let mut tr_acc = 0.0;
+        let mut te_acc = 0.0;
+        let mut used = 0.0;
+        let mut ntr_used = 0usize;
+        for (i, fold) in folds.iter().enumerate() {
+            let ntr = ((f * fold.train.len() as f64).round() as usize).clamp(2, fold.train.len());
+            ntr_used = ntr;
+            let idx = &fold.train[..ntr];
+            let xt = take_rows(x, idx);
+            let yt = take_vec(y, idx);
+            let xv = take_rows(x, &fold.test);
+            let yv = take_vec(y, &fold.test);
+            match Ridge::new(1e-3).fit(&xt, &yt, &session.child(format!("lc_{i}"))) {
+                Ok(q) => {
+                    if let (Ok(ptr), Ok(pte)) = (
+                        q.value.predict(&xt, &session.child("lctr")),
+                        q.value.predict(&xv, &session.child("lcte")),
+                    ) {
+                        if let (Ok(rtr), Ok(rte)) = (
+                            r2(&yt, &ptr.value, &session.child("r2tr")),
+                            r2(&yv, &pte.value, &session.child("r2te")),
+                        ) {
+                            tr_acc += rtr.value;
+                            te_acc += rte.value;
+                            used += 1.0;
+                        }
+                    }
+                }
+                Err(e) => {
+                    if !matches!(
+                        e.primary.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::RankZero
+                            | IssueCode::R2IsOne
+                    ) {
+                        ctx.push(e.primary);
+                    }
+                }
+            }
+        }
+        sizes.push(ntr_used);
+        tr_sc.push(if used > 0.0 { tr_acc / used } else { f64::NAN });
+        te_sc.push(if used > 0.0 { te_acc / used } else { f64::NAN });
+    }
+    ctx.finish(LearningCurve {
+        train_sizes: sizes,
+        train_scores: Vector::from_iter(tr_sc),
+        test_scores: Vector::from_iter(te_sc),
+    })
+}
+
+/// Ridge validation curve over a grid of `alpha` (sklearn `validation_curve`).
+#[derive(Clone, Debug)]
+pub struct ValidationCurve {
+    /// Penalty values.
+    pub param_values: Vector,
+    /// Mean in-sample R².
+    pub train_scores: Vector,
+    /// Mean held-out R².
+    pub test_scores: Vector,
+}
+
+/// Sklearn `validation_curve` for Ridge `alpha`.
+pub fn validation_curve(
+    x: &Matrix,
+    y: &Vector,
+    alphas: &[f64],
+    n_splits: usize,
+    session: &Session,
+) -> Result<Qualified<ValidationCurve>> {
+    validation_curve_ridge(x, y, alphas, n_splits, session)
+}
+
+/// Validation curve of Ridge over `alphas`.
+pub fn validation_curve_ridge(
+    x: &Matrix,
+    y: &Vector,
+    alphas: &[f64],
+    n_splits: usize,
+    session: &Session,
+) -> Result<Qualified<ValidationCurve>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let k = n_splits.max(2);
+    let folds = match (KFold {
+        n_splits: k,
+        shuffle: true,
+        seed: 5,
+    })
+    .split(x.nrows(), &session.child("vc_kfold"))
+    {
+        Ok(q) => q.value,
+        Err(e) => {
+            ctx.push(e.primary);
+            Vec::new()
+        }
+    };
+    let mut tr = Vec::new();
+    let mut te = Vec::new();
+    for &a in alphas {
+        let alpha = if a.is_finite() && a >= 0.0 { a } else { 0.1 };
+        let mut tr_acc = 0.0;
+        let mut te_acc = 0.0;
+        let mut used = 0.0;
+        for (i, fold) in folds.iter().enumerate() {
+            let xt = take_rows(x, &fold.train);
+            let yt = take_vec(y, &fold.train);
+            let xv = take_rows(x, &fold.test);
+            let yv = take_vec(y, &fold.test);
+            match Ridge::new(alpha).fit(&xt, &yt, &session.child(format!("vc_{i}"))) {
+                Ok(q) => {
+                    if let (Ok(ptr), Ok(pte)) = (
+                        q.value.predict(&xt, &session.child("vctr")),
+                        q.value.predict(&xv, &session.child("vcte")),
+                    ) {
+                        if let (Ok(rtr), Ok(rte)) = (
+                            r2(&yt, &ptr.value, &session.child("r2tr")),
+                            r2(&yv, &pte.value, &session.child("r2te")),
+                        ) {
+                            tr_acc += rtr.value;
+                            te_acc += rte.value;
+                            used += 1.0;
+                        }
+                    }
+                }
+                Err(e) => {
+                    if !matches!(
+                        e.primary.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::RankZero
+                            | IssueCode::R2IsOne
+                    ) {
+                        ctx.push(e.primary);
+                    }
+                }
+            }
+        }
+        tr.push(if used > 0.0 { tr_acc / used } else { f64::NAN });
+        te.push(if used > 0.0 { te_acc / used } else { f64::NAN });
+    }
+    ctx.finish(ValidationCurve {
+        param_values: Vector::from_iter(alphas.iter().copied()),
+        train_scores: Vector::from_iter(tr),
+        test_scores: Vector::from_iter(te),
+    })
+}
+
+/// Column-wise permutation importance (mean and std of R² drop).
+#[derive(Clone, Debug)]
+pub struct PermutationImportance {
+    /// Mean R² drop per column.
+    pub importances_mean: Vector,
+    /// Sample std of the drop over repeats.
+    pub importances_std: Vector,
+}
+
+/// Permute each column of a full-sample Ridge fit and record the R² drop.
+///
+/// The baseline uses the full `y` ([`IssueCode::TargetLeakageSuspected`]).
+pub fn permutation_importance(
+    x: &Matrix,
+    y: &Vector,
+    n_repeats: usize,
+    session: &Session,
+) -> Result<Qualified<PermutationImportance>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    ctx.push(
+        Issue::builder(IssueCode::TargetLeakageSuspected)
+            .severity(Severity::Advisory)
+            .message("permutation_importance fits Ridge on the full (X, y)")
+            .build(),
+    );
+    let reps = n_repeats.max(1);
+    if n_repeats < 1 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message("permutation_importance n_repeats < 1; using 1")
+                .build(),
+        );
+    }
+    let fitted = match Ridge::new(1e-3).fit(x, y, &session.child("pi_fit")) {
+        Ok(q) => q.value,
+        Err(e) => {
+            ctx.push(e.primary);
+            return ctx.finish(PermutationImportance {
+                importances_mean: Vector::zeros(x.ncols()),
+                importances_std: Vector::zeros(x.ncols()),
+            });
+        }
+    };
+    let pred0 = match fitted.predict(x, &session.child("pi_p0")) {
+        Ok(q) => q.value,
+        Err(e) => {
+            ctx.push(e.primary);
+            return ctx.finish(PermutationImportance {
+                importances_mean: Vector::zeros(x.ncols()),
+                importances_std: Vector::zeros(x.ncols()),
+            });
+        }
+    };
+    let baseline = match r2(y, &pred0, &session.child("pi_r2")) {
+        Ok(q) => q.value,
+        Err(_) => f64::NAN,
+    };
+    let mut mean = Vector::zeros(x.ncols());
+    let mut stdv = Vector::zeros(x.ncols());
+    let mut rng = Rng::new(11);
+    for j in 0..x.ncols() {
+        let mut drops = Vec::new();
+        for _ in 0..reps {
+            let mut col: Vec<f64> = (0..x.nrows()).map(|i| x.get(i, j)).collect();
+            rng.shuffle(&mut col);
+            let xp = Matrix::from_fn(x.nrows(), x.ncols(), |r, c| {
+                if c == j {
+                    col[r]
+                } else {
+                    x.get(r, c)
+                }
+            });
+            if let Ok(p) = fitted.predict(&xp, &session.child("pi_p")) {
+                if let Ok(s) = r2(y, &p.value, &session.child("pi_rs")) {
+                    if baseline.is_finite() && s.value.is_finite() {
+                        drops.push(baseline - s.value);
+                    }
+                }
+            }
+        }
+        if drops.is_empty() {
+            continue;
+        }
+        let m = drops.iter().sum::<f64>() / drops.len() as f64;
+        let var = if drops.len() > 1 {
+            drops.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / (drops.len() as f64 - 1.0)
+        } else {
+            0.0
+        };
+        mean[j] = m;
+        stdv[j] = var.max(0.0).sqrt();
+    }
+    ctx.finish(PermutationImportance {
+        importances_mean: mean,
+        importances_std: stdv,
+    })
+}
+
+/// One-way partial dependence of a full-sample Ridge (sklearn `partial_dependence`).
+#[derive(Clone, Debug)]
+pub struct PartialDependence {
+    /// Grid of the chosen column.
+    pub grid: Vector,
+    /// Mean prediction at each grid value.
+    pub average: Vector,
+}
+
+/// Average Ridge prediction after pinning `feature` to each `grid` value.
+pub fn partial_dependence(
+    x: &Matrix,
+    y: &Vector,
+    feature: usize,
+    grid: &Vector,
+    session: &Session,
+) -> Result<Qualified<PartialDependence>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    ctx.push(
+        Issue::builder(IssueCode::TargetLeakageSuspected)
+            .severity(Severity::Advisory)
+            .message("partial_dependence fits Ridge on the full (X, y)")
+            .build(),
+    );
+    if feature >= x.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "partial_dependence feature={feature} ≥ p={}",
+                    x.ncols()
+                ))
+                .build(),
+        );
+        return ctx.finish(PartialDependence {
+            grid: grid.clone(),
+            average: Vector::zeros(grid.len()),
+        });
+    }
+    let fitted = match Ridge::new(1e-3).fit(x, y, &session.child("pd_fit")) {
+        Ok(q) => q.value,
+        Err(e) => {
+            ctx.push(e.primary);
+            return ctx.finish(PartialDependence {
+                grid: grid.clone(),
+                average: Vector::zeros(grid.len()),
+            });
+        }
+    };
+    let mut avg = Vector::zeros(grid.len());
+    for (t, &g) in grid.as_slice().iter().enumerate() {
+        let xp = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            if j == feature {
+                g
+            } else {
+                x.get(i, j)
+            }
+        });
+        if let Ok(p) = fitted.predict(&xp, &session.child("pd_p")) {
+            avg[t] = p.value.mean();
+        }
+    }
+    ctx.finish(PartialDependence {
+        grid: grid.clone(),
+        average: avg,
+    })
 }
 
 /// sklearn-style grid search over Ridge / Lasso `alpha` using K-fold R².
@@ -2039,6 +2558,173 @@ impl GroupKFold {
     }
 }
 
+/// Random train/test draws that keep groups intact (sklearn `GroupShuffleSplit`).
+#[derive(Clone, Debug)]
+pub struct GroupShuffleSplit {
+    /// Number of splits.
+    pub n_splits: usize,
+    /// Test fraction of **groups**.
+    pub test_size: f64,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for GroupShuffleSplit {
+    fn default() -> Self {
+        Self {
+            n_splits: 5,
+            test_size: 0.25,
+            seed: 0,
+        }
+    }
+}
+
+impl GroupShuffleSplit {
+    /// `n_splits` group-wise random partitions.
+    pub fn new(n_splits: usize) -> Self {
+        Self {
+            n_splits,
+            ..Self::default()
+        }
+    }
+
+    /// Split rows whose group labels are `groups`.
+    pub fn split(&self, groups: &Vector, session: &Session) -> Result<Qualified<Vec<Split>>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let n = groups.len();
+        let mut ids: Vec<i64> = Vec::new();
+        for &g in groups.as_slice() {
+            if !g.is_finite() {
+                continue;
+            }
+            let lab = g.round() as i64;
+            if !ids.contains(&lab) {
+                ids.push(lab);
+            }
+        }
+        if ids.len() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("GroupShuffleSplit needs at least two groups")
+                    .build(),
+            );
+        }
+        let k = self.n_splits.max(1);
+        let frac = if self.test_size.is_finite() {
+            self.test_size.clamp(0.05, 0.5)
+        } else {
+            0.25
+        };
+        if !self.test_size.is_finite() || self.test_size <= 0.0 || self.test_size >= 1.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "GroupShuffleSplit.test_size={} is not in (0,1); clamped",
+                        self.test_size
+                    ))
+                    .build(),
+            );
+        }
+        let mut n_te_g = (frac * ids.len() as f64).round() as usize;
+        if ids.len() > 1 {
+            n_te_g = n_te_g.clamp(1, ids.len() - 1);
+        }
+        let mut rng = Rng::new(self.seed);
+        let mut folds = Vec::with_capacity(k);
+        for _ in 0..k {
+            rng.shuffle(&mut ids);
+            let test_g = ids[..n_te_g.min(ids.len())].to_vec();
+            let mut test = Vec::new();
+            let mut train = Vec::new();
+            for i in 0..n {
+                let g = groups[i].round() as i64;
+                if test_g.contains(&g) {
+                    test.push(i);
+                } else {
+                    train.push(i);
+                }
+            }
+            folds.push(Split { train, test });
+        }
+        ctx.finish(folds)
+    }
+}
+
+/// Sliding window of fixed length (sktime `SlidingWindowSplitter`).
+///
+/// Train is `[t, t+window)`, test is `[t+window, t+window+fh)`. Window length
+/// is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SlidingWindowSplitter {
+    /// Training window length.
+    pub window_length: usize,
+    /// Forecast horizon (test length).
+    pub fh: usize,
+    /// Step between consecutive windows.
+    pub step: usize,
+}
+
+impl Default for SlidingWindowSplitter {
+    fn default() -> Self {
+        Self {
+            window_length: 8,
+            fh: 1,
+            step: 1,
+        }
+    }
+}
+
+impl SlidingWindowSplitter {
+    /// Window `window_length`, horizon `fh`.
+    pub fn new(window_length: usize, fh: usize) -> Self {
+        Self {
+            window_length,
+            fh,
+            step: 1,
+        }
+    }
+
+    /// Materialize causal sliding windows for `n` rows.
+    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let w = self.window_length.max(1);
+        let h = self.fh.max(1);
+        let step = self.step.max(1);
+        if self.window_length < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!(
+                        "SlidingWindowSplitter.window_length={} < 2",
+                        self.window_length
+                    ))
+                    .build(),
+            );
+        }
+        let mut folds = Vec::new();
+        let mut start = 0usize;
+        while start + w + h <= n {
+            folds.push(Split {
+                train: (start..start + w).collect(),
+                test: (start + w..start + w + h).collect(),
+            });
+            start += step;
+        }
+        if folds.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "SlidingWindowSplitter produced no folds for n={n} window={w} fh={h}"
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(folds)
+    }
+}
+
 /// Fit a column standardizer on **all** rows of `X` and transform them.
 ///
 /// This is the helper that documents the leakage anti-pattern. The scale is
@@ -2287,5 +2973,44 @@ mod tests {
             .fit(&x, &y, &Session::new("ms", "rscv"))
             .unwrap();
         assert!(rs.value.best_alpha.is_finite());
+        let yb = Vector::from_iter((0..16).map(|i| if i < 8 { 0.0 } else { 1.0 }));
+        let sss = StratifiedShuffleSplit::new(3)
+            .split(&yb, &Session::new("ms", "sss"))
+            .unwrap()
+            .value;
+        assert_eq!(sss.len(), 3);
+        let rsk = RepeatedStratifiedKFold::new(2, 2)
+            .split(&yb, &Session::new("ms", "rsk"))
+            .unwrap()
+            .value;
+        assert_eq!(rsk.len(), 4);
+        let gg = Vector::from_iter((0..16).map(|i| (i / 4) as f64));
+        let gss = GroupShuffleSplit::new(2)
+            .split(&gg, &Session::new("ms", "gss"))
+            .unwrap()
+            .value;
+        assert_eq!(gss.len(), 2);
+        let sl = SlidingWindowSplitter::new(8, 2)
+            .split(24, &Session::new("ms", "sw"))
+            .unwrap()
+            .value;
+        assert!(!sl.is_empty());
+        assert!(sl[0].train.iter().max().unwrap() < sl[0].test.iter().min().unwrap());
+        let lc = learning_curve(&x, &y, &[0.5, 1.0], 3, &Session::new("ms", "lc")).unwrap();
+        assert_eq!(lc.value.train_scores.len(), 2);
+        assert!(lc
+            .value
+            .test_scores
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite()));
+        let vc = validation_curve_ridge(&x, &y, &[0.1, 1.0], 3, &Session::new("ms", "vc")).unwrap();
+        assert_eq!(vc.value.param_values.len(), 2);
+        let pi = permutation_importance(&x, &y, 3, &Session::new("ms", "pi")).unwrap();
+        assert_eq!(pi.value.importances_mean.len(), 1);
+        let grid = Vector::from_slice(&[0.0, 8.0, 16.0]);
+        let pd = partial_dependence(&x, &y, 0, &grid, &Session::new("ms", "pd")).unwrap();
+        assert_eq!(pd.value.average.len(), 3);
+        assert!(pd.value.average.as_slice().iter().all(|v| v.is_finite()));
     }
 }

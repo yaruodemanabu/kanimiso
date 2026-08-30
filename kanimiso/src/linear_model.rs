@@ -2101,6 +2101,108 @@ impl Fit for QuantileRegressor {
     }
 }
 
+/// Expectile regression via IRLS (asymmetric squared loss).
+///
+/// Weight is `τ` on positive residuals and `1−τ` on negative residuals.
+/// Inner least-squares issues of the residual kind are not promoted.
+#[derive(Clone, Debug)]
+pub struct ExpectileRegressor {
+    /// Expectile in (0, 1).
+    pub tau: f64,
+    /// Max IRLS iterations.
+    pub max_iter: usize,
+    /// Intercept.
+    pub fit_intercept: bool,
+}
+
+impl Default for ExpectileRegressor {
+    fn default() -> Self {
+        Self {
+            tau: 0.5,
+            max_iter: 40,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl ExpectileRegressor {
+    /// Expectile `tau`.
+    pub fn new(tau: f64) -> Self {
+        Self {
+            tau,
+            ..Self::default()
+        }
+    }
+}
+
+impl Fit for ExpectileRegressor {
+    type Fitted = FittedLinear;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLinear>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let tau = if self.tau.is_finite() && self.tau > 0.0 && self.tau < 1.0 {
+            self.tau
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "expectile τ={} is not in (0,1); using 0.5",
+                        self.tau
+                    ))
+                    .build(),
+            );
+            0.5
+        };
+        let design = if self.fit_intercept {
+            x.with_intercept()
+        } else {
+            x.clone()
+        };
+        let mut scratch = signlred::Report::new("expectile", "ols");
+        let Some(mut beta) = least_squares(&mut scratch, &design, y, &ctx.policy) else {
+            return ctx.finish(empty_fitted(x, y, self.fit_intercept));
+        };
+        for it in 0..self.max_iter {
+            let pred = design.matvec(&beta);
+            let mut xs = Matrix::zeros(design.nrows(), design.ncols());
+            let mut ys = Vector::zeros(y.len());
+            for i in 0..y.len() {
+                let r = y[i] - pred[i];
+                let w = if r >= 0.0 { tau } else { 1.0 - tau };
+                let sw = w.max(1e-12).sqrt();
+                ys[i] = y[i] * sw;
+                for j in 0..design.ncols() {
+                    xs.set(i, j, design.get(i, j) * sw);
+                }
+            }
+            let mut inner = signlred::Report::new("expectile", "irls");
+            let Some(next) = least_squares(&mut inner, &xs, &ys, &ctx.policy) else {
+                break;
+            };
+            let d = next.sub(&beta).norm();
+            beta = next;
+            ctx.session.step(it as u64, d, None);
+            if d < 1e-8 {
+                ctx.session.converged("expectile IRLS", it as u64);
+                break;
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .message("expectile IRLS SEs are a weighted-LS approximation, not the expectile sandwich")
+                .build(),
+        );
+        let fitted = infer_ols(&mut ctx, &design, y, beta, self.fit_intercept);
+        ctx.finish(fitted)
+    }
+}
+
 /// Poisson GLM (log link) via IRLS.
 #[derive(Clone, Debug)]
 pub struct PoissonRegressor {
@@ -3990,5 +4092,11 @@ mod tests {
         .fit(&x, &y, &Session::new("tw", "fit"))
         .expect("tweedie");
         assert!(q.value.coef[0].is_finite());
+        let xe = Matrix::from_fn(24, 1, |i, _| i as f64);
+        let ye = Vector::from_iter((0..24).map(|i| 2.0 * i as f64 + 0.1 * ((i % 3) as f64)));
+        let ex = ExpectileRegressor::new(0.7)
+            .fit(&xe, &ye, &Session::new("expc", "fit"))
+            .expect("expectile");
+        assert!(ex.value.coef[0].is_finite());
     }
 }

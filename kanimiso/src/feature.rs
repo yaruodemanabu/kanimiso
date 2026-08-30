@@ -2012,6 +2012,87 @@ pub fn mutual_info_regression(
     ctx.finish(FeatureScores { scores, pvalues })
 }
 
+/// Discrete-label Kraskov / Ross I^(2) mutual information per column.
+///
+/// For each row the k-th Chebyshev neighbour is taken **inside its class**;
+/// `m_i` counts every sample (any class) inside that radius. Scores use the
+/// full `y` ([`IssueCode::TargetLeakageSuspected`]).
+pub fn mutual_info_classif(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<FeatureScores>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let _ = inspect_classes(&mut ctx.report, y, &ctx.policy);
+    ctx.push(
+        Issue::builder(IssueCode::TargetLeakageSuspected)
+            .severity(Severity::Advisory)
+            .message("mutual_info_classif scores every column against the full y")
+            .build(),
+    );
+    let n = x.nrows().min(y.len());
+    let k = 3usize.min(n.saturating_sub(1)).max(1);
+    let mut scores = Vector::zeros(x.ncols());
+    let mut pvalues = Vector::zeros(x.ncols());
+    if n < 6 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message(format!("mutual_info_classif n={n} is thin for k-NN MI"))
+                .build(),
+        );
+    }
+    let labs: Vec<i64> = (0..n)
+        .map(|i| {
+            if y[i].is_finite() {
+                y[i].round() as i64
+            } else {
+                0
+            }
+        })
+        .collect();
+    for j in 0..x.ncols() {
+        let mut mi = 0.0;
+        let mut used = 0.0;
+        for i in 0..n {
+            if !x.get(i, j).is_finite() || !y[i].is_finite() {
+                continue;
+            }
+            let yi = labs[i];
+            let n_y = labs.iter().filter(|&&l| l == yi).count();
+            let mut d_same: Vec<f64> = (0..n)
+                .filter(|&u| u != i && labs[u] == yi)
+                .map(|u| (x.get(u, j) - x.get(i, j)).abs())
+                .collect();
+            if d_same.len() < k {
+                continue;
+            }
+            d_same.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let eps = d_same[k - 1];
+            let mut m = 0usize;
+            for u in 0..n {
+                if u == i {
+                    continue;
+                }
+                if (x.get(u, j) - x.get(i, j)).abs() <= eps {
+                    m += 1;
+                }
+            }
+            mi += digamma(n as f64) - digamma(n_y as f64) + digamma(k as f64)
+                - digamma((m as f64).max(1.0));
+            used += 1.0;
+        }
+        scores[j] = if used > 0.0 {
+            (mi / used).max(0.0)
+        } else {
+            0.0
+        };
+        pvalues[j] = f64::NAN;
+    }
+    ctx.finish(FeatureScores { scores, pvalues })
+}
+
 /// χ² scores of non-negative columns against a class label.
 pub fn chi2(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FeatureScores>> {
     let mut ctx = FitCtx::with_session(session.clone());
@@ -2597,6 +2678,9 @@ mod tests {
         assert!(fr.value.scores[0].is_finite() || fr.value.scores[2].is_finite());
         let mi = mutual_info_regression(&x, &y, &Session::new("f", "mi")).unwrap();
         assert!(mi.value.scores[0] >= mi.value.scores[1] - 1e-6 || mi.value.scores[2].is_finite());
+        let mic = mutual_info_classif(&x, &y, &Session::new("f", "mic")).unwrap();
+        assert!(mic.value.scores.as_slice().iter().all(|v| v.is_finite()));
+        assert!(mic.value.scores[2] >= 0.0);
         let xnn = Matrix::from_fn(20, 2, |i, j| {
             if j == 0 {
                 if i < 10 {

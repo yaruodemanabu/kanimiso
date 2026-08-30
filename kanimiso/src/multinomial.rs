@@ -9,7 +9,9 @@ use crate::data::{Matrix, Vector};
 use crate::traits::{Fit, Predict};
 use crate::validate::{inspect_classes, inspect_identification, inspect_xy};
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result};
+use signlred::{
+    Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result, Severity,
+};
 
 /// Softmax multinomial logistic.
 #[derive(Clone, Debug)]
@@ -261,6 +263,70 @@ impl Predict for FittedMultinomial {
     }
 }
 
+/// statsmodels `MNLogit` name around [`MultinomialLogistic`].
+///
+/// Records that IIA is assumed and not tested.
+#[derive(Clone, Debug)]
+pub struct MnLogit {
+    /// ℓ₂ penalty on every non-reference coefficient block.
+    pub c_inv: f64,
+    /// Max Fisher-scoring iterations.
+    pub max_iter: usize,
+    /// Gradient-norm tolerance.
+    pub tol: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+}
+
+impl Default for MnLogit {
+    fn default() -> Self {
+        Self {
+            c_inv: 1e-6,
+            max_iter: 80,
+            tol: 1e-7,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl MnLogit {
+    /// Default MNLogit.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for MnLogit {
+    type Fitted = FittedMultinomial;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMultinomial>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message(
+                    "MNLogit assumes IIA; independence of irrelevant alternatives is not tested",
+                )
+                .build(),
+        );
+        let mut inner = MultinomialLogistic {
+            c_inv: self.c_inv,
+            max_iter: self.max_iter,
+            tol: self.tol,
+            fit_intercept: self.fit_intercept,
+        };
+        let q = inner.fit(x, y, &session.child("softmax"))?;
+        for issue in q.report.issues() {
+            ctx.push(issue.clone());
+        }
+        ctx.finish(q.value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +354,9 @@ mod tests {
             }
         }
         assert!(ok >= 22, "ok={ok}");
+        let mn = MnLogit::new()
+            .fit(&x, &y, &Session::new("mnlogit", "fit"))
+            .expect("mnlogit");
+        assert_eq!(mn.value.classes.len(), 3);
     }
 }

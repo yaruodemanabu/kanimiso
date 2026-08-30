@@ -698,6 +698,141 @@ fn smo_fit(
     (alpha, b, kkt_ok)
 }
 
+fn smo_score(alpha: &[f64], y: &[f64], k: &[Vec<f64>], i: usize) -> f64 {
+    smo_decision(alpha, y, k, 0.0, i)
+}
+
+/// Schölkopf ν-SVC dual: `0 ≤ α_i ≤ 1/n`, `∑ α_i = ν`, `∑ y_i α_i = 0`.
+///
+/// Working pairs are same-class so both equalities stay feasible. This is
+/// **not** the Chang–Lin `C = 1/(ν n)` reduction used by [`NuSvc`].
+fn nu_smo_fit(
+    ctx: &mut FitCtx,
+    k: &[Vec<f64>],
+    ypm: &[f64],
+    nu: f64,
+    max_iter: usize,
+) -> (Vec<f64>, f64, bool) {
+    let n = ypm.len();
+    let u = 1.0 / n.max(1) as f64;
+    let nu = nu.clamp(1e-6, 1.0);
+    let pos: Vec<usize> = (0..n).filter(|&i| ypm[i] > 0.0).collect();
+    let neg: Vec<usize> = (0..n).filter(|&i| ypm[i] < 0.0).collect();
+    let mut a_pos = nu / (2.0 * pos.len().max(1) as f64);
+    let mut a_neg = nu / (2.0 * neg.len().max(1) as f64);
+    if a_pos > u + 1e-15 || a_neg > u + 1e-15 {
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .message("ν-SMO init clips α_i to 1/n; ∑α may miss ν")
+                .compromise(NumericalCompromise::new(
+                    "ν-SVC start with ∑α=ν and 0≤α_i≤1/n",
+                    "clipped same-class uniform start",
+                    "the equality ∑α=ν may be infeasible for this class split",
+                    "reduce ν or collect a more balanced sample",
+                ))
+                .build(),
+        );
+        a_pos = a_pos.min(u);
+        a_neg = a_neg.min(u);
+    }
+    let mut alpha = vec![0.0; n];
+    for &i in &pos {
+        alpha[i] = a_pos;
+    }
+    for &i in &neg {
+        alpha[i] = a_neg;
+    }
+    let mut rng = Rng::new(17);
+    let mut stalled = false;
+    for pass in 0..max_iter.max(1) {
+        let mut changed = 0usize;
+        for i in 0..n {
+            let same: Vec<usize> = (0..n)
+                .filter(|&j| j != i && (ypm[j] - ypm[i]).abs() < 1e-15)
+                .collect();
+            if same.is_empty() {
+                continue;
+            }
+            let fi = smo_score(&alpha, ypm, k, i);
+            let mut j = same[rng.below(same.len())];
+            let mut best = 0.0;
+            for &cand in &same {
+                let gap = (fi - smo_score(&alpha, ypm, k, cand)).abs();
+                if gap > best {
+                    best = gap;
+                    j = cand;
+                }
+            }
+            let yi = ypm[i];
+            let yj = ypm[j];
+            let fj = smo_score(&alpha, ypm, k, j);
+            let eta = 2.0 * k[i][j] - k[i][i] - k[j][j];
+            if eta >= -1e-15 {
+                continue;
+            }
+            let pair = alpha[i] + alpha[j];
+            let lo = (pair - u).max(0.0);
+            let hi = pair.min(u);
+            if hi - lo <= 1e-15 {
+                continue;
+            }
+            let ei = fi - yi;
+            let ej = fj - yj;
+            let aj_old = alpha[j];
+            let mut aj = aj_old - yj * (ei - ej) / eta;
+            if aj > hi {
+                aj = hi;
+            }
+            if aj < lo {
+                aj = lo;
+            }
+            if (aj - aj_old).abs() < 1e-15 {
+                continue;
+            }
+            let ai = pair - aj;
+            if ai < -1e-15 || ai > u + 1e-15 {
+                continue;
+            }
+            alpha[i] = ai.clamp(0.0, u);
+            alpha[j] = aj;
+            changed += 1;
+        }
+        ctx.session.step(pass as u64, changed as f64, None);
+        if changed == 0 && pass > 0 {
+            ctx.session
+                .converged("ν-SMO found no same-class pair updates", pass as u64);
+            stalled = true;
+            break;
+        }
+    }
+    let mut pos_s = 0.0;
+    let mut np = 0.0;
+    let mut neg_s = 0.0;
+    let mut nn = 0.0;
+    for i in 0..n {
+        if alpha[i] > 1e-12 && alpha[i] < u - 1e-12 {
+            let s = smo_score(&alpha, ypm, k, i);
+            if ypm[i] > 0.0 {
+                pos_s += s;
+                np += 1.0;
+            } else {
+                neg_s += s;
+                nn += 1.0;
+            }
+        }
+    }
+    let rho = if np > 0.0 && nn > 0.0 {
+        0.5 * (pos_s / np + neg_s / nn)
+    } else if np > 0.0 {
+        pos_s / np
+    } else if nn > 0.0 {
+        neg_s / nn
+    } else {
+        0.0
+    };
+    (alpha, -rho, stalled)
+}
+
 impl Fit for Svc {
     type Fitted = FittedSvc;
     fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSvc>> {
@@ -1280,6 +1415,139 @@ impl Fit for NuSvr {
     }
 }
 
+/// ν-SVC that solves the Schölkopf dual (`0 ≤ α_i ≤ 1/n`, `∑α = ν`, `∑ yα = 0`).
+///
+/// Same-class SMO pairs keep both equalities. [`NuSvc`] remains the Chang–Lin
+/// C-reduction and records that compromise.
+#[derive(Clone, Debug)]
+pub struct NuSvcSmo {
+    /// Fraction of margin errors / SVs, \(\nu \in (0, 1]\).
+    pub nu: f64,
+    /// RBF \(\gamma\).
+    pub gamma: f64,
+    /// Kernel.
+    pub kernel: Kernel,
+    /// SMO passes.
+    pub max_iter: usize,
+}
+
+impl Default for NuSvcSmo {
+    fn default() -> Self {
+        Self {
+            nu: 0.5,
+            gamma: 1.0,
+            kernel: Kernel::Rbf,
+            max_iter: 400,
+        }
+    }
+}
+
+impl NuSvcSmo {
+    /// Default true ν-SVC (`ν = 0.5`).
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for NuSvcSmo {
+    type Fitted = FittedSvc;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSvc>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let classes: Vec<i64> = counts.iter().map(|(k, _)| *k).collect();
+        let n = x.nrows();
+        let nu = if self.nu.is_finite() && self.nu > 0.0 && self.nu <= 1.0 {
+            self.nu
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "NuSvcSmo ν={} is not in (0, 1]; using 0.5",
+                        self.nu
+                    ))
+                    .build(),
+            );
+            0.5
+        };
+        if classes.len() < 2 {
+            return ctx.finish(FittedSvc {
+                x_train: x.clone(),
+                dual: Vector::zeros(n),
+                y_pm: Vector::zeros(n),
+                intercept: 0.0,
+                kernel: self.kernel,
+                gamma: self.gamma,
+                classes,
+            });
+        }
+        if !self.gamma.is_finite() || self.gamma <= 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "NuSvcSmo γ={} is not positive; using 1",
+                        self.gamma
+                    ))
+                    .build(),
+            );
+        }
+        let ylab = labels_of(y);
+        let ypm = y_pm(&ylab, &classes);
+        let k = gram(self.kernel, self.gamma.max(1e-12), x);
+        inspect_kernel_pd(&mut ctx, &k);
+        let (alpha, b, ok) = nu_smo_fit(&mut ctx, &k, &ypm, nu, self.max_iter);
+        if !ok {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("ν-SMO did not stall within max_iter")
+                    .build(),
+            );
+        }
+        let sum_a: f64 = alpha.iter().sum();
+        let sum_ya: f64 = alpha.iter().zip(ypm.iter()).map(|(a, yi)| a * yi).sum();
+        if (sum_a - nu).abs() > 0.15 || sum_ya.abs() > 0.15 {
+            ctx.push(
+                Issue::builder(IssueCode::JitterInjected)
+                    .message(format!(
+                        "ν-SMO constraints residual: ∑α={sum_a:.4e} (ν={nu:.4e}), ∑yα={sum_ya:.4e}"
+                    ))
+                    .compromise(NumericalCompromise::new(
+                        "exact ν-dual equalities",
+                        "same-class SMO with a clipped start",
+                        "the box 1/n can make ∑α=ν infeasible",
+                        "do not read the SV fraction as exactly ν",
+                    ))
+                    .build(),
+            );
+        }
+        let mut slacks = Vec::with_capacity(n);
+        let mut wnorm2 = 0.0;
+        for i in 0..n {
+            let fi = smo_decision(&alpha, &ypm, &k, b, i);
+            slacks.push((1.0 - ypm[i] * fi).max(0.0));
+            for j in 0..n {
+                wnorm2 += alpha[i] * alpha[j] * ypm[i] * ypm[j] * k[i][j];
+            }
+        }
+        diagnose_separation(&mut ctx, &slacks, wnorm2.max(0.0).sqrt());
+        let fitted = FittedSvc {
+            x_train: x.clone(),
+            dual: Vector::from_slice(&alpha),
+            y_pm: Vector::from_slice(&ypm),
+            intercept: b,
+            kernel: self.kernel,
+            gamma: self.gamma.max(1e-12),
+            classes,
+        };
+        let pred = fitted.predict_vec(x);
+        diagnose_constant_predictions(&mut ctx, &pred, y);
+        ctx.finish(fitted)
+    }
+}
+
 /// Linear SGD one-class SVM (sklearn `SGDOneClassSVM`).
 ///
 /// Primal step: if \(w^\top x < \rho\) the point is a margin violator and \(w\)
@@ -1600,5 +1868,23 @@ mod tests {
             .expect("oc");
         let z = oc.predict(&x, &Session::new("ocsgd", "p")).unwrap().value;
         assert_eq!(z.len(), x.nrows());
+        let smo = NuSvcSmo {
+            nu: 0.4,
+            kernel: Kernel::Linear,
+            max_iter: 200,
+            ..NuSvcSmo::default()
+        }
+        .fit(&x, &y, &Session::new("nusvcsmo", "fit"))
+        .expect("nusvcsmo");
+        let pred2 = smo
+            .value
+            .predict(&x, &Session::new("nusvcsmo", "p"))
+            .unwrap()
+            .value;
+        assert!(
+            accuracy(&pred2, &y) >= 0.8,
+            "nu-smo acc={}",
+            accuracy(&pred2, &y)
+        );
     }
 }

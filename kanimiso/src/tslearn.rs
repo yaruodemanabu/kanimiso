@@ -89,6 +89,85 @@ pub fn lcss(
     ctx.finish(lcss_raw(a.as_slice(), b.as_slice(), e, band))
 }
 
+/// Naive STOMP-style Euclidean matrix profile (tslearn / stumpy `matrix_profile`).
+///
+/// Window length is not identification `p`. The exclusion zone is `window/4`.
+pub fn matrix_profile(s: &Vector, window: usize, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(s.as_slice()).to_issue("matrix_profile") {
+        ctx.push(issue);
+    }
+    let n = s.len();
+    let m = window;
+    if m < 2 || m >= n {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .message(format!("matrix_profile window={m} is unusable for n={n}"))
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(0));
+    }
+    let n_sub = n + 1 - m;
+    let excl = (m / 4).max(1);
+    let mut mp = Vector::zeros(n_sub);
+    for i in 0..n_sub {
+        let mut best = f64::INFINITY;
+        for j in 0..n_sub {
+            if i.abs_diff(j) < excl {
+                continue;
+            }
+            let mut d = 0.0;
+            for t in 0..m {
+                let e = s[i + t] - s[j + t];
+                d += e * e;
+            }
+            if d < best {
+                best = d;
+            }
+        }
+        mp[i] = best.max(0.0).sqrt();
+    }
+    ctx.finish(mp)
+}
+
+/// Real-valued edit distance (insert/delete cost 1, replace `|a-b|`).
+pub fn edit_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("edit.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("edit.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("edit_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let n = a.len();
+    let m = b.len();
+    let mut prev = vec![0.0; m + 1];
+    let mut cur = vec![0.0; m + 1];
+    for j in 0..=m {
+        prev[j] = j as f64;
+    }
+    for i in 1..=n {
+        cur[0] = i as f64;
+        for j in 1..=m {
+            let rep = prev[j - 1] + (a[i - 1] - b[j - 1]).abs();
+            let del = prev[j] + 1.0;
+            let ins = cur[j - 1] + 1.0;
+            cur[j] = rep.min(del).min(ins);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    ctx.finish(prev[m])
+}
+
 fn lcss_raw(a: &[f64], b: &[f64], eps: f64, band: Option<usize>) -> f64 {
     let n = a.len();
     let m = b.len();
@@ -1127,6 +1206,217 @@ impl Predict for FittedTimeSeriesForest {
         for (tree, iv) in self.trees.iter().zip(&self.intervals) {
             let feat = interval_feats(x, iv);
             match tree.predict(&feat, &session.child("tsf_pred")) {
+                Ok(q) => {
+                    for i in 0..x.nrows() {
+                        let lab = q.value[i].round() as i64;
+                        *votes[i].entry(lab).or_insert(0) += 1;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        let out = Vector::from_iter(votes.iter().map(|m| {
+            m.iter()
+                .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(k, _)| *k as f64)
+                .unwrap_or(self.classes.first().copied().unwrap_or(0) as f64)
+        }));
+        ctx.finish(out)
+    }
+}
+
+fn interval_feats_cif(x: &Matrix, intervals: &[Interval]) -> Matrix {
+    let p = intervals.len() * 5;
+    Matrix::from_fn(x.nrows(), p, |i, j| {
+        let spec = &intervals[j / 5];
+        let kind = j % 5;
+        let a = spec.start.min(x.ncols());
+        let b = spec.end.min(x.ncols()).max(a + 1);
+        let mut vals: Vec<f64> = (a..b).map(|t| x.get(i, t)).collect();
+        let len = vals.len();
+        let mean = vals.iter().sum::<f64>() / len as f64;
+        match kind {
+            0 => mean,
+            1 => {
+                if len <= 1 {
+                    0.0
+                } else {
+                    let ss: f64 = vals.iter().map(|v| (v - mean) * (v - mean)).sum();
+                    (ss / (len as f64 - 1.0)).sqrt()
+                }
+            }
+            2 => {
+                let tbar = (len.saturating_sub(1)) as f64 / 2.0;
+                let mut num = 0.0;
+                let mut den = 0.0;
+                for (u, v) in vals.iter().enumerate() {
+                    let dt = u as f64 - tbar;
+                    num += dt * (*v - mean);
+                    den += dt * dt;
+                }
+                if den > 0.0 {
+                    num / den
+                } else {
+                    0.0
+                }
+            }
+            3 => {
+                vals.sort_by(|p, q| p.partial_cmp(q).unwrap_or(std::cmp::Ordering::Equal));
+                if len % 2 == 1 {
+                    vals[len / 2]
+                } else if len > 0 {
+                    0.5 * (vals[len / 2 - 1] + vals[len / 2])
+                } else {
+                    0.0
+                }
+            }
+            _ => {
+                vals.sort_by(|p, q| p.partial_cmp(q).unwrap_or(std::cmp::Ordering::Equal));
+                if len == 0 {
+                    0.0
+                } else {
+                    let q1 = vals[len / 4];
+                    let q3 = vals[(3 * len / 4).min(len - 1)];
+                    q3 - q1
+                }
+            }
+        }
+    })
+}
+
+/// Canonical interval forest (sktime `CanonicalIntervalForest`).
+///
+/// Each interval yields mean, std, slope, median, and IQR — a catch22-lite
+/// subset, recorded as a compromise.
+#[derive(Clone, Debug)]
+pub struct CanonicalIntervalForest {
+    /// Number of trees.
+    pub n_estimators: usize,
+    /// Random intervals per tree.
+    pub n_intervals: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for CanonicalIntervalForest {
+    fn default() -> Self {
+        Self {
+            n_estimators: 10,
+            n_intervals: 4,
+            max_depth: 6,
+            seed: 5,
+        }
+    }
+}
+
+impl CanonicalIntervalForest {
+    /// Default CIF.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted CIF.
+#[derive(Clone, Debug)]
+pub struct FittedCanonicalIntervalForest {
+    trees: Vec<crate::tree::FittedTreeClassifier>,
+    intervals: Vec<Vec<Interval>>,
+    /// Sorted class labels.
+    pub classes: Vec<i64>,
+}
+
+impl Fit for CanonicalIntervalForest {
+    type Fitted = FittedCanonicalIntervalForest;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCanonicalIntervalForest>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let classes: Vec<i64> = counts.iter().map(|(k, _)| *k).collect();
+        if x.ncols() < 3 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!(
+                        "CanonicalIntervalForest series length {} < 3",
+                        x.ncols()
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .message("CIF uses mean/std/slope/median/IQR, not the full catch22 set")
+                .compromise(NumericalCompromise::new(
+                    "catch22 interval features",
+                    "five summary statistics per random interval",
+                    "the canonical feature set is a documented subset",
+                    "do not treat this as the published CIF feature map",
+                ))
+                .build(),
+        );
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        let mut intervals = Vec::new();
+        let tlen = x.ncols().max(1);
+        for e in 0..self.n_estimators.max(1) {
+            let mut iv = Vec::new();
+            for _ in 0..self.n_intervals.max(1) {
+                let a = rng.below(tlen);
+                let span = 1 + rng.below(tlen);
+                let b = (a + span).min(tlen);
+                iv.push(Interval {
+                    start: a,
+                    end: b.max(a + 1),
+                });
+            }
+            let feat = interval_feats_cif(x, &iv);
+            let mut tree = crate::tree::DecisionTreeClassifier {
+                max_depth: self.max_depth,
+                seed: rng.next_u64(),
+                ..crate::tree::DecisionTreeClassifier::default()
+            };
+            match tree.fit(&feat, y, &session.child("cif_tree")) {
+                Ok(q) => {
+                    trees.push(q.value);
+                    intervals.push(iv);
+                }
+                Err(err) => {
+                    for issue in err.report.issues() {
+                        ctx.push(issue.clone());
+                    }
+                }
+            }
+            ctx.session.step(e as u64, 0.0, None);
+        }
+        if trees.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("every CanonicalIntervalForest tree failed to fit")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedCanonicalIntervalForest {
+            trees,
+            intervals,
+            classes,
+        })
+    }
+}
+
+impl Predict for FittedCanonicalIntervalForest {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let mut votes = vec![BTreeMap::<i64, usize>::new(); x.nrows()];
+        for (tree, iv) in self.trees.iter().zip(&self.intervals) {
+            let feat = interval_feats_cif(x, iv);
+            match tree.predict(&feat, &session.child("cif_pred")) {
                 Ok(q) => {
                     for i in 0..x.nrows() {
                         let lab = q.value[i].round() as i64;
@@ -2715,6 +3005,16 @@ mod tests {
             .unwrap()
             .value;
         assert!((lc - 1.0).abs() < 1e-12);
+        let ed = edit_distance(&a, &a, &Session::new("ts", "ed"))
+            .unwrap()
+            .value;
+        assert!(ed.abs() < 1e-12);
+        let long = Vector::from_iter((0..16).map(|i| (i as f64).sin()));
+        let mp = matrix_profile(&long, 4, &Session::new("ts", "mp"))
+            .unwrap()
+            .value;
+        assert_eq!(mp.len(), 13);
+        assert!(mp.as_slice().iter().all(|v| v.is_finite()));
         let sd = softdtw(&a, &a, 0.1, &Session::new("ts", "sdtw"))
             .unwrap()
             .value;
@@ -2803,6 +3103,20 @@ mod tests {
             }
         }
         assert!(ok >= 5, "tsf ok={ok}");
+        let cif = CanonicalIntervalForest {
+            n_estimators: 6,
+            n_intervals: 3,
+            max_depth: 4,
+            seed: 2,
+        }
+        .fit(&x, &y, &Session::new("ts", "cif"))
+        .unwrap();
+        let predc = cif
+            .value
+            .predict(&x, &Session::new("ts", "cifp"))
+            .unwrap()
+            .value;
+        assert_eq!(predc.len(), 8);
         let knn = KNeighborsTimeSeries::new(1)
             .fit(&x, &y, &Session::new("ts", "knn"))
             .unwrap();

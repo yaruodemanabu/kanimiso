@@ -287,6 +287,269 @@ impl FitSeries for HoltWinters {
     }
 }
 
+/// Simple exponential smoothing (sktime / statsmodels `SimpleExpSmoothing`).
+#[derive(Clone, Debug, Default)]
+pub struct SimpleExpSmoothing {
+    /// Level smoothing; `None` selects by in-sample SSE.
+    pub alpha: Option<f64>,
+}
+
+impl SimpleExpSmoothing {
+    /// SES with optional `alpha`.
+    pub fn new(alpha: Option<f64>) -> Self {
+        Self { alpha }
+    }
+}
+
+/// Fitted SES state.
+#[derive(Clone, Debug)]
+pub struct FittedSimpleExpSmoothing {
+    /// Level smoothing used.
+    pub alpha: f64,
+    /// Terminal level.
+    pub level: f64,
+    /// In-sample fitted values.
+    pub fitted: Vector,
+    /// In-sample residuals.
+    pub resid: Vector,
+    /// Training length.
+    pub n: usize,
+}
+
+impl FittedSimpleExpSmoothing {
+    /// Flat forecast at the terminal level.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(Vector::from_iter((0..h).map(|_| self.level)))
+    }
+}
+
+impl FitSeries for SimpleExpSmoothing {
+    type Fitted = FittedSimpleExpSmoothing;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSimpleExpSmoothing>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("SES needs n≥2")
+                    .build(),
+            );
+        }
+        let candidates = if let Some(a) = self.alpha {
+            if a.is_finite() && (0.0..=1.0).contains(&a) {
+                vec![a]
+            } else {
+                ctx.push(
+                    Issue::builder(IssueCode::InvalidWeight)
+                        .severity(Severity::Warning)
+                        .message(format!("SES α={a} is not in [0,1]; grid-searching"))
+                        .build(),
+                );
+                vec![0.1, 0.3, 0.5, 0.8]
+            }
+        } else {
+            vec![0.1, 0.3, 0.5, 0.8]
+        };
+        let mut best_a = 0.3;
+        let mut best_sse = f64::INFINITY;
+        let mut best_fit = Vector::zeros(y.len());
+        let mut best_level = y.as_slice().first().copied().unwrap_or(0.0);
+        for &a in &candidates {
+            let (fitted, level, sse) = ses_run(y.as_slice(), a);
+            if sse < best_sse {
+                best_sse = sse;
+                best_a = a;
+                best_fit = fitted;
+                best_level = level;
+            }
+        }
+        let resid = Vector::from_iter(
+            y.as_slice()
+                .iter()
+                .zip(best_fit.as_slice())
+                .map(|(a, b)| a - b),
+        );
+        ctx.finish(FittedSimpleExpSmoothing {
+            alpha: best_a,
+            level: best_level,
+            fitted: best_fit,
+            resid,
+            n: y.len(),
+        })
+    }
+}
+
+fn ses_run(y: &[f64], alpha: f64) -> (Vector, f64, f64) {
+    let mut level = y.first().copied().unwrap_or(0.0);
+    let mut fitted = Vector::zeros(y.len());
+    let mut sse = 0.0;
+    for (t, &yt) in y.iter().enumerate() {
+        fitted[t] = level;
+        if yt.is_finite() {
+            let e = yt - level;
+            sse += e * e;
+            level = alpha * yt + (1.0 - alpha) * level;
+        }
+    }
+    (fitted, level, sse)
+}
+
+/// Holt linear trend (level + slope, no season).
+#[derive(Clone, Debug, Default)]
+pub struct Holt {
+    /// Level smoothing; `None` selects by SSE.
+    pub alpha: Option<f64>,
+    /// Trend smoothing.
+    pub beta: Option<f64>,
+}
+
+impl Holt {
+    /// Holt with optional smoothing constants.
+    pub fn new(alpha: Option<f64>, beta: Option<f64>) -> Self {
+        Self { alpha, beta }
+    }
+}
+
+/// Fitted Holt state.
+#[derive(Clone, Debug)]
+pub struct FittedHolt {
+    /// Level smoothing used.
+    pub alpha: f64,
+    /// Trend smoothing used.
+    pub beta: f64,
+    /// Terminal level.
+    pub level: f64,
+    /// Terminal trend.
+    pub trend: f64,
+    /// In-sample fitted values.
+    pub fitted: Vector,
+    /// In-sample residuals.
+    pub resid: Vector,
+    /// Training length.
+    pub n: usize,
+}
+
+impl FittedHolt {
+    /// Linear-trend forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(Vector::from_iter(
+            (1..=h).map(|k| self.level + k as f64 * self.trend),
+        ))
+    }
+}
+
+impl FitSeries for Holt {
+    type Fitted = FittedHolt;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedHolt>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 3 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("Holt needs n≥3")
+                    .build(),
+            );
+        }
+        let alphas = match self.alpha {
+            Some(a) if a.is_finite() && (0.0..=1.0).contains(&a) => vec![a],
+            Some(a) => {
+                ctx.push(
+                    Issue::builder(IssueCode::InvalidWeight)
+                        .severity(Severity::Warning)
+                        .message(format!("Holt α={a} is not in [0,1]; grid-searching"))
+                        .build(),
+                );
+                vec![0.2, 0.5, 0.8]
+            }
+            None => vec![0.2, 0.5, 0.8],
+        };
+        let betas = match self.beta {
+            Some(b) if b.is_finite() && (0.0..=1.0).contains(&b) => vec![b],
+            Some(b) => {
+                ctx.push(
+                    Issue::builder(IssueCode::InvalidWeight)
+                        .severity(Severity::Warning)
+                        .message(format!("Holt β={b} is not in [0,1]; grid-searching"))
+                        .build(),
+                );
+                vec![0.1, 0.3]
+            }
+            None => vec![0.1, 0.3],
+        };
+        let mut best = (0.5, 0.1, f64::INFINITY, 0.0, 0.0, Vector::zeros(y.len()));
+        for &a in &alphas {
+            for &b in &betas {
+                let (fitted, level, trend, sse) = holt_run(y.as_slice(), a, b);
+                if sse < best.2 {
+                    best = (a, b, sse, level, trend, fitted);
+                }
+            }
+        }
+        let resid = Vector::from_iter(
+            y.as_slice()
+                .iter()
+                .zip(best.5.as_slice())
+                .map(|(u, v)| u - v),
+        );
+        ctx.finish(FittedHolt {
+            alpha: best.0,
+            beta: best.1,
+            level: best.3,
+            trend: best.4,
+            fitted: best.5,
+            resid,
+            n: y.len(),
+        })
+    }
+}
+
+fn holt_run(y: &[f64], alpha: f64, beta: f64) -> (Vector, f64, f64, f64) {
+    let y0 = y.first().copied().unwrap_or(0.0);
+    let y1 = y.get(1).copied().unwrap_or(y0);
+    let mut level = y0;
+    let mut trend = y1 - y0;
+    let mut fitted = Vector::zeros(y.len());
+    let mut sse = 0.0;
+    for (t, &yt) in y.iter().enumerate() {
+        let pred = level + trend;
+        fitted[t] = pred;
+        if yt.is_finite() {
+            let e = yt - pred;
+            sse += e * e;
+            let prev = level;
+            level = alpha * yt + (1.0 - alpha) * pred;
+            trend = beta * (level - prev) + (1.0 - beta) * trend;
+        }
+    }
+    (fitted, level, trend, sse)
+}
+
+/// Local-level Kalman wrapper (statsmodels `UnobservedComponents` local level).
+#[derive(Clone, Debug, Default)]
+pub struct LocalLevel;
+
+impl LocalLevel {
+    /// Default local level.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl FitSeries for LocalLevel {
+    type Fitted = KalmanLevelFit;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<KalmanLevelFit>> {
+        kalman_level(y, session)
+    }
+}
+
 /// ARIMA(p, d, q) identified by Hannan–Rissanen (OLS on lagged y and residual MA).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Arima {
@@ -1457,6 +1720,101 @@ pub struct VarImpulseResponse {
     pub fevd: Vec<Matrix>,
     /// Residual covariance used for the Cholesky factor.
     pub sigma: Matrix,
+}
+
+/// Structural VAR with a recursive (Cholesky) contemporaneous map.
+///
+/// This is the named SVAR surface around [`FittedVar::impulse_response`]. The
+/// `A0` factor is not estimated; it is the residual Cholesky.
+#[derive(Clone, Debug)]
+pub struct Svar {
+    /// VAR order.
+    pub lags: usize,
+}
+
+impl Default for Svar {
+    fn default() -> Self {
+        Self { lags: 1 }
+    }
+}
+
+impl Svar {
+    /// SVAR(`lags`).
+    pub fn new(lags: usize) -> Self {
+        Self { lags }
+    }
+
+    /// Fit the reduced-form VAR and keep it as a recursive SVAR.
+    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedSvar>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let q = match Var::new(self.lags).fit(y, &session.child("var")) {
+            Ok(q) => q,
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                ) {
+                    ctx.push(e.primary);
+                }
+                return ctx.finish(FittedSvar {
+                    reduced: FittedVar {
+                        lags: self.lags.max(1),
+                        k: y.ncols(),
+                        coef: Matrix::zeros(1, y.ncols()),
+                        intercepts: Vector::zeros(y.ncols()),
+                        resid: Matrix::zeros(0, y.ncols()),
+                        last: Matrix::zeros(self.lags.max(1), y.ncols()),
+                    },
+                });
+            }
+        };
+        for issue in q.report.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SVAR uses a recursive Cholesky A0, not an estimated A/B system")
+                .compromise(NumericalCompromise::new(
+                    "identified structural VAR",
+                    "reduced-form VAR plus residual Cholesky",
+                    "the shock order is the column order of Y",
+                    "do not read the first shock as causal without a theory",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedSvar { reduced: q.value })
+    }
+}
+
+/// Fitted recursive SVAR.
+#[derive(Clone, Debug)]
+pub struct FittedSvar {
+    /// Reduced-form VAR.
+    pub reduced: FittedVar,
+}
+
+impl FittedSvar {
+    /// Structural IRF / FEVD via the residual Cholesky.
+    pub fn structural_irf(
+        &self,
+        horizon: usize,
+        session: &Session,
+    ) -> Result<Qualified<VarImpulseResponse>> {
+        self.reduced.impulse_response(horizon, session)
+    }
 }
 
 fn cholesky_lower(a: &Matrix) -> Option<Matrix> {
@@ -5801,5 +6159,25 @@ mod tests {
             .expect("dumf")
             .value;
         assert!((df[0] - y[y.len() - 1]).abs() < 1e-12);
+        let ses = SimpleExpSmoothing::new(Some(0.4))
+            .fit_series(&y, &Session::new("ses", "fit"))
+            .expect("ses");
+        assert!(ses.value.level.is_finite());
+        let holt = Holt::new(Some(0.4), Some(0.2))
+            .fit_series(&y, &Session::new("holt", "fit"))
+            .expect("holt");
+        assert!(holt.value.trend.is_finite());
+        let ll = LocalLevel::new()
+            .fit_series(&y, &Session::new("ll", "fit"))
+            .expect("ll");
+        assert_eq!(ll.value.level.len(), y.len());
+        let sv = Svar::new(1)
+            .fit(&y2, &Session::new("svar", "fit"))
+            .expect("svar");
+        let sir = sv
+            .value
+            .structural_irf(2, &Session::new("svar", "irf"))
+            .expect("sirf");
+        assert!(!sir.value.irf.is_empty());
     }
 }

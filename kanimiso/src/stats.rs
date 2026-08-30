@@ -14,7 +14,7 @@ use crate::validate::{inspect_identification, inspect_xy};
 use ojizou_san::Session;
 use signlred::{
     scan_finite, slice_stats, Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified,
-    Report, Result,
+    Report, Result, Severity,
 };
 
 /// Descriptive moments of a numeric sample.
@@ -1748,6 +1748,243 @@ pub fn adfuller(
     })
 }
 
+/// Elliott–Rothenberg–Stock DF-GLS (constant case, GLS-detrended ADF).
+///
+/// Default lag is 1 so identification `p` stays the ADF regressors, not a
+/// Schwert rule that would over-parameterize short samples. The p-value reuses
+/// the constant ADF interpolation and is recorded as unreliable for ERS tables.
+pub fn dfgls(
+    y: &Vector,
+    lags: Option<usize>,
+    session: &Session,
+) -> Result<Qualified<AdfullerResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, y);
+    let n = y.len();
+    let used = lags.unwrap_or(1);
+    if n < used + 6 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message(format!("DF-GLS n={n} is thin for {used} lags"))
+                .build(),
+        );
+    }
+    let cbar = -7.0;
+    let abar = 1.0 + cbar / (n.max(1) as f64);
+    let mut yt = vec![0.0; n];
+    let mut zt = vec![0.0; n];
+    if n > 0 {
+        yt[0] = y[0];
+        zt[0] = 1.0;
+    }
+    for t in 1..n {
+        yt[t] = y[t] - abar * y[t - 1];
+        zt[t] = 1.0 - abar;
+    }
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for t in 0..n {
+        if yt[t].is_finite() && zt[t].is_finite() {
+            num += zt[t] * yt[t];
+            den += zt[t] * zt[t];
+        }
+    }
+    let mu = if den > 0.0 { num / den } else { 0.0 };
+    let e = Vector::from_iter((0..n).map(|t| y[t] - mu));
+    let mut de = vec![0.0; n.saturating_sub(1)];
+    for t in 1..n {
+        de[t - 1] = e[t] - e[t - 1];
+    }
+    let t0 = used;
+    let n_eff = de.len().saturating_sub(t0);
+    let p = 1 + used;
+    if n_eff == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("DF-GLS regression has no rows")
+                .build(),
+        );
+        return ctx.finish(AdfullerResult {
+            stat: f64::NAN,
+            pvalue: f64::NAN,
+            used_lags: used,
+            n: 0,
+        });
+    }
+    inspect_identification(&mut ctx.report, n_eff, p, &ctx.policy);
+    let design = Matrix::from_fn(n_eff, p, |i, j| {
+        let t = t0 + i;
+        if j == 0 {
+            e[t]
+        } else {
+            de[t - j]
+        }
+    });
+    let target = Vector::from_iter((0..n_eff).map(|i| de[t0 + i]));
+    let Some(beta) = statistical_ols(&mut ctx, &design, &target) else {
+        ctx.push(
+            Issue::builder(IssueCode::UnidentifiedModel)
+                .message("DF-GLS OLS failed")
+                .build(),
+        );
+        return ctx.finish(AdfullerResult {
+            stat: f64::NAN,
+            pvalue: f64::NAN,
+            used_lags: used,
+            n: n_eff,
+        });
+    };
+    let fitted = design.matvec(&beta);
+    let resid = target.sub(&fitted);
+    let sse = resid.dot(&resid);
+    let df = n_eff as f64 - p as f64;
+    let sigma2 = if df > 0.0 { sse / df } else { f64::NAN };
+    let se = ols_se_j(&mut ctx, &design, sigma2, 0);
+    let stat = if se.is_finite() && se > 0.0 {
+        beta[0] / se
+    } else {
+        f64::NAN
+    };
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .severity(Severity::Advisory)
+            .message("DF-GLS p-value reuses the constant ADF interpolation, not ERS tables")
+            .build(),
+    );
+    ctx.finish(AdfullerResult {
+        stat,
+        pvalue: adf_pvalue_constant(stat),
+        used_lags: used,
+        n: n_eff,
+    })
+}
+
+/// Zivot–Andrews crash-dummy unit-root scan (min t-stat over break dates).
+///
+/// Critical values are not the ZA tables; the p-value is the constant ADF
+/// interpolation and is recorded as unreliable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ZivotAndrewsResult {
+    /// Minimum ADF-style t-statistic.
+    pub stat: f64,
+    /// Interpolated p-value (not ZA tables).
+    pub pvalue: f64,
+    /// Break index (original time) that produced `stat`.
+    pub break_index: usize,
+    /// Effective rows of the last regression.
+    pub n: usize,
+}
+
+/// Zivot–Andrews unit-root test with a crash dummy.
+pub fn zivot_andrews(y: &Vector, session: &Session) -> Result<Qualified<ZivotAndrewsResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, y);
+    let n = y.len();
+    let used = 1usize;
+    let lo = ((0.15 * n as f64).floor() as usize).max(3);
+    let hi = ((0.85 * n as f64).ceil() as usize).min(n.saturating_sub(4));
+    let t0 = used + 1;
+    let n_eff = n.saturating_sub(t0);
+    inspect_identification(&mut ctx.report, n_eff.max(1), 5, &ctx.policy);
+    if n_eff < 8 || lo > hi {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message(format!("Zivot–Andrews n={n} is too short for a crash scan"))
+                .build(),
+        );
+        return ctx.finish(ZivotAndrewsResult {
+            stat: f64::NAN,
+            pvalue: f64::NAN,
+            break_index: 0,
+            n: n_eff,
+        });
+    }
+    let mut best_stat = f64::INFINITY;
+    let mut best_tb = lo;
+    for tb in lo..=hi {
+        let design = Matrix::from_fn(n_eff, 5, |i, j| {
+            let t = t0 + i;
+            match j {
+                0 => 1.0,
+                1 => t as f64,
+                2 => {
+                    if t > tb {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                3 => y[t - 1],
+                _ => y[t - 1] - y[t - 2],
+            }
+        });
+        let target = Vector::from_iter((0..n_eff).map(|i| y[t0 + i] - y[t0 + i - 1]));
+        let mut scratch = Report::new("za", "ols");
+        let Some(beta) = least_squares(&mut scratch, &design, &target, &ctx.policy) else {
+            continue;
+        };
+        let fitted = design.matvec(&beta);
+        let resid = target.sub(&fitted);
+        let sse = resid.dot(&resid);
+        let df = n_eff as f64 - 5.0;
+        if df <= 0.0 {
+            continue;
+        }
+        let sigma2 = sse / df;
+        let mut se_rep = Report::new("za", "se");
+        let gram = design.gram();
+        let mut ej = Vector::zeros(5);
+        ej[3] = 1.0;
+        let se = match chol_solve(&mut se_rep, &gram, &ej, &ctx.policy) {
+            Some(col) => {
+                let v = col[3] * sigma2;
+                if v.is_finite() && v > 0.0 {
+                    v.sqrt()
+                } else {
+                    f64::NAN
+                }
+            }
+            None => f64::NAN,
+        };
+        if se.is_finite() && se > 0.0 {
+            let st = beta[3] / se;
+            if st < best_stat {
+                best_stat = st;
+                best_tb = tb;
+            }
+        }
+    }
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .severity(Severity::Advisory)
+            .message("Zivot–Andrews p-value reuses the constant ADF interpolation, not ZA tables")
+            .build(),
+    );
+    if best_stat.is_finite() {
+        ctx.push(
+            Issue::builder(IssueCode::StructuralBreak)
+                .message(format!(
+                    "Zivot–Andrews min t={best_stat:.4e} at break index {best_tb}"
+                ))
+                .metric("za_stat", best_stat)
+                .build(),
+        );
+    }
+    ctx.finish(ZivotAndrewsResult {
+        stat: if best_stat.is_finite() {
+            best_stat
+        } else {
+            f64::NAN
+        },
+        pvalue: adf_pvalue_constant(best_stat),
+        break_index: best_tb,
+        n: n_eff,
+    })
+}
+
 /// KPSS level-stationarity test with a Newey–West long-run variance.
 pub fn kpss(y: &Vector, lags: Option<usize>, session: &Session) -> Result<Qualified<KpssResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
@@ -2198,6 +2435,235 @@ pub fn nelson_aalen(
         survival: h,
         n_risk: km.value.n_risk,
         n_event: km.value.n_event,
+    })
+}
+
+/// Aalen–Johansen cumulative incidence for competing risks.
+///
+/// `events` is 0 = censored, `1..=k` = cause. Cause count is not identification
+/// `p`.
+#[derive(Clone, Debug)]
+pub struct AalenJohansenResult {
+    /// Unique event times.
+    pub times: Vector,
+    /// CIF at each time (`n_times × n_causes`).
+    pub cif: Matrix,
+    /// Cause labels (sorted).
+    pub causes: Vec<i64>,
+}
+
+/// Competing-risk CIF.
+pub fn aalen_johansen(
+    times: &Vector,
+    events: &Vector,
+    session: &Session,
+) -> Result<Qualified<AalenJohansenResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, times);
+    if times.len() != events.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("Aalen–Johansen times/events length mismatch")
+                .build(),
+        );
+        return ctx.finish(AalenJohansenResult {
+            times: Vector::zeros(0),
+            cif: Matrix::zeros(0, 0),
+            causes: Vec::new(),
+        });
+    }
+    let n = times.len();
+    let mut idx: Vec<usize> = (0..n).filter(|&i| times[i].is_finite()).collect();
+    idx.sort_by(|&a, &b| {
+        times[a]
+            .partial_cmp(&times[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut causes: Vec<i64> = Vec::new();
+    for &i in &idx {
+        if events[i].is_finite() {
+            let e = events[i].round() as i64;
+            if e > 0 && !causes.contains(&e) {
+                causes.push(e);
+            }
+        }
+    }
+    causes.sort_unstable();
+    if causes.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("Aalen–Johansen saw no competing-risk events")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "cumulative incidence",
+                    "every observation is censored",
+                    "collect cause-specific events",
+                ))
+                .build(),
+        );
+        return ctx.finish(AalenJohansenResult {
+            times: Vector::zeros(0),
+            cif: Matrix::zeros(0, 0),
+            causes,
+        });
+    }
+    let mut t_out = Vec::new();
+    let mut cif_rows: Vec<Vec<f64>> = Vec::new();
+    let mut cif = vec![0.0; causes.len()];
+    let mut surv = 1.0;
+    let mut i = 0;
+    while i < idx.len() {
+        let t = times[idx[i]];
+        let mut j = i;
+        while j < idx.len() && (times[idx[j]] - t).abs() <= 1e-15 {
+            j += 1;
+        }
+        let y_risk = (idx.len() - i) as f64;
+        let mut dn = vec![0.0; causes.len()];
+        let mut d_tot = 0.0;
+        for &u in &idx[i..j] {
+            if events[u].is_finite() {
+                let e = events[u].round() as i64;
+                if let Some(c) = causes.iter().position(|&k| k == e) {
+                    dn[c] += 1.0;
+                    d_tot += 1.0;
+                }
+            }
+        }
+        if d_tot > 0.0 && y_risk > 0.0 {
+            for c in 0..causes.len() {
+                cif[c] += surv * dn[c] / y_risk;
+            }
+            surv *= (1.0 - d_tot / y_risk).max(0.0);
+            t_out.push(t);
+            cif_rows.push(cif.clone());
+        }
+        i = j;
+    }
+    let cif_mat = if cif_rows.is_empty() {
+        Matrix::zeros(0, causes.len())
+    } else {
+        Matrix::from_fn(cif_rows.len(), causes.len(), |r, c| cif_rows[r][c])
+    };
+    ctx.finish(AalenJohansenResult {
+        times: Vector::from_iter(t_out),
+        cif: cif_mat,
+        causes,
+    })
+}
+
+/// Baron–Kenny product-of-coefficients mediation.
+#[derive(Clone, Debug)]
+pub struct MediationResult {
+    /// `M ~ a X`.
+    pub a: f64,
+    /// `Y ~ c' X + b M`.
+    pub b: f64,
+    /// Total `Y ~ c X`.
+    pub c: f64,
+    /// Direct path.
+    pub c_prime: f64,
+    /// Indirect `a b`.
+    pub indirect: f64,
+}
+
+/// Three OLS paths for a single mediator.
+pub fn mediation(
+    x: &Vector,
+    m: &Vector,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<MediationResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let n = x.len().min(m.len()).min(y.len());
+    let xm = Matrix::from_fn(n, 1, |i, _| x[i]);
+    let mv = Vector::from_iter((0..n).map(|i| m[i]));
+    let ym = Vector::from_iter((0..n).map(|i| y[i]));
+    inspect_xy(&mut ctx.report, &xm, Some(&ym), &ctx.policy);
+    inspect_identification(&mut ctx.report, n, 3, &ctx.policy);
+    let xd = xm.with_intercept();
+    let mut scratch = Report::new("med", "a");
+    let ba = least_squares(&mut scratch, &xd, &mv, &ctx.policy).unwrap_or_else(|| Vector::zeros(2));
+    let mut scratch = Report::new("med", "c");
+    let bc = least_squares(&mut scratch, &xd, &ym, &ctx.policy).unwrap_or_else(|| Vector::zeros(2));
+    let xmd = Matrix::from_fn(n, 2, |i, j| if j == 0 { x[i] } else { m[i] }).with_intercept();
+    let mut scratch = Report::new("med", "b");
+    let bb =
+        least_squares(&mut scratch, &xmd, &ym, &ctx.policy).unwrap_or_else(|| Vector::zeros(3));
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message(
+                "mediation is the product method; no bootstrap SE or sequential ignorability test",
+            )
+            .build(),
+    );
+    let a = ba.as_slice().get(1).copied().unwrap_or(0.0);
+    let c = bc.as_slice().get(1).copied().unwrap_or(0.0);
+    let c_prime = bb.as_slice().get(1).copied().unwrap_or(0.0);
+    let b = bb.as_slice().get(2).copied().unwrap_or(0.0);
+    ctx.finish(MediationResult {
+        a,
+        b,
+        c,
+        c_prime,
+        indirect: a * b,
+    })
+}
+
+/// Two-by-two difference-in-differences (`y ~ treat + post + treat×post`).
+#[derive(Clone, Debug)]
+pub struct DidResult {
+    /// Interaction ATT.
+    pub att: f64,
+    /// Treat main effect.
+    pub treat: f64,
+    /// Post main effect.
+    pub post: f64,
+    /// Intercept.
+    pub intercept: f64,
+}
+
+/// Difference-in-differences on a stacked cross-section.
+pub fn difference_in_differences(
+    y: &Vector,
+    treat: &Vector,
+    post: &Vector,
+    session: &Session,
+) -> Result<Qualified<DidResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let n = y.len().min(treat.len()).min(post.len());
+    let design = Matrix::from_fn(n, 4, |i, j| match j {
+        0 => 1.0,
+        1 => treat[i],
+        2 => post[i],
+        _ => treat[i] * post[i],
+    });
+    let yv = Vector::from_iter((0..n).map(|i| y[i]));
+    inspect_xy(&mut ctx.report, &design, Some(&yv), &ctx.policy);
+    inspect_identification(&mut ctx.report, n, 4, &ctx.policy);
+    let mut scratch = Report::new("did", "ols");
+    let beta =
+        least_squares(&mut scratch, &design, &yv, &ctx.policy).unwrap_or_else(|| Vector::zeros(4));
+    for issue in scratch.issues() {
+        if matches!(
+            issue.code,
+            IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+        ) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("DID assumes parallel trends; that restriction is not tested here")
+            .build(),
+    );
+    ctx.finish(DidResult {
+        intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+        treat: beta.as_slice().get(1).copied().unwrap_or(0.0),
+        post: beta.as_slice().get(2).copied().unwrap_or(0.0),
+        att: beta.as_slice().get(3).copied().unwrap_or(0.0),
     })
 }
 
@@ -4206,5 +4672,42 @@ mod tests {
             .iter()
             .all(|h| *h >= 0.0 && *h < 1.0));
         assert!(inf.value.dffits.as_slice().iter().all(|v| v.is_finite()));
+        let rw = Vector::from_iter((0..80).map(|i| {
+            if i < 40 {
+                0.3 * i as f64
+            } else {
+                12.0 + 0.1 * (i as f64 - 40.0)
+            }
+        }));
+        let dfg = dfgls(&rw, Some(1), &Session::new("dfgls", "t")).expect("dfgls");
+        assert!(dfg.value.stat.is_finite() || dfg.value.pvalue.is_nan());
+        let za = zivot_andrews(&rw, &Session::new("za", "t")).expect("za");
+        assert!(za.value.stat.is_finite() || za.value.pvalue.is_nan());
+        let tm = Vector::from_iter((0..20).map(|i| 1.0 + i as f64));
+        let evc = Vector::from_iter((0..20).map(|i| {
+            if i % 5 == 0 {
+                1.0
+            } else if i % 5 == 2 {
+                2.0
+            } else {
+                0.0
+            }
+        }));
+        let aj = aalen_johansen(&tm, &evc, &Session::new("aj", "t")).expect("aj");
+        assert!(!aj.value.causes.is_empty());
+        assert_eq!(aj.value.cif.ncols(), aj.value.causes.len());
+        let xv = Vector::from_iter((0..40).map(|i| i as f64));
+        let md = Vector::from_iter((0..40).map(|i| 0.5 * i as f64 + 0.1));
+        let yv = Vector::from_iter((0..40).map(|i| 1.0 + 0.8 * i as f64 + 0.4 * md[i]));
+        let med = mediation(&xv, &md, &yv, &Session::new("med", "t")).expect("med");
+        assert!(med.value.indirect.is_finite());
+        let treat = Vector::from_iter((0..40).map(|i| if i % 2 == 0 { 1.0 } else { 0.0 }));
+        let post = Vector::from_iter((0..40).map(|i| if i >= 20 { 1.0 } else { 0.0 }));
+        let ydid = Vector::from_iter((0..40).map(|i| {
+            treat[i] * 0.5 + post[i] * 0.2 + treat[i] * post[i] * 1.5 + 0.05 * ((i % 3) as f64)
+        }));
+        let did = difference_in_differences(&ydid, &treat, &post, &Session::new("did", "t"))
+            .expect("did");
+        assert!((did.value.att - 1.5).abs() < 0.3, "att={}", did.value.att);
     }
 }

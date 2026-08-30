@@ -7,9 +7,9 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::validate::inspect_classes;
+use crate::validate::{inspect_classes, inspect_xy};
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Meaninglessness, Qualified, Result};
+use signlred::{Issue, IssueCode, Meaninglessness, Qualified, Result, Severity};
 
 /// Precision, recall, and F1 (binary or macro-averaged).
 #[derive(Clone, Debug, PartialEq)]
@@ -836,6 +836,298 @@ pub fn mutual_info(y_true: &Vector, y_pred: &Vector, session: &Session) -> Resul
     ctx.finish(mi)
 }
 
+/// Cohen's κ for rounded labels.
+pub fn cohen_kappa(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "cohen_kappa") {
+        return ctx.finish(f64::NAN);
+    }
+    warn_constant_target(&mut ctx, y_true, true);
+    let labs_t = labels_of(y_true);
+    let labs_p = labels_of(y_pred);
+    let mut classes = unique_sorted(&labs_t);
+    for &c in &labs_p {
+        if !classes.contains(&c) {
+            classes.push(c);
+        }
+    }
+    classes.sort_unstable();
+    let k = classes.len();
+    let n = labs_t.len().min(labs_p.len()) as f64;
+    if n <= 0.0 || k == 0 {
+        return ctx.finish(f64::NAN);
+    }
+    let mut row = vec![0.0; k];
+    let mut col = vec![0.0; k];
+    let mut agree = 0.0;
+    for i in 0..labs_t.len().min(labs_p.len()) {
+        let a = classes.iter().position(|&c| c == labs_t[i]).unwrap_or(0);
+        let b = classes.iter().position(|&c| c == labs_p[i]).unwrap_or(0);
+        row[a] += 1.0;
+        col[b] += 1.0;
+        if a == b {
+            agree += 1.0;
+        }
+    }
+    let po = agree / n;
+    let pe: f64 = (0..k).map(|c| (row[c] / n) * (col[c] / n)).sum();
+    if (1.0 - pe).abs() <= 1e-15 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Cohen κ chance agreement is 1; the statistic is undefined")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish((po - pe) / (1.0 - pe))
+}
+
+/// Matthews correlation (binary or multiclass).
+pub fn matthews_corrcoef(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "matthews_corrcoef") {
+        return ctx.finish(f64::NAN);
+    }
+    warn_constant_target(&mut ctx, y_true, true);
+    let labs_t = labels_of(y_true);
+    let labs_p = labels_of(y_pred);
+    let mut classes = unique_sorted(&labs_t);
+    for &c in &labs_p {
+        if !classes.contains(&c) {
+            classes.push(c);
+        }
+    }
+    classes.sort_unstable();
+    let k = classes.len();
+    let n = labs_t.len().min(labs_p.len());
+    if n == 0 || k == 0 {
+        return ctx.finish(f64::NAN);
+    }
+    let mut cm = vec![vec![0.0; k]; k];
+    for i in 0..n {
+        let a = classes.iter().position(|&c| c == labs_t[i]).unwrap_or(0);
+        let b = classes.iter().position(|&c| c == labs_p[i]).unwrap_or(0);
+        cm[a][b] += 1.0;
+    }
+    let s = n as f64;
+    let mut c = 0.0;
+    let mut t = vec![0.0; k];
+    let mut p = vec![0.0; k];
+    for i in 0..k {
+        c += cm[i][i];
+        for j in 0..k {
+            t[i] += cm[i][j];
+            p[j] += cm[i][j];
+        }
+    }
+    let sum_pt: f64 = (0..k).map(|i| p[i] * t[i]).sum();
+    let sum_p2: f64 = p.iter().map(|v| v * v).sum();
+    let sum_t2: f64 = t.iter().map(|v| v * v).sum();
+    let den = ((s * s - sum_p2) * (s * s - sum_t2)).sqrt();
+    if den <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("MCC denominator vanished")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish((c * s - sum_pt) / den)
+}
+
+/// Calinski–Harabasz variance-ratio index.
+pub fn calinski_harabasz(x: &Matrix, labels: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    let labs = labels_of(labels);
+    let classes = unique_sorted(&labs);
+    let k = classes.len();
+    let n = x.nrows().min(labels.len());
+    if k < 2 || n <= k {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "Calinski–Harabasz needs ≥2 clusters and n>k; k={k} n={n}"
+                ))
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let p = x.ncols();
+    let mut global = vec![0.0; p];
+    for i in 0..n {
+        for j in 0..p {
+            global[j] += x.get(i, j);
+        }
+    }
+    for g in global.iter_mut() {
+        *g /= n as f64;
+    }
+    let mut ssb = 0.0;
+    let mut ssw = 0.0;
+    for (ci, &lab) in classes.iter().enumerate() {
+        let mut mu = vec![0.0; p];
+        let mut nk = 0.0;
+        for i in 0..n {
+            if labs[i] == lab {
+                nk += 1.0;
+                for j in 0..p {
+                    mu[j] += x.get(i, j);
+                }
+            }
+        }
+        if nk <= 0.0 {
+            let _ = ci;
+            continue;
+        }
+        for j in 0..p {
+            mu[j] /= nk;
+            let d = mu[j] - global[j];
+            ssb += nk * d * d;
+        }
+        for i in 0..n {
+            if labs[i] != lab {
+                continue;
+            }
+            for j in 0..p {
+                let d = x.get(i, j) - mu[j];
+                ssw += d * d;
+            }
+        }
+    }
+    if ssw <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Calinski–Harabasz within-cluster SS is 0")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let ch = (ssb / (k as f64 - 1.0)) / (ssw / (n as f64 - k as f64));
+    ctx.finish(ch)
+}
+
+/// Davies–Bouldin index (lower is tighter, better-separated clusters).
+pub fn davies_bouldin(x: &Matrix, labels: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    let labs = labels_of(labels);
+    let classes = unique_sorted(&labs);
+    let k = classes.len();
+    let n = x.nrows().min(labels.len());
+    if k < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Davies–Bouldin needs at least two clusters")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let p = x.ncols();
+    let mut mu = vec![vec![0.0; p]; k];
+    let mut nk = vec![0.0; k];
+    for i in 0..n {
+        if let Some(c) = classes.iter().position(|&lab| lab == labs[i]) {
+            nk[c] += 1.0;
+            for j in 0..p {
+                mu[c][j] += x.get(i, j);
+            }
+        }
+    }
+    for c in 0..k {
+        if nk[c] > 0.0 {
+            for j in 0..p {
+                mu[c][j] /= nk[c];
+            }
+        }
+    }
+    let mut s = vec![0.0; k];
+    for i in 0..n {
+        if let Some(c) = classes.iter().position(|&lab| lab == labs[i]) {
+            let mut d2 = 0.0;
+            for j in 0..p {
+                let d = x.get(i, j) - mu[c][j];
+                d2 += d * d;
+            }
+            s[c] += d2.sqrt();
+        }
+    }
+    for c in 0..k {
+        if nk[c] > 0.0 {
+            s[c] /= nk[c];
+        }
+    }
+    let mut acc = 0.0;
+    for i in 0..k {
+        let mut best = 0.0;
+        for j in 0..k {
+            if i == j {
+                continue;
+            }
+            let mut dij = 0.0;
+            for t in 0..p {
+                let d = mu[i][t] - mu[j][t];
+                dij += d * d;
+            }
+            dij = dij.sqrt();
+            if dij <= 1e-18 {
+                continue;
+            }
+            let r = (s[i] + s[j]) / dij;
+            if r > best {
+                best = r;
+            }
+        }
+        acc += best;
+    }
+    ctx.finish(acc / k as f64)
+}
+
+/// Pinball (quantile) loss at level `tau`.
+pub fn pinball_loss(
+    y_true: &Vector,
+    y_pred: &Vector,
+    tau: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "pinball_loss") {
+        return ctx.finish(f64::NAN);
+    }
+    warn_constant_target(&mut ctx, y_true, false);
+    let t = if tau.is_finite() && tau > 0.0 && tau < 1.0 {
+        tau
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("pinball τ={tau} is not in (0,1); using 0.5"))
+                .build(),
+        );
+        0.5
+    };
+    let mut s = 0.0;
+    let mut n = 0.0;
+    for i in 0..y_true.len() {
+        if !y_true[i].is_finite() || !y_pred[i].is_finite() {
+            continue;
+        }
+        let e = y_true[i] - y_pred[i];
+        s += if e >= 0.0 { t * e } else { (t - 1.0) * e };
+        n += 1.0;
+    }
+    ctx.finish(if n > 0.0 { s / n } else { f64::NAN })
+}
+
 fn bump<K: PartialEq>(xs: &mut Vec<(K, f64)>, key: K) {
     if let Some(e) = xs.iter_mut().find(|(k, _)| *k == key) {
         e.1 += 1.0;
@@ -980,5 +1272,27 @@ mod tests {
         assert!(ham.abs() < 1e-12);
         let mi = mutual_info(&y, &y, &Session::new("m", "mi")).unwrap().value;
         assert!(mi > 0.0);
+        let kap = cohen_kappa(&y, &y, &Session::new("m", "kap"))
+            .unwrap()
+            .value;
+        assert!((kap - 1.0).abs() < 1e-12);
+        let mcc = matthews_corrcoef(&y, &y, &Session::new("m", "mcc"))
+            .unwrap()
+            .value;
+        assert!((mcc - 1.0).abs() < 1e-12);
+        let xb = Matrix::from_fn(6, 1, |i, _| if i < 3 { 0.0 } else { 10.0 });
+        let lb = Vector::from_iter((0..6).map(|i| if i < 3 { 0.0 } else { 1.0 }));
+        let ch = calinski_harabasz(&xb, &lb, &Session::new("m", "ch"))
+            .unwrap()
+            .value;
+        assert!(ch > 1.0, "ch={ch}");
+        let db = davies_bouldin(&xb, &lb, &Session::new("m", "db"))
+            .unwrap()
+            .value;
+        assert!(db.is_finite() && db >= 0.0);
+        let pb = pinball_loss(&y2, &h2, 0.5, &Session::new("m", "pin"))
+            .unwrap()
+            .value;
+        assert!(pb >= 0.0);
     }
 }
