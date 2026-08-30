@@ -269,6 +269,131 @@ impl FittedClassifierChain {
     }
 }
 
+/// Independent ridge classifier per column of a binary `Y` (sklearn
+/// `MultiOutputClassifier`).
+///
+/// A constant column is Misleading for that output only. Do not treat
+/// `n_outputs` as a linear-model parameter count.
+#[derive(Clone, Debug)]
+pub struct MultiOutputClassifier {
+    /// Shared ridge `α`.
+    pub alpha: f64,
+}
+
+impl Default for MultiOutputClassifier {
+    fn default() -> Self {
+        Self { alpha: 1.0 }
+    }
+}
+
+impl MultiOutputClassifier {
+    /// Multi-output ridge classifier with the given `α`.
+    pub fn new(alpha: f64) -> Self {
+        Self { alpha }
+    }
+
+    /// Fit one binary ridge per column of `y`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedMultiOutputClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        if y.nrows() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("MultiOutputClassifier Y rows ≠ X rows")
+                    .build(),
+            );
+            return ctx.finish(FittedMultiOutputClassifier {
+                models: Vec::new(),
+                n_outputs: y.ncols(),
+            });
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("outputs are independent binary ridges; label dependence is ignored")
+                .compromise(NumericalCompromise::new(
+                    "classifier chain / joint multivariate model",
+                    "separate ridge per column",
+                    "the joint label law is not estimated",
+                    "do not read the collection as a joint posterior",
+                ))
+                .build(),
+        );
+        let mut models = Vec::with_capacity(y.ncols());
+        for j in 0..y.ncols() {
+            let yj = y.column(j);
+            let st = signlred::slice_stats(yj.as_slice());
+            if st.count >= 2 && st.is_constant(ctx.policy.near_zero_variance) {
+                ctx.push(
+                    Issue::builder(IssueCode::ConstantTarget)
+                        .severity(Severity::Warning)
+                        .message(format!("output {j} is constant; that column is a majority"))
+                        .meaninglessness(Meaninglessness::new(
+                            format!("output {j} decision boundary"),
+                            "a constant column has no residual variation",
+                            signlred::InterpretiveValue::Misleading,
+                            "the remaining outputs stay identified",
+                        ))
+                        .build(),
+                );
+            }
+            match RidgeClassifier::new(self.alpha).fit(x, &yj, &session.child(format!("moc_{j}"))) {
+                Ok(q) => models.push(q.value),
+                Err(e) => {
+                    ctx.push(e.primary);
+                    models.push(FittedRidgeClassifier::from_penalized(
+                        FittedPenalized {
+                            coef: Vector::zeros(x.ncols()),
+                            intercept: 0.0,
+                            alpha: self.alpha,
+                            l1_ratio: 0.0,
+                        },
+                        vec![0, 1],
+                    ));
+                }
+            }
+        }
+        ctx.finish(FittedMultiOutputClassifier {
+            models,
+            n_outputs: y.ncols(),
+        })
+    }
+}
+
+/// Fitted independent binary ridges.
+#[derive(Clone, Debug)]
+pub struct FittedMultiOutputClassifier {
+    /// One ridge classifier per output column.
+    pub models: Vec<FittedRidgeClassifier>,
+    /// Number of output columns.
+    pub n_outputs: usize,
+}
+
+impl FittedMultiOutputClassifier {
+    /// Predict an `n × n_outputs` label matrix.
+    pub fn predict_matrix(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let mut out = Matrix::zeros(x.nrows(), self.n_outputs);
+        for (j, m) in self.models.iter().enumerate() {
+            match m.predict(x, &session.child(format!("moc_p_{j}"))) {
+                Ok(q) => {
+                    for i in 0..x.nrows().min(q.value.len()) {
+                        out.set(i, j, q.value[i]);
+                    }
+                }
+                Err(e) => ctx.push(e.primary),
+            }
+        }
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +447,15 @@ mod tests {
             .value;
         assert_eq!(hat.shape(), (20, 2));
         assert!(hat.get(0, 0).is_finite());
+        let moc = MultiOutputClassifier::new(0.5)
+            .fit(&x, &y, &Session::new("moc", "fit"))
+            .expect("moc");
+        let mh = moc
+            .value
+            .predict_matrix(&x, &Session::new("moc", "p"))
+            .unwrap()
+            .value;
+        assert_eq!(mh.shape(), (20, 2));
+        assert!((mh.get(0, 0) - 0.0).abs() < 0.5 || (mh.get(1, 0) - 0.0).abs() < 0.5);
     }
 }

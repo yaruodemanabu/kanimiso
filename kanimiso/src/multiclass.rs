@@ -8,6 +8,7 @@
 use crate::classification::{FittedRidgeClassifier, RidgeClassifier};
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
+use crate::rng::Rng;
 use crate::traits::{Fit, Predict};
 use crate::validate::{inspect_classes, inspect_xy};
 use ojizou_san::Session;
@@ -300,6 +301,194 @@ impl Predict for FittedOvo {
     }
 }
 
+/// Error-correcting output codes (sklearn `OutputCodeClassifier`).
+///
+/// Each class is a random `±1` codeword. One ridge is fit per bit. Do not
+/// pass `n_bits` as identification `p`.
+#[derive(Clone, Debug)]
+pub struct OutputCodeClassifier {
+    /// Shared ridge `α`.
+    pub alpha: f64,
+    /// Code length. `0` picks `⌈log₂ K⌉ + 1`.
+    pub n_bits: usize,
+    /// Codebook seed.
+    pub seed: u64,
+}
+
+impl Default for OutputCodeClassifier {
+    fn default() -> Self {
+        Self {
+            alpha: 1.0,
+            n_bits: 0,
+            seed: 1,
+        }
+    }
+}
+
+impl OutputCodeClassifier {
+    /// ECOC with ridge `α`.
+    pub fn new(alpha: f64) -> Self {
+        Self {
+            alpha,
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted ECOC codebook plus one ridge per bit.
+#[derive(Clone, Debug)]
+pub struct FittedOutputCode {
+    /// Class ids.
+    pub classes: Vec<i64>,
+    /// `n_classes × n_bits` codebook of `±1`.
+    pub codebook: Matrix,
+    /// One ridge per bit.
+    pub estimators: Vec<FittedRidgeClassifier>,
+}
+
+impl Fit for OutputCodeClassifier {
+    type Fitted = FittedOutputCode;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedOutputCode>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let classes: Vec<i64> = counts.iter().map(|(c, _)| *c).collect();
+        if classes.len() < 2 {
+            return ctx.finish(FittedOutputCode {
+                classes,
+                codebook: Matrix::zeros(0, 0),
+                estimators: Vec::new(),
+            });
+        }
+        let bits = if self.n_bits == 0 {
+            (classes.len() as f64).log2().ceil() as usize + 1
+        } else {
+            self.n_bits
+        }
+        .max(2);
+        let mut rng = Rng::new(self.seed);
+        let codebook = Matrix::from_fn(classes.len(), bits, |_, _| {
+            if rng.uniform() < 0.5 {
+                -1.0
+            } else {
+                1.0
+            }
+        });
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message(
+                    "ECOC bits are independent ridges; Hamming decode is not a joint likelihood",
+                )
+                .compromise(NumericalCompromise::new(
+                    "multinomial logistic / joint ECOC likelihood",
+                    "independent bit-wise ridges",
+                    "bits do not share a likelihood",
+                    "do not read Hamming nearest-neighbour as a posterior",
+                ))
+                .build(),
+        );
+        let mut estimators = Vec::with_capacity(bits);
+        for b in 0..bits {
+            let yb = Vector::from_iter(y.as_slice().iter().map(|&v| {
+                let lab = v.round() as i64;
+                match classes.iter().position(|&c| c == lab) {
+                    Some(idx) => {
+                        if codebook.get(idx, b) > 0.0 {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    None => 0.0,
+                }
+            }));
+            match RidgeClassifier::new(self.alpha).fit(x, &yb, &session.child(format!("ecoc_{b}")))
+            {
+                Ok(q) => estimators.push(q.value),
+                Err(_) => {
+                    ctx.push(
+                        Issue::builder(IssueCode::UnidentifiedModel)
+                            .severity(Severity::Warning)
+                            .message(format!("ECOC bit {b} ridge aborted"))
+                            .build(),
+                    );
+                }
+            }
+        }
+        if estimators.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("ECOC produced no bit estimators")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedOutputCode {
+            classes,
+            codebook,
+            estimators,
+        })
+    }
+}
+
+impl Predict for FittedOutputCode {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.estimators.is_empty() || self.classes.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::StaleState)
+                    .message("ECOC has no bit estimators")
+                    .build(),
+            );
+            return ctx.finish(Vector::filled(
+                x.nrows(),
+                self.classes.first().copied().unwrap_or(0) as f64,
+            ));
+        }
+        let bits = self.codebook.ncols();
+        let mut bits_hat = Matrix::zeros(x.nrows(), bits);
+        for (b, est) in self.estimators.iter().enumerate() {
+            match est.decision_function(x, &session.child(format!("ecoc_p{b}"))) {
+                Ok(q) => {
+                    for i in 0..x.nrows().min(q.value.len()) {
+                        bits_hat.set(i, b, if q.value[i] >= 0.0 { 1.0 } else { -1.0 });
+                    }
+                }
+                Err(e) => ctx.push(e.primary),
+            }
+        }
+        let y = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut best = 0usize;
+            let mut best_d = i32::MAX;
+            for c in 0..self.classes.len() {
+                let mut d = 0i32;
+                for b in 0..bits.min(self.codebook.ncols()) {
+                    let want = if self.codebook.get(c, b) >= 0.0 {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    if (bits_hat.get(i, b) - want).abs() > 0.5 {
+                        d += 1;
+                    }
+                }
+                if d < best_d {
+                    best_d = d;
+                    best = c;
+                }
+            }
+            self.classes.get(best).copied().unwrap_or(0) as f64
+        }));
+        ctx.finish(y)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,5 +520,16 @@ mod tests {
             .value;
         let acc2 = (0..30).filter(|&i| (q[i] - y[i]).abs() < 0.5).count();
         assert!(acc2 >= 18, "ovo acc={acc2}");
+        let ecoc = OutputCodeClassifier::new(0.1)
+            .fit(&x, &y, &Session::new("ecoc", "fit"))
+            .expect("ecoc");
+        assert_eq!(ecoc.value.classes.len(), 3);
+        let pe = ecoc
+            .value
+            .predict(&x, &Session::new("ecoc", "p"))
+            .expect("ecocp")
+            .value;
+        let acc3 = (0..30).filter(|&i| (pe[i] - y[i]).abs() < 0.5).count();
+        assert!(acc3 >= 16, "ecoc acc={acc3}");
     }
 }

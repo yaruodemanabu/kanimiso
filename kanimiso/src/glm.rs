@@ -1700,6 +1700,91 @@ impl Fit for WeibullAft {
     }
 }
 
+/// Exponential AFT: Weibull AFT with fixed scale `σ = 1` (log-OLS on `log T`).
+///
+/// `y ≤ 0` is [`IssueCode::NonPositiveSeries`] (Error).
+#[derive(Clone, Debug)]
+pub struct ExponentialAft {
+    /// Unused (kept for a Weibull-compatible constructor surface).
+    pub max_iter: usize,
+}
+
+impl Default for ExponentialAft {
+    fn default() -> Self {
+        Self { max_iter: 1 }
+    }
+}
+
+impl ExponentialAft {
+    /// Default exponential AFT.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for ExponentialAft {
+    type Fitted = FittedWeibullAft;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedWeibullAft>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        for (i, &yi) in y.as_slice().iter().enumerate() {
+            if yi <= 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .message(format!(
+                            "Exponential AFT y[{i}]={yi} is not strictly positive"
+                        ))
+                        .build(),
+                );
+                break;
+            }
+        }
+        let design = x.with_intercept();
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let logy = Vector::from_iter(y.as_slice().iter().map(|v| v.max(1e-12).ln()));
+        let mut scratch = signlred::Report::new("exp_aft", "ols");
+        let beta = least_squares(&mut scratch, &design, &logy, &ctx.policy).unwrap_or_else(|| {
+            let mut b = Vector::zeros(design.ncols());
+            b[0] = logy.mean();
+            b
+        });
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Exponential AFT fixes σ=1; only the log-mean is estimated")
+                .compromise(NumericalCompromise::new(
+                    "Weibull AFT with free scale",
+                    "log-OLS with σ pinned at 1",
+                    "the residual scale is not identified from the data",
+                    "do not read this as a full Weibull MLE",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedWeibullAft {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            sigma: 1.0,
+        })
+    }
+}
+
 fn gee_gls(
     design: &Matrix,
     y: &Vector,
@@ -1928,5 +2013,15 @@ mod tests {
             .expect("zinb");
         assert!(zb.value.inflate_pi >= 0.0 && zb.value.inflate_pi <= 1.0);
         assert!(zb.value.alpha > 0.0 && zb.value.alpha.is_finite());
+        let ea = ExponentialAft::new()
+            .fit(&x, &yt, &Session::new("eaft", "fit"))
+            .expect("eaft");
+        assert!((ea.value.sigma - 1.0).abs() < 1e-12);
+        let ep = ea
+            .value
+            .predict(&x, &Session::new("eaft", "p"))
+            .unwrap()
+            .value;
+        assert!(ep.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
     }
 }

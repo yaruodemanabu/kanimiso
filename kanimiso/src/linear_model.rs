@@ -8,7 +8,7 @@ use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linalg::{least_squares, ridge_solve};
 use crate::special::{f_pvalue, student_t_pvalue};
-use crate::traits::{Fit, PartialFit, Predict};
+use crate::traits::{Fit, PartialFit, Predict, Transform};
 use crate::validate::{inspect_collinearity, inspect_identification, inspect_xy};
 use ojizou_san::{IncrementalExplain, Session};
 use signlred::{
@@ -1782,6 +1782,144 @@ impl Predict for FittedPls {
             out[i] = s;
         }
         ctx.finish(out)
+    }
+}
+
+/// Two-block PLS (sklearn `PLSCanonical`): NIPALS on `X` and a matrix `Y`.
+#[derive(Clone, Debug)]
+pub struct PlsCanonical {
+    /// Latent directions.
+    pub n_components: usize,
+}
+
+impl Default for PlsCanonical {
+    fn default() -> Self {
+        Self { n_components: 1 }
+    }
+}
+
+impl PlsCanonical {
+    /// `k` canonical PLS directions.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components: n_components.max(1),
+        }
+    }
+
+    /// Fit on two views. Do not pass `n_components` as identification `p`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedPlsCanonical>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        if x.nrows() != y.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("PLSCanonical X rows ≠ Y rows")
+                    .build(),
+            );
+            return ctx.finish(FittedPlsCanonical {
+                x_weights: Matrix::zeros(x.ncols(), self.n_components),
+                y_weights: Matrix::zeros(y.ncols(), self.n_components),
+                x_mean: Vector::zeros(x.ncols()),
+                y_mean: Vector::zeros(y.ncols()),
+            });
+        }
+        let (mut xs, x_mean) = x.centered();
+        let (mut ys, y_mean) = y.centered();
+        let k = self
+            .n_components
+            .min(x.ncols())
+            .min(y.ncols())
+            .min(x.nrows().saturating_sub(1))
+            .max(1);
+        let mut xw = Matrix::zeros(x.ncols(), k);
+        let mut yw = Matrix::zeros(y.ncols(), k);
+        for c in 0..k {
+            let mut u = Vector::from_iter((0..ys.ncols()).map(|j| ys.get(0, j)));
+            if u.norm() <= ctx.policy.near_zero_variance {
+                u = Vector::filled(ys.ncols(), 1.0);
+            }
+            let un = u.norm().max(1e-12);
+            u = u.scale(1.0 / un);
+            let mut w = Vector::zeros(xs.ncols());
+            for _ in 0..8 {
+                w = xs.matvec_t(&ys.matvec(&u));
+                let wn = w.norm();
+                if wn <= ctx.policy.near_zero_variance {
+                    ctx.push(
+                        Issue::builder(IssueCode::UpdateWithZeroInformation)
+                            .message("PLSCanonical NIPALS weight vanished")
+                            .build(),
+                    );
+                    break;
+                }
+                w = w.scale(1.0 / wn);
+                let t = xs.matvec(&w);
+                u = ys.matvec_t(&t);
+                let un = u.norm();
+                if un <= ctx.policy.near_zero_variance {
+                    break;
+                }
+                u = u.scale(1.0 / un);
+            }
+            let t = xs.matvec(&w);
+            let tt = t.dot(&t).max(1e-12);
+            let pvec = xs.matvec_t(&t).scale(1.0 / tt);
+            let qvec = ys.matvec_t(&t).scale(1.0 / tt);
+            for j in 0..w.len() {
+                xw.set(j, c, w[j]);
+            }
+            for j in 0..u.len() {
+                yw.set(j, c, u[j]);
+            }
+            for i in 0..xs.nrows() {
+                for j in 0..xs.ncols() {
+                    xs.set(i, j, xs.get(i, j) - t[i] * pvec[j]);
+                }
+                for j in 0..ys.ncols() {
+                    ys.set(i, j, ys.get(i, j) - t[i] * qvec[j]);
+                }
+            }
+        }
+        ctx.finish(FittedPlsCanonical {
+            x_weights: xw,
+            y_weights: yw,
+            x_mean,
+            y_mean,
+        })
+    }
+}
+
+/// Fitted two-block PLS.
+#[derive(Clone, Debug)]
+pub struct FittedPlsCanonical {
+    /// `X` weights (`p_x` × `k`).
+    pub x_weights: Matrix,
+    /// `Y` weights (`p_y` × `k`).
+    pub y_weights: Matrix,
+    /// `X` column means.
+    pub x_mean: Vector,
+    /// `Y` column means.
+    pub y_mean: Vector,
+}
+
+impl Transform for FittedPlsCanonical {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        let k = self.x_weights.ncols();
+        let z = Matrix::from_fn(x.nrows(), k, |i, c| {
+            let mut s = 0.0;
+            for j in 0..x.ncols().min(self.x_weights.nrows()).min(self.x_mean.len()) {
+                s += (x.get(i, j) - self.x_mean[j]) * self.x_weights.get(j, c);
+            }
+            s
+        });
+        ctx.finish(z)
     }
 }
 
@@ -3631,6 +3769,23 @@ mod tests {
             .fit(&x, &y, &Session::new("llic", "fit"))
             .expect("llic");
         assert!(ic.value.coef.as_slice().iter().any(|v| v.abs() > 1e-6));
+        let ym2 = Matrix::from_fn(24, 2, |i, k| {
+            if k == 0 {
+                1.0 + 2.0 * i as f64
+            } else {
+                0.5 * i as f64
+            }
+        });
+        let pls = PlsCanonical::new(1)
+            .fit(&x, &ym2, &Session::new("plsc", "fit"))
+            .expect("plsc");
+        let z = pls
+            .value
+            .transform(&x, &Session::new("plsc", "t"))
+            .expect("plst")
+            .value;
+        assert_eq!(z.ncols(), 1);
+        assert!(z.get(0, 0).is_finite());
     }
 
     #[test]

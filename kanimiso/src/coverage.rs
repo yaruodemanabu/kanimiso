@@ -1672,6 +1672,83 @@ const INVENTORY: &[Algorithm] = &[
         "online",
     ),
     a("online.BiasedMf", "river.reco.BiasedMF", "online"),
+    a(
+        "neighbors.NeighborhoodComponentsAnalysis",
+        "sklearn.neighbors.NeighborhoodComponentsAnalysis",
+        "estimator",
+    ),
+    a(
+        "cluster.SpectralCoclustering",
+        "sklearn.cluster.SpectralCoclustering",
+        "estimator",
+    ),
+    a(
+        "linear_model.PlsCanonical",
+        "sklearn.cross_decomposition.PLSCanonical",
+        "estimator",
+    ),
+    a(
+        "multioutput.MultiOutputClassifier",
+        "sklearn.multioutput.MultiOutputClassifier",
+        "estimator",
+    ),
+    a(
+        "feature.AdditiveChi2Sampler",
+        "sklearn.kernel_approximation.AdditiveChi2Sampler",
+        "transformer",
+    ),
+    a(
+        "preprocess.MultiLabelBinarizer",
+        "sklearn.preprocessing.MultiLabelBinarizer",
+        "transformer",
+    ),
+    a(
+        "preprocess.KernelCenterer",
+        "sklearn.preprocessing.KernelCenterer",
+        "transformer",
+    ),
+    a(
+        "tsa.AutoReg",
+        "statsmodels.tsa.ar_model.AutoReg",
+        "forecast",
+    ),
+    a("tsa.Ardl", "statsmodels.tsa.ardl.model.ARDL", "forecast"),
+    a("tsa.AutoEts", "sktime.forecasting.ets.AutoETS", "forecast"),
+    a(
+        "tsa.FourierFeatures",
+        "sktime.transformations.series.fourier.FourierFeatures",
+        "forecast",
+    ),
+    a(
+        "tsa.StlForecaster",
+        "sktime.forecasting.trend.STLForecaster",
+        "forecast",
+    ),
+    a(
+        "online.KnnClassifier",
+        "river.neighbors.KNNClassifier",
+        "online",
+    ),
+    a(
+        "online.OnlineMinMaxScaler",
+        "river.preprocessing.MinMaxScaler",
+        "online",
+    ),
+    a(
+        "glm.ExponentialAft",
+        "lifelines.ExponentialFitter",
+        "estimator",
+    ),
+    a(
+        "stats.chow_test",
+        "statsmodels.stats.diagnostic.breaks_chow",
+        "stats",
+    ),
+    a(
+        "multiclass.OutputCodeClassifier",
+        "sklearn.multiclass.OutputCodeClassifier",
+        "estimator",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -1721,6 +1798,10 @@ mod tests {
             "cluster.BayesianGaussianMixture",
             "tsa.Stl",
             "online.BiasedMf",
+            "neighbors.NeighborhoodComponentsAnalysis",
+            "cluster.SpectralCoclustering",
+            "tsa.AutoReg",
+            "online.KnnClassifier",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

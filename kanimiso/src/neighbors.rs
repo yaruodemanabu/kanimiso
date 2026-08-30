@@ -6,7 +6,7 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::traits::{Fit, FitUnsupervised, Predict};
+use crate::traits::{Fit, FitUnsupervised, Predict, Transform};
 use crate::validate::{inspect_classes, inspect_identification, inspect_xy};
 use ojizou_san::Session;
 use signlred::{Issue, IssueCode, Meaninglessness, Qualified, Result, Severity};
@@ -937,6 +937,191 @@ impl Fit for NearestCentroid {
     }
 }
 
+/// Neighbourhood components analysis (Goldberger et al.): a linear map
+/// trained to raise leave-one-out softmax k-NN accuracy.
+///
+/// Do not pass `n_components` as `p` to identification — a 2-d embedding of
+/// 40 labelled rows is identified. Single-class `y` is vacuous via
+/// [`inspect_classes`].
+#[derive(Clone, Debug)]
+pub struct NeighborhoodComponentsAnalysis {
+    /// Embedding dimension.
+    pub n_components: usize,
+    /// Gradient steps.
+    pub max_iter: usize,
+    components: Matrix,
+    fitted: bool,
+}
+
+impl Default for NeighborhoodComponentsAnalysis {
+    fn default() -> Self {
+        Self {
+            n_components: 2,
+            max_iter: 40,
+            components: Matrix::zeros(0, 0),
+            fitted: false,
+        }
+    }
+}
+
+impl NeighborhoodComponentsAnalysis {
+    /// Embed into `n_components` dimensions.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components: n_components.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl Fit for NeighborhoodComponentsAnalysis {
+    type Fitted = Self;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        if counts.len() < 2 {
+            self.fitted = true;
+            self.components = Matrix::zeros(x.ncols(), self.n_components.max(1));
+            return ctx.finish(self.clone());
+        }
+        let (n, p) = x.shape();
+        let k = self.n_components.max(1).min(p.max(1));
+        if k < self.n_components {
+            ctx.push(
+                Issue::builder(IssueCode::ComponentsExceedRank)
+                    .message(format!(
+                        "NCA requested {} components, using {k}",
+                        self.n_components
+                    ))
+                    .build(),
+            );
+        }
+        let mut a = Matrix::zeros(p, k);
+        for j in 0..k.min(p) {
+            a.set(j, j, 1.0);
+        }
+        let labs: Vec<i64> = y.as_slice().iter().map(|&v| v.round() as i64).collect();
+        let lr = 0.05;
+        for it in 0..self.max_iter.max(1) {
+            let z = Matrix::from_fn(n, k, |i, c| {
+                let mut s = 0.0;
+                for j in 0..p.min(a.nrows()) {
+                    s += x.get(i, j) * a.get(j, c);
+                }
+                s
+            });
+            let mut grad = Matrix::zeros(p, k);
+            let mut obj = 0.0;
+            for i in 0..n {
+                let mut logits = vec![0.0; n];
+                let mut m = f64::NEG_INFINITY;
+                for j in 0..n {
+                    if i == j {
+                        logits[j] = f64::NEG_INFINITY;
+                        continue;
+                    }
+                    let mut d2 = 0.0;
+                    for c in 0..k {
+                        let d = z.get(i, c) - z.get(j, c);
+                        d2 += d * d;
+                    }
+                    logits[j] = -d2;
+                    if logits[j] > m {
+                        m = logits[j];
+                    }
+                }
+                let mut den = 0.0;
+                let mut pij = vec![0.0; n];
+                for j in 0..n {
+                    if i == j {
+                        continue;
+                    }
+                    let e = (logits[j] - m).exp();
+                    pij[j] = e;
+                    den += e;
+                }
+                if den <= 1e-18 {
+                    continue;
+                }
+                for j in 0..n {
+                    pij[j] /= den;
+                }
+                let mut pi = 0.0;
+                for j in 0..n {
+                    if labs[j] == labs[i] {
+                        pi += pij[j];
+                    }
+                }
+                obj += pi;
+                for j in 0..n {
+                    if i == j {
+                        continue;
+                    }
+                    let same = if labs[j] == labs[i] { 1.0 } else { 0.0 };
+                    let gij = pij[j] * (same - pi);
+                    for c in 0..k {
+                        let dz = z.get(i, c) - z.get(j, c);
+                        for u in 0..p {
+                            grad.set(
+                                u,
+                                c,
+                                grad.get(u, c) + 2.0 * gij * dz * (x.get(i, u) - x.get(j, u)),
+                            );
+                        }
+                    }
+                }
+            }
+            ctx.session.step(it as u64, -obj, None);
+            for u in 0..p {
+                for c in 0..k {
+                    a.set(u, c, a.get(u, c) + lr * grad.get(u, c) / n as f64);
+                }
+            }
+        }
+        if !obj_is_ok(&a) {
+            ctx.push(
+                Issue::builder(IssueCode::NonFiniteOutput)
+                    .message("NCA components contain NaN/Inf")
+                    .build(),
+            );
+        }
+        self.components = a;
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+fn obj_is_ok(a: &Matrix) -> bool {
+    for i in 0..a.nrows() {
+        for j in 0..a.ncols() {
+            if !a.get(i, j).is_finite() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+impl Transform for NeighborhoodComponentsAnalysis {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), self.n_components.max(1)));
+        }
+        let k = self.components.ncols();
+        let z = Matrix::from_fn(x.nrows(), k, |i, c| {
+            let mut s = 0.0;
+            for j in 0..x.ncols().min(self.components.nrows()) {
+                s += x.get(i, j) * self.components.get(j, c);
+            }
+            s
+        });
+        ctx.finish(z)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1061,5 +1246,25 @@ mod tests {
             .unwrap()
             .value;
         assert!((pred[8] - 16.0).abs() < 3.0, "pred8={}", pred[8]);
+    }
+
+    #[test]
+    fn nca_embeds_two_blobs() {
+        let x = Matrix::from_fn(40, 2, |i, j| {
+            if i < 20 {
+                -3.0 + 0.05 * i as f64 + 0.02 * j as f64
+            } else {
+                3.0 + 0.05 * (i as f64 - 20.0) + 0.02 * j as f64
+            }
+        });
+        let y = Vector::from_iter((0..40).map(|i| if i < 20 { 0.0 } else { 1.0 }));
+        let mut nca = NeighborhoodComponentsAnalysis::new(2);
+        nca.fit(&x, &y, &Session::new("nca", "fit")).expect("nca");
+        let z = nca
+            .transform(&x, &Session::new("nca", "t"))
+            .expect("ncat")
+            .value;
+        assert_eq!(z.shape(), (40, 2));
+        assert!(z.get(0, 0).is_finite());
     }
 }

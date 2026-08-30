@@ -2249,6 +2249,170 @@ impl Transform for LabelBinarizer {
     }
 }
 
+/// Multi-label indicator map (sklearn `MultiLabelBinarizer`).
+///
+/// Each finite non-negative entry of the training matrix is a class id.
+/// Negative / NaN entries are padding. A matrix with no usable labels is
+/// vacuous.
+#[derive(Clone, Debug, Default)]
+pub struct MultiLabelBinarizer {
+    classes: Vec<i64>,
+    fitted: bool,
+}
+
+impl MultiLabelBinarizer {
+    /// Empty binarizer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sorted class ids.
+    pub fn classes(&self) -> &[i64] {
+        &self.classes
+    }
+}
+
+impl FitUnsupervised for MultiLabelBinarizer {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let mut set = BTreeMap::<i64, u64>::new();
+        for i in 0..x.nrows() {
+            for j in 0..x.ncols() {
+                let v = x.get(i, j);
+                if v.is_finite() && v >= 0.0 {
+                    *set.entry(v.round() as i64).or_insert(0) += 1;
+                }
+            }
+        }
+        self.classes = set.keys().copied().collect();
+        if self.classes.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("MultiLabelBinarizer saw no non-negative finite labels")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "multi-label indicators",
+                        "an empty label alphabet cannot be binarized",
+                        "supply at least one non-negative class id",
+                    ))
+                    .build(),
+            );
+        }
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for MultiLabelBinarizer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), 0));
+        }
+        let k = self.classes.len();
+        let out = Matrix::from_fn(x.nrows(), k, |i, c| {
+            let want = self.classes[c];
+            for j in 0..x.ncols() {
+                let v = x.get(i, j);
+                if v.is_finite() && v >= 0.0 && v.round() as i64 == want {
+                    return 1.0;
+                }
+            }
+            0.0
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Center a kernel Gram matrix (sklearn `KernelCenterer`).
+///
+/// `K ← (I − 11ᵀ/n) K (I − 11ᵀ/n)`. Do not treat `n` as a parameter count.
+#[derive(Clone, Debug)]
+pub struct KernelCenterer {
+    row_mean: Vector,
+    all_mean: f64,
+    fitted: bool,
+}
+
+impl Default for KernelCenterer {
+    fn default() -> Self {
+        Self {
+            row_mean: Vector::zeros(0),
+            all_mean: 0.0,
+            fitted: false,
+        }
+    }
+}
+
+impl KernelCenterer {
+    /// Empty centerer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl FitUnsupervised for KernelCenterer {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, k: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, k, None, &ctx.policy);
+        if k.nrows() == 0 || k.ncols() == 0 {
+            self.fitted = true;
+            self.row_mean = Vector::zeros(0);
+            self.all_mean = 0.0;
+            return ctx.finish(self.clone());
+        }
+        let n = k.nrows();
+        let mut row_mean = Vector::zeros(n);
+        let mut tot = 0.0;
+        let mut cnt = 0.0;
+        for i in 0..n {
+            let mut s = 0.0;
+            let mut c = 0.0;
+            for j in 0..k.ncols() {
+                let v = k.get(i, j);
+                if v.is_finite() {
+                    s += v;
+                    c += 1.0;
+                    tot += v;
+                    cnt += 1.0;
+                }
+            }
+            row_mean[i] = if c > 0.0 { s / c } else { 0.0 };
+        }
+        self.row_mean = row_mean;
+        self.all_mean = if cnt > 0.0 { tot / cnt } else { 0.0 };
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for KernelCenterer {
+    fn transform(&self, k: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(k.clone());
+        }
+        let out = Matrix::from_fn(k.nrows(), k.ncols(), |i, j| {
+            let rm = if i < self.row_mean.len() {
+                self.row_mean[i]
+            } else {
+                0.0
+            };
+            let cm = if j < self.row_mean.len() {
+                self.row_mean[j]
+            } else {
+                rm
+            };
+            k.get(i, j) - rm - cm + self.all_mean
+        });
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2328,5 +2492,38 @@ mod tests {
         assert_eq!(oh.ncols(), 2);
         assert!((oh.get(0, 0) - 1.0).abs() < 1e-12);
         assert!((oh.get(15, 1) - 1.0).abs() < 1e-12);
+        let labs = Matrix::from_fn(4, 2, |i, j| match (i, j) {
+            (0, 0) => 0.0,
+            (0, 1) => 2.0,
+            (1, 0) => 1.0,
+            (1, 1) => -1.0,
+            (2, 0) => 0.0,
+            (2, 1) => 1.0,
+            (3, 0) => 2.0,
+            _ => 1.0,
+        });
+        let mut mlb = MultiLabelBinarizer::new();
+        mlb.fit_unsupervised(&labs, &Session::new("mlb", "fit"))
+            .unwrap();
+        assert_eq!(mlb.classes(), &[0, 1, 2]);
+        let bin = mlb
+            .transform(&labs, &Session::new("mlb", "t"))
+            .unwrap()
+            .value;
+        assert_eq!(bin.shape(), (4, 3));
+        assert!((bin.get(0, 0) - 1.0).abs() < 1e-12);
+        assert!((bin.get(0, 2) - 1.0).abs() < 1e-12);
+        let gram = Matrix::from_fn(6, 6, |i, j| (i as f64 - j as f64).abs());
+        let mut kc = KernelCenterer::new();
+        kc.fit_unsupervised(&gram, &Session::new("kc", "fit"))
+            .unwrap();
+        let ck = kc.transform(&gram, &Session::new("kc", "t")).unwrap().value;
+        let mut mean = 0.0;
+        for i in 0..6 {
+            for j in 0..6 {
+                mean += ck.get(i, j);
+            }
+        }
+        assert!(mean.abs() < 1e-8, "centered gram mean={mean}");
     }
 }

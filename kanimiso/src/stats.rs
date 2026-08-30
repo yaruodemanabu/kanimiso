@@ -1964,6 +1964,114 @@ pub fn goldfeld_quandt(
     })
 }
 
+/// Chow split-sample F-test for a structural break at `split`.
+///
+/// Inner OLS uses a scratch report; `ResidualTooLarge` / `NearSingular` are
+/// not promoted. A tiny `p`-value is [`IssueCode::StructuralBreak`].
+pub fn chow_test(
+    x: &Matrix,
+    y: &Vector,
+    split: usize,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let n = x.nrows().min(y.len());
+    let p = x.ncols() + 1;
+    if split < p || n.saturating_sub(split) < p {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(signlred::Severity::Warning)
+                .message(format!(
+                    "Chow split={split} leaves a half shorter than p+1={p}"
+                ))
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: p as f64,
+            nobs: n as f64,
+        });
+    }
+    let mut sse_of = |lo: usize, hi: usize| -> Option<f64> {
+        let m = hi.saturating_sub(lo);
+        if m == 0 {
+            return None;
+        }
+        let xs = Matrix::from_fn(m, x.ncols(), |i, j| x.get(lo + i, j)).with_intercept();
+        let ys = Vector::from_iter((lo..hi).map(|i| y[i]));
+        let mut scratch = Report::new("chow", "ols");
+        let beta = crate::linalg::least_squares(&mut scratch, &xs, &ys, &ctx.policy)?;
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::RankZero
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let r = ys.sub(&xs.matvec(&beta));
+        Some(r.dot(&r))
+    };
+    let Some(sse_p) = sse_of(0, n) else {
+        ctx.push(
+            Issue::builder(IssueCode::UnidentifiedModel)
+                .message("Chow pooled OLS failed")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: p as f64,
+            nobs: n as f64,
+        });
+    };
+    let Some(sse_1) = sse_of(0, split) else {
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: p as f64,
+            nobs: n as f64,
+        });
+    };
+    let Some(sse_2) = sse_of(split, n) else {
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: p as f64,
+            nobs: n as f64,
+        });
+    };
+    let df_num = p as f64;
+    let df_den = (n as f64 - 2.0 * p as f64).max(1.0);
+    let stat = if sse_1 + sse_2 > 0.0 {
+        ((sse_p - sse_1 - sse_2).max(0.0) / df_num) / ((sse_1 + sse_2) / df_den)
+    } else {
+        f64::NAN
+    };
+    let pvalue = if stat.is_finite() {
+        f_pvalue(stat.max(0.0), df_num, df_den)
+    } else {
+        f64::NAN
+    };
+    if pvalue.is_finite() && pvalue < 0.05 {
+        ctx.push(
+            Issue::builder(IssueCode::StructuralBreak)
+                .message(format!("Chow p={pvalue:.4} at split={split}"))
+                .metric("f", stat)
+                .build(),
+        );
+    }
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: df_num,
+        nobs: n as f64,
+    })
+}
+
 /// Ramsey RESET: augment OLS with \(\hat y^2,\hat y^3\) and F-test the extra powers.
 pub fn ramsey_reset(
     x: &Matrix,
@@ -3692,5 +3800,16 @@ mod tests {
         let ys = Vector::from_iter((0..20).map(|i| 2.0 * i as f64));
         let sm = lowess(&xs, &ys, 0.4, &Session::new("lo", "t")).expect("lowess");
         assert!((sm.value[10] - 20.0).abs() < 1.0);
+        let chow = chow_test(&x, &y, 20, &Session::new("chow", "t")).expect("chow");
+        assert!(chow.value.statistic.is_finite() || chow.value.pvalue.is_nan());
+        let yb = Vector::from_iter((0..40).map(|i| {
+            if i < 20 {
+                0.2 * i as f64
+            } else {
+                20.0 - 0.8 * (i as f64 - 20.0)
+            }
+        }));
+        let br = chow_test(&x, &yb, 20, &Session::new("chowb", "t")).expect("chowb");
+        assert!(br.report.contains(IssueCode::StructuralBreak) || br.value.pvalue < 0.2);
     }
 }

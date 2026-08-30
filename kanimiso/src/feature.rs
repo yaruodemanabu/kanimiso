@@ -933,6 +933,112 @@ impl Transform for RbfSampler {
     }
 }
 
+/// Additive χ² kernel map (Vedaldi & Zisserman / sklearn `AdditiveChi2Sampler`).
+///
+/// Each non-negative coordinate `x_j` is mapped to
+/// `√x_j {cos,sin}(ω_k log(x_j+ε))`. Do not pass the output dimension to
+/// identification — a 20×2 table with 4 Fourier features is identified.
+/// Negative entries are a [`IssueCode::NonPositiveSeries`] warning.
+#[derive(Clone, Debug)]
+pub struct AdditiveChi2Sampler {
+    /// Frequencies per input column.
+    pub n_components: usize,
+    /// Spacing of `ω_k = (k+1) · sample_interval`.
+    pub sample_interval: f64,
+    fitted: bool,
+}
+
+impl Default for AdditiveChi2Sampler {
+    fn default() -> Self {
+        Self {
+            n_components: 2,
+            sample_interval: 1.0,
+            fitted: false,
+        }
+    }
+}
+
+impl AdditiveChi2Sampler {
+    /// Sampler with `n_components` frequencies per column.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components: n_components.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl FitUnsupervised for AdditiveChi2Sampler {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if self.sample_interval <= 0.0 || !self.sample_interval.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "AdditiveChi2Sampler interval={} is not positive; using 1",
+                        self.sample_interval
+                    ))
+                    .build(),
+            );
+            self.sample_interval = 1.0;
+        }
+        let mut neg = false;
+        for i in 0..x.nrows() {
+            for j in 0..x.ncols() {
+                if x.get(i, j) < 0.0 {
+                    neg = true;
+                }
+            }
+        }
+        if neg {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message("AdditiveChi2Sampler saw negative entries; they are clipped to 0")
+                    .build(),
+            );
+        }
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for AdditiveChi2Sampler {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(x.clone());
+        }
+        let m = self.n_components.max(1);
+        let interval = if self.sample_interval > 0.0 {
+            self.sample_interval
+        } else {
+            1.0
+        };
+        let out_p = x.ncols() * m * 2;
+        let out = Matrix::from_fn(x.nrows(), out_p, |i, c| {
+            let j = c / (2 * m);
+            let rem = c % (2 * m);
+            let k = rem / 2;
+            let use_sin = rem % 2 == 1;
+            let v = x.get(i, j).max(0.0);
+            let omega = (k + 1) as f64 * interval;
+            let arg = omega * (v + 1e-8).ln();
+            let amp = v.sqrt();
+            if use_sin {
+                amp * arg.sin()
+            } else {
+                amp * arg.cos()
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
 /// Nyström approximation to an RBF kernel map.
 #[derive(Clone, Debug)]
 pub struct Nystroem {
@@ -2052,5 +2158,15 @@ mod tests {
         let mut fdr = SelectFdr::new(0.05);
         fdr.fit(&x, &y, &Session::new("fdr", "fit")).unwrap();
         assert!(fdr.support()[0]);
+        let xnn = Matrix::from_fn(16, 2, |i, j| 0.2 + (i + j) as f64);
+        let mut chi = AdditiveChi2Sampler::new(2);
+        chi.fit_unsupervised(&xnn, &Session::new("achi", "fit"))
+            .unwrap();
+        let z = chi
+            .transform(&xnn, &Session::new("achi", "t"))
+            .unwrap()
+            .value;
+        assert_eq!(z.ncols(), 8);
+        assert!(z.get(0, 0).is_finite());
     }
 }

@@ -5072,6 +5072,276 @@ impl Predict for BiasedMf {
     }
 }
 
+/// Online k-NN classifier (river `neighbors.KNNClassifier`).
+///
+/// Every labelled row is stored. A 1-row batch uses
+/// [`inspect_online_xy`], not [`inspect_xy`].
+#[derive(Clone, Debug)]
+pub struct KnnClassifier {
+    /// Neighbourhood size.
+    pub k: usize,
+    xs: Vec<Vec<f64>>,
+    ys: Vec<i64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for KnnClassifier {
+    fn default() -> Self {
+        Self {
+            k: 3,
+            xs: Vec::new(),
+            ys: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl KnnClassifier {
+    /// `k`-NN memory.
+    pub fn new(k: usize) -> Self {
+        Self {
+            k: k.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for KnnClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        if self.n_seen > 0 {
+            if let Some(first) = self.xs.first() {
+                if first.len() != x.ncols() {
+                    ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+                    return finish_explain(
+                        ctx,
+                        reject_explain(
+                            self.updates,
+                            x.nrows(),
+                            self.n_seen,
+                            "feature space changed",
+                        ),
+                    );
+                }
+            }
+        }
+        let before = self.xs.len();
+        for i in 0..x.nrows() {
+            self.xs.push((0..x.ncols()).map(|j| x.get(i, j)).collect());
+            self.ys.push(y[i].round() as i64);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.xs.len() - before) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.xs.len() >= self.k;
+        q.warmup = self.xs.len() < self.k;
+        q.explanation = format!(
+            "stored {} rows; memory={} k={}",
+            x.nrows(),
+            self.xs.len(),
+            self.k
+        );
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("online k-NN has fewer stored rows than k")
+                    .build(),
+            );
+        }
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "instance memory",
+                "append labelled rows for later majority vote",
+                format!("n={before}"),
+                format!("n={}", self.xs.len()),
+            ),
+        )
+    }
+}
+
+impl Predict for KnnClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.xs.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let k = self.k.max(1).min(self.xs.len());
+        let y = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut dist: Vec<(f64, i64)> = self
+                .xs
+                .iter()
+                .zip(self.ys.iter())
+                .map(|(z, &lab)| {
+                    let mut s = 0.0;
+                    for j in 0..x.ncols().min(z.len()) {
+                        let d = x.get(i, j) - z[j];
+                        s += d * d;
+                    }
+                    (s, lab)
+                })
+                .collect();
+            dist.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let mut votes = std::collections::BTreeMap::<i64, usize>::new();
+            for (_, lab) in dist.into_iter().take(k) {
+                *votes.entry(lab).or_insert(0) += 1;
+            }
+            votes
+                .into_iter()
+                .max_by_key(|(_, c)| *c)
+                .map(|(lab, _)| lab as f64)
+                .unwrap_or(0.0)
+        }));
+        ctx.finish(y)
+    }
+}
+
+/// Online min–max scaler (river `preprocessing.MinMaxScaler`).
+#[derive(Clone, Debug)]
+pub struct OnlineMinMaxScaler {
+    min: Vector,
+    max: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineMinMaxScaler {
+    fn default() -> Self {
+        Self {
+            min: Vector::zeros(0),
+            max: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineMinMaxScaler {
+    /// Empty scaler.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for OnlineMinMaxScaler {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        if !self.initialized {
+            self.min = Vector::from_iter((0..x.ncols()).map(|_| f64::INFINITY));
+            self.max = Vector::from_iter((0..x.ncols()).map(|_| f64::NEG_INFINITY));
+            self.initialized = true;
+        } else if self.min.len() != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.min.clone();
+        for j in 0..x.ncols() {
+            for i in 0..x.nrows() {
+                let v = x.get(i, j);
+                if !v.is_finite() {
+                    continue;
+                }
+                if v < self.min[j] {
+                    self.min[j] = v;
+                }
+                if v > self.max[j] {
+                    self.max[j] = v;
+                }
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let delta = self.min.sub(&before);
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta.norm());
+        q.information_gain = Some(delta.norm().max(1.0 / self.n_seen.max(1) as f64));
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("online MinMax on {} rows", x.nrows());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "running column min/max",
+                "stream extrema",
+                "previous extrema",
+                "updated extrema",
+            ),
+        )
+    }
+}
+
+impl Transform for OnlineMinMaxScaler {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(x.clone());
+        }
+        let p = x.ncols().min(self.min.len());
+        let out = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            if j >= p {
+                return x.get(i, j);
+            }
+            let lo = self.min[j];
+            let hi = self.max[j];
+            let span = hi - lo;
+            if !span.is_finite() || span.abs() <= ctx.policy.near_zero_variance {
+                return 0.0;
+            }
+            (x.get(i, j) - lo) / span
+        });
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5231,6 +5501,12 @@ mod tests {
         BiasedMf::new()
             .partial_fit(&xui, Some(&y), &session)
             .expect("biasedmf");
+        KnnClassifier::new(3)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("knn");
+        OnlineMinMaxScaler::new()
+            .partial_fit(&x, None, &session)
+            .expect("minmax");
 
         let n_expl = session
             .ledger()
@@ -5239,7 +5515,7 @@ mod tests {
             .filter(|e| e.kind == EventKind::IncrementalExplanation)
             .count();
         assert!(
-            n_expl >= 31,
+            n_expl >= 33,
             "expected an IncrementalExplanation per partial_fit, got {n_expl}"
         );
     }

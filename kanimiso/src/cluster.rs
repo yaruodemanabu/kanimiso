@@ -8,7 +8,7 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linalg::symmetric_eigen;
+use crate::linalg::{symmetric_eigen, thin_svd};
 use crate::rng::Rng;
 use crate::traits::{FitUnsupervised, PartialFit, Predict};
 use crate::validate::{inspect_identification, inspect_xy};
@@ -2999,6 +2999,184 @@ impl FitUnsupervised for BisectingKMeans {
     }
 }
 
+/// Spectral co-clustering (Dhillon): normalize `A`, SVD, k-means on the
+/// stacked singular vectors (sklearn `SpectralCoclustering`).
+///
+/// `n_clusters` is not passed to [`inspect_identification`]. An all-zero
+/// table is vacuous.
+#[derive(Clone, Debug)]
+pub struct SpectralCoclustering {
+    /// Number of row/column clusters.
+    pub n_clusters: usize,
+    /// PRNG seed for the k-means stage.
+    pub seed: u64,
+}
+
+impl Default for SpectralCoclustering {
+    fn default() -> Self {
+        Self {
+            n_clusters: 2,
+            seed: 1,
+        }
+    }
+}
+
+impl SpectralCoclustering {
+    /// `k` co-clusters.
+    pub fn new(n_clusters: usize) -> Self {
+        Self {
+            n_clusters: n_clusters.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedCocluster>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted spectral co-clustering.
+#[derive(Clone, Debug)]
+pub struct FittedCocluster {
+    /// Row labels.
+    pub row_labels: Vector,
+    /// Column labels.
+    pub col_labels: Vector,
+}
+
+fn local_kmeans(x: &Matrix, k: usize, seed: u64) -> Vector {
+    let n = x.nrows();
+    let k = k.max(1).min(n.max(1));
+    if n == 0 {
+        return Vector::zeros(0);
+    }
+    let mut rng = Rng::new(seed | 11);
+    let mut cents = kmeans_plus_plus(x, k, &mut rng);
+    let mut labels = Vector::zeros(n);
+    for _ in 0..25 {
+        for i in 0..n {
+            let mut b = 0usize;
+            let mut bd = f64::INFINITY;
+            for c in 0..k {
+                let d = sq_dist_rc(x, i, &cents, c);
+                if d < bd {
+                    bd = d;
+                    b = c;
+                }
+            }
+            labels[i] = b as f64;
+        }
+        for c in 0..k {
+            let mut cnt = 0.0;
+            for j in 0..x.ncols() {
+                cents.set(c, j, 0.0);
+            }
+            for i in 0..n {
+                if labels[i] as usize == c {
+                    cnt += 1.0;
+                    for j in 0..x.ncols() {
+                        cents.set(c, j, cents.get(c, j) + x.get(i, j));
+                    }
+                }
+            }
+            if cnt > 0.0 {
+                for j in 0..x.ncols() {
+                    cents.set(c, j, cents.get(c, j) / cnt);
+                }
+            }
+        }
+    }
+    labels
+}
+
+impl FitUnsupervised for SpectralCoclustering {
+    type Fitted = FittedCocluster;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCocluster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (n, p) = x.shape();
+        if n == 0 || p == 0 {
+            return ctx.finish(FittedCocluster {
+                row_labels: Vector::zeros(n),
+                col_labels: Vector::zeros(p),
+            });
+        }
+        let mut energy = 0.0f64;
+        let mut neg = false;
+        for i in 0..n {
+            for j in 0..p {
+                let v = x.get(i, j);
+                energy = energy.max(v.abs());
+                if v < 0.0 {
+                    neg = true;
+                }
+            }
+        }
+        if energy <= ctx.policy.near_zero_variance {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("co-clustering table is the zero map")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "co-cluster labels",
+                        "a zero table has no row/column association to partition",
+                        "supply a non-negative contingency / count matrix",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedCocluster {
+                row_labels: Vector::zeros(n),
+                col_labels: Vector::zeros(p),
+            });
+        }
+        if neg {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message("SpectralCoclustering saw negative entries; treating them as 0")
+                    .build(),
+            );
+        }
+        let mut rsum = vec![0.0; n];
+        let mut csum = vec![0.0; p];
+        for i in 0..n {
+            for j in 0..p {
+                let v = x.get(i, j).max(0.0);
+                rsum[i] += v;
+                csum[j] += v;
+            }
+        }
+        let an = Matrix::from_fn(n, p, |i, j| {
+            let d = (rsum[i].max(1e-12) * csum[j].max(1e-12)).sqrt();
+            x.get(i, j).max(0.0) / d
+        });
+        let mut scratch = signlred::Report::new("coclust", "svd");
+        let Some(svd) = thin_svd(&mut scratch, &an, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::SvdDidNotConverge)
+                    .message("co-clustering SVD failed")
+                    .build(),
+            );
+            return ctx.finish(FittedCocluster {
+                row_labels: Vector::zeros(n),
+                col_labels: Vector::zeros(p),
+            });
+        };
+        let k = self.n_clusters.max(2);
+        let rkeep = svd.singular_values.len().min(k).max(1);
+        let zrow = Matrix::from_fn(n, rkeep, |i, c| svd.u[(i, c)]);
+        let zcol = Matrix::from_fn(p, rkeep, |j, c| svd.v[(j, c)]);
+        ctx.finish(FittedCocluster {
+            row_labels: local_kmeans(&zrow, k, self.seed),
+            col_labels: local_kmeans(&zcol, k, self.seed.wrapping_add(1)),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3115,5 +3293,22 @@ mod tests {
         let lab = q.value.labels.as_slice();
         assert_ne!(lab[0], lab[20], "blobs must differ: {lab:?}");
         assert_eq!(q.value.weights.len(), 2);
+    }
+
+    #[test]
+    fn spectral_coclustering_block_matrix() {
+        let x = Matrix::from_fn(12, 8, |i, j| {
+            if (i < 6 && j < 4) || (i >= 6 && j >= 4) {
+                2.0
+            } else {
+                0.1
+            }
+        });
+        let q = SpectralCoclustering::new(2)
+            .fit(&x, &Session::new("scc", "fit"))
+            .expect("scc");
+        assert_eq!(q.value.row_labels.len(), 12);
+        assert_eq!(q.value.col_labels.len(), 8);
+        assert_ne!(q.value.row_labels[0], q.value.row_labels[8]);
     }
 }

@@ -2933,6 +2933,495 @@ impl FitSeries for PolynomialTrendForecaster {
     }
 }
 
+/// Autoregressive OLS `y_t = c + φ₁ y_{t-1} + ⋯ + φ_p y_{t-p}` (statsmodels `AutoReg`).
+///
+/// Lag count is not passed to identification — an AR(2) on 40 observations
+/// is identified.
+#[derive(Clone, Debug)]
+pub struct AutoReg {
+    /// AR order.
+    pub lags: usize,
+}
+
+impl Default for AutoReg {
+    fn default() -> Self {
+        Self { lags: 1 }
+    }
+}
+
+impl AutoReg {
+    /// AR(`lags`).
+    pub fn new(lags: usize) -> Self {
+        Self { lags: lags.max(1) }
+    }
+}
+
+/// Fitted AutoReg.
+#[derive(Clone, Debug)]
+pub struct FittedAutoReg {
+    /// Intercept.
+    pub intercept: f64,
+    /// `φ_1 … φ_p`.
+    pub ar: Vector,
+    /// Last `p` observations (oldest first).
+    pub last: Vector,
+}
+
+impl FittedAutoReg {
+    /// `h`-step recursive forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        let p = self.ar.len().max(1);
+        let mut hist = self.last.as_slice().to_vec();
+        let mut out = Vector::zeros(h);
+        for t in 0..h {
+            let mut yhat = self.intercept;
+            for k in 0..p {
+                let idx = hist.len().saturating_sub(p - k);
+                if idx < hist.len() {
+                    yhat += self.ar[k] * hist[idx];
+                }
+            }
+            out[t] = yhat;
+            hist.push(yhat);
+        }
+        ctx.finish(out)
+    }
+}
+
+impl FitSeries for AutoReg {
+    type Fitted = FittedAutoReg;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedAutoReg>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let p = self.lags.max(1);
+        let n = y.len();
+        if n <= p + 1 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!("AutoReg n={n} ≤ p+1={}", p + 1))
+                    .build(),
+            );
+            return ctx.finish(FittedAutoReg {
+                intercept: y.mean(),
+                ar: Vector::zeros(p),
+                last: Vector::from_iter(y.as_slice().iter().copied().take(p)),
+            });
+        }
+        warn_unit_root(&mut ctx, y);
+        let n_eff = n - p;
+        let design = Matrix::from_fn(n_eff, p + 1, |i, j| if j == 0 { 1.0 } else { y[p + i - j] });
+        let yy = Vector::from_iter((p..n).map(|t| y[t]));
+        let beta = statistical_ols(&mut ctx, &design, &yy).unwrap_or_else(|| {
+            let mut b = Vector::zeros(p + 1);
+            b[0] = yy.mean();
+            b
+        });
+        ctx.finish(FittedAutoReg {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            ar: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            last: Vector::from_iter((n - p..n).map(|t| y[t])),
+        })
+    }
+}
+
+/// ARDL(p, q): `y_t` on own lags and contemporaneous / lagged `X` (statsmodels `ARDL`).
+#[derive(Clone, Debug)]
+pub struct Ardl {
+    /// Lags of `y`.
+    pub p: usize,
+    /// Lags of each `X` column (including lag 0).
+    pub q: usize,
+}
+
+impl Default for Ardl {
+    fn default() -> Self {
+        Self { p: 1, q: 1 }
+    }
+}
+
+impl Ardl {
+    /// ARDL(`p`, `q`).
+    pub fn new(p: usize, q: usize) -> Self {
+        Self {
+            p: p.max(1),
+            q: q.max(0),
+        }
+    }
+
+    /// Fit on `y` and exogenous `x`. Do not identify on `p+q`.
+    pub fn fit(
+        &mut self,
+        y: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedArdl>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if y.len() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ARDL y length ≠ X rows")
+                    .build(),
+            );
+        }
+        let n = y.len().min(x.nrows());
+        let p = self.p.max(1);
+        let q = self.q;
+        let start = p.max(q);
+        if n <= start + 1 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!("ARDL n={n} is too short for p={p} q={q}"))
+                    .build(),
+            );
+            return ctx.finish(FittedArdl {
+                intercept: y.mean(),
+                ar: Vector::zeros(p),
+                exo: Vector::zeros(x.ncols() * (q + 1)),
+                last_y: Vector::from_iter(y.as_slice().iter().copied().take(p)),
+                last_x: x.clone(),
+                q,
+            });
+        }
+        let n_eff = n - start;
+        let k = x.ncols();
+        let cols = 1 + p + k * (q + 1);
+        let design = Matrix::from_fn(n_eff, cols, |i, j| {
+            let t = start + i;
+            if j == 0 {
+                1.0
+            } else if j <= p {
+                y[t - j]
+            } else {
+                let rest = j - 1 - p;
+                let lag = rest / k.max(1);
+                let c = rest % k.max(1);
+                x.get(t.saturating_sub(lag), c)
+            }
+        });
+        let yy = Vector::from_iter((start..n).map(|t| y[t]));
+        let beta = statistical_ols(&mut ctx, &design, &yy).unwrap_or_else(|| {
+            let mut b = Vector::zeros(cols);
+            b[0] = yy.mean();
+            b
+        });
+        ctx.finish(FittedArdl {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            ar: Vector::from_iter((1..=p).map(|j| beta[j])),
+            exo: Vector::from_iter((p + 1..beta.len()).map(|j| beta[j])),
+            last_y: Vector::from_iter((n - p..n).map(|t| y[t])),
+            last_x: x.clone(),
+            q,
+        })
+    }
+}
+
+/// Fitted ARDL.
+#[derive(Clone, Debug)]
+pub struct FittedArdl {
+    /// Intercept.
+    pub intercept: f64,
+    /// `φ_1 … φ_p`.
+    pub ar: Vector,
+    /// Exogenous coefficients, lag-major (`x_t`, `x_{t-1}`, …).
+    pub exo: Vector,
+    /// Last `p` `y` values.
+    pub last_y: Vector,
+    /// Training `X` (for lag 0 future needs a supplied path).
+    pub last_x: Matrix,
+    /// Exogenous lag order.
+    pub q: usize,
+}
+
+impl FittedArdl {
+    /// Forecast with a future exogenous path (`h × k`).
+    pub fn forecast(&self, x_future: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        let h = x_future.nrows();
+        let p = self.ar.len().max(1);
+        let k = self.last_x.ncols().max(1);
+        let mut hist_y = self.last_y.as_slice().to_vec();
+        let mut out = Vector::zeros(h);
+        for t in 0..h {
+            let mut yhat = self.intercept;
+            for j in 0..p {
+                let idx = hist_y.len().saturating_sub(p - j);
+                if idx < hist_y.len() {
+                    yhat += self.ar[j] * hist_y[idx];
+                }
+            }
+            for lag in 0..=self.q {
+                for c in 0..k {
+                    let coef_i = lag * k + c;
+                    let xv = if lag == 0 {
+                        x_future.get(t, c)
+                    } else if t >= lag {
+                        x_future.get(t - lag, c)
+                    } else {
+                        let src = self.last_x.nrows().saturating_sub(lag - t);
+                        if src < self.last_x.nrows() {
+                            self.last_x.get(src, c)
+                        } else {
+                            0.0
+                        }
+                    };
+                    if coef_i < self.exo.len() {
+                        yhat += self.exo[coef_i] * xv;
+                    }
+                }
+            }
+            out[t] = yhat;
+            hist_y.push(yhat);
+        }
+        ctx.finish(out)
+    }
+}
+
+/// Fourier seasonal features (sktime `FourierFeatures`): `sin/cos(2π k t / period)`.
+///
+/// Harmonic count is not an identification `p`.
+#[derive(Clone, Debug)]
+pub struct FourierFeatures {
+    /// Seasonal period.
+    pub period: usize,
+    /// Number of harmonics `k = 1..n_harmonics`.
+    pub n_harmonics: usize,
+}
+
+impl Default for FourierFeatures {
+    fn default() -> Self {
+        Self {
+            period: 4,
+            n_harmonics: 1,
+        }
+    }
+}
+
+impl FourierFeatures {
+    /// `n_harmonics` pairs for the given period.
+    pub fn new(period: usize, n_harmonics: usize) -> Self {
+        Self {
+            period: period.max(2),
+            n_harmonics: n_harmonics.max(1),
+        }
+    }
+
+    /// Map a length-`n` time index to Fourier columns.
+    pub fn transform(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        let p = self.period.max(2);
+        let h = self.n_harmonics.max(1);
+        let out = Matrix::from_fn(n, 2 * h, |t, j| {
+            let k = j / 2 + 1;
+            let ang = 2.0 * std::f64::consts::PI * (k as f64) * (t as f64) / p as f64;
+            if j % 2 == 0 {
+                ang.sin()
+            } else {
+                ang.cos()
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
+/// AIC grid over SES / Holt / Holt–Winters (sktime `AutoETS`).
+#[derive(Clone, Debug)]
+pub struct AutoEts {
+    /// Seasonal period for the Holt–Winters candidate.
+    pub period: usize,
+}
+
+impl Default for AutoEts {
+    fn default() -> Self {
+        Self { period: 4 }
+    }
+}
+
+impl AutoEts {
+    /// AutoETS with seasonal period `s` (used only if `n ≥ 2s`).
+    pub fn new(period: usize) -> Self {
+        Self {
+            period: period.max(2),
+        }
+    }
+}
+
+/// Fitted AutoETS winner.
+#[derive(Clone, Debug)]
+pub struct FittedAutoEts {
+    /// `"ses"`, `"holt"`, or `"hw"`.
+    pub kind: &'static str,
+    /// In-sample AIC.
+    pub aic: f64,
+    /// SES / Holt state (also used as a fallback for HW).
+    pub esm: FittedEsm,
+    /// Holt–Winters state when that candidate won.
+    pub hw: Option<FittedHoltWinters>,
+}
+
+impl FittedAutoEts {
+    /// `h`-step forecast of the selected model.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        if let Some(hw) = &self.hw {
+            if self.kind == "hw" {
+                return hw.forecast(h, session);
+            }
+        }
+        self.esm.forecast(h, session)
+    }
+}
+
+impl FitSeries for AutoEts {
+    type Fitted = FittedAutoEts;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedAutoEts>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len() as f64;
+        let aic_of = |sse: f64, k: f64| -> f64 {
+            let s = (sse / n.max(1.0)).max(1e-12);
+            n * s.ln() + 2.0 * k
+        };
+        let mut best_kind = "ses";
+        let mut best_aic = f64::INFINITY;
+        let mut best_esm = FittedEsm {
+            kind: SmoothingKind::Simple,
+            alpha: 0.3,
+            beta: 0.0,
+            level: y.as_slice().last().copied().unwrap_or(0.0),
+            trend: 0.0,
+            fitted: y.clone(),
+        };
+        let mut best_hw = None;
+        for (kind, spec, k) in [
+            (SmoothingKind::Simple, ExponentialSmoothing::simple(), 1.0),
+            (SmoothingKind::Holt, ExponentialSmoothing::holt(), 2.0),
+        ] {
+            match spec
+                .clone()
+                .fit_series(y, &session.child(format!("{kind:?}")))
+            {
+                Ok(q) => {
+                    let mut sse = 0.0;
+                    for i in 0..y.len().min(q.value.fitted.len()) {
+                        let e = y[i] - q.value.fitted[i];
+                        sse += e * e;
+                    }
+                    let aic = aic_of(sse, k);
+                    if aic < best_aic {
+                        best_aic = aic;
+                        best_kind = if matches!(kind, SmoothingKind::Simple) {
+                            "ses"
+                        } else {
+                            "holt"
+                        };
+                        best_esm = q.value;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        if y.len() >= 2 * self.period {
+            match HoltWinters::new(self.period).fit_series(y, &session.child("hw")) {
+                Ok(q) => {
+                    let mut sse = 0.0;
+                    for i in 0..y.len().min(q.value.fitted.len()) {
+                        let e = y[i] - q.value.fitted[i];
+                        sse += e * e;
+                    }
+                    let aic = aic_of(sse, 3.0);
+                    if aic < best_aic {
+                        best_aic = aic;
+                        best_kind = "hw";
+                        best_hw = Some(q.value);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        if !best_aic.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("AutoETS found no finite AIC candidate")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedAutoEts {
+            kind: best_kind,
+            aic: best_aic,
+            esm: best_esm,
+            hw: best_hw,
+        })
+    }
+}
+
+/// STL + seasonal-naive residual forecast (sktime `STLForecaster`).
+#[derive(Clone, Debug)]
+pub struct StlForecaster {
+    /// Seasonal period.
+    pub period: usize,
+}
+
+impl Default for StlForecaster {
+    fn default() -> Self {
+        Self { period: 4 }
+    }
+}
+
+impl StlForecaster {
+    /// STL forecaster with period `s`.
+    pub fn new(period: usize) -> Self {
+        Self {
+            period: period.max(2),
+        }
+    }
+}
+
+/// Fitted STL forecaster.
+#[derive(Clone, Debug)]
+pub struct FittedStlForecaster {
+    /// In-sample decomposition.
+    pub decomp: SeasonalDecomposition,
+    /// Last residual (used as a level offset).
+    pub last_resid: f64,
+}
+
+impl FittedStlForecaster {
+    /// `h`-step: last trend + seasonal cycle + last residual.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        let n = self.decomp.observed.len();
+        let period = self.decomp.period.max(2);
+        let last_trend = self.decomp.trend.as_slice().last().copied().unwrap_or(0.0);
+        let y = Vector::from_iter((0..h).map(|s| {
+            let idx = (n + s) % period;
+            let seas = self
+                .decomp
+                .seasonal
+                .as_slice()
+                .get(idx)
+                .copied()
+                .unwrap_or(0.0);
+            last_trend + seas + self.last_resid
+        }));
+        ctx.finish(y)
+    }
+}
+
+impl FitSeries for StlForecaster {
+    type Fitted = FittedStlForecaster;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedStlForecaster>> {
+        let q = Stl::new(self.period).fit_series(y, session)?;
+        let last_resid = q.value.resid.as_slice().last().copied().unwrap_or(0.0);
+        Ok(q.map(|decomp| FittedStlForecaster { decomp, last_resid }))
+    }
+}
+
 /// Two-regime switching regression (statsmodels `MarkovRegression` lite).
 ///
 /// States are an independent mixture of OLS, not a filtered Markov chain —
@@ -3309,5 +3798,45 @@ mod tests {
             .fit(&x, &y, &Session::new("mr", "fit"))
             .expect("mr");
         assert_eq!(mr.value.regime.len(), 40);
+        let ar = AutoReg::new(1)
+            .fit_series(&y, &Session::new("ar", "fit"))
+            .expect("autoreg");
+        assert_eq!(ar.value.ar.len(), 1);
+        let arf = ar
+            .value
+            .forecast(3, &Session::new("ar", "fc"))
+            .expect("arf")
+            .value;
+        assert_eq!(arf.len(), 3);
+        let adl = Ardl::new(1, 0)
+            .fit(&y, &x, &Session::new("ardl", "fit"))
+            .expect("ardl");
+        let xf = Matrix::from_fn(3, 1, |i, _| 40.0 + i as f64);
+        let adf = adl
+            .value
+            .forecast(&xf, &Session::new("ardl", "fc"))
+            .expect("ardlf")
+            .value;
+        assert_eq!(adf.len(), 3);
+        let ets = AutoEts::new(4)
+            .fit_series(&y, &Session::new("ets", "fit"))
+            .expect("ets");
+        assert!(ets.value.aic.is_finite());
+        let ff = FourierFeatures::new(4, 1)
+            .transform(20, &Session::new("ff", "t"))
+            .expect("ff")
+            .value;
+        assert_eq!(ff.shape(), (20, 2));
+        let stlf = StlForecaster::new(4)
+            .fit_series(&y, &Session::new("stlf", "fit"))
+            .expect("stlf");
+        assert_eq!(
+            stlf.value
+                .forecast(3, &Session::new("stlf", "fc"))
+                .expect("stlff")
+                .value
+                .len(),
+            3
+        );
     }
 }
