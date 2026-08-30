@@ -378,6 +378,50 @@ pub fn softdtw(a: &Vector, b: &Vector, gamma: f64, session: &Session) -> Result<
     ctx.finish(softdtw_raw(a.as_slice(), b.as_slice(), gamma))
 }
 
+/// Soft-DTW alignment path as an `n_path × 2` index matrix.
+///
+/// Path length is not identification `p`. The path is a greedy backtrack of
+/// the three predecessor cells of the Cuturi–Blondel DP (hard min of the
+/// same cells that enter the softmin).
+pub fn softdtw_alignment(
+    a: &Vector,
+    b: &Vector,
+    gamma: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !gamma.is_finite() || gamma <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .message(format!("softdtw_alignment gamma={gamma} is not positive"))
+                .build(),
+        );
+    }
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("softdtw_path.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("softdtw_path.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .severity(Severity::Warning)
+                .message("softdtw_alignment on an empty series")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(0, 2));
+    }
+    let path = softdtw_path(a.as_slice(), b.as_slice(), gamma);
+    ctx.finish(Matrix::from_fn(path.len(), 2, |i, j| {
+        if j == 0 {
+            path[i].0 as f64
+        } else {
+            path[i].1 as f64
+        }
+    }))
+}
+
 fn softdtw_raw(a: &[f64], b: &[f64], gamma: f64) -> f64 {
     let n = a.len();
     let m = b.len();
@@ -400,6 +444,48 @@ fn softdtw_raw(a: &[f64], b: &[f64], gamma: f64) -> f64 {
         }
     }
     r[idx(n, m)]
+}
+
+fn softdtw_path(a: &[f64], b: &[f64], gamma: f64) -> Vec<(usize, usize)> {
+    let n = a.len();
+    let m = b.len();
+    if n == 0 || m == 0 {
+        return Vec::new();
+    }
+    let inf = 1e300;
+    let mut r = vec![inf; (n + 2) * (m + 2)];
+    let idx = |i: usize, j: usize| i * (m + 2) + j;
+    r[idx(0, 0)] = 0.0;
+    let g = gamma.max(1e-12);
+    for i in 1..=n {
+        for j in 1..=m {
+            let cost = (a[i - 1] - b[j - 1]).abs();
+            let v = softmin(
+                &[r[idx(i - 1, j)], r[idx(i, j - 1)], r[idx(i - 1, j - 1)]],
+                g,
+            );
+            r[idx(i, j)] = cost + v;
+        }
+    }
+    let mut path = Vec::new();
+    let mut i = n;
+    let mut j = m;
+    while i > 0 && j > 0 {
+        path.push((i - 1, j - 1));
+        let a1 = r[idx(i - 1, j)];
+        let a2 = r[idx(i, j - 1)];
+        let a3 = r[idx(i - 1, j - 1)];
+        if a3 <= a1 && a3 <= a2 {
+            i -= 1;
+            j -= 1;
+        } else if a1 <= a2 {
+            i -= 1;
+        } else {
+            j -= 1;
+        }
+    }
+    path.reverse();
+    path
 }
 
 /// Pairwise soft-DTW between rows of `a` and rows of `b`.
@@ -10118,6 +10204,12 @@ mod tests {
         assert_eq!(path.ncols(), 2);
         assert_eq!(path.nrows(), q0.len());
         assert!((path.get(0, 0) - 0.0).abs() < 1e-12);
+        let spath = softdtw_alignment(&q0, &q0, 0.5, &Session::new("ts", "sdtwp"))
+            .unwrap()
+            .value;
+        assert_eq!(spath.ncols(), 2);
+        assert!(spath.nrows() >= q0.len());
+        assert!((spath.get(0, 0) - 0.0).abs() < 1e-12);
         let hmr = HydraMultiRocket::new()
             .fit(&x, &yb, &Session::new("ts", "hmr"))
             .unwrap();

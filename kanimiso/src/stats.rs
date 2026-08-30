@@ -2812,6 +2812,53 @@ pub fn proportion_ztest(
     })
 }
 
+/// Two-sample proportion z-test (`H0: p₁ = p₂`, statsmodels `proportions_ztest`).
+pub fn proportions_ztest(
+    y1: &Vector,
+    y2: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y1),
+        None,
+        &ctx.policy,
+    );
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y2),
+        None,
+        &ctx.policy,
+    );
+    let n1 = y1.as_slice().iter().filter(|v| v.is_finite()).count().max(1) as f64;
+    let n2 = y2.as_slice().iter().filter(|v| v.is_finite()).count().max(1) as f64;
+    let s1 = y1.as_slice().iter().filter(|v| **v > 0.5).count() as f64;
+    let s2 = y2.as_slice().iter().filter(|v| **v > 0.5).count() as f64;
+    let p1 = s1 / n1;
+    let p2 = s2 / n2;
+    let pooled = (s1 + s2) / (n1 + n2);
+    if pooled <= 0.0 || pooled >= 1.0 {
+        ctx.push(
+            Issue::builder(IssueCode::NearZeroVariance)
+                .severity(Severity::Warning)
+                .message("two-sample proportion z-test pooled p is 0 or 1; SE is floored")
+                .build(),
+        );
+    }
+    let se = (pooled * (1.0 - pooled) * (1.0 / n1 + 1.0 / n2))
+        .sqrt()
+        .max(1e-12);
+    let stat = (p1 - p2) / se;
+    let pvalue = 2.0 * (1.0 - crate::special::norm_cdf(stat.abs()));
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: 1.0,
+        nobs: n1 + n2,
+    })
+}
+
 /// Ramsey RESET: augment OLS with \(\hat y^2,\hat y^3\) and F-test the extra powers.
 pub fn ramsey_reset(
     x: &Matrix,
@@ -3603,6 +3650,66 @@ pub fn gaussian_kde(x: &Vector, grid: &Vector, session: &Session) -> Result<Qual
         s * inv
     }));
     ctx.finish(dens)
+}
+
+/// Univariate Gaussian KDE evaluated at the sample (statsmodels `KDEUnivariate`).
+#[derive(Clone, Debug)]
+pub struct KdeUnivariate {
+    /// Silverman (or floored) bandwidth.
+    pub bandwidth: f64,
+    /// Density at each sample point.
+    pub density: Vector,
+    /// Evaluation support (the observed sample).
+    pub support: Vector,
+}
+
+/// Silverman-bandwidth Gaussian KDE at the sample points.
+pub fn kde_univariate(y: &Vector, session: &Session) -> Result<Qualified<KdeUnivariate>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y),
+        None,
+        &ctx.policy,
+    );
+    let st = slice_stats(y.as_slice());
+    let n = st.count.max(1) as f64;
+    let mut h = 1.06 * st.std() * n.powf(-0.2);
+    if !h.is_finite() || st.std() <= ctx.policy.near_zero_variance {
+        ctx.push(
+            Issue::builder(IssueCode::NearZeroVariance)
+                .severity(Severity::Warning)
+                .message("KDEUnivariate std collapsed; bandwidth set to 1")
+                .compromise(NumericalCompromise::new(
+                    "Silverman h = 1.06 σ n^{-1/5}",
+                    "h = 1",
+                    "the sample is constant or n=1",
+                    "the density is a spike; do not treat it as a smooth estimate",
+                ))
+                .build(),
+        );
+        h = 1.0;
+    }
+    let inv = 1.0 / (n * h * (2.0 * std::f64::consts::PI).sqrt());
+    let density = Vector::from_iter(y.as_slice().iter().map(|&g| {
+        if !g.is_finite() {
+            return f64::NAN;
+        }
+        let mut s = 0.0;
+        for &xi in y.as_slice() {
+            if !xi.is_finite() {
+                continue;
+            }
+            let z = (g - xi) / h;
+            s += (-0.5 * z * z).exp();
+        }
+        s * inv
+    }));
+    ctx.finish(KdeUnivariate {
+        bandwidth: h,
+        density,
+        support: y.clone(),
+    })
 }
 
 /// Cleveland LOWESS: locally weighted linear fits with tricube weights.
@@ -9271,6 +9378,15 @@ mod tests {
         assert!(cub.value.statistic.is_finite());
         let kr = kernel_reg(&xs, &ys, 1.0, &Session::new("kr", "t")).expect("kr");
         assert!((kr.value[10] - 20.0).abs() < 2.0);
+        let kdeu = kde_univariate(&xs, &Session::new("kdeu", "t")).expect("kdeu");
+        assert_eq!(kdeu.value.density.len(), xs.len());
+        assert!(kdeu.value.bandwidth > 0.0);
+        assert!(kdeu
+            .value
+            .density
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v >= 0.0));
         let dur = Vector::from_iter((0..20).map(|i| 1.0 + i as f64));
         let ev = Vector::from_iter((0..20).map(|i| if i % 3 == 0 { 0.0 } else { 1.0 }));
         let na = nelson_aalen(&dur, &ev, &Session::new("na", "t")).expect("na");
@@ -9283,6 +9399,10 @@ mod tests {
         let ybin = Vector::from_iter((0..40).map(|i| if i % 2 == 0 { 1.0 } else { 0.0 }));
         let pz = proportion_ztest(&ybin, 0.5, &Session::new("pz", "t")).expect("pz");
         assert!(pz.value.pvalue.is_finite());
+        let ybin2 = Vector::from_iter((0..40).map(|i| if i % 3 == 0 { 0.0 } else { 1.0 }));
+        let pzs = proportions_ztest(&ybin, &ybin2, &Session::new("pzs", "t")).expect("pzs");
+        assert!(pzs.value.statistic.is_finite());
+        assert!(pzs.value.pvalue.is_finite());
         let inf = ols_influence(&x, &y, &Session::new("inf", "t")).expect("inf");
         assert_eq!(inf.value.hat.len(), 40);
         assert!(inf

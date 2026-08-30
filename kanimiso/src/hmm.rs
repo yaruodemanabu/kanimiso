@@ -1307,6 +1307,529 @@ impl FitUnsupervised for HmmAnnotator {
     }
 }
 
+fn log_sph_gauss(x: &Matrix, t: usize, means: &Matrix, state: usize, var: f64) -> f64 {
+    let d = x.ncols().min(means.ncols());
+    if d == 0 {
+        return f64::NEG_INFINITY;
+    }
+    let v = var.max(COV_FLOOR);
+    let mut q = 0.0_f64;
+    for j in 0..d {
+        let z = x.get(t, j) - means.get(state, j);
+        q += z * z;
+    }
+    -0.5 * (d as f64 * (LN_2PI + v.ln()) + q / v)
+}
+
+fn mstep_start_trans(
+    start: &mut Vector,
+    trans: &mut Matrix,
+    gamma: &[Vec<f64>],
+    xi: &[Vec<Vec<f64>>],
+    left_right: bool,
+) {
+    let k = start.len();
+    let t_len = gamma.len();
+    for j in 0..k {
+        start[j] = gamma.first().and_then(|g| g.get(j)).copied().unwrap_or(0.0);
+    }
+    renormalize_vec(start, TRANS_FLOOR);
+    if t_len > 1 {
+        for i in 0..k {
+            let mut den = 0.0_f64;
+            for t in 0..t_len - 1 {
+                den += gamma[t][i];
+            }
+            for j in 0..k {
+                let mut num = 0.0_f64;
+                for t in 0..t_len - 1 {
+                    num += xi[t][i][j];
+                }
+                trans.set(
+                    i,
+                    j,
+                    if den > 0.0 {
+                        num / den
+                    } else {
+                        trans.get(i, j)
+                    },
+                );
+            }
+        }
+        if left_right {
+            enforce_left_right(start, trans);
+        } else {
+            renormalize_rows(trans, TRANS_FLOOR);
+        }
+    }
+    if left_right && k > 1 {
+        enforce_left_right(start, trans);
+    }
+}
+
+/// Spherical-covariance Gaussian HMM (hmmlearn `covariance_type="spherical"`).
+///
+/// One shared variance per state. Variance count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct GaussianHmmSpherical {
+    /// Hidden states.
+    pub n_states: usize,
+    /// Baum–Welch iteration cap.
+    pub max_iter: usize,
+    /// Seed.
+    pub seed: u64,
+    /// Left-right (Bakis) constraint.
+    pub left_right: bool,
+}
+
+impl Default for GaussianHmmSpherical {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 50,
+            seed: 0,
+            left_right: false,
+        }
+    }
+}
+
+impl GaussianHmmSpherical {
+    /// `n_states` spherical Gaussians.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedGaussianHmmSpherical>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted spherical Gaussian HMM.
+#[derive(Clone, Debug)]
+pub struct FittedGaussianHmmSpherical {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Number of states.
+    pub n_states: usize,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Means (`n_states` × `d`).
+    pub means: Matrix,
+    /// One variance per state.
+    pub vars: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedGaussianHmmSpherical {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let s = self.n_states;
+        let mut out = vec![vec![f64::NEG_INFINITY; s]; t];
+        for ti in 0..t {
+            for j in 0..s {
+                let v = if j < self.vars.len() {
+                    self.vars[j]
+                } else {
+                    COV_FLOOR
+                };
+                out[ti][j] = log_sph_gauss(x, ti, &self.means, j, v);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("decode"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedGaussianHmmSpherical {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for GaussianHmmSpherical {
+    type Fitted = FittedGaussianHmmSpherical;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedGaussianHmmSpherical>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_states.max(1),
+            &ctx.policy,
+        );
+        let (t_len, d) = x.shape();
+        let k = self.n_states.max(1);
+        if t_len == 0 || d == 0 {
+            return ctx.finish(FittedGaussianHmmSpherical {
+                labels: empty_labels(t_len),
+                n_states: k,
+                start: init_start(k),
+                trans: init_trans(k),
+                means: Matrix::zeros(k, d),
+                vars: Vector::from_iter((0..k).map(|_| COV_FLOOR)),
+                loglik: f64::NAN,
+            });
+        }
+        if series_zero_variance(x, ctx.policy.near_zero_variance) {
+            ctx.push(emission_degenerate_issue(
+                "spherical HMM observation series has zero variance",
+            ));
+        }
+        let mut rng = Rng::new(self.seed | 1);
+        let mut means = kmeans_pp_rows(x, k.min(t_len), &mut rng);
+        if means.nrows() < k {
+            let mut padded = Matrix::zeros(k, d);
+            for i in 0..means.nrows() {
+                for j in 0..d {
+                    padded.set(i, j, means.get(i, j));
+                }
+            }
+            means = padded;
+        }
+        let gvar = global_diag_var(x);
+        let glob: f64 = (0..d).map(|j| gvar[j]).sum::<f64>() / d.max(1) as f64;
+        let mut vars = Vector::from_iter((0..k).map(|_| glob.max(COV_FLOOR)));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        if self.left_right {
+            enforce_left_right(&mut start, &mut trans);
+        }
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        let mut last_xi: Vec<Vec<Vec<f64>>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let mut log_emit = vec![vec![0.0; k]; t_len];
+            for t in 0..t_len {
+                for j in 0..k {
+                    log_emit[t][j] = log_sph_gauss(x, t, &means, j, vars[j]);
+                }
+            }
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &log_emit) else {
+                break;
+            };
+            loglik = fb.loglik;
+            ctx.session.step(it as u64, -loglik, None);
+            last_gamma = fb.gamma.clone();
+            last_xi = fb.xi.clone();
+            mstep_start_trans(&mut start, &mut trans, &fb.gamma, &fb.xi, self.left_right);
+            for j in 0..k {
+                let mut nj = 0.0_f64;
+                let mut acc = vec![0.0_f64; d];
+                for t in 0..t_len {
+                    let g = fb.gamma[t][j];
+                    nj += g;
+                    for c in 0..d {
+                        acc[c] += g * x.get(t, c);
+                    }
+                }
+                if nj <= TRANS_FLOOR {
+                    continue;
+                }
+                for c in 0..d {
+                    means.set(j, c, acc[c] / nj);
+                }
+                let mut q = 0.0_f64;
+                for t in 0..t_len {
+                    let g = fb.gamma[t][j];
+                    for c in 0..d {
+                        let z = x.get(t, c) - means.get(j, c);
+                        q += g * z * z;
+                    }
+                }
+                vars[j] = (q / (nj * d.max(1) as f64)).max(COV_FLOOR);
+            }
+        }
+        let occup: Vec<f64> = (0..k)
+            .map(|j| {
+                last_gamma
+                    .iter()
+                    .map(|g| g.get(j).copied().unwrap_or(0.0))
+                    .sum()
+            })
+            .collect();
+        diagnose_chain(&mut ctx, &start, &trans, &occup);
+        if self.left_right {
+            enforce_left_right(&mut start, &mut trans);
+        }
+        let _ = last_xi;
+        let tmp = FittedGaussianHmmSpherical {
+            labels: Vector::zeros(0),
+            n_states: k,
+            start: start.clone(),
+            trans: trans.clone(),
+            means: means.clone(),
+            vars: vars.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &tmp.log_emit_seq(x));
+        ctx.finish(FittedGaussianHmmSpherical {
+            labels,
+            n_states: k,
+            start,
+            trans,
+            means,
+            vars,
+            loglik,
+        })
+    }
+}
+
+/// Tied full-covariance Gaussian HMM (hmmlearn `covariance_type="tied"`).
+///
+/// One shared dense covariance. Free-parameter count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct GaussianHmmTied {
+    /// Hidden states.
+    pub n_states: usize,
+    /// Baum–Welch iteration cap.
+    pub max_iter: usize,
+    /// Seed.
+    pub seed: u64,
+    /// Left-right constraint.
+    pub left_right: bool,
+}
+
+impl Default for GaussianHmmTied {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 50,
+            seed: 0,
+            left_right: false,
+        }
+    }
+}
+
+impl GaussianHmmTied {
+    /// `n_states` Gaussians sharing one covariance.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGaussianHmmTied>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted tied-covariance Gaussian HMM.
+#[derive(Clone, Debug)]
+pub struct FittedGaussianHmmTied {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Number of states.
+    pub n_states: usize,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Means (`n_states` × `d`).
+    pub means: Matrix,
+    /// Shared dense covariance (`d` × `d`).
+    pub cov: Matrix,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedGaussianHmmTied {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let s = self.n_states;
+        let mut out = vec![vec![f64::NEG_INFINITY; s]; t];
+        for ti in 0..t {
+            for j in 0..s {
+                out[ti][j] = log_full_gauss(x, ti, &self.means, j, &self.cov);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("decode"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedGaussianHmmTied {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for GaussianHmmTied {
+    type Fitted = FittedGaussianHmmTied;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedGaussianHmmTied>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_states.max(1),
+            &ctx.policy,
+        );
+        let (t_len, d) = x.shape();
+        let k = self.n_states.max(1);
+        if t_len == 0 || d == 0 {
+            return ctx.finish(FittedGaussianHmmTied {
+                labels: empty_labels(t_len),
+                n_states: k,
+                start: init_start(k),
+                trans: init_trans(k),
+                means: Matrix::zeros(k, d),
+                cov: Matrix::zeros(d, d),
+                loglik: f64::NAN,
+            });
+        }
+        if series_zero_variance(x, ctx.policy.near_zero_variance) {
+            ctx.push(emission_degenerate_issue(
+                "tied HMM observation series has zero variance",
+            ));
+        }
+        let mut rng = Rng::new(self.seed | 1);
+        let mut means = kmeans_pp_rows(x, k.min(t_len), &mut rng);
+        if means.nrows() < k {
+            let mut padded = Matrix::zeros(k, d);
+            for i in 0..means.nrows() {
+                for j in 0..d {
+                    padded.set(i, j, means.get(i, j));
+                }
+            }
+            means = padded;
+        }
+        let mut cov = global_full_cov(x);
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        if self.left_right {
+            enforce_left_right(&mut start, &mut trans);
+        }
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let mut log_emit = vec![vec![0.0; k]; t_len];
+            for t in 0..t_len {
+                for j in 0..k {
+                    log_emit[t][j] = log_full_gauss(x, t, &means, j, &cov);
+                }
+            }
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &log_emit) else {
+                break;
+            };
+            loglik = fb.loglik;
+            ctx.session.step(it as u64, -loglik, None);
+            last_gamma = fb.gamma.clone();
+            mstep_start_trans(&mut start, &mut trans, &fb.gamma, &fb.xi, self.left_right);
+            for j in 0..k {
+                let mut nj = 0.0_f64;
+                let mut acc = vec![0.0_f64; d];
+                for t in 0..t_len {
+                    let g = fb.gamma[t][j];
+                    nj += g;
+                    for c in 0..d {
+                        acc[c] += g * x.get(t, c);
+                    }
+                }
+                if nj > TRANS_FLOOR {
+                    for c in 0..d {
+                        means.set(j, c, acc[c] / nj);
+                    }
+                }
+            }
+            let mut cmat = Matrix::zeros(d, d);
+            let mut ntot = 0.0_f64;
+            for j in 0..k {
+                for t in 0..t_len {
+                    let g = fb.gamma[t][j];
+                    ntot += g;
+                    for a in 0..d {
+                        let da = x.get(t, a) - means.get(j, a);
+                        for b in 0..d {
+                            cmat.set(
+                                a,
+                                b,
+                                cmat.get(a, b) + g * da * (x.get(t, b) - means.get(j, b)),
+                            );
+                        }
+                    }
+                }
+            }
+            if ntot > TRANS_FLOOR {
+                for a in 0..d {
+                    for b in 0..d {
+                        cmat.set(a, b, cmat.get(a, b) / ntot);
+                    }
+                    cmat.set(a, a, cmat.get(a, a).max(COV_FLOOR));
+                }
+                cov = cmat;
+            }
+        }
+        let occup: Vec<f64> = (0..k)
+            .map(|j| {
+                last_gamma
+                    .iter()
+                    .map(|g| g.get(j).copied().unwrap_or(0.0))
+                    .sum()
+            })
+            .collect();
+        diagnose_chain(&mut ctx, &start, &trans, &occup);
+        if self.left_right {
+            enforce_left_right(&mut start, &mut trans);
+        }
+        let tmp = FittedGaussianHmmTied {
+            labels: Vector::zeros(0),
+            n_states: k,
+            start: start.clone(),
+            trans: trans.clone(),
+            means: means.clone(),
+            cov: cov.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &tmp.log_emit_seq(x));
+        ctx.finish(FittedGaussianHmmTied {
+            labels,
+            n_states: k,
+            start,
+            trans,
+            means,
+            cov,
+            loglik,
+        })
+    }
+}
+
 /// Discrete-emission HMM. Observation codes are the rounded entries of `X`
 /// (typically a `T` × 1 matrix of integer symbols).
 ///
@@ -2903,6 +3426,32 @@ mod tests {
             .fit_unsupervised(&x, &Session::new("ann_hmm", "fit"))
             .expect("ann");
         assert_eq!(ann.value.labels.len(), 80);
+        let sph = GaussianHmmSpherical::new(2)
+            .fit(&x, &Session::new("sph_hmm", "fit"))
+            .expect("sph");
+        let mut sm0 = sph.value.means.get(0, 0);
+        let mut sm1 = sph.value.means.get(1, 0);
+        if sm0 > sm1 {
+            std::mem::swap(&mut sm0, &mut sm1);
+        }
+        assert!(
+            (sm0 + 3.0).abs() < 0.75,
+            "spherical expected a mean near -3, got {sm0} and {sm1}"
+        );
+        assert_eq!(sph.value.vars.len(), 2);
+        let tied = GaussianHmmTied::new(2)
+            .fit(&x, &Session::new("tied_hmm", "fit"))
+            .expect("tied");
+        let mut tm0 = tied.value.means.get(0, 0);
+        let mut tm1 = tied.value.means.get(1, 0);
+        if tm0 > tm1 {
+            std::mem::swap(&mut tm0, &mut tm1);
+        }
+        assert!(
+            (tm0 + 3.0).abs() < 0.75,
+            "tied expected a mean near -3, got {tm0} and {tm1}"
+        );
+        assert_eq!(tied.value.cov.shape(), (1, 1));
     }
 
     #[test]

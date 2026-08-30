@@ -16,12 +16,12 @@ use crate::linalg::{chol_solve, least_squares, thin_svd};
 use crate::rng::Rng;
 
 pub use crate::filters::{bk_filter, cf_filter, FittedLocalLinearTrend, LocalLinearTrend};
-use crate::traits::FitSeries;
+use crate::traits::{FitSeries, PartialFit};
 use crate::validate::{inspect_identification, inspect_xy};
-use ojizou_san::Session;
+use ojizou_san::{IncrementalExplain, Session};
 use signlred::{
-    scan_finite, slice_stats, Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified,
-    Report, Result, Severity,
+    scan_finite, slice_stats, IncrementalQuality, Issue, IssueCode, Meaninglessness,
+    NumericalCompromise, Qualified, Report, Result, Severity,
 };
 
 /// Relative forecast steps (sktime `ForecastingHorizon`).
@@ -744,6 +744,154 @@ impl FitSeries for Arima {
     type Fitted = FittedArima;
     fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedArima>> {
         fit_arima(self, y, session)
+    }
+}
+
+/// Heterogeneous Autoregressive realized-variance model (Corsi HAR-RV).
+///
+/// Daily / weekly / monthly window lengths are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Har {
+    /// Daily lookback (typically 1).
+    pub daily: usize,
+    /// Weekly lookback (typically 5).
+    pub weekly: usize,
+    /// Monthly lookback (typically 22).
+    pub monthly: usize,
+}
+
+impl Default for Har {
+    fn default() -> Self {
+        Self {
+            daily: 1,
+            weekly: 5,
+            monthly: 22,
+        }
+    }
+}
+
+impl Har {
+    /// Corsi (1, 5, 22) windows.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted HAR-RV coefficients and the trailing window used to recurse.
+#[derive(Clone, Debug)]
+pub struct FittedHar {
+    /// Intercept.
+    pub intercept: f64,
+    /// Daily lag coefficient.
+    pub beta_d: f64,
+    /// Weekly average coefficient.
+    pub beta_w: f64,
+    /// Monthly average coefficient.
+    pub beta_m: f64,
+    /// Trailing observations (length `monthly`) for multi-step forecast.
+    pub history: Vector,
+    /// Daily window stored from the spec.
+    pub daily: usize,
+    /// Weekly window stored from the spec.
+    pub weekly: usize,
+    /// Monthly window stored from the spec.
+    pub monthly: usize,
+}
+
+impl FittedHar {
+    /// Recurse the HAR equation `h` steps, feeding forecasts back into the windows.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let mut hist: Vec<f64> = self.history.as_slice().to_vec();
+        let mut out = Vector::zeros(h);
+        let w = self.weekly.max(1);
+        let m = self.monthly.max(1);
+        for t in 0..h {
+            let n = hist.len();
+            let daily = hist.last().copied().unwrap_or(0.0);
+            let week = if n == 0 {
+                daily
+            } else {
+                hist[n.saturating_sub(w)..].iter().sum::<f64>() / n.min(w) as f64
+            };
+            let month = if n == 0 {
+                daily
+            } else {
+                hist[n.saturating_sub(m)..].iter().sum::<f64>() / n.min(m) as f64
+            };
+            let yhat = self.intercept + self.beta_d * daily + self.beta_w * week + self.beta_m * month;
+            out[t] = yhat;
+            hist.push(yhat);
+        }
+        ctx.finish(out)
+    }
+}
+
+impl FitSeries for Har {
+    type Fitted = FittedHar;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedHar>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let daily = self.daily.max(1);
+        let weekly = self.weekly.max(daily);
+        let monthly = self.monthly.max(weekly);
+        let n = y.len();
+        let start = monthly;
+        if n <= start {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "HAR needs n>monthly={monthly}; got n={n}. Coefficients collapse to the last level."
+                    ))
+                    .metric("n", n as f64)
+                    .build(),
+            );
+            return ctx.finish(FittedHar {
+                intercept: y.as_slice().last().copied().unwrap_or(0.0),
+                beta_d: 0.0,
+                beta_w: 0.0,
+                beta_m: 0.0,
+                history: y.clone(),
+                daily,
+                weekly,
+                monthly,
+            });
+        }
+        let n_eff = n - start;
+        // Window counts are not identification p; do not call inspect_identification.
+        let design = Matrix::from_fn(n_eff, 3, |i, j| {
+            let t = i + start;
+            match j {
+                0 => {
+                    let d0 = t.saturating_sub(daily);
+                    y.as_slice()[d0..t].iter().sum::<f64>() / (t - d0) as f64
+                }
+                1 => {
+                    let d0 = t.saturating_sub(weekly);
+                    y.as_slice()[d0..t].iter().sum::<f64>() / (t - d0) as f64
+                }
+                _ => {
+                    let d0 = t.saturating_sub(monthly);
+                    y.as_slice()[d0..t].iter().sum::<f64>() / (t - d0) as f64
+                }
+            }
+        });
+        let yy = Vector::from_iter((start..n).map(|t| y[t]));
+        let xaug = design.with_intercept();
+        let beta = statistical_ols(&mut ctx, &xaug, &yy).unwrap_or_else(|| Vector::zeros(4));
+        let keep = monthly.min(n);
+        let history = Vector::from_iter(y.as_slice()[n - keep..].iter().copied());
+        ctx.finish(FittedHar {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            beta_d: if beta.len() > 1 { beta[1] } else { 0.0 },
+            beta_w: if beta.len() > 2 { beta[2] } else { 0.0 },
+            beta_m: if beta.len() > 3 { beta[3] } else { 0.0 },
+            history,
+            daily,
+            weekly,
+            monthly,
+        })
     }
 }
 
@@ -4033,6 +4181,160 @@ impl FitSeries for AutoEnsembleForecaster {
     }
 }
 
+/// Online softmax ensemble of last-value and drift (sktime `OnlineEnsembleForecaster`).
+///
+/// Member count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineEnsembleForecaster {
+    last: f64,
+    first: f64,
+    n: u64,
+    sse_naive: f64,
+    sse_drift: f64,
+    updates: u64,
+}
+
+/// Fitted online ensemble state (same type as the updater).
+pub type FittedOnlineEnsembleForecaster = OnlineEnsembleForecaster;
+
+impl OnlineEnsembleForecaster {
+    /// Empty online ensemble.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn weights(&self) -> (f64, f64) {
+        let nrm = self.n.max(1) as f64;
+        let s0 = -self.sse_naive / nrm;
+        let s1 = -self.sse_drift / nrm;
+        let mx = s0.max(s1);
+        let e0 = if s0.is_finite() { (s0 - mx).exp() } else { 0.0 };
+        let e1 = if s1.is_finite() { (s1 - mx).exp() } else { 0.0 };
+        let z = (e0 + e1).max(1e-18);
+        (e0 / z, e1 / z)
+    }
+
+    /// Weighted combination of last-value and drift.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let (wn, wd) = self.weights();
+        let slope = if self.n > 1 {
+            (self.last - self.first) / (self.n as f64 - 1.0)
+        } else {
+            0.0
+        };
+        ctx.finish(Vector::from_iter((1..=h).map(|k| {
+            wn * self.last + wd * (self.last + k as f64 * slope)
+        })))
+    }
+}
+
+impl FitSeries for OnlineEnsembleForecaster {
+    type Fitted = OnlineEnsembleForecaster;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<OnlineEnsembleForecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        if n < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("OnlineEnsembleForecaster needs n≥2")
+                    .build(),
+            );
+        }
+        self.first = y.as_slice().first().copied().unwrap_or(0.0);
+        self.last = y.as_slice().last().copied().unwrap_or(0.0);
+        self.n = n as u64;
+        self.sse_naive = 0.0;
+        self.sse_drift = 0.0;
+        let slope = if n > 1 {
+            (self.last - self.first) / (n as f64 - 1.0)
+        } else {
+            0.0
+        };
+        for t in 1..n {
+            let e_n = y[t] - y[t - 1];
+            let e_d = y[t] - (y[t - 1] + slope);
+            self.sse_naive += e_n * e_n;
+            self.sse_drift += e_d * e_d;
+        }
+        self.updates += 1;
+        ctx.finish(self.clone())
+    }
+}
+
+impl PartialFit for OnlineEnsembleForecaster {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            let q = IncrementalQuality::new(self.updates, 0, self.n);
+            return ctx.finish(IncrementalExplain::from_quality(
+                q,
+                "nothing",
+                "OnlineEnsembleForecaster needs y",
+                "invalid",
+                "invalid",
+            ));
+        };
+        inspect_univariate(&mut ctx, y);
+        let _ = x;
+        let before_n = self.n;
+        let before_last = self.last;
+        for i in 0..y.len() {
+            if !y[i].is_finite() {
+                continue;
+            }
+            if self.n == 0 {
+                self.first = y[i];
+                self.last = y[i];
+                self.n = 1;
+                continue;
+            }
+            let slope = (self.last - self.first) / self.n.max(1) as f64;
+            let e_n = y[i] - self.last;
+            let e_d = y[i] - (self.last + slope);
+            self.sse_naive += e_n * e_n;
+            self.sse_drift += e_d * e_d;
+            self.last = y[i];
+            self.n += 1;
+        }
+        self.updates += 1;
+        let (wn, wd) = self.weights();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), y.len(), self.n);
+        q.effective_sample_size = self.n as f64;
+        q.parameter_delta_norm = Some((self.last - before_last).abs());
+        q.information_gain = Some((self.n - before_n) as f64);
+        q.still_identified = self.n >= 2;
+        q.warmup = self.n < 3;
+        q.explanation = format!("OnlineEnsemble w_naive={wn:.4} w_drift={wd:.4}");
+        ctx.session.record_incremental(IncrementalExplain::from_quality(
+            q.clone(),
+            "online ensemble weights",
+            "softmax of running 1-step SSE of last-value and drift",
+            format!("n={before_n}"),
+            format!("n={}", self.n),
+        ));
+        ctx.finish(IncrementalExplain::from_quality(
+            q,
+            "online ensemble weights",
+            "softmax of running 1-step SSE of last-value and drift",
+            format!("n={before_n}"),
+            format!("n={}", self.n),
+        ))
+    }
+}
+
 /// Seasonal-naive forecaster (repeat the last period).
 #[derive(Clone, Debug)]
 pub struct SeasonalNaive {
@@ -4603,6 +4905,173 @@ impl FitSeries for Egarch {
         ctx.finish(FittedGarch11 {
             omega,
             alpha,
+            beta,
+            sigma2: Vector::from_iter(sigma2),
+            resid: e,
+        })
+    }
+}
+
+/// GJR-GARCH(1,1) (Glosten–Jagannathan–Runkle / arch `GJR`).
+///
+/// \(h_t=\omega+\alpha\varepsilon_{t-1}^2+\gamma\varepsilon_{t-1}^2 1_{\varepsilon<0}+\beta h_{t-1}\).
+#[derive(Clone, Debug)]
+pub struct GjrGarch {
+    /// Coordinate-search iterations.
+    pub max_iter: usize,
+}
+
+impl Default for GjrGarch {
+    fn default() -> Self {
+        Self { max_iter: 30 }
+    }
+}
+
+impl GjrGarch {
+    /// Default GJR-GARCH settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted GJR-GARCH(1,1) with an explicit leverage coefficient.
+#[derive(Clone, Debug)]
+pub struct FittedGjrGarch {
+    /// ω.
+    pub omega: f64,
+    /// Symmetric ARCH coefficient.
+    pub alpha: f64,
+    /// Leverage coefficient on negative shocks.
+    pub gamma: f64,
+    /// GARCH coefficient.
+    pub beta: f64,
+    /// In-sample conditional variances.
+    pub sigma2: Vector,
+    /// Demeaned residuals.
+    pub resid: Vector,
+}
+
+impl FittedGjrGarch {
+    /// Iterate the GJR recursion `h` steps using \(\mathbb{E}[1_{\varepsilon<0}]=1/2\).
+    pub fn forecast_variance(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let last = self.sigma2.as_slice().last().copied().unwrap_or(self.omega);
+        let last_e = self.resid.as_slice().last().copied().unwrap_or(0.0);
+        let last_e2 = last_e * last_e;
+        let lev = if last_e < 0.0 { 1.0 } else { 0.0 };
+        let mut s = self.omega + self.alpha * last_e2 + self.gamma * last_e2 * lev + self.beta * last;
+        let persist = self.alpha + 0.5 * self.gamma + self.beta;
+        let mut out = Vector::zeros(h);
+        for i in 0..h {
+            out[i] = s.max(1e-12);
+            s = self.omega + persist * s;
+        }
+        ctx.finish(out)
+    }
+}
+
+fn gjr_sigma2(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64) -> Vec<f64> {
+    let var0 = e.iter().map(|v| v * v).sum::<f64>() / e.len().max(1) as f64;
+    let mut s2 = vec![var0.max(omega).max(1e-12); e.len()];
+    for t in 1..e.len() {
+        let e2 = e[t - 1] * e[t - 1];
+        let lev = if e[t - 1] < 0.0 { 1.0 } else { 0.0 };
+        s2[t] = omega + alpha * e2 + gamma * e2 * lev + beta * s2[t - 1];
+        if !s2[t].is_finite() || s2[t] <= 0.0 {
+            s2[t] = omega.max(1e-12);
+        }
+    }
+    s2
+}
+
+fn gjr_nll(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64) -> f64 {
+    if omega <= 0.0 || alpha < 0.0 || beta < 0.0 || alpha + gamma.min(0.0) < 0.0 {
+        return f64::INFINITY;
+    }
+    let s2 = gjr_sigma2(e, omega, alpha, gamma, beta);
+    let mut nll = 0.0;
+    for t in 0..e.len() {
+        let v = s2[t].max(1e-12);
+        nll += 0.5 * (v.ln() + e[t] * e[t] / v);
+    }
+    nll
+}
+
+impl FitSeries for GjrGarch {
+    type Fitted = FittedGjrGarch;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedGjrGarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("GJR-GARCH QMLE needs a longer series")
+                    .metric("n", y.len() as f64)
+                    .build(),
+            );
+        }
+        let mean = y.mean();
+        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
+        let var = e.as_slice().iter().map(|v| v * v).sum::<f64>() / y.len().max(1) as f64;
+        let mut omega = 0.05 * var.max(1e-8);
+        let mut alpha = 0.05;
+        let mut gamma = 0.05;
+        let mut beta = 0.80;
+        let mut best = gjr_nll(e.as_slice(), omega, alpha, gamma, beta);
+        let mut step = 0.05;
+        for it in 0..self.max_iter {
+            let mut improved = false;
+            for (i, cur) in [omega, alpha, gamma, beta].into_iter().enumerate() {
+                for dir in [-step, step] {
+                    let mut cand = [omega, alpha, gamma, beta];
+                    cand[i] = if i == 2 { cur + dir } else { (cur + dir).max(1e-8) };
+                    if cand[1] + 0.5 * cand[2] + cand[3] >= 0.999 {
+                        continue;
+                    }
+                    let nll = gjr_nll(e.as_slice(), cand[0], cand[1], cand[2], cand[3]);
+                    if nll < best {
+                        best = nll;
+                        omega = cand[0];
+                        alpha = cand[1];
+                        gamma = cand[2];
+                        beta = cand[3];
+                        improved = true;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, best, None);
+            if !improved {
+                step *= 0.5;
+                if step < 1e-5 {
+                    ctx.session.converged("GJR-GARCH coordinate search", it as u64);
+                    break;
+                }
+            }
+        }
+        let persist = alpha + 0.5 * gamma + beta;
+        if persist >= 0.999 {
+            ctx.push(
+                Issue::builder(IssueCode::NonStationary)
+                    .message(format!(
+                        "GJR α+γ/2+β={persist:.4} ≥ 1; persistence is a unit root"
+                    ))
+                    .metric("persistence", persist)
+                    .build(),
+            );
+        }
+        let sigma2 = gjr_sigma2(e.as_slice(), omega, alpha, gamma, beta);
+        if !best.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::LossIsNan)
+                    .message("GJR-GARCH QMLE likelihood is non-finite")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedGjrGarch {
+            omega,
+            alpha,
+            gamma,
             beta,
             sigma2: Vector::from_iter(sigma2),
             resid: e,
@@ -8904,6 +9373,16 @@ mod tests {
         assert_eq!(aeff.len(), 3);
         assert!(aeff.as_slice().iter().all(|v| v.is_finite()));
         assert!(aef.value.w_naive + aef.value.w_drift + aef.value.w_ses > 0.99);
+        let oef = OnlineEnsembleForecaster::new()
+            .fit_series(&y, &Session::new("oef", "fit"))
+            .expect("oef");
+        let oeff = oef
+            .value
+            .forecast(3, &Session::new("oef", "fc"))
+            .expect("oeff")
+            .value;
+        assert_eq!(oeff.len(), 3);
+        assert!(oeff.as_slice().iter().all(|v| v.is_finite()));
     }
 
     #[test]
@@ -9184,6 +9663,28 @@ mod tests {
             .as_slice()
             .iter()
             .all(|v| v.is_finite() && *v > 0.0));
+        let gjr = GjrGarch::new()
+            .fit_series(&y, &Session::new("gjr", "fit"))
+            .expect("gjr");
+        assert!(gjr
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        assert!(gjr.value.gamma.is_finite());
+        let har = Har::new()
+            .fit_series(&y, &Session::new("har", "fit"))
+            .expect("har");
+        assert!(har.value.intercept.is_finite());
+        assert!(har.value.beta_d.is_finite());
+        let harf = har
+            .value
+            .forecast(3, &Session::new("har", "fc"))
+            .expect("harf")
+            .value;
+        assert_eq!(harf.len(), 3);
+        assert!(harf.as_slice().iter().all(|v| v.is_finite()));
         let uc = UnobservedComponents::with_seasonal(4)
             .fit_series(&y, &Session::new("uc", "fit"))
             .expect("uc");

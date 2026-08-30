@@ -13797,6 +13797,329 @@ impl Predict for HardSamplingClassifier {
     }
 }
 
+/// Hard-example buffer around SGD regression (river `imblearn.HardSamplingRegressor`).
+#[derive(Clone, Debug)]
+pub struct HardSamplingRegressor {
+    inner: SgdRegressor,
+    buffer_x: Vec<Vec<f64>>,
+    buffer_y: Vec<f64>,
+    cap: usize,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for HardSamplingRegressor {
+    fn default() -> Self {
+        Self {
+            inner: SgdRegressor::new(),
+            buffer_x: Vec::new(),
+            buffer_y: Vec::new(),
+            cap: 32,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl HardSamplingRegressor {
+    /// Buffer capacity `cap` (not identification `p`).
+    pub fn new(cap: usize) -> Self {
+        Self {
+            cap: cap.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for HardSamplingRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        let before = self.buffer_x.len();
+        if self.n_seen == 0 {
+            let _ = self
+                .inner
+                .partial_fit(x, Some(y), &session.child("hsr_init"));
+        }
+        let pred = if self.n_seen == 0 {
+            Vector::zeros(x.nrows())
+        } else {
+            match self.inner.predict(x, &session.child("hsr_pred")) {
+                Ok(q) => q.value,
+                Err(_) => Vector::zeros(x.nrows()),
+            }
+        };
+        let mut abs_e = Vec::with_capacity(x.nrows().min(y.len()));
+        for i in 0..x.nrows().min(y.len()) {
+            let e = if i < pred.len() {
+                (pred[i] - y[i]).abs()
+            } else {
+                0.0
+            };
+            abs_e.push(e);
+        }
+        let mae = if abs_e.is_empty() {
+            0.0
+        } else {
+            abs_e.iter().sum::<f64>() / abs_e.len() as f64
+        };
+        for i in 0..x.nrows().min(y.len()) {
+            let hard = self.n_seen == 0 || abs_e[i] >= mae;
+            if hard && y[i].is_finite() {
+                self.buffer_x
+                    .push((0..x.ncols()).map(|j| x.get(i, j)).collect());
+                self.buffer_y.push(y[i]);
+            }
+        }
+        while self.buffer_x.len() > self.cap {
+            self.buffer_x.remove(0);
+            self.buffer_y.remove(0);
+        }
+        if !self.buffer_x.is_empty() {
+            let p = self.buffer_x[0].len();
+            let xb = Matrix::from_fn(self.buffer_x.len(), p, |i, j| self.buffer_x[i][j]);
+            let yb = Vector::from_slice(&self.buffer_y);
+            let _ = self
+                .inner
+                .partial_fit(&xb, Some(&yb), &session.child("hsr_hard"));
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let after = self.buffer_x.len();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = after as f64;
+        q.parameter_delta_norm = Some((after as f64 - before as f64).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!("HardSamplingRegressor buffer={after}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "hard-residual buffer",
+                "high-residual rows are replayed through SGD regression",
+                format!("buf={before}"),
+                format!("buf={after}"),
+            ),
+        )
+    }
+}
+
+impl Predict for HardSamplingRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.n_seen == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        match self.inner.predict(x, session) {
+            Ok(q) => ctx.finish(q.value),
+            Err(_) => ctx.finish(Vector::zeros(x.nrows())),
+        }
+    }
+}
+
+/// Mondrian tree classifier (river `tree.mondrian.MondrianTreeClassifier`).
+///
+/// After a short warmup the tree draws one feature/threshold from the observed
+/// range. Tree depth and leaf counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MondrianTree {
+    mins: Vector,
+    maxs: Vector,
+    split_j: Option<usize>,
+    threshold: f64,
+    left: [f64; 2],
+    right: [f64; 2],
+    prior: [f64; 2],
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for MondrianTree {
+    fn default() -> Self {
+        Self {
+            mins: Vector::zeros(0),
+            maxs: Vector::zeros(0),
+            split_j: None,
+            threshold: 0.0,
+            left: [0.0, 0.0],
+            right: [0.0, 0.0],
+            prior: [0.0, 0.0],
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl MondrianTree {
+    /// Empty Mondrian tree.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn cls(y: f64) -> usize {
+        if y >= 0.5 {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn majority(counts: [f64; 2]) -> f64 {
+        if counts[1] > counts[0] {
+            1.0
+        } else {
+            0.0
+        }
+    }
+}
+
+impl PartialFit for MondrianTree {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        if self.n_seen > 0 && !self.mins.is_empty() && self.mins.len() != x.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .message(format!(
+                        "MondrianTree saw {} columns; model has {}",
+                        x.ncols(),
+                        self.mins.len()
+                    ))
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_split = self.split_j;
+        if self.mins.is_empty() && x.ncols() > 0 && x.nrows() > 0 {
+            self.mins = Vector::from_iter((0..x.ncols()).map(|j| x.get(0, j)));
+            self.maxs = self.mins.clone();
+        }
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            for j in 0..x.ncols().min(self.mins.len()) {
+                let v = x.get(i, j);
+                if v < self.mins[j] {
+                    self.mins[j] = v;
+                }
+                if v > self.maxs[j] {
+                    self.maxs[j] = v;
+                }
+            }
+            let c = Self::cls(y[i]);
+            self.prior[c] += 1.0;
+            if let Some(j) = self.split_j {
+                if x.get(i, j) <= self.threshold {
+                    self.left[c] += 1.0;
+                } else {
+                    self.right[c] += 1.0;
+                }
+            }
+            self.n_seen += 1;
+        }
+        if self.split_j.is_none() && self.n_seen >= 8 && !self.mins.is_empty() {
+            let mut rng = Rng::new(0x4d07_d1a4u64 ^ self.n_seen);
+            let mut cand = Vec::new();
+            for j in 0..self.mins.len() {
+                if self.maxs[j] - self.mins[j] > 1e-12 {
+                    cand.push(j);
+                }
+            }
+            if !cand.is_empty() {
+                let j = cand[rng.below(cand.len())];
+                let span = self.maxs[j] - self.mins[j];
+                self.threshold = self.mins[j] + rng.uniform() * span;
+                self.split_j = Some(j);
+            }
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if before_split != self.split_j {
+            1.0
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 8;
+        q.explanation = match self.split_j {
+            Some(j) => format!("MondrianTree split feat={j} thr={:.4}", self.threshold),
+            None => format!("MondrianTree leaf n={}", self.n_seen),
+        };
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "mondrian split / leaf counts",
+                "range-tracking leaf; one random axis-aligned cut after warmup",
+                format!("split={before_split:?}"),
+                format!("split={:?}", self.split_j),
+            ),
+        )
+    }
+}
+
+impl Predict for MondrianTree {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.n_seen == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            match self.split_j {
+                Some(j) if j < x.ncols() => {
+                    if x.get(i, j) <= self.threshold {
+                        Self::majority(self.left)
+                    } else {
+                        Self::majority(self.right)
+                    }
+                }
+                _ => Self::majority(self.prior),
+            }
+        }));
+        ctx.finish(out)
+    }
+}
+
 /// Concatenate an online StandardScaler and MinMaxScaler (river `compose.TransformerUnion`).
 #[derive(Clone, Debug, Default)]
 pub struct TransformerUnion {
@@ -18510,6 +18833,12 @@ mod tests {
         OnlineSvm::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("osvm");
+        MondrianTree::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("mondrian");
+        HardSamplingRegressor::new(8)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("hsr");
 
         let n_expl = session
             .ledger()

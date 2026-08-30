@@ -3851,6 +3851,44 @@ const INVENTORY: &[Algorithm] = &[
         "sktime.forecasting.compose.ForecastByLevel",
         "forecast",
     ),
+    a(
+        "hmm.GaussianHmmSpherical",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.GaussianHmmTied", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("tsa.Har", "arch.univariate.HAR", "forecast"),
+    a("tsa.GjrGarch", "arch.univariate.GARCH", "forecast"),
+    a(
+        "tsa.OnlineEnsembleForecaster",
+        "sktime.forecasting.online_learning.OnlineEnsembleForecaster",
+        "forecast",
+    ),
+    a(
+        "stats.kde_univariate",
+        "statsmodels.nonparametric.kde.KDEUnivariate",
+        "stats",
+    ),
+    a(
+        "stats.proportions_ztest",
+        "statsmodels.stats.proportion.proportions_ztest",
+        "stats",
+    ),
+    a(
+        "tslearn.softdtw_alignment",
+        "tslearn.metrics.soft_dtw",
+        "timeseries",
+    ),
+    a(
+        "online.MondrianTree",
+        "river.tree.mondrian.MondrianTreeClassifier",
+        "online",
+    ),
+    a(
+        "online.HardSamplingRegressor",
+        "river.imblearn.HardSamplingRegressor",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4066,6 +4104,16 @@ mod tests {
             "tslearn.dtw_alignment",
             "hmm.HmmAnnotator",
             "tsa.ForecastByLevel",
+            "hmm.GaussianHmmSpherical",
+            "hmm.GaussianHmmTied",
+            "tsa.Har",
+            "tsa.GjrGarch",
+            "tsa.OnlineEnsembleForecaster",
+            "stats.kde_univariate",
+            "stats.proportions_ztest",
+            "tslearn.softdtw_alignment",
+            "online.MondrianTree",
+            "online.HardSamplingRegressor",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
