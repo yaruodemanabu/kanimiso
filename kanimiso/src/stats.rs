@@ -24337,6 +24337,426 @@ impl FittedSurvivalStacking {
     }
 }
 
+fn ista_logit(x: &Matrix, treat: &Vector, max_iter: usize) -> (Vector, f64) {
+    let n = x.nrows().min(treat.len());
+    let p = x.ncols();
+    let mut beta = Vector::zeros(p);
+    let mut b = 0.0_f64;
+    let lr = 0.2 / (1.0 + p as f64);
+    for _ in 0..max_iter.max(1) {
+        let mut gb = Vector::zeros(p);
+        let mut g0 = 0.0_f64;
+        for i in 0..n {
+            if !treat[i].is_finite() {
+                continue;
+            }
+            let ti = if treat[i] >= 0.5 { 1.0 } else { 0.0 };
+            let mut xb = b;
+            for j in 0..p {
+                xb += x.get(i, j) * beta[j];
+            }
+            xb = xb.clamp(-20.0, 20.0);
+            let p_i = 1.0 / (1.0 + (-xb).exp());
+            let r = p_i - ti;
+            g0 += r;
+            for j in 0..p {
+                gb[j] += r * x.get(i, j);
+            }
+        }
+        b = (b - lr * g0 / n.max(1) as f64).clamp(-20.0, 20.0);
+        for j in 0..p {
+            beta[j] = (beta[j] - lr * gb[j] / n.max(1) as f64).clamp(-20.0, 20.0);
+        }
+    }
+    (beta, b)
+}
+
+fn propensity_row(x: &Matrix, i: usize, beta: &Vector, b: f64) -> f64 {
+    let mut xb = b;
+    for j in 0..x.ncols().min(beta.len()) {
+        xb += x.get(i, j) * beta[j];
+    }
+    xb = xb.clamp(-20.0, 20.0);
+    (1.0 / (1.0 + (-xb).exp())).clamp(1e-3, 1.0 - 1e-3)
+}
+
+/// Inverse-propensity ATE (statsmodels `treatment` / IPW).
+///
+/// Propensity is ISTA logistic. Treatment count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct IpwAte;
+
+/// Hajek IPW average treatment effect.
+#[derive(Clone, Debug)]
+pub struct FittedIpwAte {
+    /// \(\hat\tau\).
+    pub ate: f64,
+    /// Propensity slopes.
+    pub coef: Vector,
+    /// Propensity intercept.
+    pub intercept: f64,
+}
+
+impl IpwAte {
+    /// Default IPW ATE.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit Hajek IPW: \(\hat\tau=\bar y_1^w-\bar y_0^w\).
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedIpwAte>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let n1 = (0..n).filter(|&i| treat[i] >= 0.5).count();
+        let n0 = n.saturating_sub(n1);
+        if n1 == 0 || n0 == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("IpwAte needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "IPW ATE",
+                        "a single treatment arm leaves the other mean unidentified",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+        }
+        let (beta, b0) = ista_logit(x, treat, 40);
+        let mut s1 = 0.0;
+        let mut w1 = 0.0;
+        let mut s0 = 0.0;
+        let mut w0 = 0.0;
+        for i in 0..n {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let e = propensity_row(x, i, &beta, b0);
+            if treat[i] >= 0.5 {
+                let w = 1.0 / e;
+                s1 += w * y[i];
+                w1 += w;
+            } else {
+                let w = 1.0 / (1.0 - e);
+                s0 += w * y[i];
+                w0 += w;
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("IpwAte is Hajek IPW with ISTA logistic, not a published treatment estimator")
+                .compromise(NumericalCompromise::new(
+                    "inverse-propensity weighted ATE",
+                    "Hajek weighted means with clamped logistic scores",
+                    "overlap trimming, clustered SE, and doubly robust correction are omitted",
+                    "read τ as a weighted mean gap, not a published causal effect",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedIpwAte {
+            ate: s1 / w1.max(1e-12) - s0 / w0.max(1e-12),
+            coef: beta,
+            intercept: b0,
+        })
+    }
+}
+
+/// 1-NN propensity-score matching ATT.
+#[derive(Clone, Debug, Default)]
+pub struct PsmAte;
+
+/// Matched ATT.
+#[derive(Clone, Debug)]
+pub struct FittedPsmAte {
+    /// \(\widehat{\mathrm{ATT}}\).
+    pub att: f64,
+    /// Matches used.
+    pub n_matched: usize,
+}
+
+impl PsmAte {
+    /// Default 1-NN PSM.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Match each treated row to the nearest control on \(\hat e(x)\).
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPsmAte>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let treated: Vec<usize> = (0..n).filter(|&i| treat[i] >= 0.5).collect();
+        let control: Vec<usize> = (0..n).filter(|&i| treat[i] < 0.5).collect();
+        if treated.is_empty() || control.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("PsmAte needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "PSM ATT",
+                        "matching is undefined without both arms",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedPsmAte {
+                att: f64::NAN,
+                n_matched: 0,
+            });
+        }
+        let (beta, b0) = ista_logit(x, treat, 40);
+        let e: Vec<f64> = (0..n).map(|i| propensity_row(x, i, &beta, b0)).collect();
+        let mut s = 0.0;
+        let mut m = 0usize;
+        for &i in &treated {
+            let mut best = f64::INFINITY;
+            let mut bj = control[0];
+            for &j in &control {
+                let d = (e[i] - e[j]).abs();
+                if d < best {
+                    best = d;
+                    bj = j;
+                }
+            }
+            if y[i].is_finite() && y[bj].is_finite() {
+                s += y[i] - y[bj];
+                m += 1;
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("PsmAte is 1-NN on ISTA propensity, not a published matching estimator")
+                .compromise(NumericalCompromise::new(
+                    "propensity-score matching ATT",
+                    "nearest control on clamped logistic scores",
+                    "calipers, replacement policy, and Abadie–Imbens SE are omitted",
+                    "read ATT as a matched gap, not a published matching estimand",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedPsmAte {
+            att: s / m.max(1) as f64,
+            n_matched: m,
+        })
+    }
+}
+
+/// Augmented IPW / doubly robust ATE.
+#[derive(Clone, Debug, Default)]
+pub struct AipwAte;
+
+/// Doubly robust ATE.
+#[derive(Clone, Debug)]
+pub struct FittedAipwAte {
+    /// \(\hat\tau_{\mathrm{AIPW}}\).
+    pub ate: f64,
+}
+
+impl AipwAte {
+    /// Default AIPW.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// AIPW with ISTA propensity and scratch OLS outcome regressions.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedAipwAte>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let treated: Vec<usize> = (0..n).filter(|&i| treat[i] >= 0.5).collect();
+        let control: Vec<usize> = (0..n).filter(|&i| treat[i] < 0.5).collect();
+        if treated.is_empty() || control.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("AipwAte needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "AIPW ATE",
+                        "both arms are required for the two outcome regressions",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+        }
+        let (beta, b0) = ista_logit(x, treat, 40);
+        let p = x.ncols();
+        let fit_arm = |idx: &[usize]| -> (Vector, f64) {
+            if idx.len() < 2 {
+                return (Vector::zeros(p), 0.0);
+            }
+            let xa = Matrix::from_fn(idx.len(), p, |r, j| x.get(idx[r], j)).with_intercept();
+            let ya = Vector::from_iter(idx.iter().map(|&i| y[i]));
+            let mut scratch = Report::new("aipw", "ols");
+            match least_squares(&mut scratch, &xa, &ya, &ctx.policy) {
+                Some(sol) if sol.len() == p + 1 => (
+                    Vector::from_iter((1..sol.len()).map(|j| sol[j])),
+                    sol.as_slice().first().copied().unwrap_or(0.0),
+                ),
+                _ => (Vector::zeros(p), 0.0),
+            }
+        };
+        let (b1, a1) = fit_arm(&treated);
+        let (b0y, a0) = fit_arm(&control);
+        let mu = |i: usize, a: f64, b: &Vector| {
+            let mut s = a;
+            for j in 0..p.min(b.len()) {
+                s += x.get(i, j) * b[j];
+            }
+            s
+        };
+        let mut s = 0.0_f64;
+        let mut m = 0.0_f64;
+        for i in 0..n {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let e = propensity_row(x, i, &beta, b0);
+            let m1 = mu(i, a1, &b1);
+            let m0 = mu(i, a0, &b0y);
+            let t = if treat[i] >= 0.5 { 1.0 } else { 0.0 };
+            s += m1 - m0 + t * (y[i] - m1) / e - (1.0 - t) * (y[i] - m0) / (1.0 - e);
+            m += 1.0;
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("AipwAte is ISTA propensity plus scratch OLS, not a published DR estimator")
+                .compromise(NumericalCompromise::new(
+                    "augmented inverse-propensity weighting",
+                    "AIPW influence with clamped logistic scores and OLS outcome means",
+                    "cross-fitting and influence-function SE are omitted",
+                    "read τ as a doubly robust sketch, not a published ATE",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedAipwAte {
+            ate: s / f64::max(m, 1.0),
+        })
+    }
+}
+
+/// Local-linear sharp regression discontinuity.
+///
+/// Bandwidth / side counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RegressionDiscontinuity {
+    /// Cutoff on the running variable (column 0).
+    pub cutoff: f64,
+}
+
+impl Default for RegressionDiscontinuity {
+    fn default() -> Self {
+        Self { cutoff: 0.0 }
+    }
+}
+
+/// RD jump at the cutoff.
+#[derive(Clone, Debug)]
+pub struct FittedRegressionDiscontinuity {
+    /// \(\hat\tau = a_+ - a_-\).
+    pub tau: f64,
+    /// Left intercept.
+    pub left: f64,
+    /// Right intercept.
+    pub right: f64,
+}
+
+impl RegressionDiscontinuity {
+    /// RD at `cutoff`.
+    pub fn new(cutoff: f64) -> Self {
+        Self { cutoff }
+    }
+
+    /// Local linear \(y\sim 1+(r-c)\) on each side of column 0.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRegressionDiscontinuity>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), 1, &ctx.policy);
+        let n = x.nrows().min(y.len());
+        let c = self.cutoff;
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for i in 0..n {
+            if !x.get(i, 0).is_finite() || !y[i].is_finite() {
+                continue;
+            }
+            if x.get(i, 0) < c {
+                left.push(i);
+            } else {
+                right.push(i);
+            }
+        }
+        if left.len() < 2 || right.len() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("RegressionDiscontinuity needs ≥2 rows on each side of the cutoff")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "sharp RD jump",
+                        "a one-sided support cannot identify both intercepts",
+                        "widen the window or move the cutoff",
+                    ))
+                    .build(),
+            );
+        }
+        let side = |idx: &[usize]| -> f64 {
+            if idx.len() < 2 {
+                return f64::NAN;
+            }
+            let z = Matrix::from_fn(idx.len(), 1, |r, _| x.get(idx[r], 0) - c).with_intercept();
+            let ys = Vector::from_iter(idx.iter().map(|&i| y[i]));
+            let mut scratch = Report::new("rd", "ll");
+            least_squares(&mut scratch, &z, &ys, &ctx.policy)
+                .and_then(|sol| sol.as_slice().first().copied())
+                .unwrap_or(f64::NAN)
+        };
+        let a0 = side(&left);
+        let a1 = side(&right);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("RegressionDiscontinuity is local linear on each side, not a published RD")
+                .compromise(NumericalCompromise::new(
+                    "sharp regression discontinuity",
+                    "OLS of y on 1+(r−c) left and right of the cutoff",
+                    "IK/CCT bandwidth, bias correction, and robust SE are omitted",
+                    "read τ as an intercept gap, not a published RD estimate",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedRegressionDiscontinuity {
+            tau: a1 - a0,
+            left: a0,
+            right: a1,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -25412,5 +25832,22 @@ mod tests {
             .predict(&xcox, &Session::new("sst", "p"))
             .expect("sstp");
         assert_eq!(psst.value.len(), 20);
+        let xate = Matrix::from_fn(20, 1, |i, _| i as f64);
+        let ipw = IpwAte::new()
+            .fit(&xate, &dur, &grp, &Session::new("ipw", "t"))
+            .expect("ipw");
+        assert!(ipw.value.ate.is_finite());
+        let psm = PsmAte::new()
+            .fit(&xate, &dur, &grp, &Session::new("psm", "t"))
+            .expect("psm");
+        assert!(psm.value.att.is_finite());
+        let aipw = AipwAte::new()
+            .fit(&xate, &dur, &grp, &Session::new("aipw", "t"))
+            .expect("aipw");
+        assert!(aipw.value.ate.is_finite());
+        let rdest = RegressionDiscontinuity::new(9.5)
+            .fit(&xate, &dur, &Session::new("rd", "t"))
+            .expect("rd");
+        assert!(rdest.value.tau.is_finite() || rdest.value.tau.is_nan());
     }
 }

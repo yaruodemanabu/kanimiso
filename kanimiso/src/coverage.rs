@@ -6134,6 +6134,20 @@ const INVENTORY: &[Algorithm] = &[
         "online",
     ),
     a("online.AMFClassifier", "river.forest.AMFClassifier", "online"),
+    a("stats.IpwAte", "statsmodels.treatment.treatment_effects", "estimator"),
+    a("stats.PsmAte", "statsmodels.treatment.treatment_effects", "estimator"),
+    a("stats.AipwAte", "statsmodels.treatment.treatment_effects", "estimator"),
+    a(
+        "stats.RegressionDiscontinuity",
+        "statsmodels.regression.linear_model.OLS",
+        "estimator",
+    ),
+    a("panel.DiffInDiff", "linearmodels.panel.model.PanelOLS", "estimator"),
+    a(
+        "panel.SyntheticControl",
+        "statsmodels.regression.linear_model.OLS",
+        "estimator",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6625,6 +6639,9 @@ mod tests {
             "tslearn.Hidalgo",
             "stats.SurvivalStacking",
             "online.PaClassifier",
+            "stats.IpwAte",
+            "panel.DiffInDiff",
+            "panel.SyntheticControl",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

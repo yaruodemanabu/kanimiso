@@ -2165,6 +2165,7 @@ fn skip_panel_inner(issue: &signlred::Issue) -> bool {
             | IssueCode::RankZero
             | IssueCode::CholeskyFailed
             | IssueCode::PerfectCollinearity
+            | IssueCode::MeaninglessFit
     )
 }
 
@@ -2829,6 +2830,231 @@ impl EntityClusteredFamaMacBeth {
     }
 }
 
+/// Two-by-two difference-in-differences (statsmodels / linearmodels TWFE lite).
+///
+/// Group / period counts are not identification `p`. The design is
+/// \(y\sim 1+D+T+D{\times}T\).
+#[derive(Clone, Debug, Default)]
+pub struct DiffInDiff;
+
+/// Fitted DiD interaction.
+#[derive(Clone, Debug)]
+pub struct FittedDiffInDiff {
+    /// \(\hat\tau\) on \(D\times T\).
+    pub att: f64,
+    /// Treat, post, and interaction slopes.
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+}
+
+impl DiffInDiff {
+    /// Default 2×2 DiD.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// OLS of `y` on treat, post, and treat×post.
+    pub fn fit(
+        &self,
+        y: &Vector,
+        treat: &Vector,
+        post: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiffInDiff>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let n = y.len().min(treat.len()).min(post.len());
+        let x = Matrix::from_fn(n, 3, |i, j| match j {
+            0 => {
+                if treat[i] >= 0.5 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            1 => {
+                if post[i] >= 0.5 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            _ => {
+                if treat[i] >= 0.5 && post[i] >= 0.5 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        });
+        inspect_xy(&mut ctx.report, &x, Some(y), &ctx.policy);
+        let n1 = (0..n).filter(|&i| treat[i] >= 0.5).count();
+        let n0 = n.saturating_sub(n1);
+        let np = (0..n).filter(|&i| post[i] >= 0.5).count();
+        if n1 == 0 || n0 == 0 || np == 0 || np == n {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("DiffInDiff needs variation in treat and post")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "2×2 DiD interaction",
+                        "a missing arm or period leaves D×T unidentified",
+                        "collect a 2×2 panel",
+                    ))
+                    .build(),
+            );
+        }
+        let design = x.with_intercept();
+        let yn = Vector::from_iter((0..n).map(|i| y[i]));
+        let mut scratch = signlred::Report::new("did", "ols");
+        let sol = least_squares(&mut scratch, &design, &yn, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(4));
+        for issue in scratch.issues() {
+            if skip_panel_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("DiffInDiff is OLS on D+T+D×T, not a published TWFE / Callaway–Sant’Anna estimator")
+                .compromise(NumericalCompromise::new(
+                    "difference-in-differences",
+                    "four-cell OLS interaction",
+                    "staggered timing, never-treated controls, and clustered SE are omitted",
+                    "read ATT as a 2×2 interaction, not a published DiD",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedDiffInDiff {
+            att: sol.as_slice().get(3).copied().unwrap_or(0.0),
+            coef: Vector::from_iter((1..sol.len()).map(|j| sol[j])),
+            intercept: sol.as_slice().first().copied().unwrap_or(0.0),
+        })
+    }
+}
+
+/// Synthetic control (Abadie–Diamond–Hainmueller lite).
+///
+/// Donor / pre-period counts are not identification `p`. Weights are
+/// projected onto the simplex after ISTA on the pre-period SSE.
+#[derive(Clone, Debug, Default)]
+pub struct SyntheticControl;
+
+/// Fitted donor weights and post-period gap.
+#[derive(Clone, Debug)]
+pub struct FittedSyntheticControl {
+    /// Simplex weights on donors (columns of `donors`).
+    pub weights: Vector,
+    /// Pre-period SSE.
+    pub pre_rmse: f64,
+    /// Mean post-period treated − synthetic gap.
+    pub att: f64,
+}
+
+impl SyntheticControl {
+    /// Default synthetic control.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Match `treated` to `donors` on the first `n_pre` rows.
+    ///
+    /// `n_pre` is a time-window width, not identification `p`.
+    pub fn fit(
+        &self,
+        treated: &Vector,
+        donors: &Matrix,
+        n_pre: usize,
+        session: &Session,
+    ) -> Result<Qualified<FittedSyntheticControl>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, donors, Some(treated), &ctx.policy);
+        let t = treated.len().min(donors.nrows());
+        let j = donors.ncols();
+        if t < 2 || j == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("SyntheticControl needs a treated series and at least one donor")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "synthetic-control weights",
+                        "an empty donor pool cannot match the treated path",
+                        "add donor units",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedSyntheticControl {
+                weights: Vector::zeros(j),
+                pre_rmse: f64::NAN,
+                att: f64::NAN,
+            });
+        }
+        let pre = n_pre.max(1).min(t.saturating_sub(1)).max(1);
+        let mut w = Vector::filled(j, 1.0 / j as f64);
+        let lr = 0.05 / (1.0 + j as f64);
+        for _ in 0..80 {
+            let mut g = Vector::zeros(j);
+            for s in 0..pre {
+                let mut syn = 0.0;
+                for k in 0..j {
+                    syn += donors.get(s, k) * w[k];
+                }
+                let r = syn - treated[s];
+                for k in 0..j {
+                    g[k] += r * donors.get(s, k);
+                }
+            }
+            for k in 0..j {
+                w[k] = (w[k] - lr * g[k] / pre.max(1) as f64).max(0.0);
+            }
+            let z: f64 = (0..j).map(|k| w[k]).sum();
+            if z > 1e-15 {
+                for k in 0..j {
+                    w[k] /= z;
+                }
+            } else {
+                w = Vector::filled(j, 1.0 / j as f64);
+            }
+        }
+        let mut sse = 0.0;
+        for s in 0..pre {
+            let mut syn = 0.0;
+            for k in 0..j {
+                syn += donors.get(s, k) * w[k];
+            }
+            let d = treated[s] - syn;
+            sse += d * d;
+        }
+        let mut gap = 0.0_f64;
+        let mut m = 0.0_f64;
+        for s in pre..t {
+            let mut syn = 0.0;
+            for k in 0..j {
+                syn += donors.get(s, k) * w[k];
+            }
+            gap += treated[s] - syn;
+            m += 1.0;
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SyntheticControl is simplex ISTA on pre-period SSE, not ADH / SCM")
+                .compromise(NumericalCompromise::new(
+                    "synthetic control",
+                    "projected ISTA weights matching the pre-period path",
+                    "V-optimization, nested donor search, and placebo inference are omitted",
+                    "read ATT as a post-period gap, not a published SCM estimate",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedSyntheticControl {
+            weights: w,
+            pre_rmse: (sse / pre.max(1) as f64).sqrt(),
+            att: gap / m.max(1.0_f64),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2990,5 +3216,18 @@ mod tests {
         assert_eq!(ecfm.value.coef.len(), 1);
         assert!(ecfm.value.coef[0].is_finite());
         assert!(ecfm.value.se[0].is_finite() || ecfm.value.se[0].is_nan());
+        let treat = Vector::from_iter((0..32).map(|i| if i / 8 >= 2 { 1.0 } else { 0.0 }));
+        let post = Vector::from_iter((0..32).map(|i| if i % 8 >= 4 { 1.0 } else { 0.0 }));
+        let did = DiffInDiff::new()
+            .fit(&y, &treat, &post, &Session::new("did", "fit"))
+            .expect("did");
+        assert!(did.value.att.is_finite());
+        let ysc = Vector::from_iter((0..8).map(|t| 2.0 * t as f64 + 15.0));
+        let dsc = Matrix::from_fn(8, 3, |t, j| 2.0 * t as f64 + 5.0 * j as f64);
+        let sc = SyntheticControl::new()
+            .fit(&ysc, &dsc, 4, &Session::new("sc", "fit"))
+            .expect("sc");
+        assert_eq!(sc.value.weights.len(), 3);
+        assert!(sc.value.att.is_finite());
     }
 }
