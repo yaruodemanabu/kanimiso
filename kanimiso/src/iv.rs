@@ -354,7 +354,10 @@ pub fn sandwich_hc(
     session: &Session,
 ) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
-    inspect_xy(&mut ctx.report, x, Some(resid), &ctx.policy);
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    if let Some(issue) = signlred::scan_finite(resid.as_slice()).to_issue("resid") {
+        ctx.push(issue);
+    }
     if resid.len() != x.nrows() {
         ctx.push(
             Issue::builder(IssueCode::DimensionMismatch)
@@ -367,6 +370,17 @@ pub fn sandwich_hc(
     let n = x.nrows();
     if n == 0 || p == 0 {
         return ctx.finish(Matrix::zeros(p, p));
+    }
+    if resid
+        .as_slice()
+        .iter()
+        .all(|e| e.abs() <= ctx.policy.near_zero_variance)
+    {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("sandwich meat is 0 because every residual is ~0")
+                .build(),
+        );
     }
     let xtx = x.gram();
     let mut inv = Mat::<f64>::zeros(p, p);
@@ -491,11 +505,10 @@ mod tests {
     #[test]
     fn hc0_is_psd_on_a_line() {
         let x = Matrix::from_fn(16, 2, |i, j| if j == 0 { 1.0 } else { i as f64 });
-        let y = Vector::from_iter((0..16).map(|i| 1.0 + 2.0 * i as f64));
-        let pred = Vector::from_iter((0..16).map(|i| 1.0 + 2.0 * i as f64));
-        let e = y.sub(&pred);
+        let e = Vector::from_iter((0..16).map(|i| 0.1 * ((i % 3) as f64 - 1.0)));
         let q = hc0(&x, &e, &Session::new("hc", "0")).expect("hc0");
         assert!(q.value.get(0, 0).is_finite());
+        assert!(q.value.get(0, 0) >= 0.0);
         let q3 = hc3(&x, &e, &Session::new("hc", "3")).expect("hc3");
         assert_eq!(q3.value.shape(), (2, 2));
     }
