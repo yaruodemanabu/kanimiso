@@ -4041,6 +4041,210 @@ impl Fit for ZeroInflatedGamma {
     }
 }
 
+/// Zero-inflated generalized Poisson (statsmodels `ZeroInflatedGeneralizedPoisson`).
+///
+/// Count variance is \(\mathrm{Var}=\mu(1+\alpha\mu)^2\). The inflate weight is
+/// intercept-only and is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ZeroInflatedGeneralizedPoisson {
+    /// EM / IRLS cycles.
+    pub max_iter: usize,
+    /// Count-model intercept.
+    pub fit_intercept: bool,
+}
+
+impl Default for ZeroInflatedGeneralizedPoisson {
+    fn default() -> Self {
+        Self {
+            max_iter: 25,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl ZeroInflatedGeneralizedPoisson {
+    /// Default ZIGP.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted ZIGP.
+#[derive(Clone, Debug)]
+pub struct FittedZigp {
+    /// Count-model slopes.
+    pub coef: Vector,
+    /// Count-model intercept.
+    pub intercept: f64,
+    /// Structural-zero probability.
+    pub inflate_pi: f64,
+    /// GP dispersion \(\alpha\ge 0\).
+    pub alpha: f64,
+}
+
+impl Predict for FittedZigp {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() != self.coef.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ZIGP predict column count ≠ coef")
+                    .build(),
+            );
+        }
+        let mut y = x.matvec(&self.coef);
+        for i in 0..y.len() {
+            let mu = (y[i] + self.intercept).exp().max(1e-12);
+            y[i] = (1.0 - self.inflate_pi) * mu;
+        }
+        ctx.finish(y)
+    }
+}
+
+impl Fit for ZeroInflatedGeneralizedPoisson {
+    type Fitted = FittedZigp;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedZigp>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        for (i, &yi) in y.as_slice().iter().enumerate() {
+            if yi < 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .message(format!("ZIGP y[{i}]={yi} < 0"))
+                        .build(),
+                );
+                break;
+            }
+        }
+        let design = if self.fit_intercept {
+            x.with_intercept()
+        } else {
+            x.clone()
+        };
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let n = y.len();
+        let n0 = y.as_slice().iter().filter(|v| **v <= 0.0).count() as f64;
+        let mut pi = (n0 / n.max(1) as f64).clamp(0.05, 0.8);
+        let mean = y.mean().max(1e-3);
+        let var = y.std() * y.std();
+        let mut alpha = {
+            let ratio = (var / mean).sqrt();
+            ((ratio - 1.0) / mean).max(0.0).clamp(0.0, 20.0)
+        };
+        let mut beta = Vector::zeros(design.ncols());
+        if self.fit_intercept && !beta.is_empty() {
+            let ypos: Vec<f64> = y.as_slice().iter().copied().filter(|v| *v > 0.0).collect();
+            let m = if ypos.is_empty() {
+                1.0
+            } else {
+                ypos.iter().sum::<f64>() / ypos.len() as f64
+            };
+            beta[0] = m.max(1e-3).ln();
+        }
+        if n0 == n as f64 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateDistribution)
+                    .message("ZIGP: every count is zero")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "ZIGP rates",
+                        "a zero series does not identify a count mean or α",
+                        "collect positive counts",
+                    ))
+                    .build(),
+            );
+        }
+        if n0 == 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::MixtureWeightCollapsed)
+                    .message("ZIGP inflate is unidentified: there are no zeros")
+                    .build(),
+            );
+            pi = 0.0;
+        }
+        for it in 0..self.max_iter.max(1) {
+            let mut z = Vector::zeros(n);
+            let mut tau_sum = 0.0_f64;
+            let mut sse = 0.0_f64;
+            let mut mu_sum = 0.0_f64;
+            let mut used = 0.0_f64;
+            for i in 0..n {
+                let mut eta = 0.0;
+                for j in 0..design.ncols() {
+                    eta += design.get(i, j) * beta[j];
+                }
+                let mu = eta.clamp(-20.0, 20.0).exp().max(1e-12);
+                if y[i] <= 0.0 {
+                    let p0 = (-mu).exp();
+                    z[i] = pi / (pi + (1.0 - pi) * p0).max(1e-12);
+                } else {
+                    z[i] = 0.0;
+                }
+                tau_sum += z[i];
+                sse += (y[i] - mu) * (y[i] - mu);
+                mu_sum += mu;
+                used += 1.0;
+            }
+            pi = (tau_sum / n as f64).clamp(1e-6, 1.0 - 1e-6);
+            let mu_bar = (mu_sum / used.max(1.0)).max(1e-6);
+            let s2 = sse / used.max(1.0);
+            let next_a = (s2 / mu_bar).sqrt() - 1.0;
+            alpha = (next_a / mu_bar).max(0.0);
+            let mut xs = Matrix::zeros(n, design.ncols());
+            let mut rhs = Vector::zeros(n);
+            for i in 0..n {
+                let mut eta = 0.0;
+                for j in 0..design.ncols() {
+                    eta += design.get(i, j) * beta[j];
+                }
+                let mu = eta.clamp(-20.0, 20.0).exp().max(1e-12);
+                let a = alpha.max(0.0);
+                let v = mu * (1.0 + a * mu) * (1.0 + a * mu);
+                let w = ((1.0 - z[i]) * mu * mu / v.max(1e-12)).max(1e-12);
+                let sw = w.sqrt();
+                rhs[i] = (eta + (y[i] - mu) / mu) * sw;
+                for j in 0..design.ncols() {
+                    xs.set(i, j, design.get(i, j) * sw);
+                }
+            }
+            let mut scratch = signlred::Report::new("zigp", "irls");
+            let Some(next) = least_squares(&mut scratch, &xs, &rhs, &ctx.policy) else {
+                break;
+            };
+            for issue in scratch.issues() {
+                if matches!(
+                    issue.code,
+                    IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+                ) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            let d = next.sub(&beta).norm();
+            beta = next;
+            ctx.session.step(it as u64, d, Some(pi));
+            if d < 1e-7 {
+                ctx.session.converged("ZIGP EM", it as u64);
+                break;
+            }
+        }
+        let (intercept, coef) = if self.fit_intercept {
+            (
+                beta.as_slice().first().copied().unwrap_or(0.0),
+                Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            )
+        } else {
+            (0.0, beta)
+        };
+        ctx.finish(FittedZigp {
+            coef,
+            intercept,
+            inflate_pi: pi,
+            alpha,
+        })
+    }
+}
+
 /// Scobit (skewed logit) binary GLM (statsmodels `Scobit`).
 ///
 /// \(P=\sigma(\eta)^\alpha\). The shape \(\alpha\) is not identification `p`.
@@ -4442,5 +4646,11 @@ mod tests {
             .expect("zig");
         assert!(zig.value.inflate_pi >= 0.0 && zig.value.inflate_pi < 1.0);
         assert!(zig.value.coef[0].is_finite());
+        let zigp = ZeroInflatedGeneralizedPoisson::new()
+            .fit(&x, &y, &Session::new("zigp", "fit"))
+            .expect("zigp");
+        assert!(zigp.value.inflate_pi >= 0.0 && zigp.value.inflate_pi < 1.0);
+        assert!(zigp.value.coef[0].is_finite());
+        assert!(zigp.value.alpha >= 0.0);
     }
 }

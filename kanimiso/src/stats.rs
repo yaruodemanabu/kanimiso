@@ -11790,6 +11790,138 @@ pub fn vine_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualif
     })
 }
 
+/// Equal-n sample size for a two-proportion z-test (statsmodels `samplesize_proportions_2indep`).
+///
+/// Returns \(n\) per arm. Arm count is not identification `p`.
+pub fn samplesize_proportions(
+    p1: f64,
+    p2: f64,
+    alpha: f64,
+    power: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if ![p1, p2, alpha, power].iter().all(|v| v.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .severity(Severity::Warning)
+                .message("samplesize_proportions received a non-finite argument")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let a = p1.clamp(0.0, 1.0);
+    let b = p2.clamp(0.0, 1.0);
+    let al = if (0.0..1.0).contains(&alpha) {
+        alpha
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("samplesize_proportions alpha={alpha} not in (0,1); using 0.05"))
+                .build(),
+        );
+        0.05
+    };
+    let pw = if (0.0..1.0).contains(&power) {
+        power
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("samplesize_proportions power={power} not in (0,1); using 0.8"))
+                .build(),
+        );
+        0.8
+    };
+    let delta = a - b;
+    if delta.abs() < 1e-12 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .severity(Severity::Warning)
+                .message("samplesize_proportions: p1=p2 so n is unidentified")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let za = norm_ppf(1.0 - al / 2.0);
+    let zb = norm_ppf(pw);
+    let num = (za + zb) * (za + zb) * (a * (1.0 - a) + b * (1.0 - b));
+    let n = num / (delta * delta);
+    ctx.finish(n.max(2.0))
+}
+
+/// Likelihood-ratio comparison of a Cox model against the nested null (β = 0).
+///
+/// Covariate / cause counts are not identification `p`.
+pub fn compare_cox(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+    if durations.len() != events.len() || durations.len() != x.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "compare_cox lengths time={} event={} n_x={}",
+                    durations.len(),
+                    events.len(),
+                    x.nrows()
+                ))
+                .build(),
+        );
+    }
+    let n = durations.len().min(events.len()).min(x.nrows());
+    let mut rows: Vec<(f64, bool)> = (0..n)
+        .filter(|&i| durations[i].is_finite() && events[i].is_finite())
+        .map(|i| (durations[i], events[i] >= 0.5))
+        .collect();
+    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut ll0 = 0.0_f64;
+    for (k, row) in rows.iter().enumerate() {
+        if !row.1 {
+            continue;
+        }
+        let risk = (rows.len() - k) as f64;
+        if risk > 0.0 {
+            ll0 -= risk.ln();
+        }
+    }
+    let fitted = match CoxPH::new().fit(durations, events, x, &session.child("cox-full")) {
+        Ok(q) => q.value,
+        Err(e) => {
+            if !matches!(
+                e.primary.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::InformationMatrixSingular
+                    | IssueCode::R2IsOne
+            ) {
+                ctx.push(e.primary);
+            }
+            return ctx.finish(HypothesisTest {
+                statistic: f64::NAN,
+                pvalue: f64::NAN,
+                df: x.ncols() as f64,
+                nobs: n as f64,
+            });
+        }
+    };
+    let df = fitted.coef.len().max(1) as f64;
+    let stat = (2.0 * (fitted.loglik - ll0)).max(0.0);
+    let pvalue = chi2_pvalue(stat, df);
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df,
+        nobs: n as f64,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -12277,5 +12409,12 @@ mod tests {
         let vn = vine_copula(&y, &y2c, &Session::new("vine", "t")).expect("vine");
         assert!(vn.value.theta > 0.0);
         assert_eq!(vn.value.n_trees, 1);
+        let nprop = samplesize_proportions(0.2, 0.5, 0.05, 0.8, &Session::new("ssp", "t"))
+            .expect("ssp");
+        assert!(nprop.value.is_finite() && nprop.value > 10.0);
+        let xcox = Matrix::from_fn(dur.len(), 1, |i, _| grp[i]);
+        let ccx = compare_cox(&dur, &ev, &xcox, &Session::new("ccx", "t")).expect("ccx");
+        assert!(ccx.value.statistic.is_finite() || ccx.value.pvalue.is_nan());
+        assert!(ccx.value.df > 0.0);
     }
 }

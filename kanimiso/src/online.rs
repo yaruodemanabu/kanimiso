@@ -15292,6 +15292,648 @@ impl PartialFit for NUnique {
     }
 }
 
+/// Expanding geometric mean of strictly positive values (river `stats.GeometricMean`).
+///
+/// Non-positive observations are skipped with a warning; they do not abort.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineGeometricMean {
+    log_sum: f64,
+    n_pos: u64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl OnlineGeometricMean {
+    /// Empty geometric mean.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current geometric mean, or NaN before the first positive value.
+    pub fn score(&self) -> f64 {
+        if self.n_pos == 0 {
+            f64::NAN
+        } else {
+            (self.log_sum / self.n_pos as f64).exp()
+        }
+    }
+}
+
+impl PartialFit for OnlineGeometricMean {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        let mut skipped = 0usize;
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            self.n_seen += 1;
+            if v <= 0.0 {
+                skipped += 1;
+                continue;
+            }
+            self.log_sum += v.ln();
+            self.n_pos += 1;
+        }
+        if skipped > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "OnlineGeometricMean skipped {skipped} non-positive values"
+                    ))
+                    .build(),
+            );
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_pos as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_pos >= 1;
+        q.warmup = self.n_pos < 1;
+        q.explanation = format!("OnlineGeometricMean={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "expanding geometric mean",
+                "exp(mean log x) on strictly positive column 0",
+                format!("g={before:.6e}"),
+                format!("g={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Expanding signed maximum (river `stats.Max`).
+///
+/// Distinct from [`OnlineAbsMax`].
+#[derive(Clone, Debug)]
+pub struct OnlineMax {
+    max: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OnlineMax {
+    fn default() -> Self {
+        Self {
+            max: f64::NEG_INFINITY,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlineMax {
+    /// Empty max tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current max, or NaN before the first finite value.
+    pub fn score(&self) -> f64 {
+        if self.n_seen == 0 {
+            f64::NAN
+        } else {
+            self.max
+        }
+    }
+}
+
+impl PartialFit for OnlineMax {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            if v > self.max {
+                self.max = v;
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 1;
+        q.explanation = format!("OnlineMax={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "expanding signed max",
+                "running maximum of column 0",
+                format!("max={before:.6e}"),
+                format!("max={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming Fβ (river `metrics.FBeta`).
+#[derive(Clone, Debug)]
+pub struct OnlineFbeta {
+    /// β weight on recall.
+    pub beta: f64,
+    tp: f64,
+    fp: f64,
+    fn_: f64,
+    updates: u64,
+}
+
+impl Default for OnlineFbeta {
+    fn default() -> Self {
+        Self {
+            beta: 1.0,
+            tp: 0.0,
+            fp: 0.0,
+            fn_: 0.0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlineFbeta {
+    /// Fβ with the given β.
+    pub fn new(beta: f64) -> Self {
+        Self {
+            beta,
+            ..Self::default()
+        }
+    }
+
+    /// Current Fβ, or NaN when the denominator is zero.
+    pub fn score(&self) -> f64 {
+        let b2 = self.beta * self.beta;
+        let den = (1.0 + b2) * self.tp + b2 * self.fn_ + self.fp;
+        if den <= 0.0 {
+            f64::NAN
+        } else {
+            (1.0 + b2) * self.tp / den
+        }
+    }
+}
+
+impl PartialFit for OnlineFbeta {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        metric_partial(
+            session,
+            "fbeta",
+            x,
+            y,
+            self.updates,
+            self.tp as u64,
+            |pred, truth| {
+                let p = pred > 0.5;
+                let t = truth > 0.5;
+                if p && t {
+                    self.tp += 1.0;
+                } else if p && !t {
+                    self.fp += 1.0;
+                } else if !p && t {
+                    self.fn_ += 1.0;
+                }
+                self.updates += 1;
+                self.score()
+            },
+        )
+    }
+}
+
+/// Streaming MAPE (river `metrics.MAPE`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineMape {
+    sum: f64,
+    n: f64,
+    updates: u64,
+}
+
+impl OnlineMape {
+    /// Empty MAPE.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current MAPE, or NaN before a usable pair.
+    pub fn score(&self) -> f64 {
+        if self.n <= 0.0 {
+            f64::NAN
+        } else {
+            self.sum / self.n
+        }
+    }
+}
+
+impl PartialFit for OnlineMape {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        metric_partial(
+            session,
+            "mape",
+            x,
+            y,
+            self.updates,
+            self.n as u64,
+            |pred, truth| {
+                if truth.abs() > 1e-12 {
+                    self.sum += (pred - truth).abs() / truth.abs();
+                    self.n += 1.0;
+                }
+                self.updates += 1;
+                self.score()
+            },
+        )
+    }
+}
+
+/// Time / index rolling mean (river `utils.TimeRolling` lite).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct TimeRolling {
+    /// Window length in observations.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for TimeRolling {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl TimeRolling {
+    /// Rolling window of length `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window mean, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.buf.is_empty() {
+            f64::NAN
+        } else {
+            self.buf.iter().sum::<f64>() / self.buf.len() as f64
+        }
+    }
+}
+
+impl PartialFit for TimeRolling {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        let cap = self.window.max(1);
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            rolling_push(&mut self.buf, v, cap);
+            if v.is_finite() {
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.buf.is_empty();
+        q.warmup = self.buf.len() < cap;
+        q.explanation = format!("TimeRolling={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "time-index rolling mean",
+                "mean of the last W observations; W is not p",
+                format!("m={before:.6e}"),
+                format!("m={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Exponentially weighted variance (river `stats.EWVar`).
+///
+/// Distinct named companion to [`OnlineEwMean`].
+#[derive(Clone, Debug)]
+pub struct OnlineEwVar {
+    /// Smoothing \(\alpha\in(0,1]\).
+    pub alpha: f64,
+    mean: f64,
+    var: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OnlineEwVar {
+    fn default() -> Self {
+        Self {
+            alpha: 0.5,
+            mean: 0.0,
+            var: 0.0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlineEwVar {
+    /// EW variance with the given \(\alpha\).
+    pub fn new(alpha: f64) -> Self {
+        Self {
+            alpha,
+            ..Self::default()
+        }
+    }
+
+    /// Current EW variance, or NaN during warmup.
+    pub fn score(&self) -> f64 {
+        if self.n_seen < 2 {
+            f64::NAN
+        } else {
+            self.var
+        }
+    }
+}
+
+impl PartialFit for OnlineEwVar {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        let a = if self.alpha.is_finite() && self.alpha > 0.0 && self.alpha <= 1.0 {
+            self.alpha
+        } else {
+            0.5
+        };
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            if self.n_seen == 0 {
+                self.mean = v;
+                self.var = 0.0;
+            } else {
+                let d = v - self.mean;
+                self.mean = a * v + (1.0 - a) * self.mean;
+                self.var = (1.0 - a) * (self.var + a * d * d);
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = (1.0 / a).min(self.n_seen as f64);
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("OnlineEwVar={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "exponentially weighted variance",
+                "EW Welford on column 0",
+                format!("v={before:.6e}"),
+                format!("v={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming weighted mean (river `stats.WeightedMean`).
+///
+/// `y` holds weights when present; otherwise each row weighs 1.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineWeightedMean {
+    sw: f64,
+    sx: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl OnlineWeightedMean {
+    /// Empty weighted mean.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current weighted mean, or NaN before the first finite pair.
+    pub fn score(&self) -> f64 {
+        if self.sw.abs() <= 1e-15 {
+            f64::NAN
+        } else {
+            self.sx / self.sw
+        }
+    }
+}
+
+impl PartialFit for OnlineWeightedMean {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            let w = y
+                .and_then(|yy| yy.as_slice().get(i).copied())
+                .filter(|u| u.is_finite() && *u > 0.0)
+                .unwrap_or(1.0);
+            self.sx += w * v;
+            self.sw += w;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.sw;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 1;
+        q.explanation = format!("OnlineWeightedMean={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "weighted mean",
+                "Σ w x / Σ w; y is the weight when present",
+                format!("m={before:.6e}"),
+                format!("m={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Bayesian running mean with a unit-information prior (river `stats.BayesianMean`).
+#[derive(Clone, Debug)]
+pub struct OnlineBayesianMean {
+    /// Prior mean.
+    pub prior_mean: f64,
+    /// Prior pseudo-count.
+    pub prior_n: f64,
+    sum: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OnlineBayesianMean {
+    fn default() -> Self {
+        Self {
+            prior_mean: 0.0,
+            prior_n: 1.0,
+            sum: 0.0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlineBayesianMean {
+    /// Unit-information prior at `prior_mean`.
+    pub fn new(prior_mean: f64) -> Self {
+        Self {
+            prior_mean,
+            ..Self::default()
+        }
+    }
+
+    /// Posterior mean.
+    pub fn score(&self) -> f64 {
+        let n0 = self.prior_n.max(0.0);
+        (n0 * self.prior_mean + self.sum) / (n0 + self.n_seen as f64).max(1e-12)
+    }
+}
+
+impl PartialFit for OnlineBayesianMean {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            self.sum += v;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.prior_n.max(0.0) + self.n_seen as f64;
+        q.parameter_delta_norm = Some((after - before).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = true;
+        q.warmup = self.n_seen < 1;
+        q.explanation = format!("OnlineBayesianMean={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Bayesian mean",
+                "posterior mean of a normal with a unit-information prior",
+                format!("m={before:.6e}"),
+                format!("m={after:.6e}"),
+            ),
+        )
+    }
+}
+
 /// Rolling mean (river `stats.RollingMean`).
 #[derive(Clone, Debug, Default)]
 pub struct RollingMean {
@@ -23966,6 +24608,30 @@ mod tests {
         NUnique::new()
             .partial_fit(&x, None, &session)
             .expect("nuniq");
+        OnlineGeometricMean::new()
+            .partial_fit(&x, None, &session)
+            .expect("ogeom");
+        OnlineMax::new()
+            .partial_fit(&x, None, &session)
+            .expect("omax");
+        OnlineFbeta::new(0.5)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("ofb");
+        OnlineMape::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("omape");
+        TimeRolling::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("troll");
+        OnlineEwVar::new(0.4)
+            .partial_fit(&x, None, &session)
+            .expect("oewv");
+        OnlineWeightedMean::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("owm");
+        OnlineBayesianMean::new(0.0)
+            .partial_fit(&x, None, &session)
+            .expect("obayes");
 
         let n_expl = session
             .ledger()

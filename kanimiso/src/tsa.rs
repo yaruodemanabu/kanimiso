@@ -16,8 +16,8 @@ use crate::linalg::{chol_solve, least_squares, thin_svd};
 use crate::rng::Rng;
 
 pub use crate::filters::{bk_filter, cf_filter, FittedLocalLinearTrend, LocalLinearTrend};
-use crate::stats::HypothesisTest;
-use crate::traits::{FitSeries, PartialFit};
+use crate::stats::{HypothesisTest, KpssResult};
+use crate::traits::{Fit, FitSeries, PartialFit};
 use crate::validate::{inspect_identification, inspect_xy};
 use ojizou_san::{IncrementalExplain, Session};
 use signlred::{
@@ -14145,8 +14145,611 @@ fn durbin_levinson_kk(rho: &[f64], k: usize) -> f64 {
     phi_prev[k - 1]
 }
 
-#[cfg(test)]
-mod tests {
+/// Constant conditional correlation GARCH (arch `CCC`).
+///
+/// Marginal GARCH(1,1) then a fixed sample correlation of standardized
+/// residuals. Series count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct CccGarch;
+
+/// Fitted CCC correlations and marginal variances.
+#[derive(Clone, Debug)]
+pub struct FittedCccGarch {
+    /// Per-series GARCH(1,1) variances (`T` × `k`).
+    pub sigma2: Matrix,
+    /// Constant correlation (`k` × `k`).
+    pub corr: Matrix,
+}
+
+impl CccGarch {
+    /// Empty CCC estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit marginal GARCH(1,1) and the sample correlation of `z_t`.
+    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedCccGarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let (n, k) = y.shape();
+        if k < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("CCC needs at least two series")
+                    .build(),
+            );
+        }
+        let mut sigma2 = Matrix::zeros(n, k);
+        let mut z = Matrix::zeros(n, k);
+        for j in 0..k {
+            let col = y.column(j);
+            let mean = col.mean();
+            let e: Vec<f64> = col.as_slice().iter().map(|v| v - mean).collect();
+            let var = e.iter().map(|v| v * v).sum::<f64>() / n.max(1) as f64;
+            let s2 = garch_sigma2(&e, 0.05 * var.max(1e-8), 0.05, 0.80);
+            for t in 0..n {
+                let v = s2.get(t).copied().unwrap_or(var).max(1e-12);
+                sigma2.set(t, j, v);
+                z.set(t, j, e.get(t).copied().unwrap_or(0.0) / v.sqrt());
+            }
+        }
+        let mut corr = Matrix::zeros(k, k);
+        if n > 0 && k > 0 {
+            for a in 0..k {
+                for b in 0..k {
+                    let mut s = 0.0_f64;
+                    for t in 0..n {
+                        s += z.get(t, a) * z.get(t, b);
+                    }
+                    corr.set(a, b, s / n as f64);
+                }
+            }
+            for i in 0..k {
+                for j in 0..k {
+                    let den = (corr.get(i, i).max(1e-12) * corr.get(j, j).max(1e-12)).sqrt();
+                    corr.set(i, j, corr.get(i, j) / den);
+                }
+            }
+        }
+        ctx.finish(FittedCccGarch { sigma2, corr })
+    }
+}
+
+/// Constant-variance residual model (arch `FixedVariance`).
+///
+/// \(h_t=\sigma^2\) for every \(t\).
+#[derive(Clone, Debug, Default)]
+pub struct FixedVariance;
+
+/// Fitted constant variance.
+#[derive(Clone, Debug)]
+pub struct FittedFixedVariance {
+    /// \(\sigma^2\).
+    pub sigma2: f64,
+    /// Demeaned residuals.
+    pub resid: Vector,
+}
+
+impl FixedVariance {
+    /// Empty fixed-variance estimator.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl FitSeries for FixedVariance {
+    type Fitted = FittedFixedVariance;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedFixedVariance>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let mean = y.mean();
+        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
+        let n = e.len().max(1) as f64;
+        let s2 = e.as_slice().iter().map(|v| v * v).sum::<f64>() / n;
+        if !s2.is_finite() || s2 <= 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::NearZeroVariance)
+                    .severity(Severity::Warning)
+                    .message("FixedVariance collapsed to a floor")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedFixedVariance {
+            sigma2: s2.max(1e-12),
+            resid: e,
+        })
+    }
+}
+
+/// Named RiskMetrics EWMA (arch `RiskMetrics`).
+///
+/// Wraps [`EwmaVol::riskmetrics`]; \(\lambda=0.94\) is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct RiskMetrics;
+
+impl RiskMetrics {
+    /// RiskMetrics \(\lambda=0.94\).
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl FitSeries for RiskMetrics {
+    type Fitted = FittedEwmaVol;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedEwmaVol>> {
+        EwmaVol::riskmetrics().fit_series(y, session)
+    }
+}
+
+/// HAR-X: Corsi HAR plus contemporaneous exogenous columns.
+///
+/// Window lengths are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct HarX {
+    /// Daily lookback.
+    pub daily: usize,
+    /// Weekly lookback.
+    pub weekly: usize,
+    /// Monthly lookback.
+    pub monthly: usize,
+}
+
+impl Default for HarX {
+    fn default() -> Self {
+        Self {
+            daily: 1,
+            weekly: 5,
+            monthly: 22,
+        }
+    }
+}
+
+impl HarX {
+    /// Corsi (1, 5, 22) windows plus `x`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted HAR-X coefficients.
+#[derive(Clone, Debug)]
+pub struct FittedHarX {
+    /// Intercept.
+    pub intercept: f64,
+    /// Daily / weekly / monthly HAR slopes.
+    pub beta_har: Vector,
+    /// Exogenous slopes.
+    pub beta_x: Vector,
+    /// Trailing endogenous window.
+    pub history: Vector,
+    /// Last exogenous row (held fixed in a naive forecast).
+    pub last_x: Vector,
+    /// Daily window.
+    pub daily: usize,
+    /// Weekly window.
+    pub weekly: usize,
+    /// Monthly window.
+    pub monthly: usize,
+}
+
+impl FittedHarX {
+    /// Recurse HAR-X `h` steps, holding the last exogenous row fixed.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let mut hist: Vec<f64> = self.history.as_slice().to_vec();
+        let mut out = Vector::zeros(h);
+        let w = self.weekly.max(1);
+        let m = self.monthly.max(1);
+        let mut xterm = 0.0_f64;
+        for j in 0..self.beta_x.len().min(self.last_x.len()) {
+            xterm += self.beta_x[j] * self.last_x[j];
+        }
+        for t in 0..h {
+            let n = hist.len();
+            let daily = hist.last().copied().unwrap_or(0.0);
+            let week = if n == 0 {
+                daily
+            } else {
+                hist[n.saturating_sub(w)..].iter().sum::<f64>() / n.min(w) as f64
+            };
+            let month = if n == 0 {
+                daily
+            } else {
+                hist[n.saturating_sub(m)..].iter().sum::<f64>() / n.min(m) as f64
+            };
+            let yhat = self.intercept
+                + self.beta_har.as_slice().first().copied().unwrap_or(0.0) * daily
+                + (if self.beta_har.len() > 1 {
+                    self.beta_har[1]
+                } else {
+                    0.0
+                }) * week
+                + (if self.beta_har.len() > 2 {
+                    self.beta_har[2]
+                } else {
+                    0.0
+                }) * month
+                + xterm;
+            out[t] = yhat;
+            hist.push(yhat);
+        }
+        ctx.finish(out)
+    }
+}
+
+impl Fit for HarX {
+    type Fitted = FittedHarX;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedHarX>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let daily = self.daily.max(1);
+        let weekly = self.weekly.max(daily);
+        let monthly = self.monthly.max(weekly);
+        let n = y.len();
+        let start = monthly;
+        let k = x.ncols();
+        let last_x = if n == 0 || k == 0 {
+            Vector::zeros(k)
+        } else {
+            x.row(n - 1)
+        };
+        if n <= start {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "HAR-X needs n>monthly={monthly}; got n={n}. Coefficients collapse to the last level."
+                    ))
+                    .metric("n", n as f64)
+                    .build(),
+            );
+            return ctx.finish(FittedHarX {
+                intercept: y.as_slice().last().copied().unwrap_or(0.0),
+                beta_har: Vector::zeros(3),
+                beta_x: Vector::zeros(k),
+                history: y.clone(),
+                last_x,
+                daily,
+                weekly,
+                monthly,
+            });
+        }
+        let n_eff = n - start;
+        // Window / exogenous counts are not identification p.
+        let design = Matrix::from_fn(n_eff, 3 + k, |i, j| {
+            let t = i + start;
+            if j < 3 {
+                let win = match j {
+                    0 => daily,
+                    1 => weekly,
+                    _ => monthly,
+                };
+                let d0 = t.saturating_sub(win);
+                y.as_slice()[d0..t].iter().sum::<f64>() / (t - d0) as f64
+            } else {
+                x.get(t, j - 3)
+            }
+        });
+        let yy = Vector::from_iter((start..n).map(|t| y[t]));
+        let xaug = design.with_intercept();
+        let beta = statistical_ols(&mut ctx, &xaug, &yy).unwrap_or_else(|| Vector::zeros(4 + k));
+        let keep = monthly.min(n);
+        let history = Vector::from_iter(y.as_slice()[n - keep..].iter().copied());
+        ctx.finish(FittedHarX {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            beta_har: Vector::from_iter((1..4).map(|j| {
+                if j < beta.len() {
+                    beta[j]
+                } else {
+                    0.0
+                }
+            })),
+            beta_x: Vector::from_iter((4..beta.len()).map(|j| beta[j])),
+            history,
+            last_x,
+            daily,
+            weekly,
+            monthly,
+        })
+    }
+}
+
+/// Mixed-frequency dynamic factor model (statsmodels `DynamicFactorMQ` lite).
+///
+/// Rows are temporally aggregated by `period` (not identification `p`), SVD
+/// is taken on the low-frequency panel, and factors are expanded back.
+#[derive(Clone, Debug)]
+pub struct DynamicFactorMq {
+    /// Number of latent factors.
+    pub n_factors: usize,
+    /// Aggregation period (e.g. 4 for quarterly-from-monthly).
+    pub period: usize,
+}
+
+impl Default for DynamicFactorMq {
+    fn default() -> Self {
+        Self {
+            n_factors: 1,
+            period: 4,
+        }
+    }
+}
+
+impl DynamicFactorMq {
+    /// `r` factors and aggregation `period`.
+    pub fn new(n_factors: usize, period: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            period: period.max(1),
+        }
+    }
+
+    /// Fit on an `n × k` mixed-frequency panel (high-frequency rows).
+    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedDynamicFactorMq>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let (n, k) = y.shape();
+        let per = self.period.max(1);
+        if n < per {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!("DynamicFactorMQ needs n≥period={per}; got n={n}"))
+                    .build(),
+            );
+        }
+        let n_lf = (n / per).max(1);
+        let ylf = Matrix::from_fn(n_lf, k, |i, j| {
+            let lo = i * per;
+            let hi = (lo + per).min(n);
+            let mut s = 0.0_f64;
+            let mut c = 0.0_f64;
+            for t in lo..hi {
+                let v = y.get(t, j);
+                if v.is_finite() {
+                    s += v;
+                    c += 1.0;
+                }
+            }
+            if c > 0.0 {
+                s / c
+            } else {
+                0.0
+            }
+        });
+        let (yc, mean) = ylf.centered();
+        let mut scratch = Report::new("dfmq", "svd");
+        let Some(svd) = thin_svd(&mut scratch, &yc, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::SvdDidNotConverge)
+                    .message("DynamicFactorMQ SVD failed")
+                    .build(),
+            );
+            return ctx.finish(FittedDynamicFactorMq {
+                inner: FittedDynamicFactor {
+                    loadings: Matrix::zeros(k, 1),
+                    var: FittedVar {
+                        lags: 1,
+                        k: 1,
+                        coef: Matrix::zeros(2, 1),
+                        intercepts: Vector::zeros(1),
+                        resid: Matrix::zeros(0, 1),
+                        last: Matrix::zeros(1, 1),
+                    },
+                    mean,
+                },
+                period: per,
+            });
+        };
+        let r = self.n_factors.max(1).min(svd.singular_values.len()).min(k);
+        let loadings = Matrix::from_fn(k, r, |j, c| svd.v[(j, c)]);
+        let factors_lf = Matrix::from_fn(n_lf, r, |i, c| {
+            let mut s = 0.0_f64;
+            for j in 0..k {
+                s += yc.get(i, j) * loadings.get(j, c);
+            }
+            s
+        });
+        let var = match Var::new(1).fit(&factors_lf, &session.child("dfmq-var")) {
+            Ok(q) => q.value,
+            Err(_) => FittedVar {
+                lags: 1,
+                k: r,
+                coef: Matrix::zeros(1 + r, r),
+                intercepts: Vector::zeros(r),
+                resid: Matrix::zeros(0, r),
+                last: Matrix::from_fn(1, r, |_, j| factors_lf.get(n_lf.saturating_sub(1), j)),
+            },
+        };
+        ctx.finish(FittedDynamicFactorMq {
+            inner: FittedDynamicFactor {
+                loadings,
+                var,
+                mean,
+            },
+            period: per,
+        })
+    }
+}
+
+/// Fitted mixed-frequency dynamic factor model.
+#[derive(Clone, Debug)]
+pub struct FittedDynamicFactorMq {
+    /// Low-frequency DFM.
+    pub inner: FittedDynamicFactor,
+    /// Aggregation period.
+    pub period: usize,
+}
+
+impl FittedDynamicFactorMq {
+    /// `h` high-frequency steps: low-frequency forecast repeated `period` times.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+        let steps = h.div_ceil(self.period.max(1)).max(1);
+        let lf = self.inner.forecast(steps, session)?;
+        let ctx = FitCtx::with_session(session.child("dfmq-expand"));
+        let k = lf.value.ncols();
+        let per = self.period.max(1);
+        let y = Matrix::from_fn(h, k, |t, j| lf.value.get(t / per, j));
+        ctx.finish(y)
+    }
+}
+
+/// Census X-13 lite: linear trend plus seasonal dummies (not full X-13ARIMA-SEATS).
+///
+/// Seasonal dummy count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct X13 {
+    /// Seasonal period.
+    pub period: usize,
+}
+
+impl Default for X13 {
+    fn default() -> Self {
+        Self { period: 12 }
+    }
+}
+
+impl X13 {
+    /// X-13 lite with the given period.
+    pub fn new(period: usize) -> Self {
+        Self {
+            period: period.max(2),
+        }
+    }
+}
+
+/// Fitted X-13 lite components.
+#[derive(Clone, Debug)]
+pub struct FittedX13 {
+    /// Linear trend.
+    pub trend: Vector,
+    /// Seasonal dummy component.
+    pub seasonal: Vector,
+    /// Irregular remainder.
+    pub irreg: Vector,
+    /// Period stored from the spec.
+    pub period: usize,
+}
+
+impl FitSeries for X13 {
+    type Fitted = FittedX13;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedX13>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        let s = self.period.max(2);
+        if n < 2 * s {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSeasonalCycles)
+                    .severity(Severity::Warning)
+                    .message(format!("X-13 lite saw n={n} < 2·period={s}"))
+                    .build(),
+            );
+        }
+        // Intercept + trend + (s-1) dummies; dummy count is not identification p.
+        let p = 2 + (s - 1);
+        let design = Matrix::from_fn(n, p, |i, j| {
+            if j == 0 {
+                1.0
+            } else if j == 1 {
+                i as f64
+            } else {
+                let seas = i % s;
+                if seas == j - 1 { 1.0 } else { 0.0 }
+            }
+        });
+        let beta = statistical_ols(&mut ctx, &design, y).unwrap_or_else(|| Vector::zeros(p));
+        let mut trend = Vector::zeros(n);
+        let mut seasonal = Vector::zeros(n);
+        let mut irreg = Vector::zeros(n);
+        for i in 0..n {
+            let tr = beta.as_slice().first().copied().unwrap_or(0.0)
+                + (if beta.len() > 1 { beta[1] } else { 0.0 }) * i as f64;
+            let mut se = 0.0_f64;
+            for j in 2..p {
+                if (i % s) == j - 1 {
+                    se += if j < beta.len() { beta[j] } else { 0.0 };
+                }
+            }
+            trend[i] = tr;
+            seasonal[i] = se;
+            irreg[i] = y[i] - tr - se;
+        }
+        ctx.finish(FittedX13 {
+            trend,
+            seasonal,
+            irreg,
+            period: s,
+        })
+    }
+}
+
+/// KPSS on seasonal differences (pmdarima / statsmodels seasonal KPSS).
+///
+/// Period is not identification `p`.
+pub fn seasonal_kpss(
+    y: &Vector,
+    period: usize,
+    session: &Session,
+) -> Result<Qualified<KpssResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let s = period.max(2);
+    let n = y.len();
+    if n <= s {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message(format!("seasonal_kpss needs n>period={s}; got n={n}"))
+                .build(),
+        );
+        return ctx.finish(KpssResult {
+            stat: f64::NAN,
+            pvalue: f64::NAN,
+            lags: 0,
+            n,
+        });
+    }
+    let z = Vector::from_iter((s..n).map(|t| y[t] - y[t - s]));
+    match crate::stats::kpss(&z, None, &session.child("skpss")) {
+        Ok(q) => {
+            for issue in q.report.issues() {
+                if !matches!(
+                    issue.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::R2IsOne
+                        | IssueCode::RankZero
+                ) {
+                    ctx.push(issue.clone());
+                }
+            }
+            ctx.finish(q.value)
+        }
+        Err(e) => {
+            if !matches!(
+                e.primary.code,
+                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+            ) {
+                ctx.push(e.primary);
+            }
+            ctx.finish(KpssResult {
+                stat: f64::NAN,
+                pvalue: f64::NAN,
+                lags: 0,
+                n: z.len(),
+            })
+        }
+    }
+}
+
+    #[cfg(test)]
+    mod tests {
     use super::*;
     use crate::rng::Rng;
 
@@ -15174,5 +15777,49 @@ mod tests {
         assert!(varr.value.is_finite());
         let es = expected_shortfall(&y, 0.1, &Session::new("es", "t")).expect("es");
         assert!(es.value <= varr.value + 1e-9);
+        let ccc = CccGarch::new()
+            .fit(&y2, &Session::new("ccc", "fit"))
+            .expect("ccc");
+        assert_eq!(ccc.value.corr.shape(), (2, 2));
+        assert!(ccc.value.corr.get(0, 1).is_finite());
+        assert!((0..ccc.value.sigma2.nrows()).all(|t| {
+            (0..ccc.value.sigma2.ncols())
+                .all(|j| ccc.value.sigma2.get(t, j).is_finite() && ccc.value.sigma2.get(t, j) > 0.0)
+        }));
+        let fv = FixedVariance::new()
+            .fit_series(&y, &Session::new("fv", "fit"))
+            .expect("fv");
+        assert!(fv.value.sigma2.is_finite() && fv.value.sigma2 > 0.0);
+        let rm = RiskMetrics::new()
+            .fit_series(&y, &Session::new("rm", "fit"))
+            .expect("rm");
+        assert!((rm.value.lambda - 0.94).abs() < 1e-12);
+        let hx = HarX::new()
+            .fit(&x, &y, &Session::new("harx", "fit"))
+            .expect("harx");
+        assert!(hx.value.intercept.is_finite());
+        let hxf = hx
+            .value
+            .forecast(3, &Session::new("harx", "fc"))
+            .expect("harxf")
+            .value;
+        assert_eq!(hxf.len(), 3);
+        assert!(hxf.as_slice().iter().all(|v| v.is_finite()));
+        let dfmq = DynamicFactorMq::new(1, 4)
+            .fit(&y2, &Session::new("dfmq", "fit"))
+            .expect("dfmq");
+        let dfmqf = dfmq
+            .value
+            .forecast(3, &Session::new("dfmq", "fc"))
+            .expect("dfmqf")
+            .value;
+        assert_eq!(dfmqf.shape(), (3, 2));
+        let x13 = X13::new(4)
+            .fit_series(&y, &Session::new("x13", "fit"))
+            .expect("x13");
+        assert_eq!(x13.value.trend.len(), 40);
+        assert!(x13.value.seasonal.as_slice().iter().all(|v| v.is_finite()));
+        let sk = seasonal_kpss(&y, 4, &Session::new("skpss", "t")).expect("skpss");
+        assert!(sk.value.stat.is_finite() || sk.value.pvalue.is_nan());
     }
 }

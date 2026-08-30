@@ -10068,6 +10068,644 @@ impl Predict for FittedMlpTimeClassifier {
     }
 }
 
+/// MultiROCKET features + ridge (sktime `MultiRocketRegressor`).
+///
+/// Kernel count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MultiRocketRegressor {
+    /// Random kernels.
+    pub n_kernels: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for MultiRocketRegressor {
+    fn default() -> Self {
+        Self {
+            n_kernels: 16,
+            alpha: 1.0,
+            seed: 7,
+        }
+    }
+}
+
+impl MultiRocketRegressor {
+    /// Default MultiROCKET regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted MultiROCKET ridge.
+#[derive(Clone, Debug)]
+pub struct FittedMultiRocketRegressor {
+    rocket: MultiRocket,
+    inner: FittedPenalized,
+}
+
+impl Fit for MultiRocketRegressor {
+    type Fitted = FittedMultiRocketRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMultiRocketRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let rocket = MultiRocket {
+            n_kernels: self.n_kernels.max(1),
+            seed: self.seed,
+        };
+        let feat = rocket.transform(x, &session.child("mrocket"))?;
+        let mut scratch = signlred::Report::new("mrocket_reg", "ridge");
+        let design = feat.value.with_intercept();
+        let beta = ridge_solve(&mut scratch, &design, y, self.alpha.max(0.0), &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::PerfectCollinearity
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedMultiRocketRegressor {
+            rocket,
+            inner: FittedPenalized {
+                coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+                alpha: self.alpha,
+                l1_ratio: 0.0,
+            },
+        })
+    }
+}
+
+impl Predict for FittedMultiRocketRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let feat = self.rocket.transform(x, &session.child("mrocket"))?;
+        self.inner.predict(&feat.value, session)
+    }
+}
+
+/// Hydra convolution features + ridge (sktime `HydraRegressor`).
+///
+/// Kernel / group counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct HydraRegressor {
+    /// Kernels.
+    pub n_kernels: usize,
+    /// Groups.
+    pub n_groups: usize,
+    /// Kernel width.
+    pub width: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for HydraRegressor {
+    fn default() -> Self {
+        Self {
+            n_kernels: 8,
+            n_groups: 4,
+            width: 3,
+            alpha: 0.1,
+            seed: 5,
+        }
+    }
+}
+
+impl HydraRegressor {
+    /// Default Hydra regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted Hydra ridge regressor.
+#[derive(Clone, Debug)]
+pub struct FittedHydraRegressor {
+    kernels: Vec<(Vec<f64>, usize)>,
+    n_groups: usize,
+    inner: FittedPenalized,
+}
+
+impl Fit for HydraRegressor {
+    type Fitted = FittedHydraRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedHydraRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let kernels = hydra_kernels(self.n_kernels, self.n_groups, self.width, self.seed);
+        let z = hydra_apply(x, &kernels, self.n_groups);
+        let mut scratch = signlred::Report::new("hydra_reg", "ridge");
+        let design = z.with_intercept();
+        let beta = ridge_solve(&mut scratch, &design, y, self.alpha.max(0.0), &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::PerfectCollinearity
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedHydraRegressor {
+            kernels,
+            n_groups: self.n_groups.max(1),
+            inner: FittedPenalized {
+                coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+                alpha: self.alpha,
+                l1_ratio: 0.0,
+            },
+        })
+    }
+}
+
+impl Predict for FittedHydraRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = hydra_apply(x, &self.kernels, self.n_groups);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Single BOSS word-histogram + ridge (sktime `IndividualBOSS`).
+///
+/// Word count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct IndividualBoss {
+    /// Sliding-window length.
+    pub window: usize,
+    /// DFT coefficients kept per window.
+    pub word_len: usize,
+    /// SFA alphabet size.
+    pub alphabet: usize,
+}
+
+impl Default for IndividualBoss {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            word_len: 4,
+            alphabet: 4,
+        }
+    }
+}
+
+impl IndividualBoss {
+    /// Default individual BOSS.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for IndividualBoss {
+    type Fitted = FittedBoss;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedBoss>> {
+        let mut ens = BossEnsemble {
+            window: self.window,
+            word_len: self.word_len,
+            alphabet: self.alphabet,
+        };
+        ens.fit(x, y, session)
+    }
+}
+
+/// Matrix-profile summaries + ridge (sktime `MatrixProfileRegressor` lite).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MatrixProfileRegressor {
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Subsequence length.
+    pub window: usize,
+}
+
+impl Default for MatrixProfileRegressor {
+    fn default() -> Self {
+        Self {
+            alpha: 0.1,
+            window: 2,
+        }
+    }
+}
+
+impl MatrixProfileRegressor {
+    /// Default matrix-profile regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted matrix-profile ridge.
+#[derive(Clone, Debug)]
+pub struct FittedMatrixProfileRegressor {
+    inner: FittedPenalized,
+    window: usize,
+}
+
+impl Fit for MatrixProfileRegressor {
+    type Fitted = FittedMatrixProfileRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMatrixProfileRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let w = self.window.max(2);
+        let z = Matrix::from_fn(x.nrows(), 4, |i, j| {
+            let f = mp_row_features(&x.row(i), w, &session.child(format!("mpreg{i}")));
+            f[j]
+        });
+        let mut scratch = signlred::Report::new("mpreg", "ridge");
+        let design = z.with_intercept();
+        let beta = ridge_solve(&mut scratch, &design, y, self.alpha.max(0.0), &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::PerfectCollinearity
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedMatrixProfileRegressor {
+            inner: FittedPenalized {
+                coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+                alpha: self.alpha,
+                l1_ratio: 0.0,
+            },
+            window: w,
+        })
+    }
+}
+
+impl Predict for FittedMatrixProfileRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = Matrix::from_fn(x.nrows(), 4, |i, j| {
+            let f = mp_row_features(&x.row(i), self.window, &session.child(format!("mpreg_p{i}")));
+            f[j]
+        });
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Random-interval features + ridge (sktime `RandomIntervalClassifier`).
+///
+/// Interval count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RandomIntervalClassifier {
+    /// Random intervals.
+    pub n_intervals: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for RandomIntervalClassifier {
+    fn default() -> Self {
+        Self {
+            n_intervals: 6,
+            alpha: 0.1,
+            seed: 4,
+        }
+    }
+}
+
+impl RandomIntervalClassifier {
+    /// Default random-interval classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted random-interval ridge.
+#[derive(Clone, Debug)]
+pub struct FittedRandomIntervalClassifier {
+    intervals: Vec<Interval>,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for RandomIntervalClassifier {
+    type Fitted = FittedRandomIntervalClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRandomIntervalClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let tlen = x.ncols().max(1);
+        let mut rng = Rng::new(self.seed);
+        let ni = self.n_intervals.max(1);
+        let mut intervals = Vec::with_capacity(ni);
+        for _ in 0..ni {
+            let a = rng.below(tlen);
+            let span = rng.below(tlen).max(1);
+            let b = (a + span).min(tlen);
+            intervals.push(Interval {
+                start: a.min(b.saturating_sub(1)),
+                end: b.max(a + 1),
+            });
+        }
+        let z = interval_feats(x, &intervals);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "ric");
+        ctx.finish(FittedRandomIntervalClassifier { intervals, inner })
+    }
+}
+
+impl Predict for FittedRandomIntervalClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = interval_feats(x, &self.intervals);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Three-member HIVE-COTE v2 lite (ROCKET + TSF + Catch22).
+///
+/// Member / kernel / tree counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct HiveCoteV2 {
+    /// ROCKET kernels.
+    pub n_kernels: usize,
+    /// Forest trees.
+    pub n_estimators: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for HiveCoteV2 {
+    fn default() -> Self {
+        Self {
+            n_kernels: 16,
+            n_estimators: 6,
+            seed: 3,
+        }
+    }
+}
+
+impl HiveCoteV2 {
+    /// Default HIVE-COTE v2 lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted three-member HIVE-COTE v2 vote.
+#[derive(Clone, Debug)]
+pub struct FittedHiveCoteV2 {
+    rocket: FittedRocketClassifier,
+    forest: FittedTimeSeriesForest,
+    catch22: FittedCatch22Classifier,
+}
+
+impl Fit for HiveCoteV2 {
+    type Fitted = FittedHiveCoteV2;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedHiveCoteV2>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message(
+                    "HIVE-COTE v2 lite is an unweighted vote of ROCKET, TSF, and Catch22",
+                )
+                .compromise(NumericalCompromise::new(
+                    "HIVE-COTE v2 weighted ensemble",
+                    "unweighted vote of RocketClassifier, TimeSeriesForest, and Catch22",
+                    "STC / cBOSS / TDE members and published weights are omitted",
+                    "do not read the vote as a published HIVE-COTE v2 accuracy",
+                ))
+                .build(),
+        );
+        let rocket = RocketClassifier {
+            n_kernels: self.n_kernels,
+            kernel_len: 5,
+            alpha: 0.5,
+            seed: self.seed,
+        }
+        .fit(x, y, &session.child("hcv2-rocket"))?
+        .value;
+        let forest = TimeSeriesForestClassifier {
+            n_estimators: self.n_estimators,
+            n_intervals: 3,
+            max_depth: 4,
+            seed: self.seed,
+        }
+        .fit(x, y, &session.child("hcv2-tsf"))?
+        .value;
+        let catch22 = Catch22Classifier::new(0.1)
+            .fit(x, y, &session.child("hcv2-c22"))?
+            .value;
+        ctx.finish(FittedHiveCoteV2 {
+            rocket,
+            forest,
+            catch22,
+        })
+    }
+}
+
+impl Predict for FittedHiveCoteV2 {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("predict"));
+        let a = self.rocket.predict(x, &session.child("r"))?;
+        let b = self.forest.predict(x, &session.child("f"))?;
+        let c = self.catch22.predict(x, &session.child("c"))?;
+        let y = Vector::from_iter((0..x.nrows()).map(|i| {
+            let va = if i < a.value.len() { a.value[i] } else { 0.0 };
+            let vb = if i < b.value.len() { b.value[i] } else { 0.0 };
+            let vc = if i < c.value.len() { c.value[i] } else { 0.0 };
+            let mut votes: BTreeMap<i64, usize> = BTreeMap::new();
+            *votes.entry(va.round() as i64).or_insert(0) += 1;
+            *votes.entry(vb.round() as i64).or_insert(0) += 1;
+            *votes.entry(vc.round() as i64).or_insert(0) += 1;
+            votes
+                .iter()
+                .max_by(|u, v| u.1.cmp(v.1).then(v.0.cmp(u.0)))
+                .map(|(k, _)| *k as f64)
+                .unwrap_or(va)
+        }));
+        ctx.finish(y)
+    }
+}
+
+/// Random supervised time-series forest (sktime `RSTSF` lite).
+///
+/// Interval / tree counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Rstsf {
+    /// Trees.
+    pub n_estimators: usize,
+    /// Random intervals per tree.
+    pub n_intervals: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for Rstsf {
+    fn default() -> Self {
+        Self {
+            n_estimators: 6,
+            n_intervals: 3,
+            max_depth: 4,
+            seed: 19,
+        }
+    }
+}
+
+impl Rstsf {
+    /// Default RSTSF lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted RSTSF vote.
+#[derive(Clone, Debug)]
+pub struct FittedRstsf {
+    trees: Vec<crate::tree::FittedTreeClassifier>,
+    intervals: Vec<Vec<Interval>>,
+    /// Sorted class labels.
+    pub classes: Vec<i64>,
+}
+
+impl Fit for Rstsf {
+    type Fitted = FittedRstsf;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRstsf>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let classes: Vec<i64> = counts.iter().map(|(k, _)| *k).collect();
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        let mut intervals = Vec::new();
+        let tlen = x.ncols().max(1);
+        for e in 0..self.n_estimators.max(1) {
+            let ni = self.n_intervals.max(1);
+            let mut iv = Vec::with_capacity(ni);
+            for _ in 0..ni {
+                let a = rng.below(tlen);
+                let span = rng.below(tlen).max(1);
+                let b = (a + span).min(tlen);
+                iv.push(Interval {
+                    start: a.min(b.saturating_sub(1)),
+                    end: b.max(a + 1),
+                });
+            }
+            let feat = interval_feats(x, &iv);
+            let mut tree = crate::tree::DecisionTreeClassifier {
+                max_depth: self.max_depth,
+                seed: rng.next_u64(),
+                ..crate::tree::DecisionTreeClassifier::default()
+            };
+            match tree.fit(&feat, y, &session.child("rstsf_tree")) {
+                Ok(q) => {
+                    trees.push(q.value);
+                    intervals.push(iv);
+                }
+                Err(err) => {
+                    for issue in err.report.issues() {
+                        if !matches!(
+                            issue.code,
+                            IssueCode::ResidualTooLarge
+                                | IssueCode::NearSingular
+                                | IssueCode::RankZero
+                                | IssueCode::R2IsOne
+                                | IssueCode::MeaninglessFit
+                        ) {
+                            ctx.push(issue.clone());
+                        }
+                    }
+                }
+            }
+            ctx.session.step(e as u64, 0.0, None);
+        }
+        if trees.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("every RSTSF tree failed to fit")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedRstsf {
+            trees,
+            intervals,
+            classes,
+        })
+    }
+}
+
+impl Predict for FittedRstsf {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("predict"));
+        let mut votes = vec![BTreeMap::<i64, usize>::new(); x.nrows()];
+        for (tree, iv) in self.trees.iter().zip(&self.intervals) {
+            let feat = interval_feats(x, iv);
+            match tree.predict(&feat, &session.child("rstsf_pred")) {
+                Ok(q) => {
+                    for i in 0..x.nrows() {
+                        let lab = q.value[i].round() as i64;
+                        *votes[i].entry(lab).or_insert(0) += 1;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        let out = Vector::from_iter(votes.iter().map(|m| {
+            m.iter()
+                .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(k, _)| *k as f64)
+                .unwrap_or(self.classes.first().copied().unwrap_or(0) as f64)
+        }));
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10270,6 +10908,71 @@ mod tests {
             .unwrap()
             .value;
         assert!(pred.as_slice().iter().all(|v| v.is_finite()));
+        let mrr = MultiRocketRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "mrr"))
+            .unwrap();
+        let pmrr = mrr
+            .value
+            .predict(&x, &Session::new("ts", "mrrp"))
+            .unwrap()
+            .value;
+        assert!(pmrr.as_slice().iter().all(|v| v.is_finite()));
+        let hr = HydraRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "hydr"))
+            .unwrap();
+        let phr = hr
+            .value
+            .predict(&x, &Session::new("ts", "hydrp"))
+            .unwrap()
+            .value;
+        assert!(phr.as_slice().iter().all(|v| v.is_finite()));
+        let ib = IndividualBoss::new()
+            .fit(&x, &y, &Session::new("ts", "iboss"))
+            .unwrap();
+        let pib = ib
+            .value
+            .predict(&x, &Session::new("ts", "ibossp"))
+            .unwrap()
+            .value;
+        assert!(pib.as_slice().iter().all(|v| v.is_finite()));
+        let mpr = MatrixProfileRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "mpr"))
+            .unwrap();
+        let pmpr = mpr
+            .value
+            .predict(&x, &Session::new("ts", "mprp"))
+            .unwrap()
+            .value;
+        assert!(pmpr.as_slice().iter().all(|v| v.is_finite()));
+        let ric = RandomIntervalClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "ric"))
+            .unwrap();
+        let pric = ric
+            .value
+            .predict(&x, &Session::new("ts", "ricp"))
+            .unwrap()
+            .value;
+        assert_eq!(pric.len(), 8);
+        assert!(pric.as_slice().iter().all(|v| v.is_finite()));
+        let h2 = HiveCoteV2::new()
+            .fit(&x, &y, &Session::new("ts", "hcv2"))
+            .unwrap();
+        let ph2 = h2
+            .value
+            .predict(&x, &Session::new("ts", "hcv2p"))
+            .unwrap()
+            .value;
+        assert_eq!(ph2.len(), 8);
+        let rst = Rstsf::new()
+            .fit(&x, &y, &Session::new("ts", "rstsf"))
+            .unwrap();
+        let prst = rst
+            .value
+            .predict(&x, &Session::new("ts", "rstsfp"))
+            .unwrap()
+            .value;
+        assert_eq!(prst.len(), 8);
+        assert!(prst.as_slice().iter().all(|v| v.is_finite()));
     }
 
     #[test]

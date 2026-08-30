@@ -4421,6 +4421,95 @@ const INVENTORY: &[Algorithm] = &[
     a("online.OnlineGini", "river.stats.Gini", "online"),
     a("online.OnlineEwMean", "river.stats.EWMean", "online"),
     a("online.NUnique", "river.stats.NUnique", "online"),
+    a("tsa.CccGarch", "arch.univariate.CCC", "forecast"),
+    a(
+        "tsa.FixedVariance",
+        "arch.univariate.FixedVariance",
+        "forecast",
+    ),
+    a("tsa.RiskMetrics", "arch.univariate.RiskMetrics", "forecast"),
+    a("tsa.HarX", "arch.univariate.HARX", "forecast"),
+    a(
+        "tsa.DynamicFactorMq",
+        "statsmodels.tsa.statespace.dynamic_factor_mq.DynamicFactorMQ",
+        "forecast",
+    ),
+    a("tsa.X13", "statsmodels.tsa.x13.x13_arima_analysis", "forecast"),
+    a(
+        "tsa.seasonal_kpss",
+        "statsmodels.tsa.stattools.kpss",
+        "forecast",
+    ),
+    a(
+        "glm.ZeroInflatedGeneralizedPoisson",
+        "statsmodels.discrete.count_model.ZeroInflatedGeneralizedPoisson",
+        "estimator",
+    ),
+    a(
+        "stats.samplesize_proportions",
+        "statsmodels.stats.proportion.samplesize_proportions_2indep",
+        "stats",
+    ),
+    a(
+        "stats.compare_cox",
+        "statsmodels.duration.hazard_regression.compare_cox",
+        "stats",
+    ),
+    a(
+        "online.OnlineGeometricMean",
+        "river.stats.GeometricMean",
+        "online",
+    ),
+    a("online.OnlineMax", "river.stats.Max", "online"),
+    a("online.OnlineFbeta", "river.metrics.FBeta", "online"),
+    a("online.OnlineMape", "river.metrics.MAPE", "online"),
+    a("online.TimeRolling", "river.utils.TimeRolling", "online"),
+    a("online.OnlineEwVar", "river.stats.EWVar", "online"),
+    a(
+        "online.OnlineWeightedMean",
+        "river.stats.WeightedMean",
+        "online",
+    ),
+    a(
+        "online.OnlineBayesianMean",
+        "river.stats.BayesianMean",
+        "online",
+    ),
+    a(
+        "tslearn.MultiRocketRegressor",
+        "sktime.regression.kernel_based.MultiRocketRegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.HydraRegressor",
+        "sktime.regression.kernel_based.HydraRegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.IndividualBoss",
+        "sktime.classification.dictionary_based.IndividualBOSS",
+        "timeseries",
+    ),
+    a(
+        "tslearn.MatrixProfileRegressor",
+        "sktime.regression.feature_based.MatrixProfileRegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.RandomIntervalClassifier",
+        "sktime.classification.interval_based.RandomIntervalClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.HiveCoteV2",
+        "sktime.classification.hybrid.HIVECOTEV2",
+        "timeseries",
+    ),
+    a(
+        "tslearn.Rstsf",
+        "sktime.classification.interval_based.RSTSF",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4722,6 +4811,12 @@ mod tests {
             "online.Swinn",
             "stats.vine_copula",
             "iv.driscoll_kraay",
+            "tsa.CccGarch",
+            "glm.ZeroInflatedGeneralizedPoisson",
+            "tslearn.HiveCoteV2",
+            "online.OnlineGeometricMean",
+            "tsa.X13",
+            "stats.samplesize_proportions",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
