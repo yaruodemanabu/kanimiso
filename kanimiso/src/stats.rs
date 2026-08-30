@@ -11876,44 +11876,96 @@ pub fn compare_cox(
         );
     }
     let n = durations.len().min(events.len()).min(x.nrows());
-    let mut rows: Vec<(f64, bool)> = (0..n)
+    let p = x.ncols().max(1);
+    let mut idx: Vec<usize> = (0..n)
         .filter(|&i| durations[i].is_finite() && events[i].is_finite())
-        .map(|i| (durations[i], events[i] >= 0.5))
         .collect();
-    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    let mut ll0 = 0.0_f64;
-    for (k, row) in rows.iter().enumerate() {
-        if !row.1 {
+    idx.sort_by(|&a, &b| {
+        durations[a]
+            .partial_cmp(&durations[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    // Score test at β=0 (nested null). Covariate count is test df, not identification p.
+    let mut u = vec![0.0_f64; p];
+    let mut i_mat = vec![0.0_f64; p * p];
+    let mut n_ev = 0usize;
+    for (k, &i) in idx.iter().enumerate() {
+        if events[i] < 0.5 {
             continue;
         }
-        let risk = (rows.len() - k) as f64;
-        if risk > 0.0 {
-            ll0 -= risk.ln();
+        n_ev += 1;
+        let r = idx.len() - k;
+        if r == 0 {
+            continue;
+        }
+        let rf = r as f64;
+        let mut mean = vec![0.0_f64; p];
+        for &j in idx[k..].iter() {
+            for c in 0..p {
+                mean[c] += x.get(j, c);
+            }
+        }
+        for c in 0..p {
+            mean[c] /= rf;
+            u[c] += x.get(i, c) - mean[c];
+        }
+        for a in 0..p {
+            for b in 0..p {
+                let mut s2 = 0.0_f64;
+                for &j in idx[k..].iter() {
+                    s2 += (x.get(j, a) - mean[a]) * (x.get(j, b) - mean[b]);
+                }
+                i_mat[a * p + b] += s2 / rf;
+            }
         }
     }
-    let fitted = match CoxPH::new().fit(durations, events, x, &session.child("cox-full")) {
-        Ok(q) => q.value,
-        Err(e) => {
-            if !matches!(
-                e.primary.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
-                    | IssueCode::InformationMatrixSingular
-                    | IssueCode::R2IsOne
-            ) {
-                ctx.push(e.primary);
-            }
-            return ctx.finish(HypothesisTest {
-                statistic: f64::NAN,
-                pvalue: f64::NAN,
-                df: x.ncols() as f64,
-                nobs: n as f64,
-            });
+    let mut stat = 0.0_f64;
+    if p == 1 {
+        let v = i_mat[0];
+        if v.abs() > 1e-14 {
+            stat = u[0] * u[0] / v;
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InformationMatrixSingular)
+                    .severity(Severity::Warning)
+                    .message("compare_cox score variance is zero")
+                    .build(),
+            );
+            stat = f64::NAN;
         }
+    } else {
+        let mut scratch = Report::new("compare_cox", "score");
+        let im = faer::Mat::<f64>::from_fn(p, p, |a, b| i_mat[a * p + b]);
+        let rhs = Vector::from_iter(u.iter().copied());
+        match chol_solve(&mut scratch, &im, &rhs, &ctx.policy) {
+            Some(sol) => {
+                stat = (0..p).map(|c| u[c] * sol[c]).sum::<f64>().max(0.0);
+            }
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .severity(Severity::Warning)
+                        .message("compare_cox score information is not SPD; statistic is unidentified")
+                        .build(),
+                );
+                stat = f64::NAN;
+            }
+        }
+    }
+    let df = p as f64;
+    let pvalue = if stat.is_finite() {
+        chi2_pvalue(stat, df)
+    } else {
+        f64::NAN
     };
-    let df = fitted.coef.len().max(1) as f64;
-    let stat = (2.0 * (fitted.loglik - ll0)).max(0.0);
-    let pvalue = chi2_pvalue(stat, df);
+    if n_ev == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("compare_cox saw no events")
+                .build(),
+        );
+    }
     ctx.finish(HypothesisTest {
         statistic: stat,
         pvalue,
