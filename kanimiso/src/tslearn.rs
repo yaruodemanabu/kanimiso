@@ -8461,6 +8461,240 @@ impl Predict for FittedTapNetClassifier {
     }
 }
 
+/// Fully convolutional network classifier (sktime `FCNClassifier` lite).
+///
+/// Each series is used as a flattened feature map; the temporal length is not
+/// identification `p`.
+#[derive(Clone, Debug)]
+pub struct FCNClassifier {
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for FCNClassifier {
+    fn default() -> Self {
+        Self { alpha: 0.1 }
+    }
+}
+
+impl FCNClassifier {
+    /// Default FCN-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted FCN-lite ridge.
+#[derive(Clone, Debug)]
+pub struct FittedFCNClassifier {
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for FCNClassifier {
+    type Fitted = FittedFCNClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedFCNClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let inner = binary_ridge_from_features(x, y, self.alpha, &ctx.policy, "fcn");
+        ctx.finish(FittedFCNClassifier { inner })
+    }
+}
+
+impl Predict for FittedFCNClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+fn macnn_attend(raw: &Matrix, ctx: &mut FitCtx) -> Matrix {
+    let k = raw.ncols().max(1);
+    let mut overflow = 0u64;
+    let z = Matrix::from_fn(raw.nrows(), k, |i, j| {
+        let mut mx = f64::NEG_INFINITY;
+        for u in 0..raw.ncols() {
+            mx = mx.max(raw.get(i, u));
+        }
+        let mut den = 0.0;
+        for u in 0..raw.ncols() {
+            den += (raw.get(i, u) - mx).exp();
+        }
+        if !den.is_finite() || den <= 0.0 {
+            overflow += 1;
+            raw.get(i, j) / k as f64
+        } else {
+            raw.get(i, j) * (raw.get(i, j) - mx).exp() / den
+        }
+    });
+    if overflow > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteOutput)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "MACNN softmax attention overflowed on {overflow} series; used uniform weights"
+                ))
+                .compromise(NumericalCompromise::new(
+                    "softmax attention over inception kernels",
+                    "uniform attention over kernels",
+                    "the attention logits overflowed",
+                    "kernel weights are a fallback, not a learned attention map",
+                ))
+                .build(),
+        );
+    }
+    z
+}
+
+/// Multi-scale attention CNN (sktime `MACNNClassifier` lite).
+///
+/// Kernel count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MacnnClassifier {
+    /// Kernels per width.
+    pub n_kernels: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+/// sktime `MACNNClassifier` spelling of [`MacnnClassifier`].
+pub type MACNN = MacnnClassifier;
+
+impl Default for MacnnClassifier {
+    fn default() -> Self {
+        Self {
+            n_kernels: 4,
+            alpha: 0.1,
+            seed: 41,
+        }
+    }
+}
+
+impl MacnnClassifier {
+    /// Default MACNN-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted MACNN-lite ridge.
+#[derive(Clone, Debug)]
+pub struct FittedMacnnClassifier {
+    kernels: Vec<Vec<f64>>,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for MacnnClassifier {
+    type Fitted = FittedMacnnClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMacnnClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let kernels = inception_kernels(self.n_kernels, x.ncols().max(1), self.seed);
+        let raw = conv_maxpool(x, &kernels);
+        let z = macnn_attend(&raw, &mut ctx);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "macnn");
+        ctx.finish(FittedMacnnClassifier { kernels, inner })
+    }
+}
+
+impl Predict for FittedMacnnClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let raw = conv_maxpool(x, &self.kernels);
+        let z = macnn_attend(&raw, &mut ctx);
+        drop(ctx);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Random-projection + conv regressor (sktime `TapNetRegressor` lite).
+///
+/// Projection width is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct TapNetRegressor {
+    /// Projected length.
+    pub proj: usize,
+    /// Conv kernels.
+    pub n_kernels: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for TapNetRegressor {
+    fn default() -> Self {
+        Self {
+            proj: 4,
+            n_kernels: 4,
+            alpha: 0.1,
+            seed: 43,
+        }
+    }
+}
+
+impl TapNetRegressor {
+    /// Default TapNet-lite regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted TapNet-lite ridge regressor.
+#[derive(Clone, Debug)]
+pub struct FittedTapNetRegressor {
+    proj: Matrix,
+    kernels: Vec<Vec<f64>>,
+    inner: FittedPenalized,
+}
+
+impl Fit for TapNetRegressor {
+    type Fitted = FittedTapNetRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedTapNetRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let mut rng = Rng::new(self.seed);
+        let pdim = self.proj.max(1);
+        let proj = Matrix::from_fn(x.ncols().max(1), pdim, |_, _| rng.standard_normal());
+        let z0 = tap_project(x, &proj);
+        let w = 3usize.min(z0.ncols().max(1));
+        let kernels: Vec<Vec<f64>> = (0..self.n_kernels.max(1))
+            .map(|_| (0..w).map(|_| rng.standard_normal()).collect())
+            .collect();
+        let z = conv_maxpool(&z0, &kernels);
+        let inner = ridge_reg_from_features(&z, y, self.alpha, &ctx.policy, "tapnet_reg");
+        ctx.finish(FittedTapNetRegressor { proj, kernels, inner })
+    }
+}
+
+impl Predict for FittedTapNetRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z0 = tap_project(x, &self.proj);
+        let z = conv_maxpool(&z0, &self.kernels);
+        self.inner.predict(&z, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9221,5 +9455,33 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(tapp.len(), 6);
+        let fcn = FCNClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "fcn"))
+            .unwrap();
+        let fcnp = fcn
+            .value
+            .predict(&x, &Session::new("ts", "fcnp"))
+            .unwrap()
+            .value;
+        assert_eq!(fcnp.len(), 6);
+        let mac = MacnnClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "mac"))
+            .unwrap();
+        let macp = mac
+            .value
+            .predict(&x, &Session::new("ts", "macp"))
+            .unwrap()
+            .value;
+        assert_eq!(macp.len(), 6);
+        let tapr = TapNetRegressor::new()
+            .fit(&x, &yramp, &Session::new("ts", "tapr"))
+            .unwrap();
+        let taprp = tapr
+            .value
+            .predict(&x, &Session::new("ts", "taprp"))
+            .unwrap()
+            .value;
+        assert_eq!(taprp.len(), 6);
+        assert!(taprp.as_slice().iter().all(|v| v.is_finite()));
     }
 }

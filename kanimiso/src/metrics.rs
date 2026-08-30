@@ -1476,6 +1476,109 @@ pub fn hamming_loss(
     hamming(y_true, y_pred, session)
 }
 
+/// Alias of [`silhouette`] (sklearn `silhouette_score`).
+pub fn silhouette_score(
+    x: &Matrix,
+    labels: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    silhouette(x, labels, session)
+}
+
+/// Alias of [`roc_auc`] (sklearn `roc_auc_score`).
+pub fn roc_auc_score(
+    y_true: &Vector,
+    scores: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    roc_auc(y_true, scores, session)
+}
+
+/// Alias of [`cohen_kappa`] (sklearn `cohen_kappa_score`).
+pub fn cohen_kappa_score(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    cohen_kappa(y_true, y_pred, session)
+}
+
+/// Alias of [`mape`] (sklearn `mean_absolute_percentage_error`).
+pub fn mean_absolute_percentage_error(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    mape(y_true, y_pred, session)
+}
+
+/// Alias of [`medae`] (sklearn `median_absolute_error`).
+pub fn median_absolute_error(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    medae(y_true, y_pred, session)
+}
+
+/// Alias of [`precision_recall_f1`] (sklearn `precision_recall_fscore_support`).
+pub fn precision_recall_fscore_support(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<PrecisionRecallF1>> {
+    precision_recall_f1(y_true, y_pred, session)
+}
+
+/// Nearest neighbour plus its Euclidean distance (sklearn `pairwise_distances_argmin_min`).
+///
+/// Columns are `(index, distance)`. Neighbor count is not identification `p`.
+pub fn pairwise_distances_argmin_min(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("pairwise_distances_argmin_min column mismatch")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), 2));
+    }
+    if b.nrows() == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("pairwise_distances_argmin_min received an empty reference set")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), 2));
+    }
+    ctx.finish(Matrix::from_fn(a.nrows(), 2, |i, col| {
+        let mut best = 0usize;
+        let mut best_d = f64::INFINITY;
+        for j in 0..b.nrows() {
+            let mut s = 0.0;
+            for k in 0..a.ncols() {
+                let d = a.get(i, k) - b.get(j, k);
+                s += d * d;
+            }
+            if s < best_d {
+                best_d = s;
+                best = j;
+            }
+        }
+        if col == 0 {
+            best as f64
+        } else {
+            best_d.sqrt()
+        }
+    }))
+}
+
 /// Maximum residual (sklearn `max_error`).
 pub fn max_error(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
@@ -4278,5 +4381,39 @@ mod tests {
         .unwrap()
         .value;
         assert!(hl.abs() < 1e-12);
+        let sil = silhouette_score(&xb, &lb, &Session::new("m", "sils2"))
+            .unwrap()
+            .value;
+        assert!(sil.is_finite());
+        let ra = roc_auc_score(&y, &p, &Session::new("m", "ras"))
+            .unwrap()
+            .value;
+        assert!(ra > 0.8);
+        let kps = cohen_kappa_score(&y, &y, &Session::new("m", "kps"))
+            .unwrap()
+            .value;
+        assert!((kps - 1.0).abs() < 1e-12);
+        let mape2 = mean_absolute_percentage_error(&y2, &h2, &Session::new("m", "mape2"))
+            .unwrap()
+            .value;
+        assert!(mape2 > 0.0);
+        let med2 = median_absolute_error(&y2, &h2, &Session::new("m", "med2"))
+            .unwrap()
+            .value;
+        assert!(med2 >= 0.0);
+        let prfs = precision_recall_fscore_support(
+            &y,
+            &Vector::from_slice(&[0.0, 1.0, 1.0, 0.0]),
+            &Session::new("m", "prfs"),
+        )
+        .unwrap()
+        .value;
+        assert!((prfs.f1 - 1.0).abs() < 1e-12);
+        let amm = pairwise_distances_argmin_min(&xb, &xb, &Session::new("m", "amm"))
+            .unwrap()
+            .value;
+        assert_eq!(amm.shape(), (8, 2));
+        assert!((amm.get(1, 0) - 1.0).abs() < 1e-12);
+        assert!(amm.get(1, 1).abs() < 1e-12);
     }
 }

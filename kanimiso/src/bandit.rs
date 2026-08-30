@@ -476,6 +476,225 @@ impl PartialFit for ThompsonBernoulli {
     }
 }
 
+/// Contextual LinUCB (Li, Chu, Langford, Schapire).
+///
+/// Each row of `x` is a context; `y` is the observed reward. Arm count is not
+/// identification `p`. The context dimension is taken from `x.ncols()`.
+#[derive(Clone, Debug)]
+pub struct LinUcb {
+    n_arms: usize,
+    /// Exploration bonus \(\alpha\).
+    pub alpha: f64,
+    p: usize,
+    ainv: Vec<Vec<f64>>,
+    b: Vec<Vector>,
+    counts: Vec<u64>,
+    updates: u64,
+    n_seen: u64,
+}
+
+impl LinUcb {
+    /// `k` arms, unit ridge, \(\alpha = 1\).
+    pub fn new(n_arms: usize) -> Self {
+        let k = n_arms.max(1);
+        Self {
+            n_arms: k,
+            alpha: 1.0,
+            p: 0,
+            ainv: Vec::new(),
+            b: Vec::new(),
+            counts: vec![0; k],
+            updates: 0,
+            n_seen: 0,
+        }
+    }
+
+    fn ensure_dim(&mut self, p: usize) {
+        if self.p == p && !self.ainv.is_empty() {
+            return;
+        }
+        self.p = p.max(1);
+        let dim = self.p;
+        self.ainv = (0..self.n_arms)
+            .map(|_| {
+                let mut m = vec![0.0; dim * dim];
+                for i in 0..dim {
+                    m[i * dim + i] = 1.0;
+                }
+                m
+            })
+            .collect();
+        self.b = (0..self.n_arms).map(|_| Vector::zeros(dim)).collect();
+    }
+
+    fn context(x: &Matrix, i: usize, p: usize) -> Vector {
+        Vector::from_iter((0..p).map(|j| {
+            if j < x.ncols() {
+                x.get(i, j)
+            } else {
+                0.0
+            }
+        }))
+    }
+
+    fn matvec(a: &[f64], p: usize, v: &Vector) -> Vector {
+        Vector::from_iter((0..p).map(|r| {
+            let mut s = 0.0;
+            for c in 0..p {
+                s += a[r * p + c] * v[c];
+            }
+            s
+        }))
+    }
+
+    fn quad(a: &[f64], p: usize, v: &Vector) -> f64 {
+        let av = Self::matvec(a, p, v);
+        let n = v.len().min(av.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += v[j] * av[j];
+        }
+        s
+    }
+
+    fn choose_arm(&self, z: &Vector, ctx: &mut FitCtx) -> usize {
+        if let Some(a) = self.counts.iter().position(|&c| c == 0) {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message(format!("LinUCB has never pulled arm {a}"))
+                    .build(),
+            );
+            return a;
+        }
+        let p = self.p.max(1);
+        let alpha = if self.alpha.is_finite() && self.alpha > 0.0 {
+            self.alpha
+        } else {
+            1.0
+        };
+        let mut best = 0usize;
+        let mut best_u = f64::NEG_INFINITY;
+        for a in 0..self.n_arms {
+            let theta = Self::matvec(&self.ainv[a], p, &self.b[a]);
+            let mut mean = 0.0;
+            for j in 0..z.len().min(theta.len()) {
+                mean += z[j] * theta[j];
+            }
+            let var = Self::quad(&self.ainv[a], p, z).max(0.0);
+            let u = mean + alpha * var.sqrt();
+            if u > best_u {
+                best_u = u;
+                best = a;
+            }
+        }
+        best
+    }
+
+    fn sherman_update(ainv: &mut [f64], p: usize, z: &Vector) {
+        let az = Self::matvec(ainv, p, z);
+        let den = 1.0 + Self::quad(ainv, p, z);
+        if !den.is_finite() || den.abs() <= 1e-18 {
+            return;
+        }
+        for r in 0..p {
+            for c in 0..p {
+                ainv[r * p + c] -= az[r] * az[c] / den;
+            }
+        }
+    }
+
+    fn apply(&mut self, arm: usize, z: &Vector, reward: f64) {
+        let a = arm.min(self.n_arms.saturating_sub(1));
+        let p = self.p.max(1);
+        Self::sherman_update(&mut self.ainv[a], p, z);
+        for j in 0..p.min(self.b[a].len()).min(z.len()) {
+            self.b[a][j] += reward * z[j];
+        }
+        self.counts[a] += 1;
+        self.n_seen += 1;
+        self.updates += 1;
+    }
+}
+
+impl PartialFit for LinUcb {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish(
+                &ctx,
+                reject(self.updates, 0, self.n_seen, "LinUCB needs rewards"),
+            );
+        };
+        if x.ncols() == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .severity(Severity::Warning)
+                    .message("LinUCB received a context with no columns")
+                    .build(),
+            );
+            return finish(
+                &ctx,
+                reject(self.updates, y.len(), self.n_seen, "empty context"),
+            );
+        }
+        if self.p != 0 && self.p != x.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "LinUCB context dim changed from {} to {}",
+                        self.p,
+                        x.ncols()
+                    ))
+                    .build(),
+            );
+            return finish(
+                &ctx,
+                reject(self.updates, y.len(), self.n_seen, "context dim changed"),
+            );
+        }
+        self.ensure_dim(x.ncols());
+        let before: Vec<f64> = self.b.iter().map(|v| v.norm()).collect();
+        let mut dsum = 0.0;
+        let mut last_arm = 0usize;
+        for i in 0..y.len().min(x.nrows()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = Self::context(x, i, self.p);
+            let arm = self.choose_arm(&z, &mut ctx);
+            self.apply(arm, &z, y[i]);
+            last_arm = arm;
+            dsum += 1.0;
+        }
+        let after: Vec<f64> = self.b.iter().map(|v| v.norm()).collect();
+        let identified = self.counts.iter().all(|&c| c > 0);
+        let why = format!(
+            "chose arm {last_arm}; A ← A+xxᵀ and b ← b+rx on that arm (arm count is not p)"
+        );
+        let expl = pack_bandit(
+            &mut ctx,
+            self.updates,
+            y.len(),
+            self.n_seen,
+            dsum,
+            identified,
+            self.counts.iter().any(|&c| c == 0),
+            &before,
+            &after,
+            "LinUCB ridge-regression arms",
+            why.as_str(),
+        );
+        finish(&ctx, expl)
+    }
+}
+
 fn sample_beta(rng: &mut Rng, alpha: f64, beta: f64) -> f64 {
     // Gamma(k,1) ≈ sum of k exponentials for integer shape; otherwise Jöhnk.
     let x = sample_gamma(rng, alpha.max(1e-6));
@@ -630,5 +849,8 @@ mod tests {
         assert!(!q.value.narrative.is_empty());
         let _ = t.pull(&Session::new("th", "pull")).expect("th pull");
         let _ = u.pull(&Session::new("ucb", "pull")).expect("ucb pull");
+        let mut lin = LinUcb::new(2);
+        let q = lin.partial_fit(&x, Some(&y), &session).expect("linucb");
+        assert!(!q.value.narrative.is_empty());
     }
 }

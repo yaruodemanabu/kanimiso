@@ -6425,6 +6425,594 @@ pub fn mantel_haenszel(
     })
 }
 
+fn rankdata(xs: &[f64]) -> Vec<f64> {
+    let mut idx: Vec<usize> = (0..xs.len()).filter(|&i| xs[i].is_finite()).collect();
+    idx.sort_by(|&i, &j| xs[i].partial_cmp(&xs[j]).unwrap_or(std::cmp::Ordering::Equal));
+    let mut ranks = vec![f64::NAN; xs.len()];
+    let mut i = 0;
+    while i < idx.len() {
+        let mut j = i + 1;
+        while j < idx.len() && (xs[idx[j]] - xs[idx[i]]).abs() <= 1e-15 {
+            j += 1;
+        }
+        let mean_rank = (i + j + 1) as f64 / 2.0;
+        for &k in &idx[i..j] {
+            ranks[k] = mean_rank;
+        }
+        i = j;
+    }
+    ranks
+}
+
+/// Fligner–Killeen scale test (statsmodels / scipy `fligner`).
+///
+/// Group count is not identification `p`.
+pub fn fligner(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if groups.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("fligner needs at least two groups")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 0.0,
+            nobs: 0.0,
+        });
+    }
+    let mut z_all = Vec::new();
+    let mut owners = Vec::new();
+    for (g, grp) in groups.iter().enumerate() {
+        inspect_series_as_target(&mut ctx, grp);
+        let med = median(grp.as_slice());
+        for &v in grp.as_slice() {
+            if v.is_finite() && med.is_finite() {
+                z_all.push((v - med).abs());
+                owners.push(g);
+            }
+        }
+    }
+    let ranks = rankdata(&z_all);
+    let k = groups.len();
+    let mut sum_r = vec![0.0; k];
+    let mut n_g = vec![0.0; k];
+    for (o, r) in owners.iter().zip(&ranks) {
+        if r.is_finite() {
+            sum_r[*o] += *r;
+            n_g[*o] += 1.0;
+        }
+    }
+    let n: f64 = n_g.iter().sum();
+    let mean_r = if n > 0.0 {
+        ranks.iter().filter(|v| v.is_finite()).sum::<f64>() / n
+    } else {
+        f64::NAN
+    };
+    let mut ss = 0.0;
+    for r in &ranks {
+        if r.is_finite() {
+            let d = *r - mean_r;
+            ss += d * d;
+        }
+    }
+    let var = if n > 1.0 { ss / (n - 1.0) } else { 0.0 };
+    let mut stat = 0.0;
+    for g in 0..k {
+        if n_g[g] > 0.0 && var > 1e-18 {
+            let d = sum_r[g] / n_g[g] - mean_r;
+            stat += n_g[g] * d * d / var;
+        }
+    }
+    let df = (k as f64 - 1.0).max(1.0);
+    if var <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("fligner rank variance vanished")
+                .build(),
+        );
+    }
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: if stat.is_finite() {
+            chi2_pvalue(stat, df)
+        } else {
+            f64::NAN
+        },
+        df,
+        nobs: n,
+    })
+}
+
+/// Ansari–Bradley two-sample scale test (scipy `ansari`).
+pub fn ansari(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_pair(&mut ctx, x, y);
+    let mut vals = Vec::new();
+    let mut own = Vec::new();
+    for &v in x.as_slice() {
+        if v.is_finite() {
+            vals.push(v);
+            own.push(0u8);
+        }
+    }
+    for &v in y.as_slice() {
+        if v.is_finite() {
+            vals.push(v);
+            own.push(1);
+        }
+    }
+    let n = vals.len();
+    if n < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("ansari needs at least 4 finite observations")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: n as f64,
+        });
+    }
+    let ranks = rankdata(&vals);
+    let n1 = own.iter().filter(|&&o| o == 0).count() as f64;
+    let mut s = 0.0;
+    for (o, r) in own.iter().zip(&ranks) {
+        if *o == 0 && r.is_finite() {
+            s += (n as f64 + 1.0 - r).min(*r);
+        }
+    }
+    let mean = n1 * (n as f64 + 2.0) / 4.0;
+    let var = n1 * (n as f64 - n1) * (n as f64 + 1.0) * (n as f64 + 2.0) / (48.0 * (n as f64 - 1.0).max(1.0));
+    let z = if var > 1e-18 {
+        (s - mean) / var.sqrt()
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("ansari variance vanished")
+                .build(),
+        );
+        f64::NAN
+    };
+    ctx.finish(HypothesisTest {
+        statistic: s,
+        pvalue: if z.is_finite() {
+            crate::special::norm_pvalue_two_sided(z)
+        } else {
+            f64::NAN
+        },
+        df: 1.0,
+        nobs: n as f64,
+    })
+}
+
+/// Mood two-sample scale test (scipy `mood`).
+pub fn mood(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_pair(&mut ctx, x, y);
+    let mut vals = Vec::new();
+    let mut own = Vec::new();
+    for &v in x.as_slice() {
+        if v.is_finite() {
+            vals.push(v);
+            own.push(0u8);
+        }
+    }
+    for &v in y.as_slice() {
+        if v.is_finite() {
+            vals.push(v);
+            own.push(1);
+        }
+    }
+    let n = vals.len() as f64;
+    let ranks = rankdata(&vals);
+    let mid = (n + 1.0) / 2.0;
+    let mut m1 = 0.0;
+    let mut n1 = 0.0;
+    for (o, r) in own.iter().zip(&ranks) {
+        if *o == 0 && r.is_finite() {
+            let d = *r - mid;
+            m1 += d * d;
+            n1 += 1.0;
+        }
+    }
+    let mean = n1 * (n * n - 1.0) / 12.0;
+    let var = n1 * (n - n1) * (n + 1.0) * (n * n - 4.0) / (180.0 * (n - 1.0).max(1.0));
+    let z = if var > 1e-18 {
+        (m1 - mean) / var.sqrt()
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("mood variance vanished")
+                .build(),
+        );
+        f64::NAN
+    };
+    ctx.finish(HypothesisTest {
+        statistic: m1,
+        pvalue: if z.is_finite() {
+            crate::special::norm_pvalue_two_sided(z)
+        } else {
+            f64::NAN
+        },
+        df: 1.0,
+        nobs: n,
+    })
+}
+
+/// Mood's median test (scipy `median_test`).
+///
+/// Group count is not identification `p`.
+pub fn median_test(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if groups.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("median_test needs at least two groups")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 0.0,
+            nobs: 0.0,
+        });
+    }
+    let mut all = Vec::new();
+    for g in groups {
+        inspect_series_as_target(&mut ctx, g);
+        all.extend(g.as_slice().iter().copied().filter(|v| v.is_finite()));
+    }
+    let grand = median(&all);
+    let mut above = vec![0.0; groups.len()];
+    let mut below = vec![0.0; groups.len()];
+    let mut nobs = 0.0;
+    for (i, g) in groups.iter().enumerate() {
+        for &v in g.as_slice() {
+            if !v.is_finite() {
+                continue;
+            }
+            nobs += 1.0;
+            if v > grand {
+                above[i] += 1.0;
+            } else {
+                below[i] += 1.0;
+            }
+        }
+    }
+    let k = groups.len() as f64;
+    let a = above.iter().sum::<f64>();
+    let b = below.iter().sum::<f64>();
+    let mut stat = 0.0;
+    for i in 0..groups.len() {
+        let n_g = above[i] + below[i];
+        if n_g <= 0.0 || a + b <= 0.0 {
+            continue;
+        }
+        let ea = n_g * a / (a + b);
+        let eb = n_g * b / (a + b);
+        if ea > 1e-18 {
+            let d = above[i] - ea;
+            stat += d * d / ea;
+        }
+        if eb > 1e-18 {
+            let d = below[i] - eb;
+            stat += d * d / eb;
+        }
+    }
+    let df = (k - 1.0).max(1.0);
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: if stat.is_finite() {
+            chi2_pvalue(stat, df)
+        } else {
+            f64::NAN
+        },
+        df,
+        nobs,
+    })
+}
+
+/// Pearson χ² goodness-of-fit against a uniform expected (scipy `chisquare`).
+///
+/// Bin count is not identification `p`.
+pub fn chisquare(obs: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    power_divergence(obs, 1.0, session)
+}
+
+/// Cressie–Read power-divergence GOF (scipy `power_divergence`).
+///
+/// `lambda = 1` is Pearson χ². Bin count is not identification `p`.
+pub fn power_divergence(
+    obs: &Vector,
+    lambda: f64,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, obs);
+    let xs: Vec<f64> = obs.as_slice().iter().copied().filter(|v| v.is_finite()).collect();
+    if xs.iter().any(|v| *v < 0.0) {
+        ctx.push(
+            Issue::builder(IssueCode::NonPositiveSeries)
+                .severity(Severity::Warning)
+                .message("power_divergence saw a negative count")
+                .build(),
+        );
+    }
+    let n = xs.len();
+    if n < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("power_divergence needs at least two bins")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 0.0,
+            nobs: n as f64,
+        });
+    }
+    let tot: f64 = xs.iter().sum();
+    let exp = tot / n as f64;
+    let lam = if lambda.is_finite() { lambda } else { 1.0 };
+    let mut stat = 0.0;
+    for &o in &xs {
+        if exp <= 1e-18 {
+            continue;
+        }
+        if (lam - 1.0).abs() <= 1e-12 {
+            let d = o - exp;
+            stat += d * d / exp;
+        } else if lam.abs() <= 1e-12 {
+            if o > 0.0 {
+                stat += 2.0 * o * (o / exp).ln();
+            }
+        } else {
+            stat += 2.0 / (lam * (lam + 1.0)) * o * ((o / exp).powf(lam) - 1.0);
+        }
+    }
+    let df = (n as f64 - 1.0).max(1.0);
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: if stat.is_finite() {
+            chi2_pvalue(stat.max(0.0), df)
+        } else {
+            f64::NAN
+        },
+        df,
+        nobs: tot,
+    })
+}
+
+/// Cochran's Q for binary repeated measures (statsmodels `cochrans_q`).
+///
+/// Treatment count is not identification `p`.
+pub fn cochran_q(table: &Matrix, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, table, None, &ctx.policy);
+    let (n, k) = table.shape();
+    if n < 2 || k < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("cochran_q needs at least a 2×2 binary table")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 0.0,
+            nobs: n as f64,
+        });
+    }
+    let mut col = vec![0.0; k];
+    let mut row = vec![0.0; n];
+    for i in 0..n {
+        for j in 0..k {
+            let v = if table.get(i, j) >= 0.5 { 1.0 } else { 0.0 };
+            col[j] += v;
+            row[i] += v;
+        }
+    }
+    let t: f64 = col.iter().sum();
+    let mut ss_col = 0.0;
+    for c in &col {
+        ss_col += *c * *c;
+    }
+    let mut ss_row = 0.0;
+    for r in &row {
+        ss_row += *r * *r;
+    }
+    let den = k as f64 * t - ss_row;
+    let stat = if den.abs() <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("cochran_q denominator vanished")
+                .build(),
+        );
+        f64::NAN
+    } else {
+        (k as f64 - 1.0) * (k as f64 * ss_col - t * t) / den
+    };
+    let df = (k as f64 - 1.0).max(1.0);
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: if stat.is_finite() {
+            chi2_pvalue(stat.max(0.0), df)
+        } else {
+            f64::NAN
+        },
+        df,
+        nobs: n as f64,
+    })
+}
+
+/// Odds ratio of a 2×2 table (statsmodels `Table2x2.oddsratio`).
+pub fn odds_ratio(table: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if table.nrows() != 2 || table.ncols() != 2 {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("odds_ratio needs a 2×2 table")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let a = table.get(0, 0);
+    let b = table.get(0, 1);
+    let c = table.get(1, 0);
+    let d = table.get(1, 1);
+    if ![a, b, c, d].iter().all(|v| v.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .message("odds_ratio received a non-finite cell")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    if b.abs() <= 1e-18 || c.abs() <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("odds_ratio has a zero off-diagonal")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish((a * d) / (b * c))
+}
+
+/// Risk ratio of a 2×2 table (statsmodels `Table2x2.riskratio`).
+pub fn risk_ratio(table: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if table.nrows() != 2 || table.ncols() != 2 {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("risk_ratio needs a 2×2 table")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let a = table.get(0, 0);
+    let b = table.get(0, 1);
+    let c = table.get(1, 0);
+    let d = table.get(1, 1);
+    let r1 = a + b;
+    let r2 = c + d;
+    if r1.abs() <= 1e-18 || r2.abs() <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("risk_ratio has a zero row total")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish((a / r1) / (c / r2))
+}
+
+/// Paired two one-sided tests of equivalence (statsmodels `ttost_paired`).
+pub fn tost_paired(
+    x: &Vector,
+    y: &Vector,
+    low: f64,
+    high: f64,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_pair(&mut ctx, x, y);
+    if !(low.is_finite() && high.is_finite()) || low >= high {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("tost_paired bounds [{low}, {high}] are invalid"))
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 0.0,
+            nobs: 0.0,
+        });
+    }
+    let n = x.len().min(y.len());
+    let mut d = Vec::new();
+    for i in 0..n {
+        if x[i].is_finite() && y[i].is_finite() {
+            d.push(x[i] - y[i]);
+        }
+    }
+    if d.len() < 3 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("tost_paired needs n≥3 pairs")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 0.0,
+            nobs: d.len() as f64,
+        });
+    }
+    let m = d.iter().sum::<f64>() / d.len() as f64;
+    let mut ss = 0.0;
+    for v in &d {
+        let e = *v - m;
+        ss += e * e;
+    }
+    let se = (ss / (d.len() as f64 - 1.0)).sqrt() / (d.len() as f64).sqrt();
+    let df = d.len() as f64 - 1.0;
+    if se <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("tost_paired paired differences have zero variance")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df,
+            nobs: d.len() as f64,
+        });
+    }
+    let t_lo = (m - low) / se;
+    let t_hi = (high - m) / se;
+    let p_lo = 1.0 - student_t_cdf(t_lo, df);
+    let p_hi = 1.0 - student_t_cdf(t_hi, df);
+    let p = p_lo.max(p_hi);
+    ctx.finish(HypothesisTest {
+        statistic: t_lo.min(t_hi),
+        pvalue: p.clamp(0.0, 1.0),
+        df,
+        nobs: d.len() as f64,
+    })
+}
+
+/// One-way ANOVA *F* power (statsmodels `FTestAnovaPower`).
+///
+/// Group count is not identification `p`.
+pub fn ftest_anova_power(
+    effect_size: f64,
+    k_groups: f64,
+    n_per_group: f64,
+    alpha: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let df_num = (k_groups - 1.0).max(1.0);
+    let df_den = (k_groups * (n_per_group - 1.0)).max(1.0);
+    ftest_power(effect_size, df_num, df_den, alpha, session)
+}
+
 /// Nested-model ANOVA (statsmodels `anova_lm`).
 #[derive(Clone, Debug)]
 pub struct AnovaLm {
@@ -7555,5 +8143,30 @@ mod tests {
         let t2 = Matrix::from_fn(2, 2, |i, j| if i == j { 6.0 } else { 3.0 });
         let mh = mantel_haenszel(&[t1, t2], &Session::new("mh", "t")).expect("mh");
         assert!(mh.value.statistic.is_finite() || mh.value.pvalue.is_nan());
+        let fl = fligner(&[&a, &b, &c], &Session::new("fl", "t")).expect("fl");
+        assert!(fl.value.statistic.is_finite() || fl.value.pvalue.is_nan());
+        let an = ansari(&a, &b, &Session::new("ans", "t")).expect("ans");
+        assert!(an.value.statistic.is_finite() || an.value.pvalue.is_nan());
+        let mo = mood(&a, &b, &Session::new("mood", "t")).expect("mood");
+        assert!(mo.value.statistic.is_finite() || mo.value.pvalue.is_nan());
+        let mt = median_test(&[&a, &b, &c], &Session::new("mdt", "t")).expect("mdt");
+        assert!(mt.value.statistic.is_finite() || mt.value.pvalue.is_nan());
+        let cnt = Vector::from_slice(&[8.0, 6.0, 4.0, 2.0]);
+        let chi = chisquare(&cnt, &Session::new("chi", "t")).expect("chi");
+        assert!(chi.value.statistic.is_finite() || chi.value.pvalue.is_nan());
+        let pdv = power_divergence(&cnt, 1.0, &Session::new("pdv", "t")).expect("pdv");
+        assert!((pdv.value.statistic - chi.value.statistic).abs() < 1e-9 || pdv.value.statistic.is_nan());
+        let qtab = Matrix::from_fn(8, 3, |i, j| if (i + j) % 2 == 0 { 1.0 } else { 0.0 });
+        let cq = cochran_q(&qtab, &Session::new("cq", "t")).expect("cq");
+        assert!(cq.value.statistic.is_finite() || cq.value.pvalue.is_nan());
+        let or = odds_ratio(&tab2, &Session::new("or", "t")).expect("or");
+        assert!(or.value.is_finite() && or.value > 1.0);
+        let rr = risk_ratio(&tab2, &Session::new("rr", "t")).expect("rr");
+        assert!(rr.value.is_finite() && rr.value > 1.0);
+        let ys_close = Vector::from_iter((0..20).map(|i| i as f64 + 0.05 * (i as f64).sin()));
+        let tost = tost_paired(&xs, &ys_close, -1.0, 1.0, &Session::new("tost", "t")).expect("tost");
+        assert!(tost.value.pvalue.is_finite() || tost.value.statistic.is_nan());
+        let ap = ftest_anova_power(0.5, 3.0, 12.0, 0.05, &Session::new("fap", "t")).expect("fap");
+        assert!(ap.value.is_finite() && ap.value >= 0.0 && ap.value <= 1.0);
     }
 }

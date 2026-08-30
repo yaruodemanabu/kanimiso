@@ -15486,6 +15486,580 @@ impl PartialFit for ImplicitMf {
     }
 }
 
+/// AdaMax linear regressor (river `optim.AdaMax`).
+///
+/// Infinity-norm second moment: \(u \leftarrow \max(\beta_2 u, |g|)\).
+#[derive(Clone, Debug)]
+pub struct AdaMaxRegressor {
+    /// Step \(\eta\).
+    pub learning_rate: f64,
+    /// First-moment decay.
+    pub beta1: f64,
+    /// Infinity-norm decay.
+    pub beta2: f64,
+    /// Diagonal floor.
+    pub eps: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    m: Vector,
+    u: Vector,
+    t: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for AdaMaxRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            m: Vector::zeros(0),
+            u: Vector::zeros(0),
+            t: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl AdaMaxRegressor {
+    /// Default AdaMax regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for AdaMaxRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.m = Vector::zeros(dim);
+            self.u = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.coef.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let b1 = self.beta1.clamp(0.0, 0.999);
+        let b2 = self.beta2.clamp(0.0, 0.999);
+        let eps = if self.eps.is_finite() && self.eps > 0.0 {
+            self.eps
+        } else {
+            1e-8
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            self.t += 1.0;
+            let corr1 = 1.0 - b1.powf(self.t);
+            for j in 0..dim {
+                let g = err * z[j];
+                self.m[j] = b1 * self.m[j] + (1.0 - b1) * g;
+                let ug: f64 = g.abs();
+                self.u[j] = (b2 * self.u[j]).max(ug);
+                let mhat = self.m[j] / corr1.max(1e-18);
+                self.coef[j] -= eta * mhat / (self.u[j] + eps);
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "AdaMax linear weights",
+            "the first moment is bias-corrected and scaled by the running ∞-norm of g",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for AdaMaxRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
+/// AMSGrad linear regressor (river `optim.AMSGrad`).
+///
+/// Keeps the running maximum of the bias-corrected second moment.
+#[derive(Clone, Debug)]
+pub struct AMSGradRegressor {
+    /// Step \(\eta\).
+    pub learning_rate: f64,
+    /// First-moment decay.
+    pub beta1: f64,
+    /// Second-moment decay.
+    pub beta2: f64,
+    /// Diagonal floor.
+    pub eps: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    m: Vector,
+    v: Vector,
+    vhat_max: Vector,
+    t: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for AMSGradRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            m: Vector::zeros(0),
+            v: Vector::zeros(0),
+            vhat_max: Vector::zeros(0),
+            t: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl AMSGradRegressor {
+    /// Default AMSGrad regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for AMSGradRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.m = Vector::zeros(dim);
+            self.v = Vector::zeros(dim);
+            self.vhat_max = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.coef.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let b1 = self.beta1.clamp(0.0, 0.999);
+        let b2 = self.beta2.clamp(0.0, 0.999);
+        let eps = if self.eps.is_finite() && self.eps > 0.0 {
+            self.eps
+        } else {
+            1e-8
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            self.t += 1.0;
+            let corr1 = 1.0 - b1.powf(self.t);
+            let corr2 = 1.0 - b2.powf(self.t);
+            for j in 0..dim {
+                let g = err * z[j];
+                self.m[j] = b1 * self.m[j] + (1.0 - b1) * g;
+                self.v[j] = b2 * self.v[j] + (1.0 - b2) * g * g;
+                let mhat = self.m[j] / corr1.max(1e-18);
+                let vhat = self.v[j] / corr2.max(1e-18);
+                if vhat > self.vhat_max[j] {
+                    self.vhat_max[j] = vhat;
+                }
+                self.coef[j] -= eta * mhat / (self.vhat_max[j].sqrt() + eps);
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "AMSGrad linear weights",
+            "the second-moment maximum stops the Adam step from shrinking after a rare large g",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for AMSGradRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
+/// Streaming quantile of column 0 (river `stats.Quantile`).
+///
+/// Window length is not identification `p`. Distinct from [`RollingQuantile`]
+/// by exposing an explicit sliding capacity.
+#[derive(Clone, Debug)]
+pub struct OnlineQuantile {
+    /// Quantile in \((0, 1)\).
+    pub q: f64,
+    /// Sliding window capacity (not a parameter count).
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OnlineQuantile {
+    fn default() -> Self {
+        Self {
+            q: 0.5,
+            window: 32,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlineQuantile {
+    /// Quantile `q` over a sliding window of `window` observations.
+    pub fn new(q: f64, window: usize) -> Self {
+        Self {
+            q,
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current order-statistic quantile, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.buf.is_empty() {
+            return f64::NAN;
+        }
+        let qv = if self.q.is_finite() && self.q > 0.0 && self.q < 1.0 {
+            self.q
+        } else {
+            0.5
+        };
+        let mut xs = self.buf.clone();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = (qv * (xs.len() - 1) as f64).round() as usize;
+        xs[idx.min(xs.len() - 1)]
+    }
+}
+
+impl PartialFit for OnlineQuantile {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.q.is_finite() || self.q <= 0.0 || self.q >= 1.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "OnlineQuantile.q={} is not in (0,1); using 0.5",
+                        self.q
+                    ))
+                    .build(),
+            );
+            self.q = 0.5;
+        }
+        let cap = self.window.max(1);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            self.buf.push(v);
+            if self.buf.len() > cap {
+                self.buf.remove(0);
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.buf.len() >= 2;
+        q.warmup = self.buf.len() < 2;
+        q.explanation = format!("OnlineQuantile q={:.3} value={after:.6e} n={}", self.q, self.buf.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "streaming quantile",
+                "order statistic of a sliding window of column-0 values; the window length is not p",
+                format!("q={before:.6e}"),
+                format!("q={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// SLIM-lite item-item recommender (river `reco.SLIM`).
+///
+/// `X` is `[user, item]`, `y` is the rating. The last item per user is kept
+/// and SGD updates \(W[\mathrm{prev},\mathrm{item}]\). Item count is not
+/// identification `p`.
+#[derive(Clone, Debug)]
+pub struct SlimReco {
+    /// SGD step.
+    pub learning_rate: f64,
+    last: HashMap<i64, usize>,
+    w: HashMap<(usize, usize), f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for SlimReco {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            last: HashMap::new(),
+            w: HashMap::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl SlimReco {
+    /// Empty SLIM-lite recommender.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn pred(&self, prev: usize, item: usize) -> f64 {
+        self.w.get(&(prev, item)).copied().unwrap_or(0.0)
+    }
+}
+
+impl PartialFit for SlimReco {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no ratings"),
+            );
+        };
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("SlimReco needs [user, item] columns")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need two columns"),
+            );
+        }
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let mut sse = 0.0;
+        let mut moved = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let user = x.get(i, 0).round() as i64;
+            let item = x.get(i, 1).round().max(0.0) as usize;
+            if let Some(&prev) = self.last.get(&user) {
+                let before = self.pred(prev, item);
+                let err = before - y[i];
+                sse += err * err;
+                let nxt = before - eta * err;
+                self.w.insert((prev, item), nxt);
+                moved += (nxt - before).abs();
+            }
+            self.last.insert(user, item);
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(moved);
+        q.information_gain = Some(moved.max(x.nrows() as f64));
+        q.loss_after = Some(sse);
+        q.still_identified = self.w.len() >= 1;
+        q.warmup = self.w.is_empty();
+        q.explanation = format!(
+            "SlimReco {} item-item weights, ||ΔW||={moved:.6e}",
+            self.w.len()
+        );
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("SlimReco has not yet seen a repeat user")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "SLIM item-item weights",
+                "SGD on W[prev_item, item] for the last item of each user",
+                "previous sparse W",
+                format!("{} pairs", self.w.len()),
+            ),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -15909,6 +16483,18 @@ mod tests {
         ImplicitMf::new(2)
             .partial_fit(&xui, Some(&y), &session)
             .expect("imf");
+        AdaMaxRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("adamax");
+        AMSGradRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("amsgrad");
+        OnlineQuantile::new(0.5, 8)
+            .partial_fit(&x, None, &session)
+            .expect("oq");
+        SlimReco::new()
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("slim");
 
         let n_expl = session
             .ledger()

@@ -3406,6 +3406,101 @@ const INVENTORY: &[Algorithm] = &[
         "online",
     ),
     a("online.ImplicitMf", "river.reco.BiasedMF", "online"),
+    a(
+        "metrics.silhouette_score",
+        "sklearn.metrics.silhouette_score",
+        "metric",
+    ),
+    a(
+        "metrics.roc_auc_score",
+        "sklearn.metrics.roc_auc_score",
+        "metric",
+    ),
+    a(
+        "metrics.cohen_kappa_score",
+        "sklearn.metrics.cohen_kappa_score",
+        "metric",
+    ),
+    a(
+        "metrics.mean_absolute_percentage_error",
+        "sklearn.metrics.mean_absolute_percentage_error",
+        "metric",
+    ),
+    a(
+        "metrics.median_absolute_error",
+        "sklearn.metrics.median_absolute_error",
+        "metric",
+    ),
+    a(
+        "metrics.precision_recall_fscore_support",
+        "sklearn.metrics.precision_recall_fscore_support",
+        "metric",
+    ),
+    a(
+        "metrics.pairwise_distances_argmin_min",
+        "sklearn.metrics.pairwise_distances_argmin_min",
+        "metric",
+    ),
+    a(
+        "preprocess.KNNImputer",
+        "sklearn.impute.KNNImputer",
+        "preprocess",
+    ),
+    a("stats.fligner", "scipy.stats.fligner", "stats"),
+    a("stats.ansari", "scipy.stats.ansari", "stats"),
+    a("stats.mood", "scipy.stats.mood", "stats"),
+    a("stats.median_test", "scipy.stats.median_test", "stats"),
+    a("stats.chisquare", "scipy.stats.chisquare", "stats"),
+    a(
+        "stats.power_divergence",
+        "scipy.stats.power_divergence",
+        "stats",
+    ),
+    a(
+        "stats.cochran_q",
+        "statsmodels.stats.contingency_tables.cochrans_q",
+        "stats",
+    ),
+    a(
+        "stats.odds_ratio",
+        "statsmodels.stats.contingency_tables.Table2x2.oddsratio",
+        "stats",
+    ),
+    a(
+        "stats.risk_ratio",
+        "statsmodels.stats.contingency_tables.Table2x2.riskratio",
+        "stats",
+    ),
+    a(
+        "stats.tost_paired",
+        "statsmodels.stats.weightstats.ttost_paired",
+        "stats",
+    ),
+    a(
+        "stats.ftest_anova_power",
+        "statsmodels.stats.power.FTestAnovaPower",
+        "stats",
+    ),
+    a(
+        "tslearn.FCNClassifier",
+        "sktime.classification.deep_learning.fcn.FCNClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.MacnnClassifier",
+        "sktime.classification.deep_learning.macnn.MACNNClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.TapNetRegressor",
+        "sktime.regression.deep_learning.tapnet.TapNetRegressor",
+        "timeseries",
+    ),
+    a("online.AdaMaxRegressor", "river.optim.AdaMax", "online"),
+    a("online.AMSGradRegressor", "river.optim.AMSGrad", "online"),
+    a("online.OnlineQuantile", "river.stats.Quantile", "online"),
+    a("online.SlimReco", "river.reco.SLIM", "online"),
+    a("bandit.LinUcb", "river.bandit.LinUCB", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -3560,6 +3655,11 @@ mod tests {
             "metrics.class_likelihood_ratios",
             "tslearn.TapNetClassifier",
             "online.NesterovRegressor",
+            "metrics.silhouette_score",
+            "stats.fligner",
+            "tslearn.FCNClassifier",
+            "online.AdaMaxRegressor",
+            "bandit.LinUcb",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

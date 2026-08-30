@@ -872,6 +872,9 @@ impl Transform for KnnImputer {
     }
 }
 
+/// sklearn `KNNImputer` spelling of [`KnnImputer`].
+pub type KNNImputer = KnnImputer;
+
 /// MICE-style iterative imputation (sklearn `IterativeImputer`).
 ///
 /// Missing entries are initialized at the column mean of the observed cells.
@@ -2592,5 +2595,14 @@ mod tests {
         assert_eq!(ind.shape(), xm.shape());
         assert!((ind.get(3, 1) - 1.0).abs() < 1e-12);
         assert!((ind.get(0, 0) - 0.0).abs() < 1e-12);
+        let mut knn: KNNImputer = KnnImputer::new(3);
+        knn.fit_unsupervised(&xm, &Session::new("knn", "fit"))
+            .unwrap();
+        let kn = knn
+            .transform(&xm, &Session::new("knn", "t"))
+            .unwrap()
+            .value;
+        assert!(kn.get(3, 1).is_finite());
+        assert!(kn.get(7, 0).is_finite());
     }
 }
