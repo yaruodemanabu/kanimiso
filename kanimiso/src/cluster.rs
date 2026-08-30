@@ -2448,6 +2448,184 @@ pub struct FittedOptics {
     pub reachability: Vector,
 }
 
+/// Bisecting k-means: recursively split the highest-SSE cluster with 2-means.
+#[derive(Clone, Debug)]
+pub struct BisectingKMeans {
+    /// Target number of clusters.
+    pub k: usize,
+    /// Lloyd iterations per bisection.
+    pub max_iter: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for BisectingKMeans {
+    fn default() -> Self {
+        Self {
+            k: 8,
+            max_iter: 50,
+            seed: 0,
+        }
+    }
+}
+
+impl BisectingKMeans {
+    /// Bisect until `k` clusters.
+    pub fn new(k: usize) -> Self {
+        Self {
+            k,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKMeans>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+impl FitUnsupervised for BisectingKMeans {
+    type Fitted = FittedKMeans;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKMeans>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (n, p) = x.shape();
+        let want = self.k.max(1);
+        if n == 0 || p == 0 {
+            return ctx.finish(empty_kmeans(want, p, n));
+        }
+        if want > n {
+            ctx.push(
+                Issue::builder(IssueCode::Overparameterized)
+                    .message(format!("bisecting k={want} > n={n}"))
+                    .build(),
+            );
+        }
+        let k = want.min(n.max(1));
+        let mut rng = Rng::new(self.seed | 1);
+        let mut groups: Vec<Vec<usize>> = vec![(0..n).collect()];
+        let mut n_iter = 0usize;
+        while groups.len() < k {
+            let mut best = 0usize;
+            let mut best_sse = -1.0;
+            for (g, idx) in groups.iter().enumerate() {
+                if idx.len() < 2 {
+                    continue;
+                }
+                let mut mean = vec![0.0; p];
+                for &i in idx {
+                    for j in 0..p {
+                        mean[j] += x.get(i, j);
+                    }
+                }
+                let inv = 1.0 / idx.len() as f64;
+                for m in mean.iter_mut() {
+                    *m *= inv;
+                }
+                let mut sse = 0.0;
+                for &i in idx {
+                    for j in 0..p {
+                        let d = x.get(i, j) - mean[j];
+                        sse += d * d;
+                    }
+                }
+                if sse > best_sse {
+                    best_sse = sse;
+                    best = g;
+                }
+            }
+            if best_sse <= 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::EmptyCluster)
+                        .message("no cluster with ≥2 distinct points remains to bisect")
+                        .build(),
+                );
+                break;
+            }
+            let idx = groups[best].clone();
+            let sub = Matrix::from_fn(idx.len(), p, |i, j| x.get(idx[i], j));
+            let mut centers = kmeans_plus_plus(&sub, 2, &mut rng);
+            let mut last = Vector::zeros(idx.len());
+            for it in 0..self.max_iter.max(1) {
+                let (labels, counts, _) = assign_lloyd(&sub, &centers);
+                update_means(&sub, &labels, &mut centers, &counts);
+                reseed_empty(&mut ctx, &sub, &mut centers, &counts, &mut rng);
+                n_iter += 1;
+                let mut changed = false;
+                for i in 0..labels.len() {
+                    if (labels[i] - last[i]).abs() > 0.0 {
+                        changed = true;
+                    }
+                }
+                last = labels;
+                ctx.session.step(it as u64, 0.0, None);
+                if !changed && it > 0 {
+                    break;
+                }
+            }
+            let mut a = Vec::new();
+            let mut b = Vec::new();
+            for (i, &row) in idx.iter().enumerate() {
+                if last[i] < 0.5 {
+                    a.push(row);
+                } else {
+                    b.push(row);
+                }
+            }
+            if a.is_empty() || b.is_empty() {
+                ctx.push(
+                    Issue::builder(IssueCode::EmptyCluster)
+                        .message("a bisection produced an empty child")
+                        .build(),
+                );
+                break;
+            }
+            groups[best] = a;
+            groups.push(b);
+        }
+        let kk = groups.len();
+        let mut centroids = Matrix::zeros(kk, p);
+        let mut labels = Vector::zeros(n);
+        let mut counts = Vector::zeros(kk);
+        let mut inertia = 0.0;
+        for (c, idx) in groups.iter().enumerate() {
+            counts[c] = idx.len() as f64;
+            if idx.is_empty() {
+                continue;
+            }
+            for j in 0..p {
+                let mut s = 0.0;
+                for &i in idx {
+                    s += x.get(i, j);
+                }
+                centroids.set(c, j, s / idx.len() as f64);
+            }
+            for &i in idx {
+                labels[i] = c as f64;
+                inertia += sq_dist_rc(x, i, &centroids, c);
+            }
+        }
+        if kk < 2 && n > 1 && !all_rows_identical(x, ctx.policy.near_zero_variance) {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateClusters)
+                    .message("bisecting k-means collapsed to one cluster")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedKMeans {
+            labels,
+            centroids,
+            inertia,
+            n_iter,
+            counts,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2515,6 +2693,17 @@ mod tests {
         let q = m.partial_fit(&x, None, &session).expect("pf");
         assert!(!q.value.narrative.is_empty());
         assert!(q.value.quality.effective_sample_size > 0.0);
+    }
+
+    #[test]
+    fn bisecting_kmeans_recovers_two_blobs() {
+        let x = two_blobs();
+        let q = BisectingKMeans::new(2)
+            .fit(&x, &Session::new("bisect", "fit"))
+            .expect("bisect");
+        assert_eq!(q.value.centroids.nrows(), 2);
+        let lab = q.value.labels.as_slice();
+        assert_ne!(lab[0], lab[20], "blobs must differ: {lab:?}");
     }
 
     #[test]

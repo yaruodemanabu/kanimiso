@@ -1306,6 +1306,149 @@ const INVENTORY: &[Algorithm] = &[
         "river.ensemble.LeveragingBaggingClassifier",
         "online",
     ),
+    a(
+        "linear_model.ElasticNetCV",
+        "sklearn.linear_model.ElasticNetCV",
+        "estimator",
+    ),
+    a(
+        "linear_model.MultiTaskLasso",
+        "sklearn.linear_model.MultiTaskLasso",
+        "estimator",
+    ),
+    a(
+        "linear_model.TransformedTargetRegressor",
+        "sklearn.compose.TransformedTargetRegressor",
+        "estimator",
+    ),
+    a(
+        "linear_model.RollingOls",
+        "statsmodels.regression.rolling.RollingOLS",
+        "estimator",
+    ),
+    a(
+        "linear_model.ExpandingOls",
+        "statsmodels.regression.rolling.RollingOLS",
+        "estimator",
+    ),
+    a(
+        "linear_model.Glsar",
+        "statsmodels.regression.linear_model.GLSAR",
+        "estimator",
+    ),
+    a(
+        "preprocess.TargetEncoder",
+        "sklearn.preprocessing.TargetEncoder",
+        "transformer",
+    ),
+    a(
+        "preprocess.SplineTransformer",
+        "sklearn.preprocessing.SplineTransformer",
+        "transformer",
+    ),
+    a(
+        "preprocess.FunctionTransformer",
+        "sklearn.preprocessing.FunctionTransformer",
+        "transformer",
+    ),
+    a(
+        "text.CountVectorizer",
+        "sklearn.feature_extraction.text.CountVectorizer",
+        "transformer",
+    ),
+    a(
+        "text.TfidfTransformer",
+        "sklearn.feature_extraction.text.TfidfTransformer",
+        "transformer",
+    ),
+    a(
+        "feature.SelectFromModel",
+        "sklearn.feature_selection.SelectFromModel",
+        "transformer",
+    ),
+    a(
+        "feature.catch22",
+        "sktime.transformations.panel.catch22.Catch22",
+        "function",
+    ),
+    a(
+        "cluster.BisectingKMeans",
+        "sklearn.cluster.BisectingKMeans",
+        "estimator",
+    ),
+    a(
+        "neighbors.RadiusNeighborsRegressor",
+        "sklearn.neighbors.RadiusNeighborsRegressor",
+        "estimator",
+    ),
+    a(
+        "decompose.MiniBatchNmf",
+        "sklearn.decomposition.MiniBatchNMF",
+        "estimator",
+    ),
+    a(
+        "stats.tukey_hsd",
+        "statsmodels.stats.multicomp.pairwise_tukeyhsd",
+        "stats",
+    ),
+    a(
+        "stats.goldfeld_quandt",
+        "statsmodels.stats.diagnostic.het_goldfeldquandt",
+        "stats",
+    ),
+    a(
+        "stats.breusch_godfrey",
+        "statsmodels.stats.diagnostic.acorr_breusch_godfrey",
+        "stats",
+    ),
+    a(
+        "stats.phillips_perron",
+        "statsmodels.tsa.stattools.phillips_perron",
+        "stats",
+    ),
+    a(
+        "glm.ZeroInflatedPoisson",
+        "statsmodels.discrete.count_model.ZeroInflatedPoisson",
+        "estimator",
+    ),
+    a("glm.WeibullAft", "lifelines.WeibullAFTFitter", "estimator"),
+    a(
+        "tslearn.TimeSeriesScalerMinMax",
+        "tslearn.preprocessing.TimeSeriesScalerMinMax",
+        "timeseries",
+    ),
+    a(
+        "tslearn.softdtw_barycenter",
+        "tslearn.barycentres.softdtw_barycenter",
+        "timeseries",
+    ),
+    a(
+        "tslearn.global_alignment_kernel",
+        "tslearn.metrics.gak",
+        "timeseries",
+    ),
+    a(
+        "tslearn.MiniRocket",
+        "sktime.transformations.panel.rocket.MiniRocket",
+        "timeseries",
+    ),
+    a(
+        "hmm.VariationalGaussianHmm",
+        "hmmlearn.vhmm.VariationalGaussianHMM",
+        "hmm",
+    ),
+    a("online.Snarimax", "river.time_series.SNARIMAX", "online"),
+    a("online.DenStream", "river.cluster.DenStream", "online"),
+    a(
+        "covariance.GraphicalLassoCV",
+        "sklearn.covariance.GraphicalLassoCV",
+        "covariance",
+    ),
+    a(
+        "tsa.EnsembleForecaster",
+        "sktime.forecasting.compose.EnsembleForecaster",
+        "forecast",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -1342,6 +1485,10 @@ mod tests {
             "glm.OrderedLogit",
             "tsa.AutoArima",
             "online.LeveragingBagging",
+            "linear_model.ElasticNetCV",
+            "glm.ZeroInflatedPoisson",
+            "hmm.VariationalGaussianHmm",
+            "online.Snarimax",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

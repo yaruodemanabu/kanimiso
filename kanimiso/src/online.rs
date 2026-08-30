@@ -3920,6 +3920,289 @@ impl Predict for Alma {
     }
 }
 
+/// Online SNARIMAX: RLS on AR lags, MA residual lags, and exogenous columns.
+#[derive(Clone, Debug)]
+pub struct Snarimax {
+    /// Autoregressive order.
+    pub p: usize,
+    /// Moving-average order.
+    pub q: usize,
+    inner: LinearRegression,
+    y_hist: Vec<f64>,
+    e_hist: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for Snarimax {
+    fn default() -> Self {
+        Self {
+            p: 1,
+            q: 0,
+            inner: LinearRegression::new(1.0),
+            y_hist: Vec::new(),
+            e_hist: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl Snarimax {
+    /// SNARIMAX with AR(`p`) and MA(`q`).
+    pub fn new(p: usize, q: usize) -> Self {
+        Self {
+            p,
+            q,
+            ..Self::default()
+        }
+    }
+
+    fn feat_row(&self, x: &Matrix, i: usize) -> Vector {
+        let dim = self.p + self.q + x.ncols();
+        let mut z = Vector::zeros(dim);
+        for k in 0..self.p {
+            let idx = self.y_hist.len().saturating_sub(k + 1);
+            z[k] = if self.y_hist.len() > k {
+                self.y_hist[idx]
+            } else {
+                0.0
+            };
+        }
+        for k in 0..self.q {
+            let idx = self.e_hist.len().saturating_sub(k + 1);
+            z[self.p + k] = if self.e_hist.len() > k {
+                self.e_hist[idx]
+            } else {
+                0.0
+            };
+        }
+        for j in 0..x.ncols() {
+            z[self.p + self.q + j] = x.get(i, j);
+        }
+        z
+    }
+}
+
+impl PartialFit for Snarimax {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        let need = self.p.max(self.q);
+        let warmup = self.y_hist.len() < need;
+        let mut info = 0.0;
+        let mut last_err = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            let z = self.feat_row(x, i);
+            let row = Matrix::from_fn(1, z.len(), |_, j| z[j]);
+            let yi = Vector::from_slice(&[y[i]]);
+            match self
+                .inner
+                .partial_fit(&row, Some(&yi), &session.child("rls"))
+            {
+                Ok(q) => {
+                    info += q.value.quality.information_gain.unwrap_or(0.0);
+                }
+                Err(e) => ctx.push(e.primary),
+            }
+            let pred = if self.inner.coef().len() + 1 == z.len() + 1
+                || self.inner.intercept().is_finite()
+            {
+                let mut s = self.inner.intercept();
+                let c = self.inner.coef();
+                for j in 0..c.len().min(z.len()) {
+                    s += c[j] * z[j];
+                }
+                s
+            } else {
+                0.0
+            };
+            last_err = y[i] - pred;
+            self.y_hist.push(y[i]);
+            self.e_hist.push(last_err);
+            if self.y_hist.len() > 64 {
+                self.y_hist.remove(0);
+            }
+            if self.e_hist.len() > 64 {
+                self.e_hist.remove(0);
+            }
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.information_gain = Some(info.abs() + last_err.abs());
+        q.still_identified = self.n_seen > (self.p + self.q + x.ncols()) as u64;
+        q.warmup = warmup || self.n_seen < 5;
+        q.explanation = format!(
+            "SNARIMAX AR{} MA{}: last residual={last_err:.4e}, n={}",
+            self.p, self.q, self.n_seen
+        );
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("SNARIMAX lag buffers are still filling")
+                    .build(),
+            );
+        }
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "RLS update of AR/MA/exog coefficients",
+                "Hannan–Rissanen-style online regression on lags and x_t",
+                format!("n={}", self.n_seen.saturating_sub(x.nrows() as u64)),
+                format!("n={} e={last_err:.4e}", self.n_seen),
+            ),
+        )
+    }
+}
+
+/// DenStream-style decaying micro-clusters (river `cluster.DenStream`).
+#[derive(Clone, Debug)]
+pub struct DenStream {
+    /// Merge radius.
+    pub eps: f64,
+    /// Per-step weight decay.
+    pub lambda: f64,
+    micros: Vec<(Vector, f64)>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for DenStream {
+    fn default() -> Self {
+        Self {
+            eps: 1.0,
+            lambda: 0.99,
+            micros: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl DenStream {
+    /// DenStream with merge radius `eps`.
+    pub fn new(eps: f64) -> Self {
+        Self {
+            eps,
+            ..Self::default()
+        }
+    }
+
+    /// Current micro-cluster count.
+    pub fn n_micro(&self) -> usize {
+        self.micros.len()
+    }
+}
+
+impl PartialFit for DenStream {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !(self.eps.is_finite() && self.eps > 0.0) {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .message(format!("DenStream eps={} is not positive", self.eps))
+                    .build(),
+            );
+        }
+        let lam = self.lambda.clamp(1e-6, 1.0);
+        let mut merged = 0u64;
+        let mut spawned = 0u64;
+        for i in 0..x.nrows() {
+            for mc in self.micros.iter_mut() {
+                mc.1 *= lam;
+            }
+            self.micros.retain(|mc| mc.1 >= 1e-3);
+            let row = x.row(i);
+            let mut best = None;
+            let mut best_d = f64::INFINITY;
+            for (c, (ctr, _)) in self.micros.iter().enumerate() {
+                let mut d = 0.0;
+                for j in 0..row.len().min(ctr.len()) {
+                    let z = row[j] - ctr[j];
+                    d += z * z;
+                }
+                d = d.sqrt();
+                if d < best_d {
+                    best_d = d;
+                    best = Some(c);
+                }
+            }
+            if let Some(c) = best {
+                if best_d <= self.eps {
+                    let w = self.micros[c].1;
+                    let nw = w + 1.0;
+                    for j in 0..self.micros[c].0.len().min(row.len()) {
+                        self.micros[c].0[j] = (w * self.micros[c].0[j] + row[j]) / nw;
+                    }
+                    self.micros[c].1 = nw;
+                    merged += 1;
+                    continue;
+                }
+            }
+            self.micros.push((row, 1.0));
+            spawned += 1;
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        if self.micros.is_empty() && x.nrows() > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyCluster)
+                    .message("DenStream retained no micro-clusters")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.micros.iter().map(|m| m.1).sum();
+        q.information_gain = Some(merged as f64 + spawned as f64);
+        q.still_identified = !self.micros.is_empty();
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "DenStream: merged={merged} spawned={spawned} micros={}",
+            self.micros.len()
+        );
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("DenStream has seen fewer than 4 points")
+                    .build(),
+            );
+        }
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "micro-cluster assignment / spawn",
+                "decayed CF update if within eps, else a new micro-cluster",
+                format!("micros before batch"),
+                format!("micros={}", self.micros.len()),
+            ),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4048,6 +4331,12 @@ mod tests {
         LeveragingBagging::new(2)
             .partial_fit(&x, Some(&yb), &session)
             .expect("lb");
+        Snarimax::new(1, 0)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("snarimax");
+        DenStream::new(3.0)
+            .partial_fit(&x, None, &session)
+            .expect("denstream");
 
         let n_expl = session
             .ledger()
@@ -4056,7 +4345,7 @@ mod tests {
             .filter(|e| e.kind == EventKind::IncrementalExplanation)
             .count();
         assert!(
-            n_expl >= 23,
+            n_expl >= 25,
             "expected an IncrementalExplanation per partial_fit, got {n_expl}"
         );
     }

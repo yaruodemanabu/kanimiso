@@ -1546,6 +1546,273 @@ impl Transform for TimeSeriesScalerMeanVariance {
     }
 }
 
+fn softdtw_grad(a: &[f64], b: &[f64], gamma: f64) -> (f64, Vec<f64>) {
+    let n = a.len();
+    let m = b.len();
+    let mut grad = vec![0.0; n];
+    if n == 0 || m == 0 {
+        return (f64::NAN, grad);
+    }
+    let inf = 1e300;
+    let g = gamma.max(1e-12);
+    let cols = m + 2;
+    let idx = |i: usize, j: usize| i * cols + j;
+    let mut r = vec![inf; (n + 2) * cols];
+    r[idx(0, 0)] = 0.0;
+    for i in 1..=n {
+        for j in 1..=m {
+            let cost = (a[i - 1] - b[j - 1]).abs();
+            let v = softmin(
+                &[r[idx(i - 1, j)], r[idx(i, j - 1)], r[idx(i - 1, j - 1)]],
+                g,
+            );
+            r[idx(i, j)] = cost + v;
+        }
+    }
+    let mut e = vec![0.0; (n + 2) * cols];
+    e[idx(n, m)] = 1.0;
+    for i in (1..=n).rev() {
+        for j in (1..=m).rev() {
+            let ee = e[idx(i, j)];
+            if ee == 0.0 {
+                continue;
+            }
+            let preds = [r[idx(i - 1, j)], r[idx(i, j - 1)], r[idx(i - 1, j - 1)]];
+            let mut den = 0.0;
+            let mut sm = [0.0; 3];
+            for (k, &p) in preds.iter().enumerate() {
+                sm[k] = (-p / g).exp();
+                den += sm[k];
+            }
+            if den > 0.0 {
+                e[idx(i - 1, j)] += ee * sm[0] / den;
+                e[idx(i, j - 1)] += ee * sm[1] / den;
+                e[idx(i - 1, j - 1)] += ee * sm[2] / den;
+            }
+            let sgn = if a[i - 1] >= b[j - 1] { 1.0 } else { -1.0 };
+            grad[i - 1] += ee * sgn;
+        }
+    }
+    (r[idx(n, m)], grad)
+}
+
+/// Soft-DTW barycentre of the rows of `x` (Cuturi & Blondel).
+pub fn softdtw_barycenter(
+    x: &Matrix,
+    gamma: f64,
+    max_iter: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    if !gamma.is_finite() || gamma <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .message(format!("softdtw_barycenter gamma={gamma} is not positive"))
+                .build(),
+        );
+    }
+    if x.nrows() == 0 || x.ncols() == 0 {
+        return ctx.finish(Vector::zeros(0));
+    }
+    let t = x.ncols();
+    let mut c = Vector::from_iter((0..t).map(|j| x.column(j).mean()));
+    let g = gamma.max(1e-12);
+    for it in 0..max_iter.max(1) {
+        let mut acc = vec![0.0; t];
+        let mut loss = 0.0;
+        for i in 0..x.nrows() {
+            let row = x.row(i);
+            let (v, dc) = softdtw_grad(c.as_slice(), row.as_slice(), g);
+            loss += v;
+            for j in 0..t {
+                acc[j] += dc[j];
+            }
+        }
+        let inv = 1.0 / x.nrows() as f64;
+        let mut delta = 0.0;
+        for j in 0..t {
+            let step = 0.25 * acc[j] * inv;
+            c[j] -= step;
+            delta += step.abs();
+        }
+        ctx.session.step(it as u64, loss * inv, Some(delta));
+        if delta < 1e-7 {
+            ctx.session.converged("soft-DTW barycentre", it as u64);
+            break;
+        }
+    }
+    ctx.finish(c)
+}
+
+/// Global alignment kernel \(K=\exp(-\mathrm{softDTW}/\sigma)\).
+pub fn global_alignment_kernel(
+    a: &Vector,
+    b: &Vector,
+    sigma: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !sigma.is_finite() || sigma <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .message(format!("GAK sigma={sigma} is not positive"))
+                .build(),
+        );
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(Issue::builder(IssueCode::EmptyMatrix).build());
+        return ctx.finish(f64::NAN);
+    }
+    let d = softdtw_raw(a.as_slice(), b.as_slice(), 0.1);
+    ctx.finish((-d / sigma.max(1e-12)).exp())
+}
+
+/// Per-series min–max scaler (tslearn `TimeSeriesScalerMinMax`).
+#[derive(Clone, Debug, Default)]
+pub struct TimeSeriesScalerMinMax;
+
+impl TimeSeriesScalerMinMax {
+    /// Default per-series `[0, 1]` map.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl FitUnsupervised for TimeSeriesScalerMinMax {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for TimeSeriesScalerMinMax {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let out = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            let row = x.row(i);
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
+            for &v in row.as_slice() {
+                if v.is_finite() {
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+            }
+            let span = hi - lo;
+            if !span.is_finite() || span <= ctx.policy.near_zero_variance {
+                0.0
+            } else {
+                (x.get(i, j) - lo) / span
+            }
+        });
+        for i in 0..x.nrows() {
+            if x.row(i).std() <= ctx.policy.near_zero_variance {
+                ctx.push(
+                    Issue::builder(IssueCode::NearZeroVariance)
+                        .message(format!("series {i} has ~0 span; it is mapped to 0"))
+                        .build(),
+                );
+            }
+        }
+        ctx.finish(out)
+    }
+}
+
+/// MiniROCKET-style dilated PPV features (Dempster, Schmidt, Webb).
+#[derive(Clone, Debug)]
+pub struct MiniRocket {
+    /// Number of random dilated kernels.
+    pub n_kernels: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for MiniRocket {
+    fn default() -> Self {
+        Self {
+            n_kernels: 32,
+            seed: 7,
+        }
+    }
+}
+
+impl MiniRocket {
+    /// MiniROCKET with `k` kernels.
+    pub fn new(n_kernels: usize) -> Self {
+        Self {
+            n_kernels,
+            ..Self::default()
+        }
+    }
+
+    /// Transform each row into one PPV feature per kernel.
+    pub fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let n = x.nrows();
+        let t = x.ncols();
+        let w = 9usize.min(t.max(1));
+        if t < 9 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!("MiniROCKET series length {t} < 9"))
+                    .build(),
+            );
+        }
+        let mut rng = crate::rng::Rng::new(self.seed);
+        let k = self.n_kernels.max(1);
+        let max_dil = if t > w {
+            ((t - 1) as f64 / (w - 1) as f64).log2().max(0.0)
+        } else {
+            0.0
+        };
+        let mut kernels: Vec<(usize, [usize; 3])> = Vec::with_capacity(k);
+        for _ in 0..k {
+            let dil = 2f64.powf(rng.uniform() * max_dil).floor().max(1.0) as usize;
+            let pos = [rng.below(w), rng.below(w), rng.below(w)];
+            kernels.push((dil, pos));
+        }
+        let feat = Matrix::from_fn(n, k, |i, kid| {
+            let (dil, pos) = kernels[kid];
+            let last = t.saturating_sub(1 + (w - 1) * dil) + 1;
+            let mut pos_cnt = 0.0;
+            let mut cnt = 0.0;
+            for start in 0..last.max(1) {
+                let mut acc = 0.0;
+                for u in 0..w {
+                    let idx = start + u * dil;
+                    if idx >= t {
+                        continue;
+                    }
+                    let wt = if pos.contains(&u) { 2.0 } else { -1.0 };
+                    acc += wt * x.get(i, idx);
+                }
+                if acc > 0.0 {
+                    pos_cnt += 1.0;
+                }
+                cnt += 1.0;
+            }
+            if cnt > 0.0 {
+                pos_cnt / cnt
+            } else {
+                0.0
+            }
+        });
+        if k > n {
+            ctx.push(
+                Issue::builder(IssueCode::PolynomialExplosion)
+                    .message(format!("MiniROCKET features {k} > n={n}"))
+                    .build(),
+            );
+        }
+        ctx.finish(feat)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1712,5 +1979,27 @@ mod tests {
         sc.fit_unsupervised(&x, &Session::new("ts", "sc")).unwrap();
         let z = sc.transform(&x, &Session::new("ts", "sct")).unwrap().value;
         assert!((z.row(0).mean()).abs() < 1e-8);
+        let mut mm = TimeSeriesScalerMinMax::new();
+        mm.fit_unsupervised(&x, &Session::new("ts", "mm")).unwrap();
+        let z2 = mm.transform(&x, &Session::new("ts", "mmt")).unwrap().value;
+        assert!(z2.get(0, 0) >= -1e-12 && z2.get(0, 0) <= 1.0 + 1e-12);
+        let a = x.row(0);
+        let kaa = global_alignment_kernel(&a, &a, 1.0, &Session::new("ts", "gak"))
+            .unwrap()
+            .value;
+        let far = Vector::from_iter((0..a.len()).map(|j| a[j] + 5.0));
+        let kaf = global_alignment_kernel(&a, &far, 1.0, &Session::new("ts", "gak2"))
+            .unwrap()
+            .value;
+        assert!(kaa > kaf, "kaa={kaa} kaf={kaf}");
+        let b = softdtw_barycenter(&x, 0.5, 6, &Session::new("ts", "sdb"))
+            .unwrap()
+            .value;
+        assert_eq!(b.len(), x.ncols());
+        let mr = MiniRocket::new(8)
+            .transform(&x, &Session::new("ts", "mr"))
+            .unwrap()
+            .value;
+        assert_eq!(mr.shape(), (6, 8));
     }
 }

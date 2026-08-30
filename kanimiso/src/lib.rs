@@ -56,6 +56,7 @@ pub mod semi;
 pub mod special;
 pub mod stats;
 pub mod svm;
+pub mod text;
 pub mod topic;
 pub mod traits;
 pub mod tree;

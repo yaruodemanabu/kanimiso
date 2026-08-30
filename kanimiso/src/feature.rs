@@ -7,7 +7,7 @@
 use crate::cluster::Linkage;
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linalg::least_squares;
+use crate::linalg::{least_squares, ridge_solve};
 use crate::rng::Rng;
 use crate::special::{chi2_pvalue, f_pvalue};
 use crate::traits::{Fit, FitUnsupervised, Transform};
@@ -1128,6 +1128,275 @@ fn feature_link(a: &[usize], b: &[usize], dist: &Matrix, linkage: Linkage) -> f6
     }
 }
 
+/// Keep features whose ridge |coef| is at least `threshold` × max |coef|
+/// (sklearn `SelectFromModel` with a linear base).
+#[derive(Clone, Debug)]
+pub struct SelectFromModel {
+    /// Fraction of the largest absolute coefficient.
+    pub threshold: f64,
+    /// Ridge penalty used to score features.
+    pub alpha: f64,
+    support: Vec<bool>,
+    coef: Vector,
+    fitted: bool,
+}
+
+impl Default for SelectFromModel {
+    fn default() -> Self {
+        Self {
+            threshold: 0.1,
+            alpha: 1.0,
+            support: Vec::new(),
+            coef: Vector::zeros(0),
+            fitted: false,
+        }
+    }
+}
+
+impl SelectFromModel {
+    /// Selector with the given relative threshold.
+    pub fn new(threshold: f64) -> Self {
+        Self {
+            threshold,
+            ..Self::default()
+        }
+    }
+
+    /// Boolean mask of kept columns.
+    pub fn support(&self) -> &[bool] {
+        &self.support
+    }
+
+    /// Ridge coefficients used for ranking.
+    pub fn coef(&self) -> &Vector {
+        &self.coef
+    }
+}
+
+impl Fit for SelectFromModel {
+    type Fitted = Self;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let (xc, _) = x.centered();
+        let ymean = y.mean();
+        let yc = Vector::from_iter(y.as_slice().iter().map(|v| v - ymean));
+        let coef = ridge_solve(&mut ctx.report, &xc, &yc, self.alpha.max(0.0), &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(x.ncols()));
+        let max_abs = coef.max_abs();
+        let cut = self.threshold.max(0.0) * max_abs;
+        self.support = (0..coef.len())
+            .map(|j| coef[j].abs() >= cut && max_abs > 0.0)
+            .collect();
+        if !self.support.iter().any(|s| *s) && x.ncols() > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::InterceptOnlyCollapse)
+                    .message("SelectFromModel kept 0 columns")
+                    .build(),
+            );
+            if !self.support.is_empty() {
+                let mut best = 0usize;
+                for j in 1..coef.len() {
+                    if coef[j].abs() > coef[best].abs() {
+                        best = j;
+                    }
+                }
+                self.support[best] = true;
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::TargetLeakageSuspected)
+                .message("SelectFromModel scored features on the full y")
+                .build(),
+        );
+        self.coef = coef;
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for SelectFromModel {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(x.clone());
+        }
+        if x.ncols() != self.support.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("SelectFromModel column count ≠ fitted p")
+                    .build(),
+            );
+        }
+        let keep: Vec<usize> = self
+            .support
+            .iter()
+            .enumerate()
+            .filter_map(|(j, s)| if *s { Some(j) } else { None })
+            .collect();
+        let out = Matrix::from_fn(x.nrows(), keep.len(), |i, k| {
+            let j = keep[k];
+            if j < x.ncols() {
+                x.get(i, j)
+            } else {
+                0.0
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
+/// A 12-feature catch22-style sketch of a univariate series (sktime / pycatch22).
+///
+/// Features: mean, std, ACF(1), OLS slope on time, zero-crossing rate,
+/// 5-bin histogram mode, outlier fraction \(|z|>2\), mean |Δ|, longest run
+/// above the mean, 3-mean residual stderr, argmax of |ACF|, ACF(2).
+pub fn catch22(y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y),
+        Some(y),
+        &ctx.policy,
+    );
+    let n = y.len();
+    if n < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("catch22 on n<4 is a sketch, not a catch22 identification")
+                .build(),
+        );
+    }
+    let mean = y.mean();
+    let std = y.std();
+    let acf_at = |lag: usize| -> f64 {
+        if n <= lag || std <= 0.0 {
+            return f64::NAN;
+        }
+        let mut s = 0.0;
+        let mut k = 0.0;
+        for t in lag..n {
+            s += (y[t] - mean) * (y[t - lag] - mean);
+            k += 1.0;
+        }
+        if k > 0.0 {
+            s / (k * std * std)
+        } else {
+            f64::NAN
+        }
+    };
+    let acf1 = acf_at(1);
+    let acf2 = acf_at(2);
+    let mut xtx = 0.0;
+    let mut xty = 0.0;
+    let tmean = (n.saturating_sub(1)) as f64 / 2.0;
+    for i in 0..n {
+        let t = i as f64 - tmean;
+        xtx += t * t;
+        xty += t * (y[i] - mean);
+    }
+    let slope = if xtx > 0.0 { xty / xtx } else { 0.0 };
+    let mut crossings = 0.0;
+    for i in 1..n {
+        if (y[i] - mean) * (y[i - 1] - mean) < 0.0 {
+            crossings += 1.0;
+        }
+    }
+    let zcr = if n > 1 {
+        crossings / (n - 1) as f64
+    } else {
+        0.0
+    };
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for &v in y.as_slice() {
+        if v.is_finite() {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    }
+    let mut hist = [0usize; 5];
+    if hi > lo {
+        for &v in y.as_slice() {
+            if !v.is_finite() {
+                continue;
+            }
+            let b = (((v - lo) / (hi - lo)) * 4.999).floor() as usize;
+            hist[b.min(4)] += 1;
+        }
+    }
+    let mode_bin = hist
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, c)| *c)
+        .map(|(i, _)| i)
+        .unwrap_or(0) as f64;
+    let mut outliers = 0.0;
+    if std > 0.0 {
+        for &v in y.as_slice() {
+            if ((v - mean) / std).abs() > 2.0 {
+                outliers += 1.0;
+            }
+        }
+    }
+    let outlier_frac = if n > 0 { outliers / n as f64 } else { 0.0 };
+    let mut mad = 0.0;
+    for i in 1..n {
+        mad += (y[i] - y[i - 1]).abs();
+    }
+    mad = if n > 1 { mad / (n - 1) as f64 } else { 0.0 };
+    let mut best_run = 0usize;
+    let mut run = 0usize;
+    for &v in y.as_slice() {
+        if v >= mean {
+            run += 1;
+            best_run = best_run.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    let mut sse3 = 0.0;
+    let mut k3 = 0.0;
+    for i in 1..n.saturating_sub(1) {
+        let m = (y[i - 1] + y[i] + y[i + 1]) / 3.0;
+        let e = y[i] - m;
+        sse3 += e * e;
+        k3 += 1.0;
+    }
+    let se3 = if k3 > 1.0 {
+        (sse3 / (k3 - 1.0)).sqrt()
+    } else {
+        0.0
+    };
+    let mut acf_peak = 1.0;
+    let mut peak = acf1.abs();
+    for lag in 1..=n.min(8).saturating_sub(1).max(1) {
+        let a = acf_at(lag).abs();
+        if a > peak {
+            peak = a;
+            acf_peak = lag as f64;
+        }
+    }
+    let feat = Vector::from_slice(&[
+        mean,
+        std,
+        acf1,
+        slope,
+        zcr,
+        mode_bin,
+        outlier_frac,
+        mad,
+        best_run as f64,
+        se3,
+        acf_peak,
+        acf2,
+    ]);
+    ctx.finish(feat)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1202,5 +1471,24 @@ mod tests {
         let z = fa.transform(&x, &Session::new("fa", "t")).unwrap().value;
         assert_eq!(z.ncols(), 2);
         assert_eq!(z.nrows(), 20);
+    }
+
+    #[test]
+    fn select_from_model_and_catch22() {
+        let x = Matrix::from_fn(24, 3, |i, j| match j {
+            0 => i as f64,
+            1 => ((i * 13) % 5) as f64,
+            _ => 0.01 * (i as f64),
+        });
+        let y = Vector::from_iter((0..24).map(|i| 2.0 * i as f64));
+        let mut sel = SelectFromModel::new(0.2);
+        sel.fit(&x, &y, &Session::new("sfm", "fit")).unwrap();
+        assert!(sel.support()[0]);
+        let z = sel.transform(&x, &Session::new("sfm", "t")).unwrap().value;
+        assert!(z.ncols() >= 1);
+        let yts = Vector::from_iter((0..32).map(|i| (i as f64).sin() + 0.1 * i as f64));
+        let c = catch22(&yts, &Session::new("c22", "fit")).unwrap().value;
+        assert_eq!(c.len(), 12);
+        assert!(c.as_slice().iter().all(|v| v.is_finite()));
     }
 }

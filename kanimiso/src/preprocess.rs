@@ -8,13 +8,14 @@
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::special::norm_cdf;
-use crate::traits::{FitSeries, FitUnsupervised, PartialFit, Transform};
-use crate::validate::inspect_classes;
+use crate::traits::{Fit, FitSeries, FitUnsupervised, PartialFit, Transform};
+use crate::validate::{inspect_classes, inspect_xy};
 use ojizou_san::{IncrementalExplain, Session};
 use signlred::{
     slice_stats, IncrementalQuality, Issue, IssueCode, Meaninglessness, Qualified, Result,
-    SliceStats,
+    Severity, SliceStats,
 };
+use std::collections::BTreeMap;
 
 /// Column-wise mean / std scaler (sklearn `StandardScaler`).
 #[derive(Clone, Debug)]
@@ -1329,6 +1330,336 @@ impl Transform for Binarizer {
     }
 }
 
+/// Mean target encoding of rounded categorical columns (sklearn `TargetEncoder`).
+///
+/// The encoding uses the full `y`. That is [`IssueCode::TargetLeakageSuspected`]
+/// unless the caller refits inside each training fold.
+#[derive(Clone, Debug)]
+pub struct TargetEncoder {
+    /// Additive smoothing toward the global mean.
+    pub smooth: f64,
+    tables: Vec<BTreeMap<i64, f64>>,
+    global: f64,
+    fitted: bool,
+}
+
+impl Default for TargetEncoder {
+    fn default() -> Self {
+        Self {
+            smooth: 1.0,
+            tables: Vec::new(),
+            global: 0.0,
+            fitted: false,
+        }
+    }
+}
+
+impl TargetEncoder {
+    /// Encoder with unit smoothing.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for TargetEncoder {
+    type Fitted = Self;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        self.global = y.mean();
+        self.tables = vec![BTreeMap::new(); x.ncols()];
+        let smooth = self.smooth.max(0.0);
+        for j in 0..x.ncols() {
+            let mut acc: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
+            for i in 0..x.nrows().min(y.len()) {
+                let key = x.get(i, j).round() as i64;
+                let e = acc.entry(key).or_insert((0.0, 0.0));
+                e.0 += y[i];
+                e.1 += 1.0;
+            }
+            self.tables[j] = acc
+                .into_iter()
+                .map(|(k, (s, c))| (k, (s + smooth * self.global) / (c + smooth)))
+                .collect();
+        }
+        ctx.push(
+            Issue::builder(IssueCode::TargetLeakageSuspected)
+                .message("TargetEncoder used the full y; refit inside each training fold")
+                .build(),
+        );
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for TargetEncoder {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_columns_for_preprocess(&mut ctx, x);
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(x.clone());
+        }
+        if x.ncols() != self.tables.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("TargetEncoder column count ≠ fitted p")
+                    .build(),
+            );
+        }
+        let out = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            if j >= self.tables.len() {
+                return self.global;
+            }
+            let key = x.get(i, j).round() as i64;
+            self.tables[j].get(&key).copied().unwrap_or(self.global)
+        });
+        ctx.finish(out)
+    }
+}
+
+/// B-spline basis expansion (sklearn `SplineTransformer`).
+#[derive(Clone, Debug)]
+pub struct SplineTransformer {
+    /// Number of knots including the endpoints.
+    pub n_knots: usize,
+    /// Spline degree.
+    pub degree: usize,
+    knots: Vec<Vec<f64>>,
+    n_features_in: usize,
+    fitted: bool,
+}
+
+impl Default for SplineTransformer {
+    fn default() -> Self {
+        Self {
+            n_knots: 5,
+            degree: 3,
+            knots: Vec::new(),
+            n_features_in: 0,
+            fitted: false,
+        }
+    }
+}
+
+impl SplineTransformer {
+    /// Cubic B-splines with `n_knots` knots per feature.
+    pub fn new(n_knots: usize) -> Self {
+        Self {
+            n_knots: n_knots.max(2),
+            ..Self::default()
+        }
+    }
+
+    fn n_basis(&self) -> usize {
+        self.n_knots.max(2) + self.degree.saturating_sub(1)
+    }
+}
+
+fn padded_knots(lo: f64, hi: f64, n_knots: usize, degree: usize) -> Vec<f64> {
+    let n_knots = n_knots.max(2);
+    let span = (hi - lo).max(1e-12);
+    let mut interior = Vec::with_capacity(n_knots);
+    for i in 0..n_knots {
+        interior.push(lo + span * (i as f64) / (n_knots - 1) as f64);
+    }
+    let mut knots = Vec::with_capacity(n_knots + 2 * degree);
+    for _ in 0..degree {
+        knots.push(lo);
+    }
+    knots.extend(interior);
+    for _ in 0..degree {
+        knots.push(hi);
+    }
+    knots
+}
+
+fn cox_de_boor(x: f64, knots: &[f64], degree: usize, i: usize) -> f64 {
+    if i + 1 >= knots.len() {
+        return 0.0;
+    }
+    if degree == 0 {
+        let last = i + 2 >= knots.len();
+        if (x >= knots[i] && x < knots[i + 1]) || (last && (x - knots[i + 1]).abs() <= 1e-15) {
+            return 1.0;
+        }
+        return 0.0;
+    }
+    let mut left = 0.0;
+    let den_l = knots[i + degree] - knots[i];
+    if den_l.abs() > 1e-15 {
+        left = (x - knots[i]) / den_l * cox_de_boor(x, knots, degree - 1, i);
+    }
+    let mut right = 0.0;
+    if i + degree + 1 < knots.len() {
+        let den_r = knots[i + degree + 1] - knots[i + 1];
+        if den_r.abs() > 1e-15 {
+            right = (knots[i + degree + 1] - x) / den_r * cox_de_boor(x, knots, degree - 1, i + 1);
+        }
+    }
+    left + right
+}
+
+impl FitUnsupervised for SplineTransformer {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_columns_for_preprocess(&mut ctx, x);
+        self.n_features_in = x.ncols();
+        self.knots.clear();
+        for j in 0..x.ncols() {
+            let col = x.column(j);
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
+            for &v in col.as_slice() {
+                if v.is_finite() {
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+            }
+            if !lo.is_finite()
+                || !hi.is_finite()
+                || (hi - lo).abs() <= ctx.policy.near_zero_variance
+            {
+                ctx.push(
+                    Issue::builder(IssueCode::NearZeroVariance)
+                        .message(format!("SplineTransformer column {j} has no span"))
+                        .build(),
+                );
+                lo = 0.0;
+                hi = 1.0;
+            }
+            self.knots
+                .push(padded_knots(lo, hi, self.n_knots.max(2), self.degree));
+        }
+        let p_out = self.n_basis().saturating_mul(x.ncols());
+        if p_out > x.nrows() && x.nrows() > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::PolynomialExplosion)
+                    .message(format!("spline map sends n={} to p={p_out}", x.nrows()))
+                    .build(),
+            );
+        }
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for SplineTransformer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(x.clone());
+        }
+        if x.ncols() != self.n_features_in {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("SplineTransformer column count ≠ fitted p")
+                    .build(),
+            );
+        }
+        let nb = self.n_basis();
+        let p_out = nb.saturating_mul(self.knots.len());
+        let out = Matrix::from_fn(x.nrows(), p_out, |i, k| {
+            let feat = k / nb;
+            let basis = k % nb;
+            if feat >= x.ncols() || feat >= self.knots.len() {
+                return 0.0;
+            }
+            cox_de_boor(x.get(i, feat), &self.knots[feat], self.degree, basis)
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Named elementwise map (sklearn `FunctionTransformer`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElementwiseFn {
+    /// Identity.
+    Identity,
+    /// `ln(1+x)` (requires `x > -1`).
+    Log1p,
+    /// `√x` (requires `x ≥ 0`).
+    Sqrt,
+    /// Absolute value.
+    Abs,
+}
+
+/// Stateless elementwise transformer.
+#[derive(Clone, Debug)]
+pub struct FunctionTransformer {
+    /// Map applied independently to every entry.
+    pub func: ElementwiseFn,
+}
+
+impl Default for FunctionTransformer {
+    fn default() -> Self {
+        Self {
+            func: ElementwiseFn::Identity,
+        }
+    }
+}
+
+impl FunctionTransformer {
+    /// Transformer for the given map.
+    pub fn new(func: ElementwiseFn) -> Self {
+        Self { func }
+    }
+}
+
+impl FitUnsupervised for FunctionTransformer {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_columns_for_preprocess(&mut ctx, x);
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for FunctionTransformer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_columns_for_preprocess(&mut ctx, x);
+        let mut bad = 0usize;
+        let out = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            let v = x.get(i, j);
+            match self.func {
+                ElementwiseFn::Identity => v,
+                ElementwiseFn::Log1p => {
+                    if v <= -1.0 {
+                        bad += 1;
+                        f64::NAN
+                    } else {
+                        (1.0 + v).ln()
+                    }
+                }
+                ElementwiseFn::Sqrt => {
+                    if v < 0.0 {
+                        bad += 1;
+                        f64::NAN
+                    } else {
+                        v.sqrt()
+                    }
+                }
+                ElementwiseFn::Abs => v.abs(),
+            }
+        });
+        if bad > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "FunctionTransformer::{:?} is undefined on {bad} entries",
+                        self.func
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(out)
+    }
+}
+
 fn inspect_columns_for_preprocess(ctx: &mut FitCtx, x: &Matrix) {
     let (n, p) = x.shape();
     ctx.report.set_sample_shape(n, p);
@@ -1782,5 +2113,23 @@ mod tests {
             .fit_unsupervised(&x, &session)
             .unwrap_err();
         assert_eq!(err.primary().code, IssueCode::ImputationUndefined);
+    }
+
+    #[test]
+    fn target_spline_and_function() {
+        let x = Matrix::from_fn(20, 1, |i, _| (i / 5) as f64);
+        let y = Vector::from_iter((0..20).map(|i| if i < 10 { 0.0 } else { 2.0 }));
+        let mut te = TargetEncoder::new();
+        te.fit(&x, &y, &Session::new("te", "fit")).unwrap();
+        let z = te.transform(&x, &Session::new("te", "t")).unwrap().value;
+        assert!(z.get(0, 0) < z.get(19, 0));
+        let mut sp = SplineTransformer::new(4);
+        sp.fit_unsupervised(&x, &Session::new("sp", "fit")).unwrap();
+        let b = sp.transform(&x, &Session::new("sp", "t")).unwrap().value;
+        assert!(b.ncols() > 1);
+        let mut ft = FunctionTransformer::new(ElementwiseFn::Log1p);
+        ft.fit_unsupervised(&x, &Session::new("ft", "fit")).unwrap();
+        let w = ft.transform(&x, &Session::new("ft", "t")).unwrap().value;
+        assert!((w.get(0, 0) - 0.0).abs() < 1e-12);
     }
 }

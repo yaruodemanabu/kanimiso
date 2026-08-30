@@ -825,6 +825,185 @@ impl FitUnsupervised for Nmf {
     }
 }
 
+/// Mini-batch NMF: multiplicative updates of `H` on successive batches.
+#[derive(Clone, Debug)]
+pub struct MiniBatchNmf {
+    /// Number of latent components.
+    pub n_components: usize,
+    /// Rows per update.
+    pub batch_size: usize,
+    /// Seed for the nonnegative start.
+    pub seed: u64,
+    h: Option<Matrix>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for MiniBatchNmf {
+    fn default() -> Self {
+        Self {
+            n_components: 2,
+            batch_size: 16,
+            seed: 0,
+            h: None,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl MiniBatchNmf {
+    /// Mini-batch NMF with `k` components.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components,
+            ..Self::default()
+        }
+    }
+
+    /// Current right factor, if initialized.
+    pub fn h(&self) -> Option<&Matrix> {
+        self.h.as_ref()
+    }
+}
+
+impl PartialFit for MiniBatchNmf {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (n, p) = x.shape();
+        if n == 0 || p == 0 {
+            if self.h.is_none() {
+                ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            }
+            ctx.session
+                .record_incremental(dummy_explain(self.updates, n, self.n_seen));
+            return ctx.finish(dummy_explain(self.updates, n, self.n_seen));
+        }
+        let k = self.n_components.max(1).min(p.max(1));
+        if self.h.as_ref().map(|h| h.ncols()) != Some(p) {
+            if self.h.is_some() {
+                ctx.push(
+                    Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                        .message("MiniBatchNMF feature dimension changed")
+                        .build(),
+                );
+            }
+            let mut rng = Rng::new(self.seed | 1);
+            self.h = Some(Matrix::from_fn(k, p, |_, _| rng.uniform().abs() + 1e-3));
+        }
+        let xp = Matrix::from_fn(n, p, |i, j| x.get(i, j).max(0.0));
+        let mut h = self.h.clone().unwrap();
+        let before = h.frobenius();
+        let mut rng = Rng::new(self.seed.wrapping_add(self.updates + 1));
+        let mut w = Matrix::from_fn(n, k, |_, _| rng.uniform().abs() + 1e-3);
+        for _ in 0..8 {
+            let xht = matmul_nt(&xp, &h);
+            let hht = matmul_nt(&h, &h);
+            let w_hht = matmul(&w, &hht);
+            w = Matrix::from_fn(n, k, |i, c| {
+                (w.get(i, c) * xht.get(i, c) / w_hht.get(i, c).max(1e-12)).max(0.0)
+            });
+            let wtx = matmul_tn(&w, &xp);
+            let wtw = matmul_tn(&w, &w);
+            let wtw_h = matmul(&wtw, &h);
+            h = Matrix::from_fn(k, p, |c, j| {
+                (h.get(c, j) * wtx.get(c, j) / wtw_h.get(c, j).max(1e-12)).max(0.0)
+            });
+        }
+        let after = h.frobenius();
+        self.h = Some(h);
+        self.n_seen += n as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), n, self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((after - before).abs());
+        q.information_gain = Some((after - before).abs() + n as f64);
+        q.still_identified = self.n_seen >= k as u64;
+        q.warmup = self.n_seen < (5 * k) as u64;
+        q.explanation = format!("mini-batch NMF: ||H|| {before:.4e} → {after:.4e} on {n} rows");
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("MiniBatchNMF has seen fewer than 5k rows")
+                    .build(),
+            );
+        }
+        let expl = IncrementalExplain::from_quality(
+            q,
+            "multiplicative update of H",
+            "Lee–Seung steps on the current batch",
+            format!("||H||={before:.4e}"),
+            format!("||H||={after:.4e}"),
+        );
+        ctx.session.record_incremental(expl.clone());
+        ctx.finish(expl)
+    }
+}
+
+impl FitUnsupervised for MiniBatchNmf {
+    type Fitted = FittedNmf;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedNmf>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let bs = self.batch_size.max(1);
+        let n = x.nrows();
+        if n == 0 {
+            return ctx.finish(FittedNmf {
+                w: Matrix::zeros(0, self.n_components),
+                h: Matrix::zeros(self.n_components, x.ncols()),
+                reconstruction_err: f64::NAN,
+            });
+        }
+        let mut start = 0usize;
+        while start < n {
+            let end = (start + bs).min(n);
+            let batch = Matrix::from_fn(end - start, x.ncols(), |i, j| x.get(start + i, j));
+            match self.partial_fit(&batch, None, &session.child("mb")) {
+                Ok(q) => {
+                    for issue in q.report.issues() {
+                        if issue.code == IssueCode::WarmupIncomplete {
+                            continue;
+                        }
+                        ctx.push(issue.clone());
+                    }
+                }
+                Err(e) => ctx.push(e.primary),
+            }
+            start = end;
+        }
+        let h = self
+            .h
+            .clone()
+            .unwrap_or_else(|| Matrix::zeros(self.n_components.max(1), x.ncols()));
+        let mut nmf = FittedNmf {
+            w: Matrix::zeros(n, h.nrows()),
+            h: h.clone(),
+            reconstruction_err: f64::NAN,
+        };
+        match nmf.transform(x, &session.child("codes")) {
+            Ok(q) => nmf.w = q.value,
+            Err(e) => ctx.push(e.primary),
+        }
+        let recon = matmul(&nmf.w, &nmf.h);
+        let mut err = 0.0;
+        for j in 0..x.ncols() {
+            for i in 0..n {
+                let d = x.get(i, j).max(0.0) - recon.get(i, j);
+                err += d * d;
+            }
+        }
+        nmf.reconstruction_err = err.sqrt();
+        ctx.finish(nmf)
+    }
+}
+
 /// FastICA: SVD whitening plus one-unit deflation with `g = tanh`.
 #[derive(Clone, Debug)]
 pub struct FastIca {
@@ -1820,5 +1999,25 @@ mod tests {
         let q = m.partial_fit(&x, None, &session).expect("ipca");
         assert!(!q.value.narrative.is_empty());
         assert!(q.value.quality.n_seen > 0);
+    }
+
+    #[test]
+    fn minibatch_nmf_reconstructs_nonneg() {
+        let x = rank1();
+        let session = Session::new("mbnmf", "fit");
+        let q = MiniBatchNmf {
+            n_components: 1,
+            batch_size: 10,
+            seed: 2,
+            ..MiniBatchNmf::default()
+        }
+        .fit_unsupervised(&x, &session)
+        .expect("mbnmf");
+        assert!(q.value.reconstruction_err.is_finite());
+        assert!(q.value.h.nrows() >= 1);
+        let mut mb = MiniBatchNmf::new(1);
+        mb.partial_fit(&x, None, &Session::new("mbnmf", "pf"))
+            .expect("pf");
+        assert!(mb.h().is_some());
     }
 }

@@ -7,7 +7,7 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linear_model::{FittedPenalized, Lasso, LinearRegression, Ridge};
+use crate::linear_model::{ElasticNet, FittedPenalized, Lasso, LinearRegression, Ridge};
 use crate::metrics::r2;
 use crate::rng::Rng;
 use crate::traits::{Fit, Predict};
@@ -658,6 +658,144 @@ impl Fit for LassoCV {
     }
 }
 
+/// Elastic-net with a K-fold R² grid over `alpha` × `l1_ratio`.
+#[derive(Clone, Debug)]
+pub struct ElasticNetCV {
+    /// Candidate combined penalties.
+    pub alphas: Vec<f64>,
+    /// Candidate ℓ1 mixing weights.
+    pub l1_ratio: Vec<f64>,
+    /// CV splitter.
+    pub cv: KFold,
+}
+
+impl Default for ElasticNetCV {
+    fn default() -> Self {
+        Self {
+            alphas: vec![0.01, 0.1, 1.0],
+            l1_ratio: vec![0.5],
+            cv: KFold::new(3),
+        }
+    }
+}
+
+impl ElasticNetCV {
+    /// Grid over the given `alpha` values at `l1_ratio = 0.5`.
+    pub fn new(alphas: Vec<f64>) -> Self {
+        Self {
+            alphas,
+            ..Self::default()
+        }
+    }
+}
+
+/// Selected elastic-net and the CV scores that justified it.
+#[derive(Clone, Debug)]
+pub struct FittedElasticNetCV {
+    /// Penalty with the highest mean fold R².
+    pub best_alpha: f64,
+    /// Mixing weight of the winner.
+    pub best_l1_ratio: f64,
+    /// Mean CV R² of the winner.
+    pub best_score: f64,
+    /// `(alpha, l1_ratio, mean_cv_r2)` for every grid point.
+    pub scores: Vec<(f64, f64, f64)>,
+    /// Elastic-net refit on the full training design.
+    pub fitted: FittedPenalized,
+}
+
+impl Fit for ElasticNetCV {
+    type Fitted = FittedElasticNetCV;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedElasticNetCV>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let ratios = if self.l1_ratio.is_empty() {
+            vec![0.5]
+        } else {
+            self.l1_ratio.clone()
+        };
+        let folds = match self.cv.split(x.nrows(), &session.child("cv")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                Vec::new()
+            }
+        };
+        let mut scores = Vec::new();
+        let mut best_alpha = self.alphas.first().copied().unwrap_or(1.0);
+        let mut best_l1 = ratios.first().copied().unwrap_or(0.5);
+        let mut best_score = f64::NEG_INFINITY;
+        for &alpha in &self.alphas {
+            for &l1 in &ratios {
+                if !(0.0..=1.0).contains(&l1) {
+                    ctx.push(
+                        Issue::builder(IssueCode::InvalidWeight)
+                            .severity(signlred::Severity::Warning)
+                            .message(format!("ElasticNetCV skips l1_ratio={l1} outside [0,1]"))
+                            .build(),
+                    );
+                    continue;
+                }
+                let mut acc = 0.0;
+                let mut k = 0.0;
+                for (i, fold) in folds.iter().enumerate() {
+                    let xt = take_rows(x, &fold.train);
+                    let yt = take_vec(y, &fold.train);
+                    let xv = take_rows(x, &fold.test);
+                    let yv = take_vec(y, &fold.test);
+                    let mut en = ElasticNet::new(alpha, l1);
+                    match en.fit(&xt, &yt, &session.child(format!("en_{alpha}_{l1}_{i}"))) {
+                        Ok(q) => match q.value.predict(&xv, &session.child("predict")) {
+                            Ok(p) => {
+                                if let Ok(s) = r2(&yv, &p.value, &session.child("r2")) {
+                                    if s.value.is_finite() {
+                                        acc += s.value;
+                                        k += 1.0;
+                                    }
+                                }
+                            }
+                            Err(e) => ctx.push(e.primary),
+                        },
+                        Err(e) => ctx.push(e.primary),
+                    }
+                }
+                let mean = if k > 0.0 { acc / k } else { f64::NAN };
+                scores.push((alpha, l1, mean));
+                if mean.is_finite() && mean > best_score {
+                    best_score = mean;
+                    best_alpha = alpha;
+                    best_l1 = l1;
+                }
+            }
+        }
+        let mut en = ElasticNet::new(best_alpha, best_l1);
+        let fitted = match en.fit(x, y, &session.child("refit")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                FittedPenalized {
+                    coef: Vector::zeros(x.ncols()),
+                    intercept: y.mean(),
+                    alpha: best_alpha,
+                    l1_ratio: best_l1,
+                }
+            }
+        };
+        ctx.finish(FittedElasticNetCV {
+            best_alpha,
+            best_l1_ratio: best_l1,
+            best_score,
+            scores,
+            fitted,
+        })
+    }
+}
+
 /// Leave-one-out: each row is a singleton test fold.
 #[derive(Clone, Debug, Default)]
 pub struct LeaveOneOut;
@@ -927,6 +1065,11 @@ mod tests {
             .fit(&x, &y, &Session::new("ms", "lassocv"))
             .unwrap();
         assert!(l.value.best_alpha.is_finite());
+        let e = ElasticNetCV::new(vec![0.01, 0.1])
+            .fit(&x, &y, &Session::new("ms", "encv"))
+            .unwrap();
+        assert!(e.value.best_alpha.is_finite());
+        assert!((0.0..=1.0).contains(&e.value.best_l1_ratio));
     }
 
     #[test]

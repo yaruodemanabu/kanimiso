@@ -492,6 +492,145 @@ impl FitSeries for AutoArima {
     }
 }
 
+/// Average of Holt–Winters and ARIMA(1,0,1) forecasts (sktime `EnsembleForecaster`).
+#[derive(Clone, Debug)]
+pub struct EnsembleForecaster {
+    /// Holt–Winters seasonal period.
+    pub period: usize,
+}
+
+impl Default for EnsembleForecaster {
+    fn default() -> Self {
+        Self { period: 4 }
+    }
+}
+
+impl EnsembleForecaster {
+    /// Ensemble with Holt–Winters period `period`.
+    pub fn new(period: usize) -> Self {
+        Self {
+            period: period.max(2),
+        }
+    }
+}
+
+/// Fitted two-model ensemble.
+#[derive(Clone, Debug)]
+pub struct FittedEnsembleForecaster {
+    /// Holt–Winters member (if it identified).
+    pub hw: Option<FittedHoltWinters>,
+    /// ARIMA member (if it identified).
+    pub arima: Option<FittedArima>,
+}
+
+impl FittedEnsembleForecaster {
+    /// Average the available member forecasts.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        if h == 0 {
+            return ctx.finish(Vector::zeros(0));
+        }
+        let mut acc = Vector::zeros(h);
+        let mut k = 0.0;
+        if let Some(hw) = &self.hw {
+            match hw.forecast(h, &session.child("hw")) {
+                Ok(q) => {
+                    for i in 0..h.min(q.value.len()) {
+                        acc[i] += q.value[i];
+                    }
+                    k += 1.0;
+                }
+                Err(e) => ctx.push(e.primary),
+            }
+        }
+        if let Some(ar) = &self.arima {
+            match ar.forecast(h, &session.child("arima")) {
+                Ok(q) => {
+                    for i in 0..h.min(q.value.len()) {
+                        acc[i] += q.value[i];
+                    }
+                    k += 1.0;
+                }
+                Err(e) => ctx.push(e.primary),
+            }
+        }
+        if k <= 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("ensemble has no successful member forecast")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "ensemble forecast",
+                        "both members failed",
+                        "fit a single identified forecaster",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(h));
+        }
+        for i in 0..h {
+            acc[i] /= k;
+        }
+        ctx.finish(acc)
+    }
+}
+
+impl FitSeries for EnsembleForecaster {
+    type Fitted = FittedEnsembleForecaster;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedEnsembleForecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let hw = match (HoltWinters {
+            period: self.period,
+            alpha: Some(0.3),
+            beta: Some(0.1),
+            gamma: Some(0.1),
+            multiplicative: false,
+        })
+        .fit_series(y, &session.child("hw"))
+        {
+            Ok(q) => Some(q.value),
+            Err(e) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .severity(Severity::Warning)
+                        .message(format!("Holt–Winters member failed: {}", e.primary().code))
+                        .build(),
+                );
+                None
+            }
+        };
+        let arima = match Arima::new(1, 0, 1).fit_series(y, &session.child("arima")) {
+            Ok(q) => Some(q.value),
+            Err(e) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .severity(Severity::Warning)
+                        .message(format!("ARIMA member failed: {}", e.primary().code))
+                        .build(),
+                );
+                None
+            }
+        };
+        if hw.is_none() && arima.is_none() {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("both ensemble members failed")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "ensemble",
+                        "no member identified",
+                        "lengthen the series",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(FittedEnsembleForecaster { hw, arima })
+    }
+}
+
 /// Seasonal ARIMA: apply seasonal differences, then [`Arima`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sarima {
@@ -2237,6 +2376,21 @@ mod tests {
             q.value.ar[0],
             q.report.issues().iter().map(|i| i.code).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn ensemble_forecaster_averages() {
+        let y = Vector::from_iter((0..40).map(|i| 2.0 + 0.05 * i as f64 + (i as f64 * 0.4).sin()));
+        let q = EnsembleForecaster::new(4)
+            .fit_series(&y, &Session::new("ens", "fit"))
+            .expect("ens");
+        let f = q
+            .value
+            .forecast(3, &Session::new("ens", "fc"))
+            .expect("fc")
+            .value;
+        assert_eq!(f.len(), 3);
+        assert!(f.as_slice().iter().all(|v| v.is_finite()));
     }
 
     #[test]

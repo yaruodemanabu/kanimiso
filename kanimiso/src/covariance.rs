@@ -6,6 +6,8 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
+use crate::linalg::symmetric_eigen;
+use crate::model_selection::{take_rows, KFold};
 use crate::special::chi2_pvalue;
 use crate::traits::{FitUnsupervised, Predict};
 use crate::validate::inspect_xy;
@@ -735,6 +737,158 @@ impl FitUnsupervised for EllipticEnvelope {
     }
 }
 
+/// Cross-validated graphical lasso (held-out Gaussian log-likelihood).
+#[derive(Clone, Debug)]
+pub struct GraphicalLassoCV {
+    /// Candidate off-diagonal penalties.
+    pub alphas: Vec<f64>,
+    /// CV splitter.
+    pub cv: KFold,
+}
+
+impl Default for GraphicalLassoCV {
+    fn default() -> Self {
+        Self {
+            alphas: vec![0.05, 0.1, 0.3],
+            cv: KFold::new(3),
+        }
+    }
+}
+
+impl GraphicalLassoCV {
+    /// Grid over the given `alpha` values.
+    pub fn new(alphas: Vec<f64>) -> Self {
+        Self {
+            alphas,
+            ..Self::default()
+        }
+    }
+}
+
+/// Selected graphical lasso and the CV scores that justified it.
+#[derive(Clone, Debug)]
+pub struct FittedGraphicalLassoCV {
+    /// Penalty with the highest held-out Gaussian log-likelihood.
+    pub best_alpha: f64,
+    /// Mean fold score of `best_alpha`.
+    pub best_score: f64,
+    /// `(alpha, mean_ll)` for every grid point.
+    pub scores: Vec<(f64, f64)>,
+    /// Refit on the full sample.
+    pub fitted: FittedCovariance,
+}
+
+fn glasso_loglik(prec: &Matrix, x: &Matrix, loc: &Vector) -> f64 {
+    let p = prec.nrows().min(x.ncols());
+    if p == 0 || x.nrows() == 0 {
+        return f64::NAN;
+    }
+    let mut a = Mat::<f64>::zeros(p, p);
+    for i in 0..p {
+        for j in 0..p {
+            a[(i, j)] = prec.get(i, j);
+        }
+    }
+    let mut scratch = signlred::Report::new("glasso", "logdet");
+    let policy = signlred::Policy::default();
+    let logdet = match symmetric_eigen(&mut scratch, &a, &policy) {
+        Some((vals, _)) => {
+            let mut s = 0.0;
+            for v in vals {
+                if v <= 0.0 {
+                    return f64::NEG_INFINITY;
+                }
+                s += v.ln();
+            }
+            s
+        }
+        None => return f64::NEG_INFINITY,
+    };
+    let mut quad = 0.0;
+    for r in 0..x.nrows() {
+        let mut d = Vector::zeros(p);
+        for j in 0..p {
+            d[j] = x.get(r, j) - loc[j];
+        }
+        for i in 0..p {
+            let mut s = 0.0;
+            for j in 0..p {
+                s += prec.get(i, j) * d[j];
+            }
+            quad += d[i] * s;
+        }
+    }
+    0.5 * x.nrows() as f64 * logdet - 0.5 * quad
+}
+
+impl FitUnsupervised for GraphicalLassoCV {
+    type Fitted = FittedGraphicalLassoCV;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedGraphicalLassoCV>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let folds = match self.cv.split(x.nrows(), &session.child("cv")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                Vec::new()
+            }
+        };
+        let mut scores = Vec::new();
+        let mut best_alpha = self.alphas.first().copied().unwrap_or(0.1);
+        let mut best_score = f64::NEG_INFINITY;
+        for &alpha in &self.alphas {
+            let mut acc = 0.0;
+            let mut k = 0.0;
+            for (i, fold) in folds.iter().enumerate() {
+                let xt = take_rows(x, &fold.train);
+                let xv = take_rows(x, &fold.test);
+                let mut gl = GraphicalLasso::new(alpha);
+                match gl.fit_unsupervised(&xt, &session.child(format!("gl_{alpha}_{i}"))) {
+                    Ok(q) => {
+                        if let Some(prec) = &q.value.precision {
+                            let ll = glasso_loglik(prec, &xv, &q.value.location);
+                            if ll.is_finite() {
+                                acc += ll;
+                                k += 1.0;
+                            }
+                        }
+                    }
+                    Err(e) => ctx.push(e.primary),
+                }
+            }
+            let mean = if k > 0.0 { acc / k } else { f64::NAN };
+            scores.push((alpha, mean));
+            if mean.is_finite() && mean > best_score {
+                best_score = mean;
+                best_alpha = alpha;
+            }
+        }
+        let mut gl = GraphicalLasso::new(best_alpha);
+        let fitted = match gl.fit_unsupervised(x, &session.child("refit")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                FittedCovariance {
+                    location: location_of(x),
+                    covariance: Matrix::zeros(x.ncols(), x.ncols()),
+                    precision: None,
+                    shrinkage: best_alpha,
+                }
+            }
+        };
+        ctx.finish(FittedGraphicalLassoCV {
+            best_alpha,
+            best_score,
+            scores,
+            fitted,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -802,5 +956,15 @@ mod tests {
             .fit_unsupervised(&x, &Session::new("cov", "gl"))
             .unwrap();
         assert!(q.value.precision.is_some());
+    }
+
+    #[test]
+    fn graphical_lasso_cv_picks_finite_alpha() {
+        let x = blob();
+        let q = GraphicalLassoCV::new(vec![0.05, 0.2])
+            .fit_unsupervised(&x, &Session::new("cov", "glcv"))
+            .unwrap();
+        assert!(q.value.best_alpha.is_finite());
+        assert!(q.value.fitted.precision.is_some());
     }
 }

@@ -9,7 +9,7 @@ use crate::data::{Matrix, Vector};
 use crate::traits::{Fit, FitUnsupervised, Predict};
 use crate::validate::{inspect_classes, inspect_identification, inspect_xy};
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Meaninglessness, Qualified, Result};
+use signlred::{Issue, IssueCode, Meaninglessness, Qualified, Result, Severity};
 
 fn labels_of(y: &Vector) -> Vec<i64> {
     y.as_slice()
@@ -442,6 +442,119 @@ impl Fit for RadiusNeighborsClassifier {
             classes,
             radius: self.radius,
             fallback,
+        })
+    }
+}
+
+/// Radius-neighbors regressor (mean of responses inside a Euclidean ball).
+#[derive(Clone, Debug)]
+pub struct RadiusNeighborsRegressor {
+    /// Inclusive radius (Euclidean).
+    pub radius: f64,
+}
+
+impl Default for RadiusNeighborsRegressor {
+    fn default() -> Self {
+        Self { radius: 1.0 }
+    }
+}
+
+impl RadiusNeighborsRegressor {
+    /// Regressor with the given radius.
+    pub fn new(radius: f64) -> Self {
+        Self { radius }
+    }
+}
+
+/// Fitted radius-neighbors regressor.
+#[derive(Clone, Debug)]
+pub struct FittedRadiusNeighborsReg {
+    /// Training features.
+    pub x_train: Matrix,
+    /// Training response.
+    pub y_train: Vector,
+    /// Ball radius.
+    pub radius: f64,
+    /// Global mean used when a query has an empty neighborhood.
+    pub fallback: f64,
+}
+
+impl Predict for FittedRadiusNeighborsReg {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        predict_shape_guard(&mut ctx, x, self.x_train.ncols());
+        let r2 = (self.radius.max(0.0)).powi(2);
+        let mut empty = 0usize;
+        let mut out = Vector::zeros(x.nrows());
+        for i in 0..x.nrows() {
+            let mut s = 0.0;
+            let mut hit = 0.0;
+            for t in 0..self.x_train.nrows() {
+                if sq_dist_row(&self.x_train, t, x, i) <= r2 {
+                    s += self.y_train[t];
+                    hit += 1.0;
+                }
+            }
+            if hit == 0.0 {
+                empty += 1;
+                out[i] = self.fallback;
+            } else {
+                out[i] = s / hit;
+            }
+        }
+        if empty > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "{empty} / {} queries have an empty radius neighborhood",
+                        x.nrows()
+                    ))
+                    .build(),
+            );
+        }
+        if empty == x.nrows() && x.nrows() > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("every query had an empty neighborhood")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "radius-neighbors regression",
+                        "the radius isolated every query from the training set",
+                        "increase the radius or rescale features",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(out)
+    }
+}
+
+impl Fit for RadiusNeighborsRegressor {
+    type Fitted = FittedRadiusNeighborsReg;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRadiusNeighborsReg>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if !self.radius.is_finite() || self.radius < 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .message(format!(
+                        "radius={} is not a finite non-negative number",
+                        self.radius
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(FittedRadiusNeighborsReg {
+            x_train: x.clone(),
+            y_train: y.clone(),
+            radius: self.radius,
+            fallback: y.mean(),
         })
     }
 }
@@ -933,5 +1046,20 @@ mod tests {
             .unwrap()
             .value[0];
         assert!(l0 > lf, "log-density at 0 ({l0}) should exceed far ({lf})");
+    }
+
+    #[test]
+    fn radius_regressor_recovers_a_line() {
+        let x = Matrix::from_fn(16, 1, |i, _| i as f64);
+        let y = Vector::from_iter((0..16).map(|i| 2.0 * i as f64));
+        let q = RadiusNeighborsRegressor { radius: 2.5 }
+            .fit(&x, &y, &Session::new("rnr", "fit"))
+            .expect("rnr");
+        let pred = q
+            .value
+            .predict(&x, &Session::new("rnr", "p"))
+            .unwrap()
+            .value;
+        assert!((pred[8] - 16.0).abs() < 3.0, "pred8={}", pred[8]);
     }
 }

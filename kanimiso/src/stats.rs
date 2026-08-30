@@ -1803,6 +1803,351 @@ pub fn kpss(y: &Vector, lags: Option<usize>, session: &Session) -> Result<Qualif
     })
 }
 
+/// Tukey HSD pairwise comparisons after a one-way ANOVA.
+#[derive(Clone, Debug)]
+pub struct TukeyHsdResult {
+    /// Group means.
+    pub means: Vector,
+    /// Pairwise |t| statistics (`K` × `K`).
+    pub pairwise_stat: Matrix,
+    /// Pairwise two-sided t p-values (uncorrected studentized-range proxy).
+    pub pairwise_p: Matrix,
+}
+
+/// Tukey honest significant differences on `groups`.
+pub fn tukey_hsd(groups: &[&Vector], session: &Session) -> Result<Qualified<TukeyHsdResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if groups.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .message("Tukey HSD needs ≥ 2 groups")
+                .build(),
+        );
+        return ctx.finish(TukeyHsdResult {
+            means: Vector::zeros(groups.len()),
+            pairwise_stat: Matrix::zeros(groups.len(), groups.len()),
+            pairwise_p: Matrix::zeros(groups.len(), groups.len()),
+        });
+    }
+    let anova = match anova_oneway(groups, &session.child("anova")) {
+        Ok(q) => {
+            for issue in q.report.issues() {
+                ctx.push(issue.clone());
+            }
+            q.value
+        }
+        Err(e) => {
+            ctx.push(e.primary);
+            AnovaResult {
+                f_stat: f64::NAN,
+                pvalue: f64::NAN,
+                df_between: 0.0,
+                df_within: 0.0,
+                ss_between: f64::NAN,
+                ss_within: f64::NAN,
+            }
+        }
+    };
+    let k = groups.len();
+    let means = Vector::from_iter(groups.iter().map(|g| g.mean()));
+    let ns: Vec<f64> = groups.iter().map(|g| g.len() as f64).collect();
+    let mse = if anova.df_within > 0.0 {
+        anova.ss_within / anova.df_within
+    } else {
+        f64::NAN
+    };
+    let mut pairwise_stat = Matrix::zeros(k, k);
+    let mut pairwise_p = Matrix::zeros(k, k);
+    for i in 0..k {
+        for j in 0..k {
+            if i == j || !mse.is_finite() || mse <= 0.0 {
+                continue;
+            }
+            let se = (mse * (1.0 / ns[i] + 1.0 / ns[j])).sqrt();
+            if se <= 0.0 {
+                continue;
+            }
+            let t = (means[i] - means[j]).abs() / se;
+            pairwise_stat.set(i, j, t);
+            pairwise_p.set(i, j, student_t_pvalue(t, anova.df_within));
+        }
+    }
+    ctx.push(
+        Issue::builder(IssueCode::MultipleTestingUncorrected)
+            .message("Tukey pairwise p-values use a Student-t proxy, not the studentized range")
+            .build(),
+    );
+    ctx.finish(TukeyHsdResult {
+        means,
+        pairwise_stat,
+        pairwise_p,
+    })
+}
+
+/// Goldfeld–Quandt split-sample heteroscedasticity test.
+///
+/// Rows are sorted by column 0 of `x`. The middle 20% is dropped. The F
+/// statistic is `SSE_high / SSE_low` from two scratch OLS fits.
+pub fn goldfeld_quandt(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let n = x.nrows().min(y.len());
+    if n < 10 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .message("Goldfeld–Quandt needs n≥10")
+                .build(),
+        );
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|a, b| {
+        x.get(*a, 0)
+            .partial_cmp(&x.get(*b, 0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let drop = (0.2 * n as f64).floor() as usize;
+    let n_side = n.saturating_sub(drop) / 2;
+    if n_side < 3 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .message("Goldfeld–Quandt split left fewer than 3 rows per half")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: n as f64,
+        });
+    }
+    let sse_of = |idx: &[usize]| -> f64 {
+        let xs = Matrix::from_fn(idx.len(), x.ncols(), |i, j| x.get(idx[i], j));
+        let ys = Vector::from_iter(idx.iter().map(|&i| y[i]));
+        let design = xs.with_intercept();
+        let mut scratch = Report::new("gq", "ols");
+        match crate::linalg::least_squares(&mut scratch, &design, &ys, &ctx.policy) {
+            Some(beta) => {
+                let r = ys.sub(&design.matvec(&beta));
+                r.dot(&r)
+            }
+            None => f64::NAN,
+        }
+    };
+    let low = &order[..n_side];
+    let high = &order[n - n_side..];
+    let sse_l = sse_of(low);
+    let sse_h = sse_of(high);
+    let df = (n_side as f64 - (x.ncols() + 1) as f64).max(1.0);
+    let stat = if sse_l > 0.0 { sse_h / sse_l } else { f64::NAN };
+    let pvalue = if stat.is_finite() {
+        f_pvalue(stat.max(0.0), df, df)
+    } else {
+        f64::NAN
+    };
+    if pvalue.is_finite() && pvalue < 0.05 {
+        ctx.push(
+            Issue::builder(IssueCode::Heteroscedasticity)
+                .message(format!("Goldfeld–Quandt p={pvalue:.4}"))
+                .metric("f", stat)
+                .build(),
+        );
+    }
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df,
+        nobs: n as f64,
+    })
+}
+
+/// Breusch–Godfrey LM test for residual autocorrelation of order `lags`.
+pub fn breusch_godfrey(
+    resid: &Vector,
+    design: &Matrix,
+    lags: usize,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, design, None, &ctx.policy);
+    let n = resid.len().min(design.nrows());
+    let h = lags.max(1);
+    if n <= h + design.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(signlred::Severity::Warning)
+                .message(format!("Breusch–Godfrey n={n} is tight for lags={h}"))
+                .build(),
+        );
+    }
+    if resid
+        .as_slice()
+        .iter()
+        .all(|e| e.abs() <= ctx.policy.near_zero_variance)
+    {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("Breusch–Godfrey: residuals are identically zero")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: h as f64,
+            nobs: n as f64,
+        });
+    }
+    let n_eff = n.saturating_sub(h);
+    let p_aux = design.ncols() + h;
+    let aux = Matrix::from_fn(n_eff, p_aux, |i, j| {
+        let t = i + h;
+        if j < design.ncols() {
+            design.get(t, j)
+        } else {
+            resid[t - (j - design.ncols() + 1)]
+        }
+    });
+    let target = Vector::from_iter((h..n).map(|t| resid[t]));
+    let mut scratch = Report::new("bg", "aux");
+    let Some(beta) = crate::linalg::least_squares(&mut scratch, &aux, &target, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::UnidentifiedModel)
+                .severity(signlred::Severity::Warning)
+                .message("Breusch–Godfrey auxiliary OLS failed")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: h as f64,
+            nobs: n_eff as f64,
+        });
+    };
+    for issue in scratch.issues() {
+        if matches!(
+            issue.code,
+            IssueCode::ResidualTooLarge
+                | IssueCode::NearSingular
+                | IssueCode::PerfectCollinearity
+                | IssueCode::R2IsOne
+        ) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let fitted = aux.matvec(&beta);
+    let r = target.sub(&fitted);
+    let sse = r.dot(&r);
+    let mean = target.mean();
+    let sst: f64 = target
+        .as_slice()
+        .iter()
+        .map(|v| {
+            let d = v - mean;
+            d * d
+        })
+        .sum();
+    let r2 = if sst > 0.0 { 1.0 - sse / sst } else { f64::NAN };
+    let stat = n_eff as f64 * r2;
+    let pvalue = if stat.is_finite() {
+        chi2_pvalue(stat.max(0.0), h as f64)
+    } else {
+        f64::NAN
+    };
+    if pvalue.is_finite() && pvalue < 0.05 {
+        ctx.push(
+            Issue::builder(IssueCode::AutocorrelatedResiduals)
+                .message(format!("Breusch–Godfrey p={pvalue:.4}"))
+                .metric("lm", stat)
+                .build(),
+        );
+    }
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: h as f64,
+        nobs: n_eff as f64,
+    })
+}
+
+/// Phillips–Perron unit-root test (constant-only, Newey–West robust).
+pub fn phillips_perron(
+    y: &Vector,
+    lags: Option<usize>,
+    session: &Session,
+) -> Result<Qualified<AdfullerResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, y);
+    let n = y.len();
+    if n < 6 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .message("Phillips–Perron needs n≥6")
+                .build(),
+        );
+        return ctx.finish(AdfullerResult {
+            stat: f64::NAN,
+            pvalue: f64::NAN,
+            used_lags: 0,
+            n,
+        });
+    }
+    let n_eff = n - 1;
+    let design = Matrix::from_fn(n_eff, 2, |i, j| if j == 0 { 1.0 } else { y[i] });
+    let target = Vector::from_iter((1..n).map(|t| y[t]));
+    let Some(beta) = statistical_ols(&mut ctx, &design, &target) else {
+        ctx.push(
+            Issue::builder(IssueCode::UnidentifiedModel)
+                .message("Phillips–Perron OLS failed")
+                .build(),
+        );
+        return ctx.finish(AdfullerResult {
+            stat: f64::NAN,
+            pvalue: f64::NAN,
+            used_lags: 0,
+            n: n_eff,
+        });
+    };
+    let fitted = design.matvec(&beta);
+    let e = target.sub(&fitted);
+    let used = lags.unwrap_or_else(|| schwert_lags(n));
+    let lambda2 = newey_west(e.as_slice(), used);
+    let gamma0 = {
+        let mut s = 0.0;
+        for i in 0..e.len() {
+            s += e[i] * e[i];
+        }
+        s / e.len() as f64
+    };
+    let se = ols_se_j(&mut ctx, &design, gamma0, 1);
+    let rho = beta[1];
+    let t_ols = if se > 0.0 { (rho - 1.0) / se } else { f64::NAN };
+    let nf = n_eff as f64;
+    let stat = if lambda2 > 0.0 && gamma0 > 0.0 && t_ols.is_finite() {
+        t_ols * (gamma0 / lambda2).sqrt()
+            - (lambda2 - gamma0) * nf * se / (2.0 * lambda2.sqrt() * gamma0.sqrt().max(1e-12))
+    } else {
+        t_ols
+    };
+    if rho.abs() > 0.98 || (rho - 1.0).abs() < 0.05 {
+        ctx.push(
+            Issue::builder(IssueCode::NonStationary)
+                .message(format!("Phillips–Perron ρ≈{rho:.4}"))
+                .metric("rho", rho)
+                .build(),
+        );
+    }
+    ctx.finish(AdfullerResult {
+        stat,
+        pvalue: adf_pvalue_constant(stat),
+        used_lags: used,
+        n: n_eff,
+    })
+}
+
 /// Granger causality: does lagged `x` help predict `y` beyond lagged `y`?
 pub fn granger_causality(
     x: &Vector,
@@ -3014,5 +3359,35 @@ mod tests {
         let q = het_white(&e, &x, &Session::new("white", "test")).expect("white");
         assert!(q.value.statistic.is_finite());
         assert!(q.value.pvalue.is_finite());
+    }
+
+    #[test]
+    fn tukey_gq_bg_pp() {
+        let a = Vector::from_iter((0..12).map(|i| 0.1 * i as f64));
+        let b = Vector::from_iter((0..12).map(|i| 3.0 + 0.1 * i as f64));
+        let c = Vector::from_iter((0..12).map(|i| 6.0 + 0.1 * i as f64));
+        let t = tukey_hsd(&[&a, &b, &c], &Session::new("tukey", "t")).expect("tukey");
+        assert!(t.value.pairwise_stat.get(0, 2) > t.value.pairwise_stat.get(0, 1));
+        let x = Matrix::from_fn(40, 1, |i, _| i as f64);
+        let y = Vector::from_iter((0..40).map(|i| 0.2 * i as f64 + 0.05 * (i as f64).sin()));
+        let gq = goldfeld_quandt(&x, &y, &Session::new("gq", "t")).expect("gq");
+        assert!(gq.value.statistic.is_finite());
+        let design = x.with_intercept();
+        let e = Vector::from_iter((0..40).map(|i| {
+            if i == 0 {
+                0.3
+            } else {
+                0.6 * ((i as f64).sin())
+            }
+        }));
+        let bg = breusch_godfrey(&e, &design, 1, &Session::new("bg", "t")).expect("bg");
+        assert!(bg.value.df > 0.0);
+        let mut rw = vec![0.0; 40];
+        for t in 1..40 {
+            rw[t] = rw[t - 1] + 0.4;
+        }
+        let pp = phillips_perron(&Vector::from_slice(&rw), Some(1), &Session::new("pp", "t"))
+            .expect("pp");
+        assert!(pp.report.contains(IssueCode::NonStationary) || pp.value.stat.is_finite());
     }
 }

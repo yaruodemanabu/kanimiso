@@ -2371,6 +2371,665 @@ impl Fit for TweedieRegressor {
     }
 }
 
+/// Multi-task lasso: \(\|Y-XW\|_F^2 + \alpha\|W\|_{2,1}\) by block coordinate descent.
+#[derive(Clone, Debug)]
+pub struct MultiTaskLasso {
+    /// Group-ℓ1 penalty on each feature's coefficient vector across tasks.
+    pub alpha: f64,
+    /// Coordinate cycles.
+    pub max_iter: usize,
+    /// Coordinate change tolerance.
+    pub tol: f64,
+}
+
+impl Default for MultiTaskLasso {
+    fn default() -> Self {
+        Self {
+            alpha: 0.1,
+            max_iter: 200,
+            tol: 1e-6,
+        }
+    }
+}
+
+impl MultiTaskLasso {
+    /// Multi-task lasso with the given group penalty.
+    pub fn new(alpha: f64) -> Self {
+        Self {
+            alpha,
+            ..Self::default()
+        }
+    }
+
+    /// Fit `Y ~ X` for a multi-column response.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedMultiTask>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        if x.nrows() != y.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("MultiTaskLasso: Y rows ≠ X rows")
+                    .build(),
+            );
+        }
+        let n = x.nrows().min(y.nrows());
+        let p = x.ncols();
+        let t = y.ncols();
+        if n == 0 || p == 0 || t == 0 {
+            return ctx.finish(FittedMultiTask {
+                coef: Matrix::zeros(p, t),
+                intercept: Vector::zeros(t),
+                alpha: self.alpha,
+            });
+        }
+        let (xc, xmean) = x.centered();
+        let mut ymean = Vector::zeros(t);
+        let mut yc = Matrix::zeros(n, t);
+        for j in 0..t {
+            let col = y.column(j);
+            ymean[j] = col.mean();
+            for i in 0..n {
+                yc.set(i, j, y.get(i, j) - ymean[j]);
+            }
+        }
+        let mut col_norm2 = vec![0.0; p];
+        for j in 0..p {
+            let mut s = 0.0;
+            for i in 0..n {
+                let v = xc.get(i, j);
+                s += v * v;
+            }
+            col_norm2[j] = s;
+        }
+        let mut w = Matrix::zeros(p, t);
+        let mut resid = yc.clone();
+        let mut converged = false;
+        let lam = (n as f64) * self.alpha.max(0.0);
+        for it in 0..self.max_iter.max(1) {
+            let mut max_d: f64 = 0.0;
+            for j in 0..p {
+                if col_norm2[j] <= ctx.policy.near_zero_variance {
+                    continue;
+                }
+                for task in 0..t {
+                    let wj = w.get(j, task);
+                    for i in 0..n {
+                        resid.set(i, task, resid.get(i, task) + xc.get(i, j) * wj);
+                    }
+                }
+                let mut s_vec = Vector::zeros(t);
+                for task in 0..t {
+                    let mut rho = 0.0;
+                    for i in 0..n {
+                        rho += xc.get(i, j) * resid.get(i, task);
+                    }
+                    s_vec[task] = rho;
+                }
+                let nrm = s_vec.norm();
+                let old: Vec<f64> = (0..t).map(|task| w.get(j, task)).collect();
+                if nrm <= lam {
+                    for task in 0..t {
+                        w.set(j, task, 0.0);
+                    }
+                } else {
+                    let scale = (1.0 - lam / nrm) / col_norm2[j];
+                    for task in 0..t {
+                        w.set(j, task, scale * s_vec[task]);
+                    }
+                }
+                for task in 0..t {
+                    let wj = w.get(j, task);
+                    max_d = max_d.max((wj - old[task]).abs());
+                    for i in 0..n {
+                        resid.set(i, task, resid.get(i, task) - xc.get(i, j) * wj);
+                    }
+                }
+            }
+            ctx.session.step(it as u64, max_d, None);
+            if max_d < self.tol {
+                ctx.session.converged("multi-task CD", it as u64);
+                converged = true;
+                break;
+            }
+        }
+        if !converged {
+            ctx.push(
+                Issue::builder(IssueCode::MaxIterReached)
+                    .message("MultiTaskLasso hit max_iter")
+                    .build(),
+            );
+        }
+        let all_zero = (0..p).all(|j| (0..t).all(|k| w.get(j, k).abs() == 0.0));
+        let y_var = (0..t).any(|k| y.column(k).std() > ctx.policy.near_zero_variance);
+        if all_zero && y_var {
+            ctx.push(
+                Issue::builder(IssueCode::InterceptOnlyCollapse)
+                    .message("multi-task lasso shrank every feature to 0")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "multi-task slopes",
+                        "the group penalty ate every direction",
+                        "decrease α",
+                    ))
+                    .build(),
+            );
+        }
+        let intercept = Vector::from_iter((0..t).map(|k| {
+            let mut s = ymean[k];
+            for j in 0..p {
+                s -= xmean[j] * w.get(j, k);
+            }
+            s
+        }));
+        ctx.finish(FittedMultiTask {
+            coef: w,
+            intercept,
+            alpha: self.alpha,
+        })
+    }
+}
+
+/// Fitted multi-task lasso.
+#[derive(Clone, Debug)]
+pub struct FittedMultiTask {
+    /// Coefficient matrix (`p` × `n_tasks`).
+    pub coef: Matrix,
+    /// Intercept per task.
+    pub intercept: Vector,
+    /// Penalty used.
+    pub alpha: f64,
+}
+
+impl FittedMultiTask {
+    /// Predict a multi-column response.
+    pub fn predict_matrix(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.ncols() != self.coef.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("MultiTaskLasso predict column count ≠ p")
+                    .build(),
+            );
+        }
+        let t = self.coef.ncols();
+        let out = Matrix::from_fn(x.nrows(), t, |i, k| {
+            let mut s = if k < self.intercept.len() {
+                self.intercept[k]
+            } else {
+                0.0
+            };
+            for j in 0..x.ncols().min(self.coef.nrows()) {
+                s += x.get(i, j) * self.coef.get(j, k);
+            }
+            s
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Target map applied before a linear fit (sklearn `TransformedTargetRegressor`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TargetTransform {
+    /// Identity (plain OLS).
+    Identity,
+    /// `log(y)` / `exp` inverse. Requires `y > 0`.
+    Log,
+}
+
+/// OLS on a transformed target, with the inverse applied at predict time.
+#[derive(Clone, Debug)]
+pub struct TransformedTargetRegressor {
+    /// Target map.
+    pub transform: TargetTransform,
+}
+
+impl Default for TransformedTargetRegressor {
+    fn default() -> Self {
+        Self {
+            transform: TargetTransform::Log,
+        }
+    }
+}
+
+impl TransformedTargetRegressor {
+    /// Log-target OLS.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted transformed-target regressor.
+#[derive(Clone, Debug)]
+pub struct FittedTtr {
+    /// Inner OLS on the transformed scale.
+    pub inner: FittedLinear,
+    /// Map that was applied.
+    pub transform: TargetTransform,
+}
+
+impl Predict for FittedTtr {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let q = self.inner.predict(x, session)?;
+        Ok(q.map(|mut y| {
+            if self.transform == TargetTransform::Log {
+                for i in 0..y.len() {
+                    y[i] = y[i].exp();
+                }
+            }
+            y
+        }))
+    }
+}
+
+impl Fit for TransformedTargetRegressor {
+    type Fitted = FittedTtr;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedTtr>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let yt = match self.transform {
+            TargetTransform::Identity => y.clone(),
+            TargetTransform::Log => {
+                for (i, &yi) in y.as_slice().iter().enumerate() {
+                    if yi <= 0.0 {
+                        ctx.push(
+                            Issue::builder(IssueCode::NonPositiveSeries)
+                                .message(format!("log-target y[{i}]={yi} is not strictly positive"))
+                                .build(),
+                        );
+                        break;
+                    }
+                }
+                Vector::from_iter(y.as_slice().iter().map(|v| v.max(1e-12).ln()))
+            }
+        };
+        let mut ols = LinearRegression::new();
+        let inner = match ols.fit(x, &yt, &session.child("inner")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if matches!(issue.code, IssueCode::ResidualTooLarge | IssueCode::R2IsOne) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                q.value
+            }
+            Err(e) => {
+                ctx.push(e.primary);
+                empty_fitted(x, y, true)
+            }
+        };
+        ctx.finish(FittedTtr {
+            inner,
+            transform: self.transform,
+        })
+    }
+}
+
+/// Rolling-window OLS (statsmodels `RollingOLS`).
+#[derive(Clone, Debug)]
+pub struct RollingOls {
+    /// Window length.
+    pub window: usize,
+    /// Prepend an intercept.
+    pub fit_intercept: bool,
+}
+
+impl Default for RollingOls {
+    fn default() -> Self {
+        Self {
+            window: 12,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl RollingOls {
+    /// Rolling OLS with the given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+            fit_intercept: true,
+        }
+    }
+
+    /// Fit a coefficient path, one row per complete window.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRollingOls>> {
+        rolling_path(&mut *self, x, y, false, session)
+    }
+}
+
+/// Expanding-window OLS (statsmodels `ExpandingOLS`).
+#[derive(Clone, Debug)]
+pub struct ExpandingOls {
+    /// Minimum observations before the first estimate.
+    pub min_n: usize,
+    /// Prepend an intercept.
+    pub fit_intercept: bool,
+}
+
+impl Default for ExpandingOls {
+    fn default() -> Self {
+        Self {
+            min_n: 8,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl ExpandingOls {
+    /// Expanding OLS with the given burn-in.
+    pub fn new(min_n: usize) -> Self {
+        Self {
+            min_n: min_n.max(2),
+            fit_intercept: true,
+        }
+    }
+
+    /// Fit a coefficient path from `min_n` through `n`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRollingOls>> {
+        let mut roll = RollingOls {
+            window: self.min_n,
+            fit_intercept: self.fit_intercept,
+        };
+        rolling_path(&mut roll, x, y, true, session)
+    }
+}
+
+/// Coefficient path from a rolling or expanding OLS.
+#[derive(Clone, Debug)]
+pub struct FittedRollingOls {
+    /// Slopes (`n_windows` × `p`).
+    pub coef: Matrix,
+    /// Intercept per window.
+    pub intercept: Vector,
+    /// In-window R².
+    pub r2: Vector,
+    /// Window (or burn-in) length.
+    pub window: usize,
+}
+
+fn rolling_path(
+    spec: &mut RollingOls,
+    x: &Matrix,
+    y: &Vector,
+    expanding: bool,
+    session: &Session,
+) -> Result<Qualified<FittedRollingOls>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let n = x.nrows().min(y.len());
+    let w = spec.window.max(2);
+    if n < w {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .message(format!("rolling/expanding window {w} > n={n}"))
+                .build(),
+        );
+    }
+    let p_design = x.ncols() + if spec.fit_intercept { 1 } else { 0 };
+    let ends: Vec<usize> = (w..=n).collect();
+    let n_win = ends.len();
+    let mut coef = Matrix::zeros(n_win, x.ncols());
+    let mut intercept = Vector::zeros(n_win);
+    let mut r2v = Vector::zeros(n_win);
+    for (k, &end) in ends.iter().enumerate() {
+        let start = if expanding { 0 } else { end.saturating_sub(w) };
+        let nn = end.saturating_sub(start);
+        if nn == 0 {
+            continue;
+        }
+        let xs = Matrix::from_fn(nn, x.ncols(), |i, j| x.get(start + i, j));
+        let ys = Vector::from_iter((0..nn).map(|i| y[start + i]));
+        let design = if spec.fit_intercept {
+            xs.with_intercept()
+        } else {
+            xs.clone()
+        };
+        if (nn as f64) < ctx.policy.min_samples_per_parameter * p_design as f64 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!("window [{start},{end}) has n={nn} p={p_design}"))
+                    .build(),
+            );
+        }
+        let mut scratch = signlred::Report::new("rolling", "ols");
+        let Some(beta) = least_squares(&mut scratch, &design, &ys, &ctx.policy) else {
+            continue;
+        };
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::PerfectCollinearity
+                    | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let (b0, slopes) = if spec.fit_intercept {
+            (
+                beta.as_slice().first().copied().unwrap_or(0.0),
+                Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            )
+        } else {
+            (0.0, beta.clone())
+        };
+        intercept[k] = b0;
+        for j in 0..slopes.len().min(x.ncols()) {
+            coef.set(k, j, slopes[j]);
+        }
+        let fit = design.matvec(&beta);
+        let resid = ys.sub(&fit);
+        let sse = resid.dot(&resid);
+        let ym = ys.mean();
+        let sst: f64 = ys.as_slice().iter().map(|v| (v - ym) * (v - ym)).sum();
+        r2v[k] = if sst > ctx.policy.r2_zero_tol {
+            1.0 - sse / sst
+        } else {
+            f64::NAN
+        };
+    }
+    if n_win == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .message("no complete rolling window")
+                .build(),
+        );
+    }
+    ctx.finish(FittedRollingOls {
+        coef,
+        intercept,
+        r2: r2v,
+        window: w,
+    })
+}
+
+/// Cochrane–Orcutt GLS with an AR(1) residual (statsmodels `GLSAR`).
+#[derive(Clone, Debug)]
+pub struct Glsar {
+    /// Prepend an intercept.
+    pub fit_intercept: bool,
+    /// ρ / β iterations.
+    pub max_iter: usize,
+}
+
+impl Default for Glsar {
+    fn default() -> Self {
+        Self {
+            fit_intercept: true,
+            max_iter: 8,
+        }
+    }
+}
+
+impl Glsar {
+    /// Default Cochrane–Orcutt GLSAR.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted GLSAR.
+#[derive(Clone, Debug)]
+pub struct FittedGlsar {
+    /// Slopes on the original scale.
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+    /// Estimated AR(1) residual coefficient.
+    pub rho: f64,
+    /// Innovation variance after the AR(1) filter.
+    pub sigma2: f64,
+}
+
+impl Predict for FittedGlsar {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() != self.coef.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("GLSAR predict column count ≠ coef")
+                    .build(),
+            );
+        }
+        let mut y = x.matvec(&self.coef);
+        for i in 0..y.len() {
+            y[i] += self.intercept;
+        }
+        ctx.finish(y)
+    }
+}
+
+impl Fit for Glsar {
+    type Fitted = FittedGlsar;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlsar>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let design = if self.fit_intercept {
+            x.with_intercept()
+        } else {
+            x.clone()
+        };
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let n = y.len().min(design.nrows());
+        if n < 3 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .message("GLSAR needs n≥3")
+                    .build(),
+            );
+            return ctx.finish(FittedGlsar {
+                coef: Vector::zeros(x.ncols()),
+                intercept: y.mean(),
+                rho: 0.0,
+                sigma2: f64::NAN,
+            });
+        }
+        let mut scratch = signlred::Report::new("glsar", "ols0");
+        let mut beta = least_squares(&mut scratch, &design, y, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        for issue in scratch.issues() {
+            if issue.code == IssueCode::ResidualTooLarge {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let mut rho = 0.0;
+        for it in 0..self.max_iter.max(1) {
+            let fitted = design.matvec(&beta);
+            let e = y.sub(&fitted);
+            let mut num = 0.0;
+            let mut den = 0.0;
+            for t in 1..n {
+                num += e[t] * e[t - 1];
+                den += e[t - 1] * e[t - 1];
+            }
+            rho = if den > ctx.policy.near_zero_variance {
+                (num / den).clamp(-0.99, 0.99)
+            } else {
+                0.0
+            };
+            let n2 = n.saturating_sub(1);
+            let xs = Matrix::from_fn(n2, design.ncols(), |i, j| {
+                design.get(i + 1, j) - rho * design.get(i, j)
+            });
+            let ys = Vector::from_iter((1..n).map(|i| y[i] - rho * y[i - 1]));
+            let mut step = signlred::Report::new("glsar", "co");
+            let Some(next) = least_squares(&mut step, &xs, &ys, &ctx.policy) else {
+                break;
+            };
+            for issue in step.issues() {
+                if matches!(
+                    issue.code,
+                    IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+                ) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            let d = next.sub(&beta).norm();
+            beta = next;
+            ctx.session.step(it as u64, d, Some(rho.abs()));
+            if d < 1e-8 {
+                ctx.session.converged("Cochrane–Orcutt", it as u64);
+                break;
+            }
+        }
+        if rho.abs() > 0.2 {
+            ctx.push(
+                Issue::builder(IssueCode::AutocorrelatedResiduals)
+                    .message(format!("GLSAR ρ={rho:.4}"))
+                    .metric("rho", rho)
+                    .build(),
+            );
+        }
+        let fitted = design.matvec(&beta);
+        let e = y.sub(&fitted);
+        let mut sse = 0.0;
+        for t in 1..n {
+            let u = e[t] - rho * e[t - 1];
+            sse += u * u;
+        }
+        let df = (n as f64 - 1.0) - design.ncols() as f64;
+        let sigma2 = if df > 0.0 { sse / df } else { f64::NAN };
+        let (intercept, coef) = if self.fit_intercept {
+            (
+                beta.as_slice().first().copied().unwrap_or(0.0),
+                Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            )
+        } else {
+            (0.0, beta)
+        };
+        ctx.finish(FittedGlsar {
+            coef,
+            intercept,
+            rho,
+            sigma2,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2475,6 +3134,51 @@ mod tests {
             "mse={}",
             sse / (y.len() as f64)
         );
+    }
+
+    #[test]
+    fn rolling_glsar_ttr_and_multitask() {
+        let x = Matrix::from_fn(24, 1, |i, _| i as f64);
+        let y = Vector::from_iter((0..24).map(|i| 1.0 + 2.0 * i as f64));
+        let roll = RollingOls::new(12)
+            .fit(&x, &y, &Session::new("roll", "fit"))
+            .expect("roll");
+        assert!(roll.value.coef.nrows() >= 10);
+        assert!((roll.value.coef.get(roll.value.coef.nrows() - 1, 0) - 2.0).abs() < 0.05);
+        let exp = ExpandingOls::new(12)
+            .fit(&x, &y, &Session::new("exp", "fit"))
+            .expect("exp");
+        assert!(exp.value.coef.nrows() >= 10);
+        let mut e = y.clone();
+        for i in 1..e.len() {
+            e[i] += 0.4 * (e[i] - 1.0 - 2.0 * (i as f64 - 1.0));
+        }
+        let g = Glsar::new()
+            .fit(&x, &e, &Session::new("glsar", "fit"))
+            .expect("glsar");
+        assert!((g.value.coef[0] - 2.0).abs() < 0.5, "b={}", g.value.coef[0]);
+        let ylog = Vector::from_iter((0..24).map(|i| (1.0 + 0.1 * i as f64).exp()));
+        let ttr = TransformedTargetRegressor::new()
+            .fit(&x, &ylog, &Session::new("ttr", "fit"))
+            .expect("ttr");
+        let pred = ttr
+            .value
+            .predict(&x, &Session::new("ttr", "p"))
+            .unwrap()
+            .value;
+        assert!((pred[0] - ylog[0]).abs() / ylog[0] < 0.2);
+        let ym = Matrix::from_fn(24, 2, |i, k| {
+            if k == 0 {
+                1.0 + 2.0 * i as f64
+            } else {
+                0.5 * i as f64
+            }
+        });
+        let mt = MultiTaskLasso::new(0.01)
+            .fit(&x, &ym, &Session::new("mt", "fit"))
+            .expect("mt");
+        assert_eq!(mt.value.coef.shape(), (1, 2));
+        assert!(mt.value.coef.get(0, 0).is_finite());
     }
 
     #[test]

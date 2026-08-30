@@ -1192,6 +1192,303 @@ impl Predict for FittedGee {
     }
 }
 
+/// Zero-inflated Poisson (Lambert): intercept-only inflate + Poisson count GLM.
+#[derive(Clone, Debug)]
+pub struct ZeroInflatedPoisson {
+    /// EM / IRLS cycles.
+    pub max_iter: usize,
+    /// Count-model intercept.
+    pub fit_intercept: bool,
+}
+
+impl Default for ZeroInflatedPoisson {
+    fn default() -> Self {
+        Self {
+            max_iter: 25,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl ZeroInflatedPoisson {
+    /// Default ZIP.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted ZIP.
+#[derive(Clone, Debug)]
+pub struct FittedZip {
+    /// Count-model slopes.
+    pub coef: Vector,
+    /// Count-model intercept.
+    pub intercept: f64,
+    /// Structural-zero probability (intercept-only).
+    pub inflate_pi: f64,
+}
+
+impl Predict for FittedZip {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() != self.coef.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ZIP predict column count ≠ coef")
+                    .build(),
+            );
+        }
+        let mut y = x.matvec(&self.coef);
+        for i in 0..y.len() {
+            let mu = (y[i] + self.intercept).exp().max(1e-12);
+            y[i] = (1.0 - self.inflate_pi) * mu;
+        }
+        ctx.finish(y)
+    }
+}
+
+impl Fit for ZeroInflatedPoisson {
+    type Fitted = FittedZip;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedZip>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        for (i, &yi) in y.as_slice().iter().enumerate() {
+            if yi < 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .message(format!("ZIP y[{i}]={yi} < 0"))
+                        .build(),
+                );
+                break;
+            }
+        }
+        let design = if self.fit_intercept {
+            x.with_intercept()
+        } else {
+            x.clone()
+        };
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let n = y.len();
+        let n0 = y.as_slice().iter().filter(|v| **v <= 0.0).count() as f64;
+        let mut pi = (n0 / n.max(1) as f64).clamp(0.05, 0.8);
+        let mut beta = Vector::zeros(design.ncols());
+        if self.fit_intercept && !beta.is_empty() {
+            let ypos: Vec<f64> = y.as_slice().iter().copied().filter(|v| *v > 0.0).collect();
+            let m = if ypos.is_empty() {
+                1.0
+            } else {
+                ypos.iter().sum::<f64>() / ypos.len() as f64
+            };
+            beta[0] = m.max(1e-3).ln();
+        }
+        if n0 == n as f64 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateDistribution)
+                    .message("ZIP: every count is zero")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "ZIP rates",
+                        "a zero series does not identify a count mean",
+                        "collect positive counts",
+                    ))
+                    .build(),
+            );
+        }
+        if n0 == 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::MixtureWeightCollapsed)
+                    .message("ZIP inflate is unidentified: there are no zeros")
+                    .build(),
+            );
+            pi = 0.0;
+        }
+        for it in 0..self.max_iter.max(1) {
+            let mut z = Vector::zeros(n);
+            let mut tau_sum = 0.0;
+            for i in 0..n {
+                let mut eta = 0.0;
+                for j in 0..design.ncols() {
+                    eta += design.get(i, j) * beta[j];
+                }
+                let mu = eta.exp().max(1e-12);
+                if y[i] <= 0.0 {
+                    let p0 = (-mu).exp();
+                    z[i] = pi / (pi + (1.0 - pi) * p0).max(1e-12);
+                } else {
+                    z[i] = 0.0;
+                }
+                tau_sum += z[i];
+            }
+            pi = (tau_sum / n as f64).clamp(1e-6, 1.0 - 1e-6);
+            let mut xs = Matrix::zeros(n, design.ncols());
+            let mut rhs = Vector::zeros(n);
+            for i in 0..n {
+                let mut eta = 0.0;
+                for j in 0..design.ncols() {
+                    eta += design.get(i, j) * beta[j];
+                }
+                let mu = eta.exp().max(1e-12);
+                let w = ((1.0 - z[i]) * mu).max(1e-12);
+                let sw = w.sqrt();
+                rhs[i] = (eta + (y[i] - mu) / mu) * sw;
+                for j in 0..design.ncols() {
+                    xs.set(i, j, design.get(i, j) * sw);
+                }
+            }
+            let mut scratch = signlred::Report::new("zip", "irls");
+            let Some(next) = least_squares(&mut scratch, &xs, &rhs, &ctx.policy) else {
+                break;
+            };
+            for issue in scratch.issues() {
+                if matches!(
+                    issue.code,
+                    IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+                ) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            let d = next.sub(&beta).norm();
+            beta = next;
+            ctx.session.step(it as u64, d, Some(pi));
+            if d < 1e-7 {
+                ctx.session.converged("ZIP EM", it as u64);
+                break;
+            }
+        }
+        let (intercept, coef) = if self.fit_intercept {
+            (
+                beta.as_slice().first().copied().unwrap_or(0.0),
+                Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            )
+        } else {
+            (0.0, beta)
+        };
+        ctx.finish(FittedZip {
+            coef,
+            intercept,
+            inflate_pi: pi,
+        })
+    }
+}
+
+/// Weibull AFT (uncensored): \(\log T = x^\top\beta + \sigma\varepsilon\), \(\varepsilon\sim\) Gumbel.
+#[derive(Clone, Debug)]
+pub struct WeibullAft {
+    /// Gradient steps.
+    pub max_iter: usize,
+}
+
+impl Default for WeibullAft {
+    fn default() -> Self {
+        Self { max_iter: 40 }
+    }
+}
+
+impl WeibullAft {
+    /// Default Weibull AFT.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted Weibull AFT.
+#[derive(Clone, Debug)]
+pub struct FittedWeibullAft {
+    /// Slopes.
+    pub coef: Vector,
+    /// Intercept on the log-time scale.
+    pub intercept: f64,
+    /// Scale \(\sigma > 0\).
+    pub sigma: f64,
+}
+
+impl Predict for FittedWeibullAft {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() != self.coef.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("WeibullAFT predict column count ≠ coef")
+                    .build(),
+            );
+        }
+        let mut y = x.matvec(&self.coef);
+        for i in 0..y.len() {
+            y[i] = (y[i] + self.intercept).exp();
+        }
+        ctx.finish(y)
+    }
+}
+
+impl Fit for WeibullAft {
+    type Fitted = FittedWeibullAft;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedWeibullAft>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        for (i, &yi) in y.as_slice().iter().enumerate() {
+            if yi <= 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .message(format!("Weibull AFT y[{i}]={yi} is not strictly positive"))
+                        .build(),
+                );
+                break;
+            }
+        }
+        let design = x.with_intercept();
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let n = y.len().min(design.nrows());
+        let logy = Vector::from_iter(y.as_slice().iter().map(|v| v.max(1e-12).ln()));
+        let mut beta = Vector::zeros(design.ncols());
+        beta[0] = logy.mean();
+        let mut log_sigma = logy.std().max(0.1).ln();
+        for it in 0..self.max_iter.max(1) {
+            let sigma = log_sigma.exp().max(1e-6);
+            let mut g_beta = Vector::zeros(design.ncols());
+            let mut g_ls = 0.0;
+            for i in 0..n {
+                let mut eta = 0.0;
+                for j in 0..design.ncols() {
+                    eta += design.get(i, j) * beta[j];
+                }
+                let z = (logy[i] - eta) / sigma;
+                let ez = z.exp();
+                for j in 0..design.ncols() {
+                    g_beta[j] += (ez - 1.0) * design.get(i, j) / sigma;
+                }
+                g_ls += -1.0 + (ez - 1.0) * z;
+            }
+            let step = 0.05 / (n as f64).sqrt();
+            for j in 0..beta.len() {
+                beta[j] += step * g_beta[j];
+            }
+            log_sigma += step * g_ls / n as f64;
+            let gn = g_beta.norm() + g_ls.abs();
+            ctx.session.step(it as u64, gn, None);
+            if gn < 1e-5 {
+                ctx.session.converged("Weibull AFT gradient", it as u64);
+                break;
+            }
+        }
+        let sigma = log_sigma.exp().max(1e-6);
+        if !sigma.is_finite() {
+            ctx.push(Issue::builder(IssueCode::NonFiniteOutput).build());
+        }
+        ctx.finish(FittedWeibullAft {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            sigma,
+        })
+    }
+}
+
 fn gee_gls(
     design: &Matrix,
     y: &Vector,
@@ -1388,5 +1685,32 @@ mod tests {
         );
         assert!(q.value.rho.is_finite());
         assert_eq!(q.value.n_groups, 2);
+    }
+
+    #[test]
+    fn zip_and_weibull() {
+        let x = Matrix::from_fn(30, 1, |i, _| (i % 6) as f64);
+        let y = Vector::from_iter((0..30).map(|i| {
+            if i % 5 == 0 {
+                0.0
+            } else {
+                (0.4 * (i % 6) as f64).exp().round()
+            }
+        }));
+        let z = ZeroInflatedPoisson::new()
+            .fit(&x, &y, &Session::new("zip", "fit"))
+            .expect("zip");
+        assert!(z.value.inflate_pi > 0.0 && z.value.inflate_pi < 1.0);
+        let yt = Vector::from_iter((0..30).map(|i| (0.8 + 0.15 * (i % 6) as f64).exp()));
+        let w = WeibullAft::new()
+            .fit(&x, &yt, &Session::new("aft", "fit"))
+            .expect("aft");
+        assert!(w.value.sigma > 0.0 && w.value.sigma.is_finite());
+        let pred = w
+            .value
+            .predict(&x, &Session::new("aft", "p"))
+            .unwrap()
+            .value;
+        assert!(pred.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
     }
 }
