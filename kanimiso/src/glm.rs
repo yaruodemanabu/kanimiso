@@ -1448,9 +1448,9 @@ impl Fit for WeibullAft {
         let logy = Vector::from_iter(y.as_slice().iter().map(|v| v.max(1e-12).ln()));
         let mut beta = Vector::zeros(design.ncols());
         beta[0] = logy.mean();
-        let mut log_sigma = logy.std().max(0.1).ln();
+        let mut log_sigma = logy.std().max(0.1).ln().clamp(-2.0, 2.0);
         for it in 0..self.max_iter.max(1) {
-            let sigma = log_sigma.exp().max(1e-6);
+            let sigma = log_sigma.exp().clamp(1e-3, 10.0);
             let mut g_beta = Vector::zeros(design.ncols());
             let mut g_ls = 0.0;
             for i in 0..n {
@@ -1458,28 +1458,47 @@ impl Fit for WeibullAft {
                 for j in 0..design.ncols() {
                     eta += design.get(i, j) * beta[j];
                 }
-                let z = (logy[i] - eta) / sigma;
+                let z = ((logy[i] - eta) / sigma).clamp(-20.0, 20.0);
                 let ez = z.exp();
                 for j in 0..design.ncols() {
                     g_beta[j] += (ez - 1.0) * design.get(i, j) / sigma;
                 }
                 g_ls += -1.0 + (ez - 1.0) * z;
             }
-            let step = 0.05 / (n as f64).sqrt();
-            for j in 0..beta.len() {
-                beta[j] += step * g_beta[j];
+            let step = 0.01 / (n as f64).sqrt();
+            let mut next = beta.clone();
+            for j in 0..next.len() {
+                let g = g_beta[j].clamp(-1e3, 1e3);
+                next[j] += step * g;
             }
-            log_sigma += step * g_ls / n as f64;
+            let next_ls = (log_sigma + step * (g_ls / n as f64).clamp(-1e3, 1e3)).clamp(-2.0, 2.0);
+            if next.as_slice().iter().all(|v| v.is_finite()) && next_ls.is_finite() {
+                beta = next;
+                log_sigma = next_ls;
+            } else {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("Weibull AFT step was non-finite; last finite iterate kept")
+                        .build(),
+                );
+                break;
+            }
             let gn = g_beta.norm() + g_ls.abs();
             ctx.session.step(it as u64, gn, None);
-            if gn < 1e-5 {
+            if gn < 1e-4 {
                 ctx.session.converged("Weibull AFT gradient", it as u64);
                 break;
             }
         }
-        let sigma = log_sigma.exp().max(1e-6);
-        if !sigma.is_finite() {
-            ctx.push(Issue::builder(IssueCode::NonFiniteOutput).build());
+        let sigma = log_sigma.exp().clamp(1e-3, 10.0);
+        if !sigma.is_finite() || beta.as_slice().iter().any(|v| !v.is_finite()) {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("Weibull AFT ended on a non-finite iterate; parameters were clamped")
+                    .build(),
+            );
+            beta = Vector::zeros(design.ncols());
+            beta[0] = logy.mean();
         }
         ctx.finish(FittedWeibullAft {
             intercept: beta.as_slice().first().copied().unwrap_or(0.0),
