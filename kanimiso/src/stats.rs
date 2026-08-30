@@ -8597,6 +8597,103 @@ pub fn cancorr(x: &Matrix, y: &Matrix, session: &Session) -> Result<Qualified<Ca
     })
 }
 
+/// Aalen additive hazards (lifelines `AalenAdditiveFitter`).
+///
+/// Covariate count is not identification `p`. Inner least-squares issues on
+/// a risk-set increment are not promoted.
+#[derive(Clone, Debug)]
+pub struct AalenAdditiveResult {
+    /// Cumulative additive coefficients (`n_events` × `p`).
+    pub cumulative: Matrix,
+    /// Event times.
+    pub times: Vector,
+    /// Number of events used.
+    pub n_events: f64,
+}
+
+/// Fit Aalen's additive hazards model by accumulating risk-set OLS increments.
+pub fn aalen_additive(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<AalenAdditiveResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    let n = x.nrows().min(durations.len()).min(events.len());
+    let p = x.ncols();
+    if n < 3 || p == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Aalen additive needs n≥3 and a covariate")
+                .build(),
+        );
+        return ctx.finish(AalenAdditiveResult {
+            cumulative: Matrix::zeros(0, p),
+            times: Vector::zeros(0),
+            n_events: 0.0,
+        });
+    }
+    let mut idx: Vec<usize> = (0..n).filter(|&i| durations[i].is_finite()).collect();
+    idx.sort_by(|&a, &b| {
+        durations[a]
+            .partial_cmp(&durations[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut times = Vec::new();
+    let mut rows = Vec::new();
+    let mut acc = Vector::zeros(p);
+    let mut i = 0;
+    while i < idx.len() {
+        let t = durations[idx[i]];
+        let mut j = i;
+        while j < idx.len() && (durations[idx[j]] - t).abs() <= 1e-15 {
+            j += 1;
+        }
+        let risk = &idx[i..];
+        let mut event_at = None;
+        for &u in &idx[i..j] {
+            if events[u] >= 0.5 {
+                event_at = Some(u);
+                break;
+            }
+        }
+        if let Some(u) = event_at {
+            let xr = Matrix::from_fn(risk.len(), p, |r, c| x.get(risk[r], c));
+            let dn = Vector::from_iter(risk.iter().map(|&r| if r == u { 1.0 } else { 0.0 }));
+            let mut scratch = Report::new("aalen_add", "inc");
+            if let Some(inc) = least_squares(&mut scratch, &xr, &dn, &ctx.policy) {
+                for c in 0..p.min(inc.len()) {
+                    acc[c] += inc[c];
+                }
+                times.push(t);
+                rows.push(acc.as_slice().to_vec());
+            }
+        }
+        i = j;
+    }
+    if times.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Aalen additive saw no usable events")
+                .build(),
+        );
+        return ctx.finish(AalenAdditiveResult {
+            cumulative: Matrix::zeros(0, p),
+            times: Vector::zeros(0),
+            n_events: 0.0,
+        });
+    }
+    let cumulative = Matrix::from_fn(rows.len(), p, |r, c| rows[r][c]);
+    ctx.finish(AalenAdditiveResult {
+        n_events: times.len() as f64,
+        times: Vector::from_iter(times),
+        cumulative,
+    })
+}
+
 /// One-way MANOVA (statsmodels `multivariate.manova.MANOVA`) via Pillai's trace.
 ///
 /// Group and response counts are **not** identification `p`. A singular
@@ -9428,5 +9525,8 @@ mod tests {
         let ycc = Matrix::from_fn(x.nrows(), 1, |i, _| y[i]);
         let cc = cancorr(&x, &ycc, &Session::new("cc", "t")).expect("cc");
         assert!(cc.value.correlations.as_slice().iter().any(|v| *v > 0.5));
+        let aa = aalen_additive(&dur, &ev, &cx, &Session::new("aa", "t")).expect("aa");
+        assert!(aa.value.n_events > 0.0);
+        assert_eq!(aa.value.cumulative.ncols(), cx.ncols());
     }
 }

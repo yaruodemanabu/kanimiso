@@ -3768,6 +3768,21 @@ const INVENTORY: &[Algorithm] = &[
         "estimator",
     ),
     a("online.HoFm", "river.reco.HoFM", "online"),
+    a(
+        "hmm.MultinomialHmmLeftRight",
+        "hmmlearn.hmm.MultinomialHMM",
+        "hmm",
+    ),
+    a(
+        "tsa.StackingForecaster",
+        "sktime.forecasting.compose.StackingForecaster",
+        "forecast",
+    ),
+    a(
+        "stats.aalen_additive",
+        "lifelines.AalenAdditiveFitter",
+        "stats",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -3960,6 +3975,9 @@ mod tests {
             "tslearn.ggs",
             "tslearn.MrSeqlClassifier",
             "online.HoFm",
+            "hmm.MultinomialHmmLeftRight",
+            "tsa.StackingForecaster",
+            "stats.aalen_additive",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

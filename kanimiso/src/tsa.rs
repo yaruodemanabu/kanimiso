@@ -12,7 +12,7 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linalg::{chol_solve, thin_svd};
+use crate::linalg::{chol_solve, least_squares, thin_svd};
 use crate::rng::Rng;
 
 pub use crate::filters::{bk_filter, cf_filter, FittedLocalLinearTrend, LocalLinearTrend};
@@ -3822,6 +3822,86 @@ impl FitSeries for NaiveConformal {
             last: y[y.len() - 1],
             half_width: half,
             coverage: cov,
+        })
+    }
+}
+
+/// Linear stack of last-value and drift forecasts (sktime `StackingForecaster`).
+///
+/// Member count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct StackingForecaster;
+
+/// Fitted last-value / drift stack.
+#[derive(Clone, Debug)]
+pub struct FittedStackingForecaster {
+    /// Last observed level.
+    pub last: f64,
+    /// Drift slope.
+    pub slope: f64,
+    /// Intercept of the meta ridge.
+    pub intercept: f64,
+    /// Weight on the last-value member.
+    pub w_naive: f64,
+    /// Weight on the drift member.
+    pub w_drift: f64,
+}
+
+impl FittedStackingForecaster {
+    /// Combine member forecasts with the fitted meta weights.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(Vector::from_iter((1..=h).map(|k| {
+            let naive = self.last;
+            let drift = self.last + k as f64 * self.slope;
+            self.intercept + self.w_naive * naive + self.w_drift * drift
+        })))
+    }
+}
+
+impl FitSeries for StackingForecaster {
+    type Fitted = FittedStackingForecaster;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedStackingForecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        if n < 3 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("StackingForecaster needs n≥3")
+                    .build(),
+            );
+            return ctx.finish(FittedStackingForecaster {
+                last: y.as_slice().last().copied().unwrap_or(f64::NAN),
+                slope: 0.0,
+                intercept: y.as_slice().last().copied().unwrap_or(0.0),
+                w_naive: 1.0,
+                w_drift: 0.0,
+            });
+        }
+        let last = y[n - 1];
+        let slope = (y[n - 1] - y[0]) / (n as f64 - 1.0);
+        let m = n - 1;
+        let z = Matrix::from_fn(m, 3, |i, j| match j {
+            0 => 1.0,
+            1 => y[i],
+            _ => y[0] + (i as f64 + 1.0) * slope,
+        });
+        let yy = Vector::from_iter((1..n).map(|t| y[t]));
+        let mut scratch = Report::new("stack_fc", "meta");
+        let beta = least_squares(&mut scratch, &z, &yy, &ctx.policy)
+            .unwrap_or_else(|| Vector::from_slice(&[0.0, 1.0, 0.0]));
+        ctx.finish(FittedStackingForecaster {
+            last,
+            slope,
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            w_naive: if beta.len() > 1 { beta[1] } else { 1.0 },
+            w_drift: if beta.len() > 2 { beta[2] } else { 0.0 },
         })
     }
 }
@@ -8310,6 +8390,16 @@ mod tests {
             .value;
         assert_eq!(iv.shape(), (3, 3));
         assert!(iv.get(0, 0) <= iv.get(0, 1) && iv.get(0, 1) <= iv.get(0, 2));
+        let stf = StackingForecaster
+            .fit_series(&y, &Session::new("stf", "fit"))
+            .expect("stf");
+        let stff = stf
+            .value
+            .forecast(3, &Session::new("stf", "fc"))
+            .expect("stff")
+            .value;
+        assert_eq!(stff.len(), 3);
+        assert!(stff.as_slice().iter().all(|v| v.is_finite()));
     }
 
     #[test]

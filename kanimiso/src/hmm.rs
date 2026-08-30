@@ -868,6 +868,8 @@ pub struct MultinomialHmm {
     pub max_iter: usize,
     /// Seed for emission jitter.
     pub seed: u64,
+    /// If true, transitions to earlier states are zeroed (hmmlearn `left_right`).
+    pub left_right: bool,
 }
 
 impl Default for MultinomialHmm {
@@ -876,6 +878,7 @@ impl Default for MultinomialHmm {
             n_states: 2,
             max_iter: 50,
             seed: 0,
+            left_right: false,
         }
     }
 }
@@ -888,6 +891,15 @@ impl MultinomialHmm {
     pub fn new(n_states: usize) -> Self {
         Self {
             n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Left-right multinomial HMM with `n_states` states.
+    pub fn left_right(n_states: usize) -> Self {
+        Self {
+            n_states,
+            left_right: true,
             ..Self::default()
         }
     }
@@ -1080,6 +1092,9 @@ impl FitUnsupervised for MultinomialHmm {
         let mut rng = Rng::new(self.seed | 1);
         let mut start = init_start(k);
         let mut trans = init_trans(k);
+        if self.left_right {
+            enforce_left_right(&mut start, &mut trans);
+        }
         let mut emission = Matrix::from_fn(k, n_sym, |_, _| rng.uniform() + 0.1);
         renormalize_rows(&mut emission, TRANS_FLOOR);
         let mut loglik = f64::NEG_INFINITY;
@@ -1126,7 +1141,14 @@ impl FitUnsupervised for MultinomialHmm {
                         );
                     }
                 }
-                renormalize_rows(&mut trans, TRANS_FLOOR);
+                if self.left_right {
+                    enforce_left_right(&mut start, &mut trans);
+                } else {
+                    renormalize_rows(&mut trans, TRANS_FLOOR);
+                }
+            }
+            if self.left_right && k > 1 {
+                enforce_left_right(&mut start, &mut trans);
             }
             for j in 0..k {
                 let mut counts = vec![0.0; n_sym];
@@ -1167,6 +1189,9 @@ impl FitUnsupervised for MultinomialHmm {
             })
             .collect();
         diagnose_chain(&mut ctx, &start, &trans, &occup);
+        if self.left_right {
+            enforce_left_right(&mut start, &mut trans);
+        }
         let log_emit = FittedMultinomialHmm {
             labels: Vector::zeros(0),
             n_states: k,
@@ -2365,6 +2390,11 @@ mod tests {
             .expect("lr");
         assert!(lr.value.trans.get(1, 0) <= 1e-8);
         assert!(lr.value.start[0] >= lr.value.start[1] - 1e-9);
+        let cat = Matrix::from_fn(40, 1, |i, _| if i < 20 { 0.0 } else { 1.0 });
+        let mlr = MultinomialHmm::left_right(2)
+            .fit(&cat, &Session::new("mlr_hmm", "fit"))
+            .expect("mlr");
+        assert!(mlr.value.trans.get(1, 0) <= 1e-8);
     }
 
     #[test]
