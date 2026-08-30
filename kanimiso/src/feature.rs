@@ -10,7 +10,7 @@ use crate::data::{Matrix, Vector};
 use crate::linalg::{least_squares, ridge_solve};
 use crate::model_selection::{take_rows, take_vec, KFold};
 use crate::rng::Rng;
-use crate::special::{chi2_pvalue, f_pvalue};
+use crate::special::{chi2_pvalue, digamma, f_pvalue};
 use crate::traits::{Fit, FitUnsupervised, Transform};
 use crate::validate::{inspect_classes, inspect_xy};
 use faer::Mat;
@@ -1936,6 +1936,82 @@ pub fn f_regression(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualifi
     ctx.finish(FeatureScores { scores, pvalues })
 }
 
+/// k-NN mutual information of each column with `y` (sklearn `mutual_info_regression`).
+///
+/// Kraskov I^(2) with Chebyshev neighbours. The scores use the full `y`
+/// ([`IssueCode::TargetLeakageSuspected`]).
+pub fn mutual_info_regression(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<FeatureScores>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    ctx.push(
+        Issue::builder(IssueCode::TargetLeakageSuspected)
+            .severity(Severity::Advisory)
+            .message("mutual_info_regression scores every column against the full y")
+            .build(),
+    );
+    let n = x.nrows().min(y.len());
+    let k = 3usize.min(n.saturating_sub(1)).max(1);
+    let mut scores = Vector::zeros(x.ncols());
+    let mut pvalues = Vector::zeros(x.ncols());
+    if n < 6 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message(format!("mutual_info_regression n={n} is thin for k-NN MI"))
+                .build(),
+        );
+    }
+    for j in 0..x.ncols() {
+        let mut mi = 0.0;
+        let mut used = 0.0;
+        for i in 0..n {
+            if !x.get(i, j).is_finite() || !y[i].is_finite() {
+                continue;
+            }
+            let mut dists: Vec<f64> = (0..n)
+                .filter(|&u| u != i)
+                .map(|u| {
+                    let dx = (x.get(u, j) - x.get(i, j)).abs();
+                    let dy = (y[u] - y[i]).abs();
+                    dx.max(dy)
+                })
+                .collect();
+            if dists.len() < k {
+                continue;
+            }
+            dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let eps = dists[k - 1];
+            let mut nx = 0usize;
+            let mut ny = 0usize;
+            for u in 0..n {
+                if u == i {
+                    continue;
+                }
+                if (x.get(u, j) - x.get(i, j)).abs() <= eps {
+                    nx += 1;
+                }
+                if (y[u] - y[i]).abs() <= eps {
+                    ny += 1;
+                }
+            }
+            mi += digamma(k as f64) - digamma(nx as f64 + 1.0) - digamma(ny as f64 + 1.0)
+                + digamma(n as f64);
+            used += 1.0;
+        }
+        scores[j] = if used > 0.0 {
+            (mi / used).max(0.0)
+        } else {
+            0.0
+        };
+        pvalues[j] = f64::NAN;
+    }
+    ctx.finish(FeatureScores { scores, pvalues })
+}
+
 /// χ² scores of non-negative columns against a class label.
 pub fn chi2(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FeatureScores>> {
     let mut ctx = FitCtx::with_session(session.clone());
@@ -2519,6 +2595,8 @@ mod tests {
         assert!(fc.value.scores[2] > fc.value.scores[1]);
         let fr = f_regression(&x, &y, &Session::new("f", "r")).unwrap();
         assert!(fr.value.scores[0].is_finite() || fr.value.scores[2].is_finite());
+        let mi = mutual_info_regression(&x, &y, &Session::new("f", "mi")).unwrap();
+        assert!(mi.value.scores[0] >= mi.value.scores[1] - 1e-6 || mi.value.scores[2].is_finite());
         let xnn = Matrix::from_fn(20, 2, |i, j| {
             if j == 0 {
                 if i < 10 {

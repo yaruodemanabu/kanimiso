@@ -1654,6 +1654,195 @@ impl Predict for AdaptiveRandomForest {
     }
 }
 
+/// Adaptive random forest for regression (river `ARFRegressor` lite).
+///
+/// Each tree is online RLS with a Poisson bootstrap and a per-tree ADWIN
+/// detector on absolute residual. Nested `partial_fit` of the leaves adds
+/// extra incremental events (allowed).
+#[derive(Clone, Debug)]
+pub struct AdaptiveRandomForestRegressor {
+    /// Number of RLS leaves.
+    pub n_estimators: usize,
+    trees: Vec<LinearRegression>,
+    detectors: Vec<Adwin>,
+    n_features: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+    rng: Rng,
+}
+
+impl Default for AdaptiveRandomForestRegressor {
+    fn default() -> Self {
+        Self {
+            n_estimators: 3,
+            trees: Vec::new(),
+            detectors: Vec::new(),
+            n_features: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+            rng: Rng::new(11),
+        }
+    }
+}
+
+impl AdaptiveRandomForestRegressor {
+    /// Forest with `n_estimators` RLS leaves.
+    pub fn new(n_estimators: usize) -> Self {
+        Self {
+            n_estimators: n_estimators.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn ensure(&mut self) {
+        if self.initialized {
+            return;
+        }
+        self.trees = (0..self.n_estimators)
+            .map(|_| LinearRegression::new(1.0))
+            .collect();
+        self.detectors = (0..self.n_estimators).map(|_| Adwin::new(0.002)).collect();
+        self.initialized = true;
+    }
+}
+
+impl PartialFit for AdaptiveRandomForestRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        if self.initialized && self.n_features != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        self.ensure();
+        self.n_features = x.ncols();
+        inspect_online_xy(&mut ctx, x, Some(y));
+        let mut resets = 0u64;
+        let mut delta: f64 = 0.0;
+        for k in 0..self.trees.len() {
+            let mut xb = x.clone();
+            let mut yb = y.clone();
+            let mut keep = 0usize;
+            for i in 0..x.nrows() {
+                if self.rng.uniform() < 0.632 || x.nrows() == 1 {
+                    if keep != i {
+                        for j in 0..x.ncols() {
+                            xb.set(keep, j, x.get(i, j));
+                        }
+                        yb[keep] = y[i];
+                    }
+                    keep += 1;
+                }
+            }
+            if keep == 0 {
+                keep = 1;
+            }
+            let xs = Matrix::from_fn(keep, x.ncols(), |i, j| xb.get(i, j));
+            let ys = Vector::from_iter((0..keep).map(|i| yb[i]));
+            let before = self.trees[k].coef();
+            let q = self.trees[k].partial_fit(&xs, Some(&ys), &session.child("rls"))?;
+            delta += q.value.quality.parameter_delta_norm.unwrap_or(0.0);
+            let after = self.trees[k].coef();
+            if before.len() == after.len() {
+                delta += after.sub(&before).norm();
+            }
+            for i in 0..x.nrows() {
+                let pred = self.trees[k].predict_row(x, i);
+                let err = (pred - y[i]).abs();
+                let d = self.detectors[k].update(err, &session.child("adwin"))?;
+                if matches!(d.value, DriftDecision::Drift { .. }) {
+                    self.trees[k] = LinearRegression::new(1.0);
+                    resets += 1;
+                    ctx.push(
+                        Issue::builder(IssueCode::ConceptDriftDetected)
+                            .message(format!("ARF-regressor leaf {k} reset after ADWIN drift"))
+                            .build(),
+                    );
+                }
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta + resets as f64);
+        q.information_gain = Some(delta + resets as f64);
+        q.still_identified = self.n_seen >= 15;
+        q.warmup = self.n_seen < 15;
+        q.explanation = format!(
+            "ARF-regressor: {} RLS leaves, {resets} ADWIN resets on {} rows",
+            self.trees.len(),
+            x.nrows()
+        );
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("adaptive forest regressor still warming up")
+                    .build(),
+            );
+        }
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("{resets} leaf resets, Δθ={delta:.6e}"),
+                "bootstrap RLS updates + per-leaf ADWIN on |residual|",
+                "pre-batch forest",
+                "post-batch forest",
+            ),
+        )
+    }
+}
+
+impl Predict for AdaptiveRandomForestRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let n_trees = self.trees.len().max(1) as f64;
+        let y = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = 0.0;
+            for t in &self.trees {
+                s += t.predict_row(x, i);
+            }
+            s / n_trees
+        }));
+        ctx.finish(y)
+    }
+}
+
 /// Online column-wise standard scaler (Welford).
 #[derive(Clone, Debug)]
 pub struct OnlineStandardScaler {
@@ -6212,6 +6401,9 @@ mod tests {
         AdaptiveRandomForest::new(2)
             .partial_fit(&x, Some(&yb), &session)
             .expect("arf");
+        AdaptiveRandomForestRegressor::new(2)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("arfr");
         SgdRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("sgd");
@@ -6296,7 +6488,7 @@ mod tests {
             .filter(|e| e.kind == EventKind::IncrementalExplanation)
             .count();
         assert!(
-            n_expl >= 39,
+            n_expl >= 40,
             "expected an IncrementalExplanation per partial_fit, got {n_expl}"
         );
     }

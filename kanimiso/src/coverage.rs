@@ -1992,6 +1992,117 @@ const INVENTORY: &[Algorithm] = &[
         "river.naive_bayes.GaussianNB",
         "online",
     ),
+    a(
+        "tsa.UnobservedComponents",
+        "statsmodels.tsa.statespace.structural.UnobservedComponents",
+        "forecast",
+    ),
+    a(
+        "tsa.MarkovSwitchingAutoregression",
+        "statsmodels.tsa.regime_switching.markov_autoregression.MarkovAutoregression",
+        "forecast",
+    ),
+    a(
+        "tsa.VarImpulseResponse",
+        "statsmodels.tsa.vector_ar.var_model.VARResults.irf",
+        "forecast",
+    ),
+    a(
+        "tsa.ProphetForecaster",
+        "sktime.forecasting.fbprophet.Prophet",
+        "forecast",
+    ),
+    a(
+        "tsa.DummyForecaster",
+        "sktime.forecasting.dummy.DummyForecaster",
+        "forecast",
+    ),
+    a(
+        "glm.TobitRegressor",
+        "statsmodels.duration.TOBIT",
+        "estimator",
+    ),
+    a(
+        "glm.HeckmanSelection",
+        "statsmodels.regression.Heckman",
+        "estimator",
+    ),
+    a(
+        "glm.ConditionalLogit",
+        "statsmodels.discrete.conditional_models.ConditionalLogit",
+        "estimator",
+    ),
+    a(
+        "glm.BetaRegression",
+        "statsmodels.othermod.betareg.BetaModel",
+        "estimator",
+    ),
+    a(
+        "model_selection.GridSearchCV",
+        "sklearn.model_selection.GridSearchCV",
+        "estimator",
+    ),
+    a(
+        "model_selection.RandomizedSearchCV",
+        "sklearn.model_selection.RandomizedSearchCV",
+        "estimator",
+    ),
+    a(
+        "model_selection.cross_val_predict",
+        "sklearn.model_selection.cross_val_predict",
+        "function",
+    ),
+    a(
+        "model_selection.RepeatedKFold",
+        "sklearn.model_selection.RepeatedKFold",
+        "splitter",
+    ),
+    a(
+        "model_selection.ShuffleSplit",
+        "sklearn.model_selection.ShuffleSplit",
+        "splitter",
+    ),
+    a("tslearn.lcss", "tslearn.metrics.lcss", "timeseries"),
+    a(
+        "tslearn.HiveCote",
+        "sktime.classification.hybrid.HIVECOTEV2",
+        "timeseries",
+    ),
+    a(
+        "panel.ArellanoBondGmm",
+        "linearmodels.panel.model.DynamicPanel",
+        "estimator",
+    ),
+    a(
+        "iv.PhillipsOuliarisCoint",
+        "statsmodels.tsa.stattools.coint",
+        "estimator",
+    ),
+    a(
+        "online.AdaptiveRandomForestRegressor",
+        "river.forest.ARFRegressor",
+        "online",
+    ),
+    a(
+        "feature.mutual_info_regression",
+        "sklearn.feature_selection.mutual_info_regression",
+        "function",
+    ),
+    a(
+        "covariance.ShrunkCovariance",
+        "sklearn.covariance.ShrunkCovariance",
+        "covariance",
+    ),
+    a(
+        "multioutput.RegressorChain",
+        "sklearn.multioutput.RegressorChain",
+        "estimator",
+    ),
+    a(
+        "stats.ols_influence",
+        "statsmodels.stats.outliers_influence.OLSInfluence",
+        "stats",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -2053,6 +2164,12 @@ mod tests {
             "tsa.Mstl",
             "online.KnnRegressor",
             "stats.nelson_aalen",
+            "tsa.UnobservedComponents",
+            "tsa.MarkovSwitchingAutoregression",
+            "model_selection.cross_val_predict",
+            "online.AdaptiveRandomForestRegressor",
+            "glm.TobitRegressor",
+            "panel.ArellanoBondGmm",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

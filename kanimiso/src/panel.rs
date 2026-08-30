@@ -707,6 +707,143 @@ pub fn hausman(
     })
 }
 
+/// Arellano–Bond one-step GMM for a dynamic panel (first-difference IV).
+///
+/// \(\Delta y_{it}=\rho\Delta y_{i,t-1}+\Delta x_{it}\beta+\Delta\varepsilon_{it}\)
+/// with collapsed instrument \(y_{i,t-2}\) (and \(\Delta x\)). Group count is
+/// **not** passed as identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct ArellanoBondGmm;
+
+impl ArellanoBondGmm {
+    /// Default collapsed Arellano–Bond.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on rows sorted by group then time.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedArellanoBond>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if groups.len() != y.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ArellanoBond groups length ≠ n")
+                    .build(),
+            );
+            return ctx.finish(FittedArellanoBond {
+                rho: 0.0,
+                coef: Vector::zeros(x.ncols()),
+                n_eff: 0,
+                n_groups: 0,
+            });
+        }
+        let sizes = group_sizes(groups);
+        warn_panel_groups(&mut ctx, &sizes, "ArellanoBond");
+        let n = y.len().min(x.nrows()).min(groups.len());
+        let p = x.ncols();
+        let mut yd = Vec::new();
+        let mut xd = Vec::new();
+        let mut zd = Vec::new();
+        for i in 2..n {
+            if !groups[i].is_finite() || !groups[i - 1].is_finite() || !groups[i - 2].is_finite() {
+                continue;
+            }
+            let g = groups[i].round() as i64;
+            if groups[i - 1].round() as i64 != g || groups[i - 2].round() as i64 != g {
+                continue;
+            }
+            yd.push(y[i] - y[i - 1]);
+            let mut row_x = vec![0.0; p + 1];
+            row_x[0] = y[i - 1] - y[i - 2];
+            let mut row_z = vec![0.0; p + 1];
+            row_z[0] = y[i - 2];
+            for j in 0..p {
+                row_x[j + 1] = x.get(i, j) - x.get(i - 1, j);
+                row_z[j + 1] = x.get(i, j) - x.get(i - 1, j);
+            }
+            xd.push(row_x);
+            zd.push(row_z);
+        }
+        if xd.len() < 3 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("Arellano–Bond has too few first-difference triples")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "dynamic-panel ρ",
+                        "need groups with at least three consecutive times",
+                        "lengthen the panel or sort by group then time",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedArellanoBond {
+                rho: 0.0,
+                coef: Vector::zeros(p),
+                n_eff: xd.len(),
+                n_groups: sizes.len(),
+            });
+        }
+        let m = xd.len();
+        let xmat = Matrix::from_fn(m, p + 1, |i, j| xd[i][j]);
+        let zmat = Matrix::from_fn(m, p + 1, |i, j| zd[i][j]);
+        let yvec = Vector::from_iter(yd);
+        let mut xhat = Matrix::zeros(m, p + 1);
+        for j in 0..(p + 1) {
+            let xj = xmat.column(j);
+            let mut scratch = signlred::Report::new("ab", "s1");
+            if let Some(g) = least_squares(&mut scratch, &zmat, &xj, &ctx.policy) {
+                let f = zmat.matvec(&g);
+                for i in 0..m {
+                    xhat.set(i, j, f[i]);
+                }
+            }
+        }
+        let mut scratch = signlred::Report::new("ab", "s2");
+        let beta = least_squares(&mut scratch, &xhat, &yvec, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(p + 1));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(Severity::Advisory)
+                .message("Arellano–Bond is collapsed one-step 2SLS, not two-step Windmeijer GMM")
+                .build(),
+        );
+        ctx.finish(FittedArellanoBond {
+            rho: beta.as_slice().first().copied().unwrap_or(0.0),
+            coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            n_eff: m,
+            n_groups: sizes.len(),
+        })
+    }
+}
+
+/// Fitted Arellano–Bond.
+#[derive(Clone, Debug)]
+pub struct FittedArellanoBond {
+    /// Coefficient on \(\Delta y_{i,t-1}\).
+    pub rho: f64,
+    /// Slopes on \(\Delta X\).
+    pub coef: Vector,
+    /// First-difference rows used.
+    pub n_eff: usize,
+    /// Groups in the panel.
+    pub n_groups: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,5 +898,16 @@ mod tests {
         );
         let h = hausman(&x, &y, &g, &Session::new("haus", "t")).expect("haus");
         assert!(h.value.statistic.is_finite() || h.value.pvalue.is_nan());
+        let mut ydyn = y.clone();
+        for i in 1..32 {
+            if g[i] == g[i - 1] {
+                ydyn[i] = 0.4 * ydyn[i - 1] + 2.0 * x.get(i, 0) + 0.1 * (i / 8) as f64;
+            }
+        }
+        let ab = ArellanoBondGmm::new()
+            .fit(&x, &ydyn, &g, &Session::new("ab", "fit"))
+            .expect("ab");
+        assert!(ab.value.n_eff > 0);
+        assert!(ab.value.rho.is_finite());
     }
 }

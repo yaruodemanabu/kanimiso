@@ -289,6 +289,65 @@ impl FitUnsupervised for LedoitWolf {
     }
 }
 
+/// Fixed-intensity shrinkage \((1-\alpha)S+\alpha\mu I\) (sklearn `ShrunkCovariance`).
+#[derive(Clone, Debug)]
+pub struct ShrunkCovariance {
+    /// Shrinkage intensity in `[0, 1]`.
+    pub shrinkage: f64,
+}
+
+impl Default for ShrunkCovariance {
+    fn default() -> Self {
+        Self { shrinkage: 0.1 }
+    }
+}
+
+impl ShrunkCovariance {
+    /// Shrinkage with the given `α`.
+    pub fn new(shrinkage: f64) -> Self {
+        Self { shrinkage }
+    }
+}
+
+impl FitUnsupervised for ShrunkCovariance {
+    type Fitted = FittedCovariance;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCovariance>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let a = if self.shrinkage.is_finite() {
+            self.shrinkage.clamp(0.0, 1.0)
+        } else {
+            0.1
+        };
+        if !self.shrinkage.is_finite() || self.shrinkage < 0.0 || self.shrinkage > 1.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "ShrunkCovariance.shrinkage={} is not in [0,1]; clamped",
+                        self.shrinkage
+                    ))
+                    .build(),
+            );
+        }
+        let loc = location_of(x);
+        let (s, _) = empirical_cov_mat(x, &loc, true);
+        let p = x.ncols();
+        let mut tr = 0.0;
+        for i in 0..p {
+            tr += s[(i, i)];
+        }
+        let mu = if p > 0 { tr / p as f64 } else { 0.0 };
+        let shrunk = shrink(&s, a, mu);
+        let fitted = finish_cov(&mut ctx, loc, shrunk, a);
+        ctx.finish(fitted)
+    }
+}
+
 /// Oracle approximating shrinkage (Chen, Wiesel, Hero).
 #[derive(Clone, Debug, Default)]
 pub struct Oas {}
@@ -927,6 +986,10 @@ mod tests {
             .fit_unsupervised(&x, &Session::new("cov", "oas"))
             .unwrap();
         assert!((0.0..=1.0).contains(&oas.value.shrinkage));
+        let sh = ShrunkCovariance::new(0.2)
+            .fit_unsupervised(&x, &Session::new("cov", "sh"))
+            .unwrap();
+        assert!((sh.value.shrinkage - 0.2).abs() < 1e-12);
     }
 
     #[test]

@@ -7,7 +7,7 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linalg::chol_solve;
+use crate::linalg::{chol_solve, least_squares};
 use crate::rng::Rng;
 use crate::special::{chi2_pvalue, f_pvalue, ln_gamma, norm_cdf, student_t_cdf, student_t_pvalue};
 use crate::validate::{inspect_identification, inspect_xy};
@@ -3949,6 +3949,122 @@ pub(crate) fn lowess_raw(x: &[f64], y: &[f64], frac: f64) -> Vec<f64> {
     out
 }
 
+/// OLS influence diagnostics (statsmodels `OLSInfluence`): leverage, DFFITS, DFBETAS.
+#[derive(Clone, Debug)]
+pub struct OlsInfluence {
+    /// Residuals.
+    pub resid: Vector,
+    /// Hat-matrix diagonal \(h_{ii}\).
+    pub hat: Vector,
+    /// DFFITS.
+    pub dffits: Vector,
+    /// DFBETAS (`n × p`, including intercept).
+    pub dfbetas: Matrix,
+}
+
+/// Cook / DFFITS / DFBETAS from an intercept-on OLS of `y` on `X`.
+pub fn ols_influence(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<OlsInfluence>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let design = x.with_intercept();
+    inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+    let mut scratch = Report::new("infl", "ols");
+    let Some(beta) = least_squares(&mut scratch, &design, y, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::UnidentifiedModel)
+                .message("OLS influence: least squares failed")
+                .build(),
+        );
+        return ctx.finish(OlsInfluence {
+            resid: Vector::zeros(y.len()),
+            hat: Vector::zeros(y.len()),
+            dffits: Vector::zeros(y.len()),
+            dfbetas: Matrix::zeros(y.len(), design.ncols()),
+        });
+    };
+    for issue in scratch.issues() {
+        if matches!(
+            issue.code,
+            IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+        ) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let n = design.nrows().min(y.len());
+    let p = design.ncols();
+    let fit = design.matvec(&beta);
+    let resid = Vector::from_iter((0..n).map(|i| y[i] - fit[i]));
+    let mut xtx = faer::Mat::<f64>::zeros(p, p);
+    for i in 0..n {
+        for a in 0..p {
+            for b in 0..p {
+                xtx[(a, b)] += design.get(i, a) * design.get(i, b);
+            }
+        }
+    }
+    let mut xtx_inv = Matrix::zeros(p, p);
+    for j in 0..p {
+        let mut e = Vector::zeros(p);
+        e[j] = 1.0;
+        let mut sc = Report::new("infl", "inv");
+        if let Some(col) = chol_solve(&mut sc, &xtx, &e, &ctx.policy) {
+            for i in 0..p {
+                xtx_inv.set(i, j, col[i]);
+            }
+        }
+    }
+    let mut sse = 0.0;
+    for i in 0..n {
+        sse += resid[i] * resid[i];
+    }
+    let df = (n as f64 - p as f64).max(1.0);
+    let s = (sse / df).sqrt().max(1e-12);
+    let mut hat = Vector::zeros(n);
+    let mut dffits = Vector::zeros(n);
+    let mut dfbetas = Matrix::zeros(n, p);
+    for i in 0..n {
+        let mut h = 0.0;
+        for a in 0..p {
+            let mut sa = 0.0;
+            for b in 0..p {
+                sa += xtx_inv.get(a, b) * design.get(i, b);
+            }
+            h += design.get(i, a) * sa;
+        }
+        h = h.clamp(0.0, 1.0 - 1e-12);
+        hat[i] = h;
+        let denom = (1.0 - h).max(1e-12);
+        dffits[i] = resid[i] / (s * denom.sqrt()) * (h / denom).sqrt();
+        for j in 0..p {
+            let mut c = 0.0;
+            for a in 0..p {
+                c += xtx_inv.get(j, a) * design.get(i, a);
+            }
+            let cjj = xtx_inv.get(j, j).abs().sqrt().max(1e-12);
+            dfbetas.set(i, j, c * resid[i] / (s * cjj * denom));
+        }
+    }
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .severity(signlred::Severity::Advisory)
+            .message("DFFITS uses the full-sample s, not the leave-one-out s_{(i)}")
+            .compromise(NumericalCompromise::new(
+                "exact leave-one-out DFFITS / DFBETAS",
+                "hat-diagonal formulae with the pooled residual scale",
+                "s_{(i)} is not recomputed",
+                "rank cases by |DFFITS|, do not treat the cutoff as exact",
+            ))
+            .build(),
+    );
+    ctx.finish(OlsInfluence {
+        resid,
+        hat,
+        dffits,
+        dfbetas,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4081,5 +4197,14 @@ mod tests {
         let ybin = Vector::from_iter((0..40).map(|i| if i % 2 == 0 { 1.0 } else { 0.0 }));
         let pz = proportion_ztest(&ybin, 0.5, &Session::new("pz", "t")).expect("pz");
         assert!(pz.value.pvalue.is_finite());
+        let inf = ols_influence(&x, &y, &Session::new("inf", "t")).expect("inf");
+        assert_eq!(inf.value.hat.len(), 40);
+        assert!(inf
+            .value
+            .hat
+            .as_slice()
+            .iter()
+            .all(|h| *h >= 0.0 && *h < 1.0));
+        assert!(inf.value.dffits.as_slice().iter().all(|v| v.is_finite()));
     }
 }

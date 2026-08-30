@@ -2079,6 +2079,545 @@ impl Fit for Hurdle {
     }
 }
 
+/// Type-I Tobit (left-censored at 0) via a two-step mills correction.
+///
+/// Inner probit / OLS failures of the usual residual kind are not promoted.
+#[derive(Clone, Debug, Default)]
+pub struct TobitRegressor;
+
+impl TobitRegressor {
+    /// Default Tobit.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// Fitted two-step Tobit.
+#[derive(Clone, Debug)]
+pub struct FittedTobit {
+    /// Outcome intercept.
+    pub intercept: f64,
+    /// Outcome slopes.
+    pub coef: Vector,
+    /// Inverse-mills coefficient (scale).
+    pub mills: f64,
+    /// Fraction left-censored.
+    pub censor_rate: f64,
+}
+
+impl Fit for TobitRegressor {
+    type Fitted = FittedTobit;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedTobit>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let n = x.nrows().min(y.len());
+        let d = Vector::from_iter((0..n).map(|i| if y[i] > 0.0 { 1.0 } else { 0.0 }));
+        let n_pos = d.as_slice().iter().filter(|v| **v > 0.5).count();
+        if n_pos == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("Tobit saw no uncensored y>0")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "Tobit slopes",
+                        "every observation is left-censored at 0",
+                        "collect uncensored positives",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedTobit {
+                intercept: 0.0,
+                coef: Vector::zeros(x.ncols()),
+                mills: 0.0,
+                censor_rate: 1.0,
+            });
+        }
+        if n_pos == n {
+            ctx.push(
+                Issue::builder(IssueCode::CausalClaimUnidentified)
+                    .severity(Severity::Advisory)
+                    .message("Tobit has no censored rows; the mills term is unidentified")
+                    .build(),
+            );
+        }
+        let (g_int, g_coef) =
+            match ProbitRegression::new().fit(x, &d, &session.child("tobit-probit")) {
+                Ok(q) => (q.value.intercept, q.value.coef),
+                Err(e) => {
+                    if !matches!(
+                        e.primary.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::RankZero
+                            | IssueCode::R2IsOne
+                    ) {
+                        ctx.push(e.primary);
+                    }
+                    (0.0, Vector::zeros(x.ncols()))
+                }
+            };
+        let idx: Vec<usize> = (0..n).filter(|&i| y[i] > 0.0).collect();
+        let p = x.ncols();
+        let xp = Matrix::from_fn(idx.len(), p + 1, |r, c| {
+            if c < p {
+                x.get(idx[r], c)
+            } else {
+                let mut eta = g_int;
+                for j in 0..p {
+                    eta += g_coef[j] * x.get(idx[r], j);
+                }
+                eta = eta.clamp(-8.0, 8.0);
+                let den = norm_cdf(eta).clamp(1e-8, 1.0 - 1e-8);
+                norm_pdf(eta) / den
+            }
+        });
+        let yp = Vector::from_iter(idx.iter().map(|&i| y[i]));
+        let design = xp.with_intercept();
+        let mut scratch = signlred::Report::new("tobit", "ols");
+        let beta = least_squares(&mut scratch, &design, &yp, &ctx.policy).unwrap_or_else(|| {
+            let mut b = Vector::zeros(design.ncols());
+            b[0] = yp.mean();
+            b
+        });
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(Severity::Advisory)
+                .message("Tobit is Amemiya two-step, not the censored Gaussian MLE")
+                .compromise(NumericalCompromise::new(
+                    "Tobit MLE on (β, σ)",
+                    "probit then OLS on positives with a mills column",
+                    "the second-step residual variance is not σ̂",
+                    "do not read the mills coefficient as a t-statistic",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedTobit {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            coef: Vector::from_iter((1..=p).map(|j| if j < beta.len() { beta[j] } else { 0.0 })),
+            mills: beta.as_slice().last().copied().unwrap_or(0.0),
+            censor_rate: 1.0 - n_pos as f64 / n.max(1) as f64,
+        })
+    }
+}
+
+/// Heckman two-step sample-selection correction.
+///
+/// `selected` is a 0/1 indicator. The same `X` is used in both stages when
+/// no extra exclusion restriction is supplied — recorded as unidentified
+/// for a causal reading of the mills term.
+#[derive(Clone, Debug, Default)]
+pub struct HeckmanSelection;
+
+impl HeckmanSelection {
+    /// Default Heckman two-step.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit the outcome on selected rows with a mills correction from `selected`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        selected: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedHeckman>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if selected.len() != y.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("Heckman selected length ≠ n")
+                    .build(),
+            );
+            return ctx.finish(FittedHeckman {
+                intercept: 0.0,
+                coef: Vector::zeros(x.ncols()),
+                mills: 0.0,
+                n_selected: 0,
+            });
+        }
+        let n = x.nrows().min(y.len());
+        let n_sel = (0..n).filter(|&i| selected[i] > 0.5).count();
+        if n_sel == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("Heckman saw no selected rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "Heckman outcome slopes",
+                        "the second-step sample is empty",
+                        "collect selected outcomes",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedHeckman {
+                intercept: 0.0,
+                coef: Vector::zeros(x.ncols()),
+                mills: 0.0,
+                n_selected: 0,
+            });
+        }
+        if n_sel < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!("Heckman second step has only {n_sel} rows"))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Heckman uses the same X in both stages; the mills term has no exclusion")
+                .build(),
+        );
+        let (g_int, g_coef) =
+            match ProbitRegression::new().fit(x, selected, &session.child("heck-probit")) {
+                Ok(q) => (q.value.intercept, q.value.coef),
+                Err(e) => {
+                    if !matches!(
+                        e.primary.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::RankZero
+                            | IssueCode::R2IsOne
+                    ) {
+                        ctx.push(e.primary);
+                    }
+                    (0.0, Vector::zeros(x.ncols()))
+                }
+            };
+        let idx: Vec<usize> = (0..n).filter(|&i| selected[i] > 0.5).collect();
+        let p = x.ncols();
+        let xp = Matrix::from_fn(idx.len(), p + 1, |r, c| {
+            if c < p {
+                x.get(idx[r], c)
+            } else {
+                let mut eta = g_int;
+                for j in 0..p {
+                    eta += g_coef[j] * x.get(idx[r], j);
+                }
+                eta = eta.clamp(-8.0, 8.0);
+                let den = norm_cdf(eta).clamp(1e-8, 1.0 - 1e-8);
+                norm_pdf(eta) / den
+            }
+        });
+        let yp = Vector::from_iter(idx.iter().map(|&i| y[i]));
+        let design = xp.with_intercept();
+        let mut scratch = signlred::Report::new("heckman", "ols");
+        let beta = least_squares(&mut scratch, &design, &yp, &ctx.policy).unwrap_or_else(|| {
+            let mut b = Vector::zeros(design.ncols());
+            b[0] = yp.mean();
+            b
+        });
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedHeckman {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            coef: Vector::from_iter((1..=p).map(|j| if j < beta.len() { beta[j] } else { 0.0 })),
+            mills: beta.as_slice().last().copied().unwrap_or(0.0),
+            n_selected: n_sel,
+        })
+    }
+}
+
+/// Fitted Heckman two-step.
+#[derive(Clone, Debug)]
+pub struct FittedHeckman {
+    /// Outcome intercept.
+    pub intercept: f64,
+    /// Outcome slopes.
+    pub coef: Vector,
+    /// Inverse-mills coefficient.
+    pub mills: f64,
+    /// Rows used in the second step.
+    pub n_selected: usize,
+}
+
+/// McFadden conditional logit on grouped alternatives.
+///
+/// Few groups are a warning, not [`IssueCode::InsufficientSample`] as an error.
+/// Alternative count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ConditionalLogit {
+    /// Newton iterations.
+    pub max_iter: usize,
+}
+
+impl Default for ConditionalLogit {
+    fn default() -> Self {
+        Self { max_iter: 25 }
+    }
+}
+
+impl ConditionalLogit {
+    /// Default conditional logit.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit `y ∈ {0,1}` chosen alternative within `groups`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedConditionalLogit>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if y.len() != x.nrows() || groups.len() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ConditionalLogit y/groups length ≠ n")
+                    .build(),
+            );
+            return ctx.finish(FittedConditionalLogit {
+                coef: Vector::zeros(x.ncols()),
+                n_groups: 0,
+            });
+        }
+        let n = x.nrows();
+        let mut members: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+        for i in 0..n {
+            if groups[i].is_finite() {
+                members.entry(groups[i].round() as i64).or_default().push(i);
+            }
+        }
+        let n_g = members.len();
+        if n_g <= 1 {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("conditional logit needs at least two groups")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "conditional-logit slopes",
+                        "a single choice set cannot identify β after the group intercept is swept",
+                        "collect more choice sets",
+                    ))
+                    .build(),
+            );
+        } else if n_g < 5 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!("{n_g} choice sets is thin for conditional logit"))
+                    .build(),
+            );
+        }
+        let p = x.ncols();
+        let mut beta = Vector::zeros(p);
+        for it in 0..self.max_iter.max(1) {
+            let mut xtwx = vec![0.0; p * p];
+            let mut xtwz = Vector::zeros(p);
+            for idx in members.values() {
+                if idx.len() < 2 {
+                    continue;
+                }
+                let mut eta = vec![0.0; idx.len()];
+                let mut m = f64::NEG_INFINITY;
+                for (a, &i) in idx.iter().enumerate() {
+                    let mut e = 0.0;
+                    for j in 0..p {
+                        e += x.get(i, j) * beta[j];
+                    }
+                    eta[a] = e;
+                    if e > m {
+                        m = e;
+                    }
+                }
+                let mut den = 0.0;
+                let mut pr = vec![0.0; idx.len()];
+                for a in 0..idx.len() {
+                    pr[a] = (eta[a] - m).exp();
+                    den += pr[a];
+                }
+                if den <= 0.0 {
+                    continue;
+                }
+                for a in 0..idx.len() {
+                    pr[a] /= den;
+                }
+                for (a, &i) in idx.iter().enumerate() {
+                    let w = (pr[a] * (1.0 - pr[a])).max(1e-8);
+                    let resid = (if y[i] > 0.5 { 1.0 } else { 0.0 }) - pr[a];
+                    for j in 0..p {
+                        xtwz[j] += x.get(i, j) * resid;
+                        for k in 0..p {
+                            xtwx[j * p + k] += w * x.get(i, j) * x.get(i, k);
+                        }
+                    }
+                }
+            }
+            let mut a = Mat::<f64>::zeros(p, p);
+            for j in 0..p {
+                for k in 0..p {
+                    a[(j, k)] = xtwx[j * p + k];
+                }
+                a[(j, j)] += 1e-10;
+            }
+            let mut scratch = signlred::Report::new("clogit", "newton");
+            let Some(step) = chol_solve(&mut scratch, &a, &xtwz, &ctx.policy) else {
+                break;
+            };
+            for j in 0..p {
+                beta[j] += step[j];
+            }
+            ctx.session.step(it as u64, step.norm(), None);
+            if step.norm() < 1e-8 {
+                break;
+            }
+        }
+        ctx.finish(FittedConditionalLogit {
+            coef: beta,
+            n_groups: n_g,
+        })
+    }
+}
+
+/// Fitted conditional logit.
+#[derive(Clone, Debug)]
+pub struct FittedConditionalLogit {
+    /// Slopes (no intercept; it is swept by the group softmax).
+    pub coef: Vector,
+    /// Number of choice sets.
+    pub n_groups: usize,
+}
+
+/// Beta regression with a logit mean (Ferrari–Cribari-Neto lite).
+///
+/// \(y\in(0,1)\). Boundary values are squeezed; that is a compromise.
+#[derive(Clone, Debug)]
+pub struct BetaRegression {
+    /// IRLS iterations.
+    pub max_iter: usize,
+}
+
+impl Default for BetaRegression {
+    fn default() -> Self {
+        Self { max_iter: 30 }
+    }
+}
+
+impl BetaRegression {
+    /// Default beta regression.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for BetaRegression {
+    type Fitted = FittedGlm;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let n = x.nrows().min(y.len());
+        let mut y01 = Vector::zeros(n);
+        let mut squeezed = 0usize;
+        for i in 0..n {
+            let v = y[i];
+            if !v.is_finite() || v <= 0.0 || v >= 1.0 {
+                squeezed += 1;
+                y01[i] = v.clamp(1e-4, 1.0 - 1e-4);
+            } else {
+                y01[i] = v;
+            }
+        }
+        if squeezed == n {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .message("beta regression saw no y in (0,1)")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "beta mean",
+                        "the logit mean is undefined when every y is outside (0,1)",
+                        "map the outcome into the open unit interval after disclosing the map",
+                    ))
+                    .build(),
+            );
+        } else if squeezed > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::JitterInjected)
+                    .message(format!(
+                        "beta regression squeezed {squeezed} boundary outcomes into (ε,1−ε)"
+                    ))
+                    .compromise(NumericalCompromise::new(
+                        "beta likelihood on (0,1)",
+                        "clamped y",
+                        "0/1 are not in the support",
+                        "do not read the intercept as a boundary model",
+                    ))
+                    .build(),
+            );
+        }
+        let design = x.with_intercept();
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let mut beta = Vector::zeros(design.ncols());
+        for it in 0..self.max_iter.max(1) {
+            let mut xs = Matrix::zeros(n, design.ncols());
+            let mut z = Vector::zeros(n);
+            for i in 0..n {
+                let mut eta = 0.0;
+                for j in 0..design.ncols() {
+                    eta += design.get(i, j) * beta[j];
+                }
+                eta = eta.clamp(-8.0, 8.0);
+                let mu = sigmoid(eta).clamp(1e-6, 1.0 - 1e-6);
+                let w = (mu * (1.0 - mu)).max(1e-8);
+                let sw = w.sqrt();
+                z[i] = (eta + (y01[i] - mu) / w) * sw;
+                for j in 0..design.ncols() {
+                    xs.set(i, j, design.get(i, j) * sw);
+                }
+            }
+            let mut scratch = signlred::Report::new("beta", "irls");
+            let Some(next) = least_squares(&mut scratch, &xs, &z, &ctx.policy) else {
+                break;
+            };
+            for issue in scratch.issues() {
+                if issue.code == IssueCode::ResidualTooLarge {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            let d = next.sub(&beta).norm();
+            beta = next;
+            ctx.session.step(it as u64, d, None);
+            if d < 1e-8 {
+                break;
+            }
+        }
+        let (intercept, coef) = (
+            beta.as_slice().first().copied().unwrap_or(0.0),
+            Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+        );
+        ctx.finish(FittedGlm {
+            coef,
+            intercept,
+            dispersion: 1.0,
+        })
+    }
+}
+
 fn gee_gls(
     design: &Matrix,
     y: &Vector,
@@ -2329,5 +2868,30 @@ mod tests {
             .fit(&x, &y, &Session::new("hurdle", "fit"))
             .expect("hurdle");
         assert!(hu.value.pos_coef[0].is_finite());
+        let yc = Vector::from_iter((0..30).map(|i| {
+            let v = -0.5 + 0.25 * (i % 6) as f64;
+            v.max(0.0)
+        }));
+        let tb = TobitRegressor::new()
+            .fit(&x, &yc, &Session::new("tobit", "fit"))
+            .expect("tobit");
+        assert!(tb.value.coef[0].is_finite());
+        let sel = Vector::from_iter((0..30).map(|i| if i % 4 == 0 { 0.0 } else { 1.0 }));
+        let hk = HeckmanSelection::new()
+            .fit(&x, &y, &sel, &Session::new("heck", "fit"))
+            .expect("heck");
+        assert!(hk.value.n_selected > 0);
+        let yb = Vector::from_iter((0..30).map(|i| 0.2 + 0.02 * (i % 6) as f64));
+        let br = BetaRegression::new()
+            .fit(&x, &yb, &Session::new("beta", "fit"))
+            .expect("beta");
+        assert!(br.value.coef[0].is_finite());
+        let g = Vector::from_iter((0..30).map(|i| (i / 3) as f64));
+        let ych = Vector::from_iter((0..30).map(|i| if i % 3 == 1 { 1.0 } else { 0.0 }));
+        let cl = ConditionalLogit::new()
+            .fit(&x, &ych, &g, &Session::new("clogit", "fit"))
+            .expect("clogit");
+        assert_eq!(cl.value.n_groups, 10);
+        assert!(cl.value.coef[0].is_finite());
     }
 }

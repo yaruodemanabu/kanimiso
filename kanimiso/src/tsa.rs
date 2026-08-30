@@ -1334,6 +1334,155 @@ impl FittedVar {
         }
         ctx.finish(out)
     }
+
+    /// Cholesky impulse responses and forecast-error variance decompositions.
+    ///
+    /// Orthogonalisation is the residual Cholesky, not a structural SVAR.
+    /// Lag count is not an identification `p` for this post-estimation map.
+    pub fn impulse_response(
+        &self,
+        horizon: usize,
+        session: &Session,
+    ) -> Result<Qualified<VarImpulseResponse>> {
+        let mut ctx = FitCtx::with_session(session.child("irf"));
+        let k = self.k;
+        let p = self.lags.max(1);
+        let h = horizon.max(1);
+        let (t_res, _) = self.resid.shape();
+        let mut sigma = Matrix::zeros(k, k);
+        if t_res > 0 && k > 0 {
+            for a in 0..k {
+                for b in 0..=a {
+                    let mut s = 0.0;
+                    for i in 0..t_res {
+                        s += self.resid.get(i, a) * self.resid.get(i, b);
+                    }
+                    let v = s / t_res as f64;
+                    sigma.set(a, b, v);
+                    sigma.set(b, a, v);
+                }
+            }
+        }
+        let chol = match cholesky_lower(&sigma) {
+            Some(l) => l,
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::JitterInjected)
+                        .message("VAR residual covariance was not SPD; IRF uses a diagonal jitter")
+                        .compromise(NumericalCompromise::new(
+                            "Cholesky of the residual covariance",
+                            "diagonally jittered residual scale",
+                            "the Gram of residuals was not positive definite",
+                            "do not read the IRF as a unique structural shock",
+                        ))
+                        .build(),
+                );
+                Matrix::from_fn(k, k, |i, j| {
+                    if i == j {
+                        sigma.get(i, i).abs().sqrt().max(1e-6)
+                    } else {
+                        0.0
+                    }
+                })
+            }
+        };
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("VAR IRF uses a residual Cholesky, not identified structural shocks")
+                .compromise(NumericalCompromise::new(
+                    "SVAR with exclusion / sign restrictions",
+                    "reduced-form MA with Cholesky P",
+                    "the ordering of the columns is the variable order",
+                    "do not treat the first shock as causal without a theory",
+                ))
+                .build(),
+        );
+        let mut psi = vec![Matrix::zeros(k, k); h + 1];
+        for i in 0..k {
+            psi[0].set(i, i, 1.0);
+        }
+        for hor in 1..=h {
+            for lag in 1..=p.min(hor) {
+                for eq in 0..k {
+                    for var in 0..k {
+                        let a = self.coef.get(1 + (lag - 1) * k + var, eq);
+                        for sh in 0..k {
+                            let v = psi[hor].get(eq, sh) + a * psi[hor - lag].get(var, sh);
+                            psi[hor].set(eq, sh, v);
+                        }
+                    }
+                }
+            }
+        }
+        let mut irf = Vec::with_capacity(h + 1);
+        let mut mse = vec![0.0; k];
+        let mut fevd = Vec::with_capacity(h + 1);
+        let mut acc_sq = Matrix::zeros(k, k);
+        for hor in 0..=h {
+            let th = Matrix::from_fn(k, k, |i, j| {
+                let mut v = 0.0;
+                for r in 0..k {
+                    v += psi[hor].get(i, r) * chol.get(r, j);
+                }
+                v
+            });
+            for i in 0..k {
+                for j in 0..k {
+                    let s = th.get(i, j);
+                    acc_sq.set(i, j, acc_sq.get(i, j) + s * s);
+                    mse[i] += s * s;
+                }
+            }
+            let decomp = Matrix::from_fn(k, k, |i, j| {
+                if mse[i] > 1e-18 {
+                    acc_sq.get(i, j) / mse[i]
+                } else {
+                    0.0
+                }
+            });
+            irf.push(th);
+            fevd.push(decomp);
+        }
+        ctx.finish(VarImpulseResponse { irf, fevd, sigma })
+    }
+}
+
+/// Cholesky IRF and FEVD of a fitted VAR (statsmodels `VARResults.irf` / `fevd`).
+#[derive(Clone, Debug)]
+pub struct VarImpulseResponse {
+    /// Orthogonal MA matrices \(\Theta_h=\Psi_h P\) (`horizon+1` of them, each \(k\times k\)).
+    pub irf: Vec<Matrix>,
+    /// Forecast-error variance shares at each horizon (rows sum to 1).
+    pub fevd: Vec<Matrix>,
+    /// Residual covariance used for the Cholesky factor.
+    pub sigma: Matrix,
+}
+
+fn cholesky_lower(a: &Matrix) -> Option<Matrix> {
+    let n = a.nrows().min(a.ncols());
+    let mut l = Matrix::zeros(n, n);
+    for i in 0..n {
+        for j in 0..=i {
+            let mut s = a.get(i, j);
+            for p in 0..j {
+                s -= l.get(i, p) * l.get(j, p);
+            }
+            if i == j {
+                if s <= 1e-18 {
+                    return None;
+                }
+                l.set(i, i, s.sqrt());
+            } else {
+                let d = l.get(j, j);
+                if d.abs() <= 1e-18 {
+                    return None;
+                }
+                l.set(i, j, s / d);
+            }
+        }
+    }
+    Some(l)
 }
 
 /// VARMAX: VAR with contemporaneous exogenous regressors.
@@ -4482,6 +4631,718 @@ impl MarkovRegression {
     }
 }
 
+/// Local-linear-trend plus dummy seasonal (statsmodels `UnobservedComponents` lite).
+///
+/// Seasonal length is **not** an identification `p`. Variances are treated as
+/// known; this is a two-pass Kalman / dummy-seasonal smoother, not QMLE.
+#[derive(Clone, Debug)]
+pub struct UnobservedComponents {
+    /// Observation variance \(\sigma_\varepsilon^2\).
+    pub obs_var: f64,
+    /// Level innovation \(\sigma_\eta^2\).
+    pub level_var: f64,
+    /// Slope innovation \(\sigma_\zeta^2\).
+    pub slope_var: f64,
+    /// Seasonal period (`0` or `1` ⇒ no seasonal).
+    pub seasonal_period: usize,
+}
+
+impl Default for UnobservedComponents {
+    fn default() -> Self {
+        Self {
+            obs_var: 1.0,
+            level_var: 0.1,
+            slope_var: 0.01,
+            seasonal_period: 0,
+        }
+    }
+}
+
+impl UnobservedComponents {
+    /// Local linear trend, no seasonal.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Local linear trend plus a dummy seasonal of period `s`.
+    pub fn with_seasonal(period: usize) -> Self {
+        Self {
+            seasonal_period: period,
+            ..Self::default()
+        }
+    }
+}
+
+/// Kalman-smoothed unobserved components.
+#[derive(Clone, Debug)]
+pub struct FittedUnobservedComponents {
+    /// Level.
+    pub level: Vector,
+    /// Slope.
+    pub slope: Vector,
+    /// Dummy seasonal (zeros when `period ≤ 1`).
+    pub seasonal: Vector,
+    /// Irregular \(y - \mathrm{level} - \mathrm{seasonal}\).
+    pub irregular: Vector,
+}
+
+impl FitSeries for UnobservedComponents {
+    type Fitted = FittedUnobservedComponents;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnobservedComponents>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        let s = self.seasonal_period;
+        if s >= 2 && n < 2 * s {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!(
+                        "UnobservedComponents seasonal period {s} needs n≥{}; series has {n}",
+                        2 * s
+                    ))
+                    .build(),
+            );
+        }
+        let mut llt = LocalLinearTrend {
+            obs_var: self.obs_var,
+            level_var: self.level_var,
+            slope_var: self.slope_var,
+        };
+        let q = match llt.fit_series(y, &session.child("uc-llt")) {
+            Ok(q) => q,
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                ) {
+                    ctx.push(e.primary);
+                }
+                return ctx.finish(FittedUnobservedComponents {
+                    level: Vector::zeros(n),
+                    slope: Vector::zeros(n),
+                    seasonal: Vector::zeros(n),
+                    irregular: y.clone(),
+                });
+            }
+        };
+        for issue in q.report.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let level = q.value.level;
+        let slope = q.value.slope;
+        let mut seasonal = Vector::zeros(n);
+        if s >= 2 {
+            let mut acc = vec![0.0; s];
+            let mut cnt = vec![0.0; s];
+            for t in 0..n {
+                let irr = y[t] - level[t];
+                if irr.is_finite() {
+                    let k = t % s;
+                    acc[k] += irr;
+                    cnt[k] += 1.0;
+                }
+            }
+            let mut mean = 0.0;
+            let mut m = 0.0;
+            for k in 0..s {
+                if cnt[k] > 0.0 {
+                    acc[k] /= cnt[k];
+                    mean += acc[k];
+                    m += 1.0;
+                }
+            }
+            if m > 0.0 {
+                mean /= m;
+            }
+            for k in 0..s {
+                acc[k] -= mean;
+            }
+            for t in 0..n {
+                seasonal[t] = acc[t % s];
+            }
+            ctx.push(
+                Issue::builder(IssueCode::PValueUnreliable)
+                    .severity(Severity::Advisory)
+                    .message(
+                        "UC seasonal is a dummy mean of the irregular, not a joint Kalman seasonal",
+                    )
+                    .compromise(NumericalCompromise::new(
+                        "Harvey dummy-seasonal state in one Kalman filter",
+                        "local-linear trend then period-mean of y−level",
+                        "level and seasonal are not estimated jointly",
+                        "do not read the seasonal as a QMLE state",
+                    ))
+                    .build(),
+            );
+        }
+        let irregular = Vector::from_iter((0..n).map(|t| y[t] - level[t] - seasonal[t]));
+        ctx.finish(FittedUnobservedComponents {
+            level,
+            slope,
+            seasonal,
+            irregular,
+        })
+    }
+}
+
+/// Two-regime Markov-switching AR (statsmodels `MarkovAutoregression`).
+///
+/// This is a Hamilton filter / Kim smoother with an EM M-step, not the
+/// i.i.d. mixture [`MarkovRegression`]. Lag count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MarkovSwitchingAutoregression {
+    /// AR order.
+    pub lags: usize,
+    /// EM iterations.
+    pub max_iter: usize,
+}
+
+impl Default for MarkovSwitchingAutoregression {
+    fn default() -> Self {
+        Self {
+            lags: 1,
+            max_iter: 20,
+        }
+    }
+}
+
+impl MarkovSwitchingAutoregression {
+    /// Two-regime MS-AR(`lags`).
+    pub fn new(lags: usize) -> Self {
+        Self {
+            lags: lags.max(1),
+            max_iter: 20,
+        }
+    }
+}
+
+/// Fitted Hamilton-filtered switching AR.
+#[derive(Clone, Debug)]
+pub struct FittedMarkovSwitchingAr {
+    /// Intercepts \(\mu_0,\mu_1\).
+    pub mu: Vector,
+    /// AR coefficients per regime (`2 × p`).
+    pub ar: Matrix,
+    /// Innovation variances.
+    pub sigma2: Vector,
+    /// Transition \(p_{i\to j}\) (`2 × 2`).
+    pub transition: Matrix,
+    /// Filtered \(P(s_t=1\mid y_{1:t})\).
+    pub filtered: Vector,
+    /// Smoothed \(P(s_t=1\mid y_{1:T})\).
+    pub smoothed: Vector,
+}
+
+impl FitSeries for MarkovSwitchingAutoregression {
+    type Fitted = FittedMarkovSwitchingAr;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMarkovSwitchingAr>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let p = self.lags.max(1);
+        let n = y.len();
+        if n <= p + 4 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!("MarkovSwitchingAR n={n} is short for AR({p})"))
+                    .build(),
+            );
+        }
+        warn_unit_root(&mut ctx, y);
+        let t0 = p;
+        let t_eff = n.saturating_sub(t0);
+        let mut mu = Vector::from_slice(&[y.mean() - 0.5 * y.std(), y.mean() + 0.5 * y.std()]);
+        let mut phi = Matrix::from_fn(2, p, |_, _| 0.3);
+        let mut sig2 = Vector::from_slice(&[y.std().powi(2).max(1e-4), y.std().powi(2).max(1e-4)]);
+        let mut trans = Matrix::from_fn(2, 2, |i, j| if i == j { 0.85 } else { 0.15 });
+        let mut filt = Vector::zeros(n);
+        let mut smooth = Vector::zeros(n);
+        let mut pred1 = vec![0.5; n];
+        let mut f0 = vec![0.5; n];
+        let mut f1 = vec![0.5; n];
+        for it in 0..self.max_iter.max(1) {
+            let mut xi0 = 0.5_f64;
+            let mut xi1 = 0.5_f64;
+            for t in 0..t0 {
+                f0[t] = xi0;
+                f1[t] = xi1;
+                filt[t] = xi1;
+                pred1[t] = xi1;
+            }
+            for t in t0..n {
+                let p0 = trans.get(0, 0) * xi0 + trans.get(1, 0) * xi1;
+                let p1 = trans.get(0, 1) * xi0 + trans.get(1, 1) * xi1;
+                pred1[t] = p1;
+                let mut m0 = mu[0];
+                let mut m1 = mu[1];
+                for k in 0..p {
+                    m0 += phi.get(0, k) * y[t - 1 - k];
+                    m1 += phi.get(1, k) * y[t - 1 - k];
+                }
+                let l0 = gauss_pdf(y[t], m0, sig2[0].sqrt());
+                let l1 = gauss_pdf(y[t], m1, sig2[1].sqrt());
+                let j0 = p0 * l0;
+                let j1 = p1 * l1;
+                let s = j0 + j1;
+                if s <= 1e-300 {
+                    xi0 = 0.5;
+                    xi1 = 0.5;
+                } else {
+                    xi0 = j0 / s;
+                    xi1 = j1 / s;
+                }
+                f0[t] = xi0;
+                f1[t] = xi1;
+                filt[t] = xi1;
+            }
+            let mut s0 = f0[n.saturating_sub(1)];
+            let mut s1 = f1[n.saturating_sub(1)];
+            smooth[n.saturating_sub(1)] = s1;
+            if n > 1 {
+                for t in (t0..n - 1).rev() {
+                    let pr0 = trans.get(0, 0) * f0[t] + trans.get(1, 0) * f1[t];
+                    let pr1 = trans.get(0, 1) * f0[t] + trans.get(1, 1) * f1[t];
+                    let a00 = if pr0 > 1e-18 {
+                        f0[t] * trans.get(0, 0) * s0 / pr0
+                    } else {
+                        0.0
+                    };
+                    let a01 = if pr1 > 1e-18 {
+                        f0[t] * trans.get(0, 1) * s1 / pr1
+                    } else {
+                        0.0
+                    };
+                    let a10 = if pr0 > 1e-18 {
+                        f1[t] * trans.get(1, 0) * s0 / pr0
+                    } else {
+                        0.0
+                    };
+                    let a11 = if pr1 > 1e-18 {
+                        f1[t] * trans.get(1, 1) * s1 / pr1
+                    } else {
+                        0.0
+                    };
+                    s0 = a00 + a01;
+                    s1 = a10 + a11;
+                    let den = s0 + s1;
+                    if den > 1e-18 {
+                        s0 /= den;
+                        s1 /= den;
+                    }
+                    smooth[t] = s1;
+                }
+            }
+            for t in 0..t0 {
+                smooth[t] = filt[t];
+            }
+            let mut n00 = 0.0;
+            let mut n01 = 0.0;
+            let mut n10 = 0.0;
+            let mut n11 = 0.0;
+            for t in (t0 + 1)..n {
+                n00 += (1.0 - smooth[t - 1]) * (1.0 - smooth[t]);
+                n01 += (1.0 - smooth[t - 1]) * smooth[t];
+                n10 += smooth[t - 1] * (1.0 - smooth[t]);
+                n11 += smooth[t - 1] * smooth[t];
+            }
+            let r0 = (n00 + n01).max(1e-12);
+            let r1 = (n10 + n11).max(1e-12);
+            trans.set(0, 0, n00 / r0);
+            trans.set(0, 1, n01 / r0);
+            trans.set(1, 0, n10 / r1);
+            trans.set(1, 1, n11 / r1);
+            for reg in 0..2 {
+                let design = Matrix::from_fn(t_eff, p + 1, |i, j| {
+                    let t = t0 + i;
+                    let w = if reg == 0 {
+                        (1.0 - smooth[t]).sqrt()
+                    } else {
+                        smooth[t].sqrt()
+                    };
+                    if j == 0 {
+                        w
+                    } else {
+                        w * y[t - j]
+                    }
+                });
+                let yy = Vector::from_iter((0..t_eff).map(|i| {
+                    let t = t0 + i;
+                    let w = if reg == 0 {
+                        (1.0 - smooth[t]).sqrt()
+                    } else {
+                        smooth[t].sqrt()
+                    };
+                    w * y[t]
+                }));
+                let mut scratch = Report::new("msar", "ols");
+                if let Some(b) =
+                    crate::linalg::least_squares(&mut scratch, &design, &yy, &ctx.policy)
+                {
+                    mu[reg] = b.as_slice().first().copied().unwrap_or(0.0);
+                    for k in 0..p {
+                        if k + 1 < b.len() {
+                            phi.set(reg, k, b[k + 1]);
+                        }
+                    }
+                    let mut sse = 0.0;
+                    let mut ww = 0.0;
+                    for i in 0..t_eff {
+                        let t = t0 + i;
+                        let w = if reg == 0 { 1.0 - smooth[t] } else { smooth[t] };
+                        let mut m = mu[reg];
+                        for k in 0..p {
+                            m += phi.get(reg, k) * y[t - 1 - k];
+                        }
+                        let e = y[t] - m;
+                        sse += w * e * e;
+                        ww += w;
+                    }
+                    sig2[reg] = (sse / ww.max(1e-12)).max(1e-8);
+                }
+            }
+            ctx.session.step(it as u64, (mu[1] - mu[0]).abs(), None);
+        }
+        let mass1: f64 = (t0..n).map(|t| smooth[t]).sum::<f64>();
+        if mass1 < 1.0 || mass1 > (t_eff as f64 - 1.0) {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateClusters)
+                    .severity(Severity::Warning)
+                    .message("one Markov regime has near-zero smoothed mass")
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(Severity::Advisory)
+                .message("MS-AR EM uses a Kim smoother; SEs are not attached")
+                .compromise(NumericalCompromise::new(
+                    "Hamilton filter + information-matrix SEs",
+                    "EM with weighted OLS M-step",
+                    "the transition is a smoothed-count estimate",
+                    "do not read μ as an OLS t-statistic",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedMarkovSwitchingAr {
+            mu,
+            ar: phi,
+            sigma2: sig2,
+            transition: trans,
+            filtered: filt,
+            smoothed: smooth,
+        })
+    }
+}
+
+fn gauss_pdf(y: f64, mean: f64, sd: f64) -> f64 {
+    let s = sd.max(1e-8);
+    let z = (y - mean) / s;
+    0.3989422804014327 / s * (-0.5 * z * z).exp()
+}
+
+/// Piecewise-linear trend plus Fourier seasonality (sktime / Prophet lite).
+///
+/// Knot and harmonic counts are **not** identification `p`.
+#[derive(Clone, Debug)]
+pub struct ProphetForecaster {
+    /// Number of evenly spaced changepoints.
+    pub n_changepoints: usize,
+    /// Seasonal period for Fourier features.
+    pub period: usize,
+    /// Fourier harmonics.
+    pub n_harmonics: usize,
+}
+
+impl Default for ProphetForecaster {
+    fn default() -> Self {
+        Self {
+            n_changepoints: 3,
+            period: 7,
+            n_harmonics: 1,
+        }
+    }
+}
+
+impl ProphetForecaster {
+    /// Prophet-lite with `k` changepoints and `h` harmonics of period `s`.
+    pub fn new(n_changepoints: usize, period: usize, n_harmonics: usize) -> Self {
+        Self {
+            n_changepoints: n_changepoints.max(1),
+            period: period.max(2),
+            n_harmonics: n_harmonics.max(1),
+        }
+    }
+}
+
+/// Fitted Prophet-lite.
+#[derive(Clone, Debug)]
+pub struct FittedProphet {
+    /// Intercept.
+    pub intercept: f64,
+    /// Linear slope.
+    pub slope: f64,
+    /// Changepoint deltas.
+    pub deltas: Vector,
+    /// Knot locations (time index).
+    pub knots: Vector,
+    /// Fourier coefficients (sin/cos interleaved).
+    pub fourier: Vector,
+    /// Training length.
+    pub n: usize,
+    /// Seasonal period.
+    pub period: usize,
+}
+
+impl FittedProphet {
+    /// `h`-step forecast continuing the time index.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        let out = Vector::from_iter((0..h).map(|u| {
+            let t = (self.n + u) as f64;
+            prophet_mean(
+                t,
+                self.intercept,
+                self.slope,
+                &self.deltas,
+                &self.knots,
+                &self.fourier,
+                self.period,
+            )
+        }));
+        ctx.finish(out)
+    }
+}
+
+fn prophet_mean(
+    t: f64,
+    intercept: f64,
+    slope: f64,
+    deltas: &Vector,
+    knots: &Vector,
+    fourier: &Vector,
+    period: usize,
+) -> f64 {
+    let mut yhat = intercept + slope * t;
+    for k in 0..deltas.len().min(knots.len()) {
+        let r = t - knots[k];
+        if r > 0.0 {
+            yhat += deltas[k] * r;
+        }
+    }
+    let p = period.max(2) as f64;
+    let nh = fourier.len() / 2;
+    for j in 0..nh {
+        let k = (j + 1) as f64;
+        let ang = 2.0 * std::f64::consts::PI * k * t / p;
+        if 2 * j < fourier.len() {
+            yhat += fourier[2 * j] * ang.sin();
+        }
+        if 2 * j + 1 < fourier.len() {
+            yhat += fourier[2 * j + 1] * ang.cos();
+        }
+    }
+    yhat
+}
+
+impl FitSeries for ProphetForecaster {
+    type Fitted = FittedProphet;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedProphet>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        let k = self.n_changepoints.max(1);
+        let s = self.period.max(2);
+        let h = self.n_harmonics.max(1);
+        if n < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!("Prophet n={n} is short for a piecewise trend"))
+                    .build(),
+            );
+        }
+        let knots = Vector::from_iter((1..=k).map(|j| n as f64 * j as f64 / (k + 1) as f64));
+        let cols = 2 + k + 2 * h;
+        let design = Matrix::from_fn(n, cols, |i, j| {
+            let t = i as f64;
+            if j == 0 {
+                1.0
+            } else if j == 1 {
+                t
+            } else if j < 2 + k {
+                let r = t - knots[j - 2];
+                r.max(0.0)
+            } else {
+                let rest = j - 2 - k;
+                let harm = rest / 2 + 1;
+                let ang = 2.0 * std::f64::consts::PI * (harm as f64) * t / s as f64;
+                if rest % 2 == 0 {
+                    ang.sin()
+                } else {
+                    ang.cos()
+                }
+            }
+        });
+        let beta = statistical_ols(&mut ctx, &design, y).unwrap_or_else(|| {
+            let mut b = Vector::zeros(cols);
+            b[0] = y.mean();
+            b
+        });
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(Severity::Advisory)
+                .message("Prophet-lite is OLS on ramps + Fourier; not Stan / L-BFGS")
+                .compromise(NumericalCompromise::new(
+                    "Bayesian Prophet with Laplace priors on deltas",
+                    "unpenalized OLS on piecewise linear + Fourier",
+                    "changepoints are evenly spaced, not selected",
+                    "do not read deltas as posterior means",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedProphet {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            slope: if beta.len() > 1 { beta[1] } else { 0.0 },
+            deltas: Vector::from_iter(
+                (2..2 + k).map(|j| if j < beta.len() { beta[j] } else { 0.0 }),
+            ),
+            knots,
+            fourier: Vector::from_iter((2 + k..cols).map(|j| {
+                if j < beta.len() {
+                    beta[j]
+                } else {
+                    0.0
+                }
+            })),
+            n,
+            period: s,
+        })
+    }
+}
+
+/// Mean / last / seasonal-last dummy (sktime `DummyForecaster`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DummyStrategy {
+    /// In-sample mean.
+    Mean,
+    /// Last observation.
+    Last,
+    /// Seasonal naive (last value of the same season).
+    SeasonalLast,
+}
+
+/// Naive / mean / seasonal dummy forecaster.
+#[derive(Clone, Debug)]
+pub struct DummyForecaster {
+    /// Forecast rule.
+    pub strategy: DummyStrategy,
+    /// Period used by [`DummyStrategy::SeasonalLast`].
+    pub period: usize,
+}
+
+impl Default for DummyForecaster {
+    fn default() -> Self {
+        Self {
+            strategy: DummyStrategy::Last,
+            period: 1,
+        }
+    }
+}
+
+impl DummyForecaster {
+    /// Dummy with the given strategy.
+    pub fn new(strategy: DummyStrategy) -> Self {
+        Self {
+            strategy,
+            period: 1,
+        }
+    }
+}
+
+/// Fitted dummy forecaster.
+#[derive(Clone, Debug)]
+pub struct FittedDummyForecaster {
+    /// Strategy.
+    pub strategy: DummyStrategy,
+    /// Mean of the training series.
+    pub mean: f64,
+    /// Last value.
+    pub last: f64,
+    /// Last `period` observations (oldest first) for seasonal naive.
+    pub season: Vector,
+}
+
+impl FittedDummyForecaster {
+    /// `h`-step dummy forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        let p = self.season.len().max(1);
+        let out = Vector::from_iter((0..h).map(|u| match self.strategy {
+            DummyStrategy::Mean => self.mean,
+            DummyStrategy::Last => self.last,
+            DummyStrategy::SeasonalLast => self.season[u % p],
+        }));
+        ctx.finish(out)
+    }
+}
+
+impl FitSeries for DummyForecaster {
+    type Fitted = FittedDummyForecaster;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedDummyForecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        if n == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .message("DummyForecaster on an empty series")
+                    .build(),
+            );
+        }
+        let p = self.period.max(1);
+        if self.strategy == DummyStrategy::SeasonalLast && n < p {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!("seasonal dummy needs n≥{p}; series has {n}"))
+                    .build(),
+            );
+        }
+        let season = if n == 0 {
+            Vector::zeros(0)
+        } else {
+            Vector::from_iter(((n.saturating_sub(p))..n).map(|t| y[t]))
+        };
+        ctx.finish(FittedDummyForecaster {
+            strategy: self.strategy,
+            mean: y.mean(),
+            last: y.as_slice().last().copied().unwrap_or(0.0),
+            season,
+        })
+    }
+}
+
 fn inspect_univariate(ctx: &mut FitCtx, y: &Vector) {
     inspect_xy(&mut ctx.report, &Matrix::from_vector(y), None, &ctx.policy);
     if let Some(issue) = scan_finite(y.as_slice()).to_issue("y") {
@@ -4899,5 +5760,46 @@ mod tests {
             .as_slice()
             .iter()
             .all(|v| v.is_finite() && *v > 0.0));
+        let uc = UnobservedComponents::with_seasonal(4)
+            .fit_series(&y, &Session::new("uc", "fit"))
+            .expect("uc");
+        assert_eq!(uc.value.level.len(), y.len());
+        assert!(uc.value.seasonal.as_slice().iter().all(|v| v.is_finite()));
+        let msar = MarkovSwitchingAutoregression::new(1)
+            .fit_series(&y, &Session::new("msar", "fit"))
+            .expect("msar");
+        assert_eq!(msar.value.smoothed.len(), y.len());
+        assert!(msar.value.transition.get(0, 0).is_finite());
+        let var1 = Var::new(1)
+            .fit(&y2, &Session::new("varirf", "fit"))
+            .expect("var");
+        let ir = var1
+            .value
+            .impulse_response(3, &Session::new("varirf", "irf"))
+            .expect("irf");
+        assert_eq!(ir.value.irf.len(), 4);
+        assert_eq!(ir.value.fevd[3].shape(), (2, 2));
+        let row_sum: f64 = (0..2).map(|j| ir.value.fevd[3].get(0, j)).sum();
+        assert!((row_sum - 1.0).abs() < 1e-8, "fevd row={row_sum}");
+        let pr = ProphetForecaster::new(2, 4, 1)
+            .fit_series(&y, &Session::new("pr", "fit"))
+            .expect("prophet");
+        assert_eq!(
+            pr.value
+                .forecast(3, &Session::new("pr", "fc"))
+                .expect("prf")
+                .value
+                .len(),
+            3
+        );
+        let dum = DummyForecaster::new(DummyStrategy::Last)
+            .fit_series(&y, &Session::new("dum", "fit"))
+            .expect("dum");
+        let df = dum
+            .value
+            .forecast(2, &Session::new("dum", "fc"))
+            .expect("dumf")
+            .value;
+        assert!((df[0] - y[y.len() - 1]).abs() < 1e-12);
     }
 }

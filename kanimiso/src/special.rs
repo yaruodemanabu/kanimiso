@@ -217,6 +217,24 @@ pub fn f_pvalue(x: f64, d1: f64, d2: f64) -> f64 {
     (1.0 - f_cdf(x, d1, d2)).clamp(0.0, 1.0)
 }
 
+/// Digamma \(\psi(x)=\Gamma'(x)/\Gamma(x)\) for \(x>0\).
+///
+/// Recurrence to \(x\ge 7\) then a Stirling tail. Used by k-NN mutual
+/// information (Kraskov).
+pub fn digamma(mut x: f64) -> f64 {
+    if !(x > 0.0) {
+        return f64::NAN;
+    }
+    let mut acc = 0.0;
+    while x < 7.0 {
+        acc -= 1.0 / x;
+        x += 1.0;
+    }
+    let inv = 1.0 / x;
+    let inv2 = inv * inv;
+    acc + x.ln() - 0.5 * inv - inv2 * (1.0 / 12.0 - inv2 * (1.0 / 120.0 - inv2 / 252.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +250,13 @@ mod tests {
         // P(χ²_2 ≤ 2) ≈ 0.632
         let p = chi2_cdf(2.0, 2.0);
         assert!((p - 0.632120).abs() < 0.02, "{p}");
+    }
+
+    #[test]
+    fn digamma_integers() {
+        // ψ(1) = −γ, ψ(2) = −γ+1
+        let g = 0.5772156649015329;
+        assert!((digamma(1.0) + g).abs() < 1e-6);
+        assert!((digamma(2.0) + g - 1.0).abs() < 1e-6);
     }
 }

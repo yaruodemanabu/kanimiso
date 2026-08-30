@@ -269,6 +269,125 @@ impl FittedClassifierChain {
     }
 }
 
+/// Regressor chain: column `k` sees `X` plus predictions of `0..k-1`.
+#[derive(Clone, Debug)]
+pub struct RegressorChain {
+    /// Shared ridge `α`.
+    pub alpha: f64,
+}
+
+impl Default for RegressorChain {
+    fn default() -> Self {
+        Self { alpha: 1.0 }
+    }
+}
+
+impl RegressorChain {
+    /// Chain with the given ridge `α`.
+    pub fn new(alpha: f64) -> Self {
+        Self { alpha }
+    }
+
+    /// Fit on an `n × k` target matrix.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedRegressorChain>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        if y.nrows() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("regressor-chain Y rows ≠ X rows")
+                    .build(),
+            );
+            return ctx.finish(FittedRegressorChain {
+                models: Vec::new(),
+                n_outputs: y.ncols(),
+                p: x.ncols(),
+            });
+        }
+        ctx.push(
+            Issue::builder(IssueCode::TargetLeakageSuspected)
+                .severity(Severity::Advisory)
+                .message(
+                    "later chain members see earlier training targets, not out-of-fold predictions",
+                )
+                .build(),
+        );
+        let mut models = Vec::new();
+        for k in 0..y.ncols() {
+            let xk = Matrix::from_fn(x.nrows(), x.ncols() + k, |i, j| {
+                if j < x.ncols() {
+                    x.get(i, j)
+                } else {
+                    y.get(i, j - x.ncols())
+                }
+            });
+            let yk = y.column(k);
+            match Ridge::new(self.alpha).fit(&xk, &yk, &session.child(format!("rchain_{k}"))) {
+                Ok(q) => models.push(q.value),
+                Err(e) => {
+                    ctx.push(e.primary);
+                    models.push(FittedPenalized {
+                        coef: Vector::zeros(x.ncols() + k),
+                        intercept: yk.mean(),
+                        alpha: self.alpha,
+                        l1_ratio: 0.0,
+                    });
+                }
+            }
+        }
+        ctx.finish(FittedRegressorChain {
+            models,
+            n_outputs: y.ncols(),
+            p: x.ncols(),
+        })
+    }
+}
+
+/// Fitted regressor chain.
+#[derive(Clone, Debug)]
+pub struct FittedRegressorChain {
+    models: Vec<FittedPenalized>,
+    /// Number of output columns.
+    pub n_outputs: usize,
+    p: usize,
+}
+
+impl FittedRegressorChain {
+    /// Sequential predictions (`n × k`).
+    pub fn predict_matrix(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let mut prev = Matrix::zeros(x.nrows(), 0);
+        let mut out = Matrix::zeros(x.nrows(), self.n_outputs);
+        for (k, m) in self.models.iter().enumerate() {
+            let xk = Matrix::from_fn(x.nrows(), self.p + k, |i, j| {
+                if j < self.p {
+                    x.get(i, j)
+                } else if j - self.p < prev.ncols() {
+                    prev.get(i, j - self.p)
+                } else {
+                    0.0
+                }
+            });
+            match m.predict(&xk, &session.child(format!("p_{k}"))) {
+                Ok(q) => {
+                    for i in 0..x.nrows().min(q.value.len()) {
+                        out.set(i, k, q.value[i]);
+                    }
+                }
+                Err(e) => ctx.push(e.primary),
+            }
+            prev = Matrix::from_fn(x.nrows(), k + 1, |i, j| out.get(i, j));
+        }
+        ctx.finish(out)
+    }
+}
+
 /// Independent ridge classifier per column of a binary `Y` (sklearn
 /// `MultiOutputClassifier`).
 ///
@@ -457,5 +576,23 @@ mod tests {
             .value;
         assert_eq!(mh.shape(), (20, 2));
         assert!((mh.get(0, 0) - 0.0).abs() < 0.5 || (mh.get(1, 0) - 0.0).abs() < 0.5);
+        let yr = Matrix::from_fn(16, 2, |i, j| {
+            if j == 0 {
+                1.0 + 2.0 * i as f64
+            } else {
+                0.5 * i as f64
+            }
+        });
+        let xr = Matrix::from_fn(16, 1, |i, _| i as f64);
+        let rc = RegressorChain::new(0.01)
+            .fit(&xr, &yr, &Session::new("rc", "fit"))
+            .expect("rc");
+        let rh = rc
+            .value
+            .predict_matrix(&xr, &Session::new("rc", "p"))
+            .unwrap()
+            .value;
+        assert_eq!(rh.shape(), (16, 2));
+        assert!((rh.get(5, 0) - yr.get(5, 0)).abs() < 1.0);
     }
 }

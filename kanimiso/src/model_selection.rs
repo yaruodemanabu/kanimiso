@@ -17,7 +17,7 @@ use crate::robust::OrthogonalMatchingPursuit;
 use crate::traits::{Fit, Predict};
 use crate::validate::inspect_xy;
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, NumericalCompromise, Qualified, Result};
+use signlred::{Issue, IssueCode, NumericalCompromise, Qualified, Result, Severity};
 
 /// Row indices of one train / test fold.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,6 +176,150 @@ impl KFold {
                 }
             }
             folds.push(Split { train, test });
+        }
+        ctx.finish(folds)
+    }
+}
+
+/// Repeated K-fold: `n_repeats` shuffled K-fold partitions.
+#[derive(Clone, Debug)]
+pub struct RepeatedKFold {
+    /// Folds per repeat.
+    pub n_splits: usize,
+    /// Independent shuffles.
+    pub n_repeats: usize,
+    /// Base PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for RepeatedKFold {
+    fn default() -> Self {
+        Self {
+            n_splits: 5,
+            n_repeats: 2,
+            seed: 0,
+        }
+    }
+}
+
+impl RepeatedKFold {
+    /// `n_splits` folds, `n_repeats` times.
+    pub fn new(n_splits: usize, n_repeats: usize) -> Self {
+        Self {
+            n_splits,
+            n_repeats,
+            seed: 0,
+        }
+    }
+
+    /// Materialize all train/test index pairs.
+    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let k = self.n_splits.max(2);
+        let r = self.n_repeats.max(1);
+        if self.n_splits < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("RepeatedKFold.n_splits < 2; using 2")
+                    .build(),
+            );
+        }
+        if self.n_repeats < 1 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("RepeatedKFold.n_repeats < 1; using 1")
+                    .build(),
+            );
+        }
+        let mut folds = Vec::new();
+        for rep in 0..r {
+            let inner = KFold {
+                n_splits: k,
+                shuffle: true,
+                seed: self.seed.wrapping_add(rep as u64),
+            };
+            match inner.split(n, &session.child(format!("rep_{rep}"))) {
+                Ok(q) => folds.extend(q.value),
+                Err(e) => ctx.push(e.primary),
+            }
+        }
+        ctx.finish(folds)
+    }
+}
+
+/// Independent random train/test draws (sklearn `ShuffleSplit`).
+#[derive(Clone, Debug)]
+pub struct ShuffleSplit {
+    /// Number of splits.
+    pub n_splits: usize,
+    /// Test fraction.
+    pub test_size: f64,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for ShuffleSplit {
+    fn default() -> Self {
+        Self {
+            n_splits: 5,
+            test_size: 0.25,
+            seed: 0,
+        }
+    }
+}
+
+impl ShuffleSplit {
+    /// `n_splits` random partitions.
+    pub fn new(n_splits: usize) -> Self {
+        Self {
+            n_splits,
+            ..Self::default()
+        }
+    }
+
+    /// Materialize train/test index pairs for `n` rows.
+    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let k = self.n_splits.max(1);
+        if self.n_splits < 1 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("ShuffleSplit.n_splits < 1; using 1")
+                    .build(),
+            );
+        }
+        let frac = if self.test_size.is_finite() {
+            self.test_size.clamp(0.05, 0.5)
+        } else {
+            0.25
+        };
+        if !self.test_size.is_finite() || self.test_size <= 0.0 || self.test_size >= 1.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "ShuffleSplit.test_size={} is not in (0,1); clamped",
+                        self.test_size
+                    ))
+                    .build(),
+            );
+        }
+        let mut n_test = (frac * n as f64).round() as usize;
+        if n > 1 {
+            n_test = n_test.clamp(1, n - 1);
+        }
+        let mut rng = Rng::new(self.seed);
+        let mut folds = Vec::with_capacity(k);
+        for _ in 0..k {
+            let mut idx: Vec<usize> = (0..n).collect();
+            rng.shuffle(&mut idx);
+            folds.push(Split {
+                test: idx[..n_test].to_vec(),
+                train: idx[n_test..].to_vec(),
+            });
         }
         ctx.finish(folds)
     }
@@ -388,6 +532,278 @@ pub fn cross_val_score_linear(
         },
         session,
     )
+}
+
+/// Out-of-fold Ridge predictions (sklearn `cross_val_predict`).
+///
+/// Each fold's predictions come from a model that did not see those rows.
+/// Scoring against the full `y` after this map is still a leakage risk if
+/// a later selector treats the OOF vector as a feature — that is recorded.
+pub fn cross_val_predict(
+    x: &Matrix,
+    y: &Vector,
+    splitter: &KFold,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let folds = match splitter.split(x.nrows(), &session.child("kfold")) {
+        Ok(q) => q.value,
+        Err(e) => {
+            ctx.push(e.primary);
+            Vec::new()
+        }
+    };
+    let mut out = Vector::zeros(y.len());
+    let mut seen = vec![false; y.len()];
+    for (i, fold) in folds.iter().enumerate() {
+        let xt = take_rows(x, &fold.train);
+        let yt = take_vec(y, &fold.train);
+        let xv = take_rows(x, &fold.test);
+        match Ridge::new(0.1).fit(&xt, &yt, &session.child(format!("cvp_{i}"))) {
+            Ok(q) => match q.value.predict(&xv, &session.child("p")) {
+                Ok(p) => {
+                    for (k, &row) in fold.test.iter().enumerate() {
+                        if row < out.len() && k < p.value.len() {
+                            out[row] = p.value[k];
+                            seen[row] = true;
+                        }
+                    }
+                }
+                Err(e) => ctx.push(e.primary),
+            },
+            Err(e) => ctx.push(e.primary),
+        }
+    }
+    if seen.iter().any(|s| !*s) {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("cross_val_predict left some rows without an OOF prediction")
+                .build(),
+        );
+    }
+    ctx.finish(out)
+}
+
+/// sklearn-style grid search over Ridge / Lasso `alpha` using K-fold R².
+///
+/// Lives here (not `linear_model`) to avoid a module cycle.
+#[derive(Clone, Debug)]
+pub struct GridSearchCV {
+    /// Candidate penalties.
+    pub alphas: Vec<f64>,
+    /// `0` ⇒ Ridge, `1` ⇒ Lasso.
+    pub l1_ratio: f64,
+    /// CV splitter.
+    pub cv: KFold,
+}
+
+impl Default for GridSearchCV {
+    fn default() -> Self {
+        Self {
+            alphas: vec![0.01, 0.1, 1.0, 10.0],
+            l1_ratio: 0.0,
+            cv: KFold::new(3),
+        }
+    }
+}
+
+impl GridSearchCV {
+    /// Grid over the given `alpha` values (Ridge unless `l1_ratio` is set).
+    pub fn new(alphas: Vec<f64>) -> Self {
+        Self {
+            alphas,
+            l1_ratio: 0.0,
+            cv: KFold::new(3),
+        }
+    }
+}
+
+/// Selected linear model and the CV scores that justified it.
+#[derive(Clone, Debug)]
+pub struct FittedGridSearchCV {
+    /// Penalty with the highest mean fold R².
+    pub best_alpha: f64,
+    /// Mean CV R² of `best_alpha`.
+    pub best_score: f64,
+    /// `(alpha, mean_cv_r2)` for every grid point.
+    pub scores: Vec<(f64, f64)>,
+    /// Refit on the full training design.
+    pub fitted: FittedPenalized,
+}
+
+impl Fit for GridSearchCV {
+    type Fitted = FittedGridSearchCV;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedGridSearchCV>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let folds = match self.cv.split(x.nrows(), &session.child("cv")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                Vec::new()
+            }
+        };
+        let l1 = self.l1_ratio.clamp(0.0, 1.0);
+        let mut scores = Vec::new();
+        let mut best_alpha = self.alphas.first().copied().unwrap_or(1.0);
+        let mut best_score = f64::NEG_INFINITY;
+        for &alpha in &self.alphas {
+            let mut acc = 0.0;
+            let mut k = 0.0;
+            for (i, fold) in folds.iter().enumerate() {
+                let xt = take_rows(x, &fold.train);
+                let yt = take_vec(y, &fold.train);
+                let xv = take_rows(x, &fold.test);
+                let yv = take_vec(y, &fold.test);
+                let fitted = if l1 >= 0.5 {
+                    Lasso::new(alpha).fit(&xt, &yt, &session.child(format!("gs_{alpha}_{i}")))
+                } else {
+                    Ridge::new(alpha).fit(&xt, &yt, &session.child(format!("gs_{alpha}_{i}")))
+                };
+                match fitted {
+                    Ok(q) => match q.value.predict(&xv, &session.child("predict")) {
+                        Ok(p) => {
+                            if let Ok(s) = r2(&yv, &p.value, &session.child("r2")) {
+                                if s.value.is_finite() {
+                                    acc += s.value;
+                                    k += 1.0;
+                                }
+                            }
+                        }
+                        Err(e) => ctx.push(e.primary),
+                    },
+                    Err(e) => ctx.push(e.primary),
+                }
+            }
+            let mean = if k > 0.0 { acc / k } else { f64::NAN };
+            scores.push((alpha, mean));
+            if mean.is_finite() && mean > best_score {
+                best_score = mean;
+                best_alpha = alpha;
+            }
+        }
+        let fitted = if l1 >= 0.5 {
+            Lasso::new(best_alpha).fit(x, y, &session.child("refit"))
+        } else {
+            Ridge::new(best_alpha).fit(x, y, &session.child("refit"))
+        };
+        let fitted = match fitted {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                FittedPenalized {
+                    coef: Vector::zeros(x.ncols()),
+                    intercept: y.mean(),
+                    alpha: best_alpha,
+                    l1_ratio: l1,
+                }
+            }
+        };
+        ctx.finish(FittedGridSearchCV {
+            best_alpha,
+            best_score,
+            scores,
+            fitted,
+        })
+    }
+}
+
+/// Randomized search over a log-uniform Ridge `alpha` range.
+#[derive(Clone, Debug)]
+pub struct RandomizedSearchCV {
+    /// Number of random `alpha` draws.
+    pub n_iter: usize,
+    /// Inclusive log10 lower bound.
+    pub alpha_log_low: f64,
+    /// Inclusive log10 upper bound.
+    pub alpha_log_high: f64,
+    /// PRNG seed.
+    pub seed: u64,
+    /// CV splitter.
+    pub cv: KFold,
+}
+
+impl Default for RandomizedSearchCV {
+    fn default() -> Self {
+        Self {
+            n_iter: 6,
+            alpha_log_low: -2.0,
+            alpha_log_high: 1.0,
+            seed: 3,
+            cv: KFold::new(3),
+        }
+    }
+}
+
+impl RandomizedSearchCV {
+    /// `n_iter` log-uniform Ridge penalties.
+    pub fn new(n_iter: usize) -> Self {
+        Self {
+            n_iter: n_iter.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl Fit for RandomizedSearchCV {
+    type Fitted = FittedGridSearchCV;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedGridSearchCV>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        if self.n_iter < 1 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("RandomizedSearchCV.n_iter < 1; using 1")
+                    .build(),
+            );
+        }
+        let mut rng = Rng::new(self.seed);
+        let lo = self.alpha_log_low.min(self.alpha_log_high);
+        let hi = self.alpha_log_low.max(self.alpha_log_high);
+        let n_iter = self.n_iter.max(1);
+        let alphas: Vec<f64> = (0..n_iter)
+            .map(|_| 10.0_f64.powf(lo + (hi - lo) * rng.uniform()))
+            .collect();
+        let mut inner = GridSearchCV {
+            alphas,
+            l1_ratio: 0.0,
+            cv: self.cv.clone(),
+        };
+        match inner.fit(x, y, session) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    ctx.push(issue.clone());
+                }
+                ctx.finish(q.value)
+            }
+            Err(e) => {
+                ctx.push(e.primary);
+                ctx.finish(FittedGridSearchCV {
+                    best_alpha: 1.0,
+                    best_score: f64::NAN,
+                    scores: Vec::new(),
+                    fitted: FittedPenalized {
+                        coef: Vector::zeros(x.ncols()),
+                        intercept: y.mean(),
+                        alpha: 1.0,
+                        l1_ratio: 0.0,
+                    },
+                })
+            }
+        }
+    }
 }
 
 /// Discrete grid search over Ridge `alpha` using K-fold R².
@@ -1846,5 +2262,30 @@ mod tests {
                 assert!(!seen.contains(&(g[i].round() as i64)));
             }
         }
+        let rk = RepeatedKFold::new(3, 2)
+            .split(12, &Session::new("ms", "rkf"))
+            .unwrap()
+            .value;
+        assert_eq!(rk.len(), 6);
+        let ss = ShuffleSplit::new(4)
+            .split(16, &Session::new("ms", "shs"))
+            .unwrap()
+            .value;
+        assert_eq!(ss.len(), 4);
+        let x = Matrix::from_fn(24, 1, |i, _| i as f64);
+        let y = Vector::from_iter((0..24).map(|i| 1.0 + 2.0 * i as f64 + 0.2 * ((i % 3) as f64)));
+        let oof = cross_val_predict(&x, &y, &KFold::new(4), &Session::new("ms", "cvp"))
+            .unwrap()
+            .value;
+        assert_eq!(oof.len(), 24);
+        assert!(oof.as_slice().iter().all(|v| v.is_finite()));
+        let gs = GridSearchCV::new(vec![0.01, 0.1, 1.0])
+            .fit(&x, &y, &Session::new("ms", "gscv"))
+            .unwrap();
+        assert!(gs.value.best_alpha.is_finite());
+        let rs = RandomizedSearchCV::new(4)
+            .fit(&x, &y, &Session::new("ms", "rscv"))
+            .unwrap();
+        assert!(rs.value.best_alpha.is_finite());
     }
 }

@@ -7,7 +7,7 @@
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linalg::{chol_solve, least_squares};
-use crate::stats::adfuller;
+use crate::stats::{adfuller, phillips_perron};
 use crate::traits::Predict;
 use crate::validate::{inspect_identification, inspect_xy};
 use faer::Mat;
@@ -790,6 +790,90 @@ impl CointEngleGranger {
     }
 }
 
+/// Phillips–Ouliaris residual-based cointegration test.
+///
+/// The residual unit-root is a Phillips–Perron statistic. Critical values
+/// are the same MacKinnon approximation as ADF, **not** the PO tables —
+/// recorded as a compromise.
+#[derive(Clone, Debug)]
+pub struct PhillipsOuliarisCoint {
+    /// Newey–West lags (`None` ⇒ default PP lag).
+    pub lags: Option<usize>,
+}
+
+impl Default for PhillipsOuliarisCoint {
+    fn default() -> Self {
+        Self { lags: None }
+    }
+}
+
+impl PhillipsOuliarisCoint {
+    /// Default Phillips–Ouliaris test.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// OLS `y` on `x` (with intercept), then Phillips–Perron on the residual.
+    pub fn fit(&self, y: &Vector, x: &Vector, session: &Session) -> Result<Qualified<CointResult>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let xm = Matrix::from_vector(x).with_intercept();
+        inspect_xy(&mut ctx.report, &xm, Some(y), &ctx.policy);
+        let mut scratch = signlred::Report::new("po", "ols");
+        let Some(beta) = least_squares(&mut scratch, &xm, y, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("Phillips–Ouliaris first-step OLS failed")
+                    .build(),
+            );
+            return ctx.finish(CointResult {
+                coef: 0.0,
+                intercept: 0.0,
+                adf_stat: f64::NAN,
+                adf_pvalue: f64::NAN,
+            });
+        };
+        let resid = y.sub(&xm.matvec(&beta));
+        let pp = phillips_perron(&resid, self.lags, &session.child("pp"))?;
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(signlred::Severity::Advisory)
+                .message(
+                    "Phillips–Ouliaris p-values use the MacKinnon ADF approximation, not PO tables",
+                )
+                .compromise(NumericalCompromise::new(
+                    "Phillips–Ouliaris Z_t with published critical values",
+                    "Phillips–Perron on the OLS residual + MacKinnon p",
+                    "the residual-based null is a unit root, not the PO finite-sample table",
+                    "treat p as a ranking statistic, not a PO size-correct test",
+                ))
+                .build(),
+        );
+        if pp.value.pvalue > 0.05 {
+            ctx.push(
+                Issue::builder(IssueCode::NonStationary)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "Phillips–Ouliaris residual PP p={:.4e}; no cointegration at 5%",
+                        pp.value.pvalue
+                    ))
+                    .meaninglessness(Meaninglessness::new(
+                        "cointegrating slope",
+                        "the residual still looks like a unit root, so β is a spurious-regression coefficient",
+                        signlred::InterpretiveValue::Misleading,
+                        "do not interpret the OLS slope as a long-run relation",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(CointResult {
+            coef: beta[1],
+            intercept: beta[0],
+            adf_stat: pp.value.stat,
+            adf_pvalue: pp.value.pvalue,
+        })
+    }
+}
+
 /// Engle–Granger result.
 #[derive(Clone, Debug)]
 pub struct CointResult {
@@ -1014,5 +1098,12 @@ mod tests {
             .fit(&x, &y1, &z, &Session::new("liml", "fit"))
             .expect("liml");
         assert!(liml.value.coef[0].is_finite());
+        let t = Vector::from_iter((0..40).map(|i| i as f64));
+        let yrw = Vector::from_iter((0..40).map(|i| 2.0 * i as f64 + 0.15 * ((i % 5) as f64)));
+        let po = PhillipsOuliarisCoint::new()
+            .fit(&yrw, &t, &Session::new("po", "fit"))
+            .expect("po");
+        assert!(po.value.coef.is_finite());
+        assert!(po.value.adf_stat.is_finite());
     }
 }

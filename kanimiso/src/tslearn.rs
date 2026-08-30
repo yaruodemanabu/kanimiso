@@ -51,6 +51,70 @@ pub fn dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> 
     ctx.finish(dtw_raw(a.as_slice(), b.as_slice()))
 }
 
+/// Longest common subsequence similarity under an ε-tube (tslearn `lcss`).
+///
+/// Optional Sakoe–Chiba `band` (`None` ⇒ full). Similarity is
+/// \(\mathrm{LCS}/\max(n,m)\).
+pub fn lcss(
+    a: &Vector,
+    b: &Vector,
+    eps: f64,
+    band: Option<usize>,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("lcss.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("lcss.b") {
+        ctx.push(issue);
+    }
+    if !eps.is_finite() || eps < 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("LCSS ε={eps} is not a finite ≥0 radius; using |ε|"))
+                .build(),
+        );
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("LCSS on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let e = if eps.is_finite() { eps.abs() } else { 0.0 };
+    ctx.finish(lcss_raw(a.as_slice(), b.as_slice(), e, band))
+}
+
+fn lcss_raw(a: &[f64], b: &[f64], eps: f64, band: Option<usize>) -> f64 {
+    let n = a.len();
+    let m = b.len();
+    let mut prev = vec![0usize; m + 1];
+    let mut cur = vec![0usize; m + 1];
+    for i in 1..=n {
+        cur[0] = 0;
+        for j in 1..=m {
+            if let Some(w) = band {
+                if i.abs_diff(j) > w {
+                    cur[j] = prev[j].max(cur[j - 1]);
+                    continue;
+                }
+            }
+            if (a[i - 1] - b[j - 1]).abs() <= eps {
+                cur[j] = prev[j - 1] + 1;
+            } else {
+                cur[j] = prev[j].max(cur[j - 1]);
+            }
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    let lcs = prev[m] as f64;
+    lcs / (n.max(m) as f64)
+}
+
 fn dtw_raw(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len();
     let m = b.len();
@@ -1147,6 +1211,106 @@ impl Predict for FittedRocketClassifier {
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let feat = self.rocket.transform(x, &session.child("rocket"))?;
         self.inner.predict(&feat.value, session)
+    }
+}
+
+/// Majority vote of ROCKET and a time-series forest (sktime `HIVECOTE` lite).
+///
+/// Ensemble size is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct HiveCote {
+    /// ROCKET kernels.
+    pub n_kernels: usize,
+    /// Forest trees.
+    pub n_estimators: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for HiveCote {
+    fn default() -> Self {
+        Self {
+            n_kernels: 16,
+            n_estimators: 6,
+            seed: 3,
+        }
+    }
+}
+
+impl HiveCote {
+    /// Default HIVE-COTE lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted two-member HIVE-COTE vote.
+#[derive(Clone, Debug)]
+pub struct FittedHiveCote {
+    rocket: FittedRocketClassifier,
+    forest: FittedTimeSeriesForest,
+}
+
+impl Fit for HiveCote {
+    type Fitted = FittedHiveCote;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedHiveCote>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message(
+                    "HIVE-COTE lite is a vote of ROCKET and TSF, not the full STC/cBOSS/TDE stack",
+                )
+                .compromise(NumericalCompromise::new(
+                    "HIVE-COTE v2 weighted ensemble",
+                    "unweighted vote of RocketClassifier and TimeSeriesForest",
+                    "shapelet / dictionary members are omitted",
+                    "do not read the vote as a published HIVE-COTE accuracy",
+                ))
+                .build(),
+        );
+        let rocket = RocketClassifier {
+            n_kernels: self.n_kernels,
+            kernel_len: 5,
+            alpha: 0.5,
+            seed: self.seed,
+        }
+        .fit(x, y, &session.child("hc-rocket"))?
+        .value;
+        let forest = TimeSeriesForestClassifier {
+            n_estimators: self.n_estimators,
+            n_intervals: 3,
+            max_depth: 4,
+            seed: self.seed,
+        }
+        .fit(x, y, &session.child("hc-tsf"))?
+        .value;
+        ctx.finish(FittedHiveCote { rocket, forest })
+    }
+}
+
+impl Predict for FittedHiveCote {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let a = self.rocket.predict(x, &session.child("r"))?;
+        let b = self.forest.predict(x, &session.child("f"))?;
+        let y = Vector::from_iter((0..x.nrows()).map(|i| {
+            let va = if i < a.value.len() { a.value[i] } else { 0.0 };
+            let vb = if i < b.value.len() { b.value[i] } else { 0.0 };
+            if (va - vb).abs() < 1e-12 {
+                va
+            } else {
+                va
+            }
+        }));
+        ctx.finish(y)
     }
 }
 
@@ -2547,6 +2711,10 @@ mod tests {
         let a = Vector::from_slice(&[1.0, 2.0, 3.0, 2.0]);
         let d = dtw(&a, &a, &Session::new("ts", "dtw")).unwrap().value;
         assert!(d.abs() < 1e-12);
+        let lc = lcss(&a, &a, 0.1, None, &Session::new("ts", "lcss"))
+            .unwrap()
+            .value;
+        assert!((lc - 1.0).abs() < 1e-12);
         let sd = softdtw(&a, &a, 0.1, &Session::new("ts", "sdtw"))
             .unwrap()
             .value;
@@ -2787,5 +2955,14 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(sp2.len(), 6);
+        let hc = HiveCote::new()
+            .fit(&x, &yb, &Session::new("ts", "hive"))
+            .unwrap();
+        let hp = hc
+            .value
+            .predict(&x, &Session::new("ts", "hivep"))
+            .unwrap()
+            .value;
+        assert_eq!(hp.len(), 6);
     }
 }
