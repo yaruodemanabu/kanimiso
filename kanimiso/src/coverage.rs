@@ -2805,6 +2805,31 @@ const INVENTORY: &[Algorithm] = &[
         "river.model_selection.SuccessiveHalvingClassifier",
         "online",
     ),
+    a(
+        "metrics.silhouette_samples",
+        "sklearn.metrics.silhouette_samples",
+        "metric",
+    ),
+    a(
+        "metrics.pairwise_distances",
+        "sklearn.metrics.pairwise_distances",
+        "metric",
+    ),
+    a(
+        "stats.compare_lr",
+        "statsmodels.regression.linear_model.OLSResults.compare_lr_test",
+        "stats",
+    ),
+    a(
+        "tslearn.TemporalDictionaryEnsemble",
+        "sktime.classification.dictionary_based.TemporalDictionaryEnsemble",
+        "timeseries",
+    ),
+    a(
+        "online.SuccessiveHalvingRegressor",
+        "river.model_selection.SuccessiveHalvingRegressor",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -2917,6 +2942,10 @@ mod tests {
             "tslearn.DrCif",
             "tslearn.ProximityForest",
             "online.SuccessiveHalvingClassifier",
+            "metrics.silhouette_samples",
+            "stats.compare_lr",
+            "tslearn.TemporalDictionaryEnsemble",
+            "online.SuccessiveHalvingRegressor",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

@@ -10082,6 +10082,201 @@ impl Predict for SuccessiveHalvingClassifier {
     }
 }
 
+/// Successive-halving RLS committee (river `model_selection.SuccessiveHalvingRegressor`).
+#[derive(Clone, Debug)]
+pub struct SuccessiveHalvingRegressor {
+    /// Initial candidate count.
+    pub n_models: usize,
+    models: Vec<LinearRegression>,
+    sse: Vec<f64>,
+    n_err: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+    cuts: u64,
+}
+
+impl Default for SuccessiveHalvingRegressor {
+    fn default() -> Self {
+        Self {
+            n_models: 4,
+            models: Vec::new(),
+            sse: Vec::new(),
+            n_err: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            cuts: 0,
+        }
+    }
+}
+
+impl SuccessiveHalvingRegressor {
+    /// Committee of `n_models` RLS estimators.
+    pub fn new(n_models: usize) -> Self {
+        Self {
+            n_models: n_models.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for SuccessiveHalvingRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        if self.n_models < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "SuccessiveHalvingRegressor n_models={} < 2; using 2",
+                        self.n_models
+                    ))
+                    .build(),
+            );
+            self.n_models = 2;
+        }
+        if self.models.is_empty() {
+            self.models = (0..self.n_models.max(2))
+                .map(|i| {
+                    let mut m = LinearRegression::new(1.0);
+                    m.p0 = 10.0 * (i as f64 + 1.0);
+                    m.fit_intercept = true;
+                    m
+                })
+                .collect();
+            self.sse = vec![0.0; self.models.len()];
+            self.n_err = vec![0.0; self.models.len()];
+        }
+        let before = self.n_seen;
+        let n_before = self.models.len();
+        for m in 0..self.models.len() {
+            let pred = self.models[m]
+                .predict(x, &session.child(format!("shr_pre_{m}")))
+                .map(|q| q.value)
+                .unwrap_or_else(|_| Vector::zeros(x.nrows()));
+            for i in 0..x.nrows().min(y.len()).min(pred.len()) {
+                let e = pred[i] - y[i];
+                self.sse[m] += e * e;
+                self.n_err[m] += 1.0;
+            }
+            let _ = self.models[m].partial_fit(x, Some(y), &session.child(format!("shr_{m}")));
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut cut = false;
+        if self.models.len() > 1
+            && self.n_seen >= 2
+            && (self.n_seen.is_power_of_two() || before < 2)
+        {
+            let mut order: Vec<usize> = (0..self.models.len()).collect();
+            order.sort_by(|&a, &b| {
+                let aa = if self.n_err[a] > 0.0 {
+                    self.sse[a] / self.n_err[a]
+                } else {
+                    f64::INFINITY
+                };
+                let bb = if self.n_err[b] > 0.0 {
+                    self.sse[b] / self.n_err[b]
+                } else {
+                    f64::INFINITY
+                };
+                aa.partial_cmp(&bb).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let keep = (self.models.len() / 2).max(1);
+            let keep_idx = &order[..keep];
+            let mut models = Vec::new();
+            let mut sse = Vec::new();
+            let mut n_err = Vec::new();
+            for &i in keep_idx {
+                models.push(self.models[i].clone());
+                sse.push(self.sse[i]);
+                n_err.push(self.n_err[i]);
+            }
+            if models.len() < n_before {
+                cut = true;
+                self.cuts += 1;
+            }
+            self.models = models;
+            self.sse = sse;
+            self.n_err = n_err;
+        }
+        let best = self
+            .sse
+            .iter()
+            .zip(&self.n_err)
+            .map(|(s, n)| if *n > 0.0 { s / n } else { f64::INFINITY })
+            .fold(f64::INFINITY, f64::min);
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if cut { 1.0 } else { 0.0 });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2 && !self.models.is_empty();
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "SuccessiveHalvingRegressor alive={} cuts={} best_mse={best:.6e}",
+            self.models.len(),
+            self.cuts
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                if cut {
+                    "eliminated the worse half of the RLS committee"
+                } else {
+                    "updated every surviving RLS member"
+                },
+                "rung promotions drop models with the highest running MSE",
+                format!("alive={n_before} n={before}"),
+                format!(
+                    "alive={} n={} mse={best:.6e}",
+                    self.models.len(),
+                    self.n_seen
+                ),
+            ),
+        )
+    }
+}
+
+impl Predict for SuccessiveHalvingRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.models.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let mut acc = vec![0.0; x.nrows()];
+        let mut k: f64 = 0.0;
+        for (t, m) in self.models.iter().enumerate() {
+            match m.predict(x, &session.child(format!("shrp_{t}"))) {
+                Ok(q) => {
+                    for i in 0..x.nrows().min(q.value.len()) {
+                        acc[i] += q.value[i];
+                    }
+                    k += 1.0;
+                }
+                Err(_) => {}
+            }
+        }
+        let k = k.max(1.0);
+        ctx.finish(Vector::from_iter(acc.iter().map(|v| v / k)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10361,6 +10556,9 @@ mod tests {
         SuccessiveHalvingClassifier::new(4)
             .partial_fit(&x, Some(&yb), &session)
             .expect("sh");
+        SuccessiveHalvingRegressor::new(4)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("shr");
 
         let n_expl = session
             .ledger()

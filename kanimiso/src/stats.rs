@@ -4697,6 +4697,73 @@ pub fn compare_means(
     })
 }
 
+/// Likelihood-ratio test of nested OLS (statsmodels `compare_lr_test`).
+///
+/// `x_restr` must be nested in `x_unrestr` (fewer columns). Extra-column
+/// count is not identification `p`.
+pub fn compare_lr(
+    y: &Vector,
+    x_restr: &Matrix,
+    x_unrestr: &Matrix,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x_restr, Some(y), &ctx.policy);
+    inspect_xy(&mut ctx.report, x_unrestr, Some(y), &ctx.policy);
+    let n = y.len().min(x_restr.nrows()).min(x_unrestr.nrows());
+    if x_unrestr.ncols() <= x_restr.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message("compare_lr: unrestricted design is not wider; the LR is unidentified")
+                .build(),
+        );
+    }
+    let Some(br) = statistical_ols(&mut ctx, x_restr, y) else {
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: (x_unrestr.ncols() as f64 - x_restr.ncols() as f64).max(1.0),
+            nobs: n as f64,
+        });
+    };
+    let Some(bu) = statistical_ols(&mut ctx, x_unrestr, y) else {
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: (x_unrestr.ncols() as f64 - x_restr.ncols() as f64).max(1.0),
+            nobs: n as f64,
+        });
+    };
+    let fr = x_restr.matvec(&br);
+    let fu = x_unrestr.matvec(&bu);
+    let mut ssr_r = 0.0;
+    let mut ssr_u = 0.0;
+    for i in 0..n {
+        let er = y[i] - if i < fr.len() { fr[i] } else { 0.0 };
+        let eu = y[i] - if i < fu.len() { fu[i] } else { 0.0 };
+        ssr_r += er * er;
+        ssr_u += eu * eu;
+    }
+    let df = (x_unrestr.ncols() as f64 - x_restr.ncols() as f64).max(1.0);
+    let stat = if ssr_u > 0.0 && ssr_r > 0.0 {
+        n as f64 * (ssr_r / ssr_u).ln()
+    } else {
+        f64::NAN
+    };
+    let pvalue = if stat.is_finite() {
+        chi2_pvalue(stat.max(0.0), df)
+    } else {
+        f64::NAN
+    };
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df,
+        nobs: n as f64,
+    })
+}
+
 /// Nested-model ANOVA (statsmodels `anova_lm`).
 #[derive(Clone, Debug)]
 pub struct AnovaLm {
@@ -5757,5 +5824,8 @@ mod tests {
         let rb = rainbow(&x, &y, 0.5, &Session::new("rb", "t")).expect("rainbow");
         assert!(rb.value.statistic.is_finite() || rb.value.pvalue.is_nan());
         assert!(rb.value.nobs > 0.0);
+        let lr = compare_lr(&yr, &xr, &xf, &Session::new("lr", "t")).expect("lr");
+        assert!(lr.value.statistic.is_finite() || lr.value.pvalue.is_nan());
+        assert!(lr.value.df > 0.0);
     }
 }

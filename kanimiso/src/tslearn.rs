@@ -5337,6 +5337,136 @@ impl Predict for FittedColumnEnsembleClassifier {
     }
 }
 
+/// Temporal dictionary ensemble (sktime `TemporalDictionaryEnsemble` lite).
+///
+/// A vote of BOSS and WEASEL. Word / window counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct TemporalDictionaryEnsemble {
+    /// BOSS window.
+    pub window: usize,
+    /// Words kept by WEASEL.
+    pub n_words: usize,
+}
+
+impl Default for TemporalDictionaryEnsemble {
+    fn default() -> Self {
+        Self {
+            window: 3,
+            n_words: 6,
+        }
+    }
+}
+
+impl TemporalDictionaryEnsemble {
+    /// Default TDE lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted TDE vote.
+#[derive(Clone, Debug)]
+pub struct FittedTemporalDictionaryEnsemble {
+    boss: Option<FittedBoss>,
+    weasel: Option<FittedBoss>,
+}
+
+impl Fit for TemporalDictionaryEnsemble {
+    type Fitted = FittedTemporalDictionaryEnsemble;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedTemporalDictionaryEnsemble>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let w = self.window.max(2).min(x.ncols().max(1));
+        let mut boss = BossEnsemble {
+            window: w,
+            word_len: 3,
+            alphabet: 4,
+        };
+        let mut weasel = Weasel {
+            window: w,
+            word_len: 3,
+            alphabet: 4,
+            n_words: self.n_words.max(1),
+        };
+        let boss = match boss.fit(x, y, &session.child("tde_boss")) {
+            Ok(q) => Some(q.value),
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                        | IssueCode::InsufficientSample
+                ) {
+                    ctx.push(e.primary);
+                }
+                None
+            }
+        };
+        let weasel = match weasel.fit(x, y, &session.child("tde_weasel")) {
+            Ok(q) => Some(q.value),
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                        | IssueCode::InsufficientSample
+                ) {
+                    ctx.push(e.primary);
+                }
+                None
+            }
+        };
+        if boss.is_none() && weasel.is_none() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("TemporalDictionaryEnsemble: both dictionary members failed")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedTemporalDictionaryEnsemble { boss, weasel })
+    }
+}
+
+impl Predict for FittedTemporalDictionaryEnsemble {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let mut acc = vec![0.0; x.nrows()];
+        let mut k: f64 = 0.0;
+        for (name, m) in [("b", self.boss.as_ref()), ("w", self.weasel.as_ref())] {
+            if let Some(m) = m {
+                match m.predict(x, &session.child(name)) {
+                    Ok(q) => {
+                        for i in 0..x.nrows().min(q.value.len()) {
+                            acc[i] += q.value[i];
+                        }
+                        k += 1.0;
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        let k = k.max(1.0);
+        ctx.finish(Vector::from_iter(acc.iter().map(|v| {
+            if *v / k > 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5815,5 +5945,14 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(cep.len(), 6);
+        let tde = TemporalDictionaryEnsemble::new()
+            .fit(&x, &yb, &Session::new("ts", "tde"))
+            .unwrap();
+        let tdep = tde
+            .value
+            .predict(&x, &Session::new("ts", "tdep"))
+            .unwrap()
+            .value;
+        assert_eq!(tdep.len(), 6);
     }
 }

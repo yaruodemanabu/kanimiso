@@ -554,6 +554,110 @@ pub fn silhouette(x: &Matrix, labels: &Vector, session: &Session) -> Result<Qual
     })
 }
 
+/// Per-sample silhouette (sklearn `silhouette_samples`).
+///
+/// Cluster count is not identification `p`. A one-class partition is vacuous
+/// and aborts, matching [`silhouette`].
+pub fn silhouette_samples(
+    x: &Matrix,
+    labels: &Vector,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    crate::validate::inspect_xy(&mut ctx.report, x, Some(labels), &ctx.policy);
+    inspect_classes(&mut ctx.report, labels, &ctx.policy);
+    warn_constant_target(&mut ctx, labels, true);
+    if x.nrows() != labels.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("silhouette_samples: rows(X) ≠ len(labels)")
+                .build(),
+        );
+        return ctx.finish(Vector::filled(x.nrows(), f64::NAN));
+    }
+    let labs = labels_of(labels);
+    let classes = unique_sorted(&labs);
+    if classes.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("silhouette_samples needs at least two clusters")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "silhouette_samples",
+                    "b(i) is undefined when every point shares a label",
+                    "use a partition with K≥2",
+                ))
+                .build(),
+        );
+        return ctx.finish(Vector::filled(x.nrows(), f64::NAN));
+    }
+    let n = x.nrows();
+    let mut out = Vector::zeros(n);
+    for i in 0..n {
+        let ci = labs[i];
+        let mut a = 0.0;
+        let mut a_n = 0.0;
+        let mut b = f64::INFINITY;
+        for &c in &classes {
+            let mut s = 0.0;
+            let mut k = 0.0;
+            for j in 0..n {
+                if i == j || labs[j] != c {
+                    continue;
+                }
+                s += euclid(x, i, j);
+                k += 1.0;
+            }
+            if k <= 0.0 {
+                continue;
+            }
+            let mean = s / k;
+            if c == ci {
+                a = mean;
+                a_n = k;
+            } else if mean < b {
+                b = mean;
+            }
+        }
+        if a_n <= 0.0 || !b.is_finite() {
+            out[i] = f64::NAN;
+            continue;
+        }
+        let denom = a.max(b);
+        out[i] = if denom > 0.0 { (b - a) / denom } else { 0.0 };
+    }
+    ctx.finish(out)
+}
+
+/// Pairwise Euclidean distances (sklearn `pairwise_distances` metric=`euclidean`).
+///
+/// Row counts are not identification `p`.
+pub fn pairwise_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "pairwise_distances a.ncols()={} b.ncols()={}",
+                    a.ncols(),
+                    b.ncols()
+                ))
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let mut s = 0.0;
+        for k in 0..a.ncols() {
+            let d = a.get(i, k) - b.get(j, k);
+            s += d * d;
+        }
+        s.sqrt()
+    });
+    ctx.finish(out)
+}
+
 fn comb2(n: f64) -> f64 {
     if n < 2.0 {
         0.0
@@ -2732,5 +2836,15 @@ mod tests {
             .unwrap()
             .value;
         assert!(d2p.is_finite());
+        let ss = silhouette_samples(&xb, &lb, &Session::new("m", "sils"))
+            .unwrap()
+            .value;
+        assert_eq!(ss.len(), 8);
+        assert!(ss.as_slice().iter().all(|v| v.is_finite()));
+        let pd = pairwise_distances(&xb, &xb, &Session::new("m", "pwd"))
+            .unwrap()
+            .value;
+        assert_eq!(pd.shape(), (8, 8));
+        assert!(pd.get(0, 0).abs() < 1e-12);
     }
 }
