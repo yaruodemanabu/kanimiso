@@ -5222,6 +5222,41 @@ const INVENTORY: &[Algorithm] = &[
         "function",
     ),
     a("online.Bpr", "river.reco.BPR", "online"),
+    a(
+        "stats.piecewise_exponential",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "stats",
+    ),
+    a(
+        "stats.PiecewiseExponential",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "estimator",
+    ),
+    a(
+        "stats.logistic_ph",
+        "statsmodels.discrete.discrete_model.Logit",
+        "stats",
+    ),
+    a(
+        "stats.LogisticPH",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "estimator",
+    ),
+    a(
+        "stats.EfronCox",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "estimator",
+    ),
+    a("online.ItemKnn", "river.reco.ItemKNN", "online"),
+    a("online.UserKnn", "river.reco.UserKNN", "online"),
+    a("online.SvdPp", "river.reco.SVDPP", "online"),
+    a(
+        "tslearn.Ggs",
+        "sktime.annotation.ggs.GreedyGaussianSegmentation",
+        "estimator",
+    ),
+    a("tslearn.Stamp", "stumpy.stump", "estimator"),
+    a("tslearn.Stray", "sktime.annotation.stray.STRAY", "estimator"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5592,6 +5627,12 @@ mod tests {
             "iv.anderson_rubin",
             "iv.wu_hausman",
             "online.Bpr",
+            "stats.piecewise_exponential",
+            "stats.LogisticPH",
+            "stats.EfronCox",
+            "online.ItemKnn",
+            "online.SvdPp",
+            "tslearn.Ggs",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

@@ -9677,6 +9677,91 @@ impl ClaSPSegmentation {
     }
 }
 
+/// Named greedy Gaussian segmentation (sktime `GreedyGaussianSegmentation`).
+///
+/// Change-point count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Ggs {
+    /// Maximum number of splits. Not identification `p`.
+    pub max_changes: usize,
+}
+
+impl Default for Ggs {
+    fn default() -> Self {
+        Self { max_changes: 2 }
+    }
+}
+
+impl Ggs {
+    /// Default GGS (at most two splits).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Change-point locations as a vector of indices.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        ggs(y, self.max_changes, session)
+    }
+}
+
+/// Named STAMP matrix-profile detector (stumpy `stump` / sktime `STAMP`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Stamp {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+}
+
+impl Default for Stamp {
+    fn default() -> Self {
+        Self { window: 3 }
+    }
+}
+
+impl Stamp {
+    /// STAMP with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+        }
+    }
+
+    /// Matrix profile and nearest-neighbour index.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StampResult>> {
+        stamp(y, self.window, session)
+    }
+}
+
+/// Named STRAY anomaly scorer (sktime `STRAY`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Stray {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+}
+
+impl Default for Stray {
+    fn default() -> Self {
+        Self { window: 3 }
+    }
+}
+
+impl Stray {
+    /// STRAY with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+        }
+    }
+
+    /// Robust z-scores of the matrix profile.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        stray(y, self.window, session)
+    }
+}
+
 fn ridge_reg_from_features(
     z: &Matrix,
     y: &Vector,
@@ -12995,6 +13080,21 @@ mod tests {
             .unwrap()
             .value;
         assert!(clp.is_finite() || clp.is_nan());
+        let ggsn = Ggs::new()
+            .fit(&yr, &Session::new("ts", "ggsn"))
+            .unwrap()
+            .value;
+        assert!(ggsn.as_slice().iter().all(|v| v.is_finite()));
+        let stp = Stamp::new(3)
+            .fit(&yr, &Session::new("ts", "stmp"))
+            .unwrap()
+            .value;
+        assert!(stp.profile.as_slice().iter().all(|v| v.is_finite()) || stp.profile.is_empty());
+        let sty = Stray::new(3)
+            .fit(&yr, &Session::new("ts", "stry"))
+            .unwrap()
+            .value;
+        assert!(sty.as_slice().iter().all(|v| v.is_finite()) || sty.is_empty());
     }
 
     #[test]

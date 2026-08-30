@@ -27155,6 +27155,602 @@ impl Predict for Bpr {
     }
 }
 
+/// Item-item kNN recommender (river `reco.ItemKNN`).
+///
+/// `X` is `[user, item]`, `y` is the rating. Neighbourhood size is not
+/// identification `p`. Similarity is cosine of item rating vectors over users.
+#[derive(Clone, Debug)]
+pub struct ItemKnn {
+    /// Neighbours kept per query item. Not identification `p`.
+    pub k: usize,
+    ratings: HashMap<(u64, u64), f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for ItemKnn {
+    fn default() -> Self {
+        Self {
+            k: 8,
+            ratings: HashMap::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl ItemKnn {
+    /// Empty item-item neighbourhood.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn item_vec(&self, item: u64) -> HashMap<u64, f64> {
+        let mut v = HashMap::new();
+        for (&(u, i), &r) in &self.ratings {
+            if i == item {
+                v.insert(u, r);
+            }
+        }
+        v
+    }
+
+    fn user_items(&self, user: u64) -> Vec<(u64, f64)> {
+        self.ratings
+            .iter()
+            .filter_map(|(&(u, i), &r)| if u == user { Some((i, r)) } else { None })
+            .collect()
+    }
+
+    fn pred(&self, user: u64, item: u64) -> f64 {
+        let target = self.item_vec(item);
+        let rated = self.user_items(user);
+        if rated.is_empty() {
+            return self
+                .ratings
+                .values()
+                .copied()
+                .sum::<f64>()
+                / (self.ratings.len().max(1) as f64);
+        }
+        let mut scored: Vec<(f64, f64)> = Vec::new();
+        for (j, rj) in rated {
+            if j == item {
+                continue;
+            }
+            let other = self.item_vec(j);
+            let sim = cosine_sparse(&target, &other);
+            if sim.abs() > 1e-15 {
+                scored.push((sim, rj));
+            }
+        }
+        scored.sort_by(|a, b| b.0.abs().partial_cmp(&a.0.abs()).unwrap_or(std::cmp::Ordering::Equal));
+        let keep = self.k.max(1);
+        let mut num = 0.0_f64;
+        let mut den = 0.0_f64;
+        for (sim, rj) in scored.into_iter().take(keep) {
+            num += sim * rj;
+            den += sim.abs();
+        }
+        if den > 1e-15 {
+            num / den
+        } else {
+            self.ratings.values().copied().sum::<f64>() / (self.ratings.len().max(1) as f64)
+        }
+    }
+}
+
+fn cosine_sparse(a: &HashMap<u64, f64>, b: &HashMap<u64, f64>) -> f64 {
+    let mut dot = 0.0_f64;
+    let mut na = 0.0_f64;
+    let mut nb = 0.0_f64;
+    for (&u, &ra) in a {
+        na += ra * ra;
+        if let Some(&rb) = b.get(&u) {
+            dot += ra * rb;
+        }
+    }
+    for &rb in b.values() {
+        nb += rb * rb;
+    }
+    let den = na.sqrt() * nb.sqrt();
+    if den <= 1e-15 {
+        0.0
+    } else {
+        dot / den
+    }
+}
+
+impl PartialFit for ItemKnn {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing ratings"),
+            );
+        };
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ItemKNN needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let mut stored = 0u64;
+        for r in 0..x.nrows().min(y.len()) {
+            let u = x.get(r, 0).max(0.0).round() as u64;
+            let i = x.get(r, 1).max(0.0).round() as u64;
+            self.ratings.insert((u, i), y[r]);
+            stored += 1;
+        }
+        self.n_seen += stored;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(stored as f64);
+        q.information_gain = Some(stored as f64);
+        q.still_identified = self.ratings.len() >= 2;
+        q.warmup = self.ratings.len() < 2;
+        q.explanation = format!(
+            "ItemKNN stored={stored} cells={} k={}",
+            self.ratings.len(),
+            self.k
+        );
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("ItemKNN has fewer than two ratings")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "item-item rating table update",
+                "cosine neighbourhood; neighbour count is not identification p",
+                "previous user-item cells",
+                format!("cells={}", self.ratings.len()),
+            ),
+        )
+    }
+}
+
+impl Predict for ItemKnn {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ItemKNN predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as u64;
+            let i = x.get(r, 1).max(0.0).round() as u64;
+            self.pred(u, i)
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// User-user kNN recommender (river `reco.UserKNN`).
+///
+/// `X` is `[user, item]`, `y` is the rating. Neighbourhood size is not
+/// identification `p`.
+#[derive(Clone, Debug)]
+pub struct UserKnn {
+    /// Neighbours kept per query user. Not identification `p`.
+    pub k: usize,
+    ratings: HashMap<(u64, u64), f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for UserKnn {
+    fn default() -> Self {
+        Self {
+            k: 8,
+            ratings: HashMap::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl UserKnn {
+    /// Empty user-user neighbourhood.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn user_vec(&self, user: u64) -> HashMap<u64, f64> {
+        let mut v = HashMap::new();
+        for (&(u, i), &r) in &self.ratings {
+            if u == user {
+                v.insert(i, r);
+            }
+        }
+        v
+    }
+
+    fn item_raters(&self, item: u64) -> Vec<(u64, f64)> {
+        self.ratings
+            .iter()
+            .filter_map(|(&(u, i), &r)| if i == item { Some((u, r)) } else { None })
+            .collect()
+    }
+
+    fn pred(&self, user: u64, item: u64) -> f64 {
+        let target = self.user_vec(user);
+        let raters = self.item_raters(item);
+        if raters.is_empty() {
+            return self
+                .ratings
+                .values()
+                .copied()
+                .sum::<f64>()
+                / (self.ratings.len().max(1) as f64);
+        }
+        let mut scored: Vec<(f64, f64)> = Vec::new();
+        for (v, rv) in raters {
+            if v == user {
+                continue;
+            }
+            let other = self.user_vec(v);
+            let sim = cosine_sparse(&target, &other);
+            if sim.abs() > 1e-15 {
+                scored.push((sim, rv));
+            }
+        }
+        scored.sort_by(|a, b| b.0.abs().partial_cmp(&a.0.abs()).unwrap_or(std::cmp::Ordering::Equal));
+        let keep = self.k.max(1);
+        let mut num = 0.0_f64;
+        let mut den = 0.0_f64;
+        for (sim, rv) in scored.into_iter().take(keep) {
+            num += sim * rv;
+            den += sim.abs();
+        }
+        if den > 1e-15 {
+            num / den
+        } else {
+            self.ratings.values().copied().sum::<f64>() / (self.ratings.len().max(1) as f64)
+        }
+    }
+}
+
+impl PartialFit for UserKnn {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing ratings"),
+            );
+        };
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("UserKNN needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let mut stored = 0u64;
+        for r in 0..x.nrows().min(y.len()) {
+            let u = x.get(r, 0).max(0.0).round() as u64;
+            let i = x.get(r, 1).max(0.0).round() as u64;
+            self.ratings.insert((u, i), y[r]);
+            stored += 1;
+        }
+        self.n_seen += stored;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(stored as f64);
+        q.information_gain = Some(stored as f64);
+        q.still_identified = self.ratings.len() >= 2;
+        q.warmup = self.ratings.len() < 2;
+        q.explanation = format!(
+            "UserKNN stored={stored} cells={} k={}",
+            self.ratings.len(),
+            self.k
+        );
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("UserKNN has fewer than two ratings")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "user-user rating table update",
+                "cosine neighbourhood; neighbour count is not identification p",
+                "previous user-item cells",
+                format!("cells={}", self.ratings.len()),
+            ),
+        )
+    }
+}
+
+impl Predict for UserKnn {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("UserKNN predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as u64;
+            let i = x.get(r, 1).max(0.0).round() as u64;
+            self.pred(u, i)
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// SVD++ / implicit-feedback MF (river `reco.SVDPP`).
+///
+/// \( \hat y_{ui}=\mu+b_u+b_i+q_i^\top\bigl(p_u+|N(u)|^{-1/2}\sum_{j\in N(u)}y_j\bigr) \).
+/// Factor count is not identification `p`. `X` is `[user, item]`.
+#[derive(Clone, Debug)]
+pub struct SvdPp {
+    /// Latent rank.
+    pub n_factors: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    /// ℓ2 on factors and biases.
+    pub l2: f64,
+    mu: f64,
+    bu: Vec<f64>,
+    bi: Vec<f64>,
+    pu: Vec<Vec<f64>>,
+    qi: Vec<Vec<f64>>,
+    yj: Vec<Vec<f64>>,
+    nu: Vec<Vec<usize>>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for SvdPp {
+    fn default() -> Self {
+        Self {
+            n_factors: 4,
+            learning_rate: 0.05,
+            l2: 0.01,
+            mu: 0.0,
+            bu: Vec::new(),
+            bi: Vec::new(),
+            pu: Vec::new(),
+            qi: Vec::new(),
+            yj: Vec::new(),
+            nu: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl SvdPp {
+    /// SVD++ with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn grow(&mut self, u: usize, i: usize) {
+        let k = self.n_factors.max(1);
+        while self.bu.len() <= u {
+            self.bu.push(0.0);
+            self.pu.push(vec![0.01; k]);
+            self.nu.push(Vec::new());
+        }
+        while self.bi.len() <= i {
+            self.bi.push(0.0);
+            self.qi.push(vec![0.01; k]);
+            self.yj.push(vec![0.01; k]);
+        }
+        if !self.nu[u].contains(&i) {
+            self.nu[u].push(i);
+        }
+    }
+
+    fn implicit(&self, u: usize) -> Vec<f64> {
+        let k = self.n_factors.max(1);
+        let mut acc = vec![0.0_f64; k];
+        if u >= self.nu.len() {
+            return acc;
+        }
+        let n = self.nu[u].len();
+        if n == 0 {
+            return acc;
+        }
+        let scale = 1.0 / (n as f64).sqrt();
+        for &j in &self.nu[u] {
+            if j < self.yj.len() {
+                for f in 0..k.min(self.yj[j].len()) {
+                    acc[f] += self.yj[j][f] * scale;
+                }
+            }
+        }
+        acc
+    }
+
+    fn pred(&self, u: usize, i: usize) -> f64 {
+        let mut s = self.mu;
+        if u < self.bu.len() {
+            s += self.bu[u];
+        }
+        if i < self.bi.len() {
+            s += self.bi[i];
+        }
+        let imp = self.implicit(u);
+        if u < self.pu.len() && i < self.qi.len() {
+            for f in 0..self.n_factors.min(self.pu[u].len()).min(self.qi[i].len()) {
+                s += self.qi[i][f] * (self.pu[u][f] + imp.get(f).copied().unwrap_or(0.0));
+            }
+        }
+        s
+    }
+}
+
+impl PartialFit for SvdPp {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("SVD++ needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let lr = self.learning_rate.max(1e-6);
+        let l2 = self.l2.max(0.0);
+        let mut sse = 0.0_f64;
+        let mut dsum = 0.0_f64;
+        for r in 0..x.nrows().min(y.len()) {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.grow(u, i);
+            let pred = self.pred(u, i);
+            let e = y[r] - pred;
+            sse += e * e;
+            let n_imp = self.nu[u].len().max(1);
+            let scale = 1.0 / (n_imp as f64).sqrt();
+            let imp = self.implicit(u);
+            self.mu += lr * e;
+            self.bu[u] += lr * (e - l2 * self.bu[u]);
+            self.bi[i] += lr * (e - l2 * self.bi[i]);
+            for f in 0..self.n_factors {
+                let pu = self.pu[u][f];
+                let qi = self.qi[i][f];
+                let im = imp.get(f).copied().unwrap_or(0.0);
+                self.pu[u][f] += lr * (e * qi - l2 * pu);
+                self.qi[i][f] += lr * (e * (pu + im) - l2 * qi);
+                dsum += (self.pu[u][f] - pu).abs() + (self.qi[i][f] - qi).abs();
+                let items = self.nu[u].clone();
+                for j in items {
+                    let yold = self.yj[j][f];
+                    self.yj[j][f] += lr * (e * qi * scale - l2 * yold);
+                    dsum += (self.yj[j][f] - yold).abs();
+                }
+            }
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        let warmup = self.n_seen < 8;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.loss_before = Some(sse);
+        q.loss_after = Some(sse);
+        q.information_gain = Some(dsum);
+        q.still_identified = !warmup;
+        q.warmup = warmup;
+        q.explanation = format!(
+            "SVD++ SGD ||Δ||₁={dsum:.4e} SSE={sse:.4e} users={} items={}",
+            self.bu.len(),
+            self.bi.len()
+        );
+        if warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("SVD++ is still warming up")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "SVD++ biased MF + implicit item set",
+                "SGD on μ, b, p, q, y; factor count is not identification p",
+                "pre-batch factors",
+                format!("μ={:.4e} SSE={sse:.4e}", self.mu),
+            ),
+        )
+    }
+}
+
+impl Predict for SvdPp {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("SVD++ predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::filled(x.nrows(), self.mu));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.pred(u, i)
+        }));
+        ctx.finish(out)
+    }
+}
+
 /// AdaMax linear regressor (river `optim.AdaMax`).
 ///
 /// Infinity-norm second moment: \(u \leftarrow \max(\beta_2 u, |g|)\).
@@ -29571,6 +30167,15 @@ mod tests {
         Bpr::new(2)
             .partial_fit(&xui, None, &session)
             .expect("bpr");
+        ItemKnn::new()
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("itemknn");
+        UserKnn::new()
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("userknn");
+        SvdPp::new(2)
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("svdpp");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

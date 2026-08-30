@@ -14034,6 +14034,639 @@ impl Turnbull {
     }
 }
 
+/// Fitted piecewise-constant hazard (statsmodels `PHReg` piecewise exponential).
+///
+/// Cut count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct FittedPiecewiseExponential {
+    /// Right endpoints of the hazard pieces.
+    pub cuts: Vector,
+    /// Constant hazard on each piece.
+    pub hazard: Vector,
+    /// Evaluation times (the cut points).
+    pub times: Vector,
+    /// \(S(t)=\exp(-\sum\lambda\Delta)\) at each cut.
+    pub survival: Vector,
+    /// Event count per piece.
+    pub n_event: Vector,
+    /// Time at risk per piece.
+    pub exposure: Vector,
+}
+
+/// Piecewise exponential / Poisson PE (statsmodels duration `PHReg` PE).
+///
+/// Equal-width cuts on \([0, t_{\max}]\). Cut count is not identification `p`.
+/// Do not call [`kaplan_meier_fit`]: this is a rate model, and a complementary
+/// KM with zero events would vacuous-abort. Inspect times with `y=None`.
+pub fn piecewise_exponential(
+    time: &Vector,
+    event: &Vector,
+    n_cuts: usize,
+    session: &Session,
+) -> Result<Qualified<FittedPiecewiseExponential>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(time),
+        None,
+        &ctx.policy,
+    );
+    if let Some(issue) = scan_finite(event.as_slice()).to_issue("event") {
+        ctx.push(issue);
+    }
+    let n = time.len().min(event.len());
+    if event.len() != time.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "piecewise_exponential time.len()={} ≠ event.len()={}",
+                    time.len(),
+                    event.len()
+                ))
+                .build(),
+        );
+    }
+    let mut rows: Vec<(f64, f64)> = (0..n)
+        .filter(|&i| time[i].is_finite() && event[i].is_finite() && time[i] > 0.0)
+        .map(|i| (time[i], event[i]))
+        .collect();
+    if rows.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("piecewise_exponential has no finite positive times")
+                .build(),
+        );
+        return ctx.finish(FittedPiecewiseExponential {
+            cuts: Vector::zeros(0),
+            hazard: Vector::zeros(0),
+            times: Vector::zeros(0),
+            survival: Vector::zeros(0),
+            n_event: Vector::zeros(0),
+            exposure: Vector::zeros(0),
+        });
+    }
+    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let n_ev = rows.iter().filter(|r| r.1 > 0.5).count();
+    if n_ev == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("piecewise exponential has zero events; every λ is 0")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "piecewise-constant hazard",
+                    "without events the Poisson PE likelihood is flat at λ=0",
+                    "collect events or report only the censoring pattern",
+                ))
+                .build(),
+        );
+    }
+    let tmax = rows
+        .iter()
+        .map(|r| r.0)
+        .fold(0.0_f64, |a, t| if t > a { t } else { a });
+    let k = n_cuts.max(1);
+    let width = (tmax / k as f64).max(1e-12);
+    let mut cuts = Vec::with_capacity(k);
+    let mut hazard = Vec::with_capacity(k);
+    let mut nevent = Vec::with_capacity(k);
+    let mut exposure = Vec::with_capacity(k);
+    for j in 0..k {
+        let lo = j as f64 * width;
+        let hi = (j + 1) as f64 * width;
+        let mut exp_j = 0.0_f64;
+        let mut d_j = 0.0_f64;
+        for &(t, e) in &rows {
+            if t <= lo {
+                continue;
+            }
+            let spent = t.min(hi) - lo;
+            if spent > 0.0 {
+                exp_j += spent;
+            }
+            if e > 0.5 && t > lo && t <= hi + 1e-15 {
+                d_j += 1.0;
+            }
+        }
+        let lam = if exp_j > 1e-15 {
+            d_j / exp_j
+        } else {
+            if d_j > 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::DegenerateDistribution)
+                        .message(format!("PE piece {j} has events but zero exposure"))
+                        .build(),
+                );
+            }
+            0.0
+        };
+        cuts.push(hi);
+        hazard.push(lam);
+        nevent.push(d_j);
+        exposure.push(exp_j);
+    }
+    let mut s = 1.0_f64;
+    let mut surv = Vec::with_capacity(k);
+    for j in 0..k {
+        s *= (-hazard[j] * width).exp();
+        surv.push(s.max(0.0));
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("piecewise_exponential is equal-width Poisson PE, not a covariate PHReg")
+            .compromise(NumericalCompromise::new(
+                "piecewise exponential GLM with design and user cuts",
+                "equal-width Poisson rates on [0, t_max]",
+                "hazards ignore covariates and use a regular grid",
+                "read λ as a nonparametric rate table, not a regression",
+            ))
+            .build(),
+    );
+    ctx.finish(FittedPiecewiseExponential {
+        cuts: Vector::from_iter(cuts.iter().copied()),
+        hazard: Vector::from_iter(hazard),
+        times: Vector::from_iter(cuts),
+        survival: Vector::from_iter(surv),
+        n_event: Vector::from_iter(nevent),
+        exposure: Vector::from_iter(exposure),
+    })
+}
+
+/// Named piecewise exponential (statsmodels duration PE).
+#[derive(Clone, Debug)]
+pub struct PiecewiseExponential {
+    /// Number of equal-width pieces. Not identification `p`.
+    pub n_cuts: usize,
+}
+
+impl Default for PiecewiseExponential {
+    fn default() -> Self {
+        Self { n_cuts: 4 }
+    }
+}
+
+impl PiecewiseExponential {
+    /// Default four-piece PE.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit constant hazards on right-censored times.
+    pub fn fit(
+        &self,
+        time: &Vector,
+        event: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPiecewiseExponential>> {
+        piecewise_exponential(time, event, self.n_cuts, session)
+    }
+}
+
+fn logit_sig(z: f64) -> f64 {
+    if z >= 0.0 {
+        let e = (-z).exp();
+        1.0 / (1.0 + e)
+    } else {
+        let e = z.exp();
+        e / (1.0 + e)
+    }
+}
+
+/// Local Bernoulli IRLS on a scratch report (never promotes Fatal Cholesky).
+fn discrete_logit_irls(
+    design: &Matrix,
+    y: &Vector,
+    policy: &signlred::Policy,
+    max_iter: usize,
+) -> Vector {
+    let mut beta = Vector::zeros(design.ncols());
+    if !beta.is_empty() {
+        let p = y.as_slice().iter().filter(|v| **v > 0.5).count() as f64 / y.len().max(1) as f64;
+        let p = p.clamp(1e-3, 1.0 - 1e-3);
+        beta[0] = (p / (1.0 - p)).ln();
+    }
+    for _ in 0..max_iter.max(1) {
+        let mut xs = Matrix::zeros(design.nrows(), design.ncols());
+        let mut rhs = Vector::zeros(design.nrows());
+        for i in 0..design.nrows() {
+            let mut eta = 0.0_f64;
+            for j in 0..design.ncols() {
+                eta += design.get(i, j) * beta[j];
+            }
+            let p = logit_sig(eta).clamp(1e-6, 1.0 - 1e-6);
+            let w = (p * (1.0 - p)).max(1e-12);
+            let sw = w.sqrt();
+            rhs[i] = (eta + (y[i] - p) / w) * sw;
+            for j in 0..design.ncols() {
+                xs.set(i, j, design.get(i, j) * sw);
+            }
+        }
+        let mut scratch = Report::new("logit_ph", "irls");
+        let Some(next) = least_squares(&mut scratch, &xs, &rhs, policy) else {
+            break;
+        };
+        let d = next.sub(&beta).norm();
+        beta = next;
+        if d < 1e-7 {
+            break;
+        }
+    }
+    beta
+}
+
+/// Fitted discrete-time logistic proportional hazards.
+#[derive(Clone, Debug)]
+pub struct FittedLogisticPH {
+    /// Intercept of \(\mathrm{logit}\,h(t)\).
+    pub intercept: f64,
+    /// Slope on the integer period index.
+    pub time_coef: f64,
+    /// Expanded person-period rows.
+    pub n_person_periods: usize,
+    /// Events in the expansion.
+    pub n_events: usize,
+}
+
+/// Discrete-time logistic PH (statsmodels `PHReg` / `LogisticPH` person-period).
+///
+/// Each subject is expanded to integer periods \(1,\ldots,\lceil t\rceil\) with
+/// an event only on the last period when uncensored. Period count is not
+/// identification `p`. Inspect times with `y=None`.
+pub fn logistic_ph(
+    time: &Vector,
+    event: &Vector,
+    session: &Session,
+) -> Result<Qualified<FittedLogisticPH>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(time),
+        None,
+        &ctx.policy,
+    );
+    if let Some(issue) = scan_finite(event.as_slice()).to_issue("event") {
+        ctx.push(issue);
+    }
+    let n = time.len().min(event.len());
+    if event.len() != time.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "logistic_ph time.len()={} ≠ event.len()={}",
+                    time.len(),
+                    event.len()
+                ))
+                .build(),
+        );
+    }
+    let mut rows: Vec<(f64, f64)> = Vec::new();
+    for i in 0..n {
+        if !time[i].is_finite() || !event[i].is_finite() || time[i] <= 0.0 {
+            continue;
+        }
+        let tmax = time[i].ceil().max(1.0) as usize;
+        for t in 1..=tmax {
+            let ev = if t == tmax && event[i] > 0.5 {
+                1.0
+            } else {
+                0.0
+            };
+            rows.push((t as f64, ev));
+        }
+    }
+    if rows.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("logistic_ph has no finite positive times")
+                .build(),
+        );
+        return ctx.finish(FittedLogisticPH {
+            intercept: 0.0,
+            time_coef: 0.0,
+            n_person_periods: 0,
+            n_events: 0,
+        });
+    }
+    let n_events = rows.iter().filter(|r| r.1 > 0.5).count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("logistic PH expansion has zero events")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "discrete-time logistic hazard",
+                    "an all-zero person-period outcome identifies no logit slope",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedLogisticPH {
+            intercept: 0.0,
+            time_coef: 0.0,
+            n_person_periods: rows.len(),
+            n_events: 0,
+        });
+    }
+    let m = rows.len();
+    let design = Matrix::from_fn(m, 2, |i, j| if j == 0 { 1.0 } else { rows[i].0 });
+    let yexp = Vector::from_iter(rows.iter().map(|r| r.1));
+    let beta = discrete_logit_irls(&design, &yexp, &ctx.policy, 20);
+    if !beta.as_slice().iter().all(|v| v.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .message("logistic PH IRLS produced a non-finite coefficient")
+                .build(),
+        );
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("logistic_ph is intercept+period logit, not a covariate discrete PH")
+            .compromise(NumericalCompromise::new(
+                "person-period logistic PH with covariates",
+                "IRLS of event on [1, period]",
+                "the only time effect is a linear period slope",
+                "read as a discrete baseline hazard, not a full PHReg",
+            ))
+            .build(),
+    );
+    ctx.finish(FittedLogisticPH {
+        intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+        time_coef: beta.as_slice().get(1).copied().unwrap_or(0.0),
+        n_person_periods: m,
+        n_events,
+    })
+}
+
+/// Named discrete-time logistic PH (statsmodels `LogisticPH`).
+#[derive(Clone, Debug, Default)]
+pub struct LogisticPH;
+
+impl LogisticPH {
+    /// Default person-period logistic PH.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on right-censored times and event indicators.
+    pub fn fit(
+        &self,
+        time: &Vector,
+        event: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLogisticPH>> {
+        logistic_ph(time, event, session)
+    }
+}
+
+/// Cox partial likelihood with Efron ties (statsmodels `PHReg` `ties='efron'`).
+///
+/// Covariate count is identification `p`. Newton uses a scratch Cholesky so a
+/// non-SPD information matrix does not Fatal-abort the outer session.
+#[derive(Clone, Debug)]
+pub struct EfronCox {
+    /// Newton iteration cap.
+    pub max_iter: usize,
+    /// Gradient-norm convergence tolerance.
+    pub tol: f64,
+}
+
+impl Default for EfronCox {
+    fn default() -> Self {
+        Self {
+            max_iter: 40,
+            tol: 1e-8,
+        }
+    }
+}
+
+impl EfronCox {
+    /// Default Efron-tie Cox.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit \(h(t\mid x)=h_0(t)\exp(x\beta)\) with Efron tie correction.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCoxPH>> {
+        efron_cox_fit(self, durations, events, x, session)
+    }
+}
+
+fn cox_grad_hess_efron(
+    idx: &[usize],
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    beta: &Vector,
+) -> (f64, Vector, Matrix) {
+    let n = idx.len();
+    let p = x.ncols();
+    let mut ll = 0.0_f64;
+    let mut grad = Vector::zeros(p);
+    let mut hess = Matrix::zeros(p, p);
+    let mut s0 = 0.0_f64;
+    let mut s1 = vec![0.0_f64; p];
+    let mut s2 = vec![0.0_f64; p * p];
+    let mut k = n;
+    while k > 0 {
+        let t = durations[idx[k - 1]];
+        let start = k;
+        while k > 0 && (durations[idx[k - 1]] - t).abs() <= 0.0 {
+            k -= 1;
+            let i = idx[k];
+            let mut xb = 0.0_f64;
+            for j in 0..p {
+                xb += x.get(i, j) * beta[j];
+            }
+            let w = xb.exp().max(1e-300);
+            s0 += w;
+            for j in 0..p {
+                s1[j] += w * x.get(i, j);
+            }
+            for a in 0..p {
+                for b in 0..p {
+                    s2[a * p + b] += w * x.get(i, a) * x.get(i, b);
+                }
+            }
+        }
+        let mut deaths: Vec<usize> = Vec::new();
+        for r in k..start {
+            let i = idx[r];
+            if i < events.len() && events[i] > 0.5 {
+                deaths.push(i);
+            }
+        }
+        let d = deaths.len();
+        if d == 0 || s0 <= 0.0 {
+            continue;
+        }
+        let mut s0d = 0.0_f64;
+        let mut s1d = vec![0.0_f64; p];
+        let mut s2d = vec![0.0_f64; p * p];
+        for &i in &deaths {
+            let mut xb = 0.0_f64;
+            for j in 0..p {
+                xb += x.get(i, j) * beta[j];
+            }
+            let w = xb.exp().max(1e-300);
+            s0d += w;
+            for j in 0..p {
+                s1d[j] += w * x.get(i, j);
+            }
+            for a in 0..p {
+                for b in 0..p {
+                    s2d[a * p + b] += w * x.get(i, a) * x.get(i, b);
+                }
+            }
+        }
+        for (r, &i) in deaths.iter().enumerate() {
+            let frac = r as f64 / d as f64;
+            let s0e = (s0 - frac * s0d).max(1e-300);
+            let mut xb = 0.0_f64;
+            for j in 0..p {
+                xb += x.get(i, j) * beta[j];
+            }
+            ll += xb - s0e.ln();
+            for j in 0..p {
+                let s1e = s1[j] - frac * s1d[j];
+                grad[j] += x.get(i, j) - s1e / s0e;
+            }
+            for a in 0..p {
+                for b in 0..p {
+                    let s1a = s1[a] - frac * s1d[a];
+                    let s1b = s1[b] - frac * s1d[b];
+                    let s2e = s2[a * p + b] - frac * s2d[a * p + b];
+                    let v = s2e / s0e - (s1a / s0e) * (s1b / s0e);
+                    hess.set(a, b, hess.get(a, b) - v);
+                }
+            }
+        }
+    }
+    (ll, grad, hess)
+}
+
+fn efron_cox_fit(
+    spec: &EfronCox,
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<FittedCoxPH>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+    if events.len() != x.nrows() || durations.len() != x.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("EfronCox durations/events length ≠ X rows")
+                .build(),
+        );
+    }
+    let n = x.nrows();
+    let p = x.ncols();
+    inspect_identification(&mut ctx.report, n, p, &ctx.policy);
+    let mut idx: Vec<usize> = (0..n).collect();
+    idx.sort_by(|&a, &b| {
+        durations[a]
+            .partial_cmp(&durations[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let n_events = (0..n)
+        .filter(|&i| i < events.len() && events[i] > 0.5)
+        .count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("EfronCox has no events; the partial likelihood is flat")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "Efron partial-likelihood coefficients",
+                    "zero events ⇒ every β gives the same empty product",
+                    "do not interpret hazard ratios",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedCoxPH {
+            coef: Vector::zeros(p),
+            loglik: 0.0,
+            n_events: 0,
+            n,
+            converged: false,
+        });
+    }
+    let mut beta = Vector::zeros(p);
+    let mut loglik = f64::NEG_INFINITY;
+    let mut converged = false;
+    for it in 0..spec.max_iter {
+        let (ll, grad, hess) = cox_grad_hess_efron(&idx, durations, events, x, &beta);
+        loglik = ll;
+        if !grad.as_slice().iter().all(|v| v.is_finite()) {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("EfronCox gradient became non-finite")
+                    .build(),
+            );
+            break;
+        }
+        let gnorm = grad.norm();
+        ctx.session.step(it as u64, -ll, Some(gnorm));
+        if gnorm < spec.tol {
+            ctx.session.converged("EfronCox Newton", it as u64);
+            converged = true;
+            break;
+        }
+        let mut hneg = Matrix::zeros(p, p);
+        for i in 0..p {
+            for j in 0..p {
+                hneg.set(i, j, -hess.get(i, j));
+            }
+        }
+        let mut scratch = Report::new("efron_cox", "newton");
+        match chol_solve(&mut scratch, hneg.inner(), &grad, &ctx.policy) {
+            Some(delta) => {
+                for j in 0..p {
+                    beta[j] -= delta[j];
+                }
+            }
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("EfronCox information is not SPD; Newton step dropped")
+                        .build(),
+                );
+                break;
+            }
+        }
+        if it + 1 == spec.max_iter {
+            ctx.push(
+                Issue::builder(IssueCode::MaxIterReached)
+                    .message("EfronCox Newton hit the iteration cap")
+                    .build(),
+            );
+        }
+    }
+    if !beta.as_slice().iter().all(|v| v.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .message("EfronCox coefficients are non-finite")
+                .build(),
+        );
+        beta = Vector::zeros(p);
+    }
+    ctx.finish(FittedCoxPH {
+        coef: beta,
+        loglik,
+        n_events,
+        n,
+        converged,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -14662,5 +15295,24 @@ mod tests {
         let tb = survfunc_dc(&left, &right, &Session::new("tbull", "t")).expect("tbull");
         assert!(!tb.value.times.is_empty());
         assert!(tb.value.survival.as_slice().iter().all(|s| *s >= 0.0 && *s <= 1.0));
+        let pwe = piecewise_exponential(&dur, &ev, 4, &Session::new("pwe", "t")).expect("pwe");
+        assert_eq!(pwe.value.hazard.len(), 4);
+        assert!(pwe
+            .value
+            .survival
+            .as_slice()
+            .iter()
+            .all(|s| *s >= 0.0 && *s <= 1.0));
+        assert!(pwe.value.hazard.as_slice().iter().all(|h| h.is_finite() && *h >= 0.0));
+        let lph = logistic_ph(&dur, &ev, &Session::new("lph", "t")).expect("lph");
+        assert!(lph.value.intercept.is_finite());
+        assert!(lph.value.time_coef.is_finite());
+        assert!(lph.value.n_events > 0);
+        assert!(lph.value.n_person_periods >= 20);
+        let efr = EfronCox::new()
+            .fit(&dur, &ev, &xcox, &Session::new("efron", "t"))
+            .expect("efron");
+        assert_eq!(efr.value.coef.len(), 1);
+        assert!(efr.value.coef[0].is_finite() || !efr.value.converged);
     }
 }
