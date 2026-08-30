@@ -3087,7 +3087,11 @@ const INVENTORY: &[Algorithm] = &[
         "sktime.transformations.hierarchical.reconcile",
         "forecast",
     ),
-    a("tslearn.cdist_sax", "tslearn.metrics.cdist_sax", "timeseries"),
+    a(
+        "tslearn.cdist_sax",
+        "tslearn.metrics.cdist_sax",
+        "timeseries",
+    ),
     a(
         "tslearn.canonical_time_warping",
         "tslearn.metrics.ctw",
@@ -3158,7 +3162,11 @@ const INVENTORY: &[Algorithm] = &[
         "stats",
     ),
     a("stats.normaltest", "scipy.stats.normaltest", "stats"),
-    a("stats.q_stat", "statsmodels.stats.diagnostic.acorr_ljungbox", "stats"),
+    a(
+        "stats.q_stat",
+        "statsmodels.stats.diagnostic.acorr_ljungbox",
+        "stats",
+    ),
     a(
         "stats.proportion_confint",
         "statsmodels.stats.proportion.proportion_confint",
@@ -3184,7 +3192,11 @@ const INVENTORY: &[Algorithm] = &[
         "statsmodels.tsa.arima_process.arma2ma",
         "forecast",
     ),
-    a("tslearn.cdist_ctw", "tslearn.metrics.cdist_ctw", "timeseries"),
+    a(
+        "tslearn.cdist_ctw",
+        "tslearn.metrics.cdist_ctw",
+        "timeseries",
+    ),
     a(
         "tslearn.TimeSeriesKMedoids",
         "tslearn.clustering.TimeSeriesKMedoids",
@@ -3215,7 +3227,11 @@ const INVENTORY: &[Algorithm] = &[
         "statsmodels.tsa.arima_process.arma2ar",
         "forecast",
     ),
-    a("tslearn.cdist_erp", "tslearn.metrics.cdist_erp", "timeseries"),
+    a(
+        "tslearn.cdist_erp",
+        "tslearn.metrics.cdist_erp",
+        "timeseries",
+    ),
     a("online.OnlineSum", "river.stats.Sum", "online"),
     a(
         "metrics.nan_euclidean_distances",
@@ -3288,7 +3304,11 @@ const INVENTORY: &[Algorithm] = &[
         "statsmodels.stats.power.GofChisquarePower",
         "stats",
     ),
-    a("tslearn.cdist_lcss", "tslearn.metrics.cdist_lcss", "timeseries"),
+    a(
+        "tslearn.cdist_lcss",
+        "tslearn.metrics.cdist_lcss",
+        "timeseries",
+    ),
     a(
         "tslearn.CnnClassifier",
         "sktime.classification.deep_learning.cnn.CNNClassifier",
@@ -3329,14 +3349,14 @@ const INVENTORY: &[Algorithm] = &[
         "river.facto.FMRegressor",
         "online",
     ),
-    a(
-        "online.AdaGradRegressor",
-        "river.optim.AdaGrad",
-        "online",
-    ),
+    a("online.AdaGradRegressor", "river.optim.AdaGrad", "online"),
     a("online.AdamRegressor", "river.optim.Adam", "online"),
     a("online.RmsPropRegressor", "river.optim.RMSProp", "online"),
-    a("online.OnlineLof", "river.anomaly.LocalOutlierFactor", "online"),
+    a(
+        "online.OnlineLof",
+        "river.anomaly.LocalOutlierFactor",
+        "online",
+    ),
     a("online.OnlineBeta", "river.proba.Beta", "online"),
     a("online.OnlineGamma", "river.proba.Gamma", "online"),
     a("online.ColumnSelect", "river.compose.Select", "online"),
@@ -3501,7 +3521,11 @@ const INVENTORY: &[Algorithm] = &[
     a("online.OnlineQuantile", "river.stats.Quantile", "online"),
     a("online.SlimReco", "river.reco.SLIM", "online"),
     a("bandit.LinUcb", "river.bandit.LinUCB", "online"),
-    a("metrics.accuracy_score", "sklearn.metrics.accuracy_score", "metric"),
+    a(
+        "metrics.accuracy_score",
+        "sklearn.metrics.accuracy_score",
+        "metric",
+    ),
     a("metrics.r2_score", "sklearn.metrics.r2_score", "metric"),
     a(
         "metrics.mean_squared_error",
@@ -3528,7 +3552,11 @@ const INVENTORY: &[Algorithm] = &[
         "sklearn.metrics.pairwise.pairwise_distances",
         "metric",
     ),
-    a("stats.ztest", "statsmodels.stats.weightstats.ztest", "stats"),
+    a(
+        "stats.ztest",
+        "statsmodels.stats.weightstats.ztest",
+        "stats",
+    ),
     a(
         "stats.hotelling",
         "statsmodels.stats.multivariate.Hotelling",
@@ -3539,7 +3567,11 @@ const INVENTORY: &[Algorithm] = &[
         "statsmodels.stats.proportion.proportion_effectsize",
         "stats",
     ),
-    a("stats.ttost", "statsmodels.stats.weightstats.ttost_ind", "stats"),
+    a(
+        "stats.ttost",
+        "statsmodels.stats.weightstats.ttost_ind",
+        "stats",
+    ),
     a(
         "tslearn.EncoderClassifier",
         "sktime.classification.deep_learning.encoder.EncoderClassifier",
@@ -3578,8 +3610,16 @@ const INVENTORY: &[Algorithm] = &[
         "statsmodels.stats.multitest.multipletests",
         "stats",
     ),
-    a("stats.holm", "statsmodels.stats.multitest.multipletests", "stats"),
-    a("stats.sidak", "statsmodels.stats.multitest.multipletests", "stats"),
+    a(
+        "stats.holm",
+        "statsmodels.stats.multitest.multipletests",
+        "stats",
+    ),
+    a(
+        "stats.sidak",
+        "statsmodels.stats.multitest.multipletests",
+        "stats",
+    ),
     a(
         "stats.DescrStatsW",
         "statsmodels.stats.weightstats.DescrStatsW",
@@ -3616,7 +3656,11 @@ const INVENTORY: &[Algorithm] = &[
         "sklearn.metrics.precision_score",
         "metric",
     ),
-    a("metrics.recall_score", "sklearn.metrics.recall_score", "metric"),
+    a(
+        "metrics.recall_score",
+        "sklearn.metrics.recall_score",
+        "metric",
+    ),
     a("metrics.auc", "sklearn.metrics.auc", "metric"),
     a(
         "metrics.average_precision_score",
@@ -3644,7 +3688,11 @@ const INVENTORY: &[Algorithm] = &[
         "stats",
     ),
     a("feature.RFE", "sklearn.feature_selection.RFE", "estimator"),
-    a("feature.RFECV", "sklearn.feature_selection.RFECV", "estimator"),
+    a(
+        "feature.RFECV",
+        "sklearn.feature_selection.RFECV",
+        "estimator",
+    ),
     a(
         "tsa.ForecastingHorizon",
         "sktime.forecasting.base.ForecastingHorizon",
@@ -3658,6 +3706,37 @@ const INVENTORY: &[Algorithm] = &[
     a("online.NadamRegressor", "river.optim.Nadam", "online"),
     a("online.AdamWRegressor", "river.optim.Adam", "online"),
     a("bandit.BayesianUcb", "river.bandit.BayesUCB", "online"),
+    a(
+        "tree.RandomTreesEmbedding",
+        "sklearn.ensemble.RandomTreesEmbedding",
+        "transformer",
+    ),
+    a(
+        "classification.HuberClassifier",
+        "sklearn.linear_model.SGDClassifier",
+        "estimator",
+    ),
+    a(
+        "stats.cox_zph",
+        "lifelines.statistics.proportional_hazard_test",
+        "stats",
+    ),
+    a("stats.anova_rm", "statsmodels.stats.anova.AnovaRM", "stats"),
+    a("tslearn.pelt", "ruptures.detection.Pelt", "timeseries"),
+    a(
+        "tslearn.ClaSPClassifier",
+        "sktime.classification.feature_based.Catch22Classifier",
+        "estimator",
+    ),
+    a("bandit.UcbTuned", "river.bandit.UCB", "online"),
+    a("online.HogwildRegressor", "river.optim.SGD", "online"),
+    a("online.ContentReco", "river.reco.Content", "online"),
+    a("online.TargetAgg", "river.feature_extraction.Agg", "online"),
+    a(
+        "hmm.GaussianHmmLeftRight",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -3832,6 +3911,17 @@ mod tests {
             "tsa.ForecastingHorizon",
             "online.NadamRegressor",
             "bandit.BayesianUcb",
+            "tree.RandomTreesEmbedding",
+            "classification.HuberClassifier",
+            "stats.cox_zph",
+            "stats.anova_rm",
+            "tslearn.pelt",
+            "tslearn.ClaSPClassifier",
+            "bandit.UcbTuned",
+            "online.HogwildRegressor",
+            "online.ContentReco",
+            "online.TargetAgg",
+            "hmm.GaussianHmmLeftRight",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

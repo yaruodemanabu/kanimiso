@@ -6,6 +6,7 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
+use crate::linalg::least_squares;
 use crate::linear_model::{FittedPenalized, Ridge};
 use crate::metrics::accuracy;
 use crate::model_selection::{take_rows, take_vec, KFold};
@@ -141,6 +142,129 @@ impl Fit for RidgeClassifier {
             }
         };
         ctx.finish(FittedRidgeClassifier { inner, classes })
+    }
+}
+
+/// Huber IRLS classifier on `±1` labels (sklearn `SGDClassifier` loss=`huber`).
+///
+/// The Huber threshold is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct HuberClassifier {
+    /// Huber threshold on the residual / scale.
+    pub epsilon: f64,
+    /// IRLS iteration cap.
+    pub max_iter: usize,
+}
+
+impl Default for HuberClassifier {
+    fn default() -> Self {
+        Self {
+            epsilon: 1.35,
+            max_iter: 40,
+        }
+    }
+}
+
+impl HuberClassifier {
+    /// Default Huber classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted Huber classifier.
+#[derive(Clone, Debug)]
+pub struct FittedHuberClassifier {
+    coef: Vector,
+    intercept: f64,
+    /// Training classes (sorted).
+    pub classes: Vec<i64>,
+}
+
+impl Fit for HuberClassifier {
+    type Fitted = FittedHuberClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedHuberClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let classes: Vec<i64> = counts.iter().map(|(c, _)| *c).collect();
+        let ypm = Vector::from_iter(y.as_slice().iter().map(|&v| to_pm(v, &classes)));
+        let design = x.with_intercept();
+        let mut scratch = signlred::Report::new("huber_clf", "irls");
+        let mut beta = least_squares(&mut scratch, &design, &ypm, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        let eps = if self.epsilon.is_finite() && self.epsilon > 0.0 {
+            self.epsilon
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "HuberClassifier ε={} is invalid; using 1.35",
+                        self.epsilon
+                    ))
+                    .build(),
+            );
+            1.35
+        };
+        for it in 0..self.max_iter.max(1) {
+            let pred = design.matvec(&beta);
+            let mut sse = 0.0;
+            let mut xs = Matrix::zeros(design.nrows(), design.ncols());
+            let mut ys = Vector::zeros(ypm.len());
+            for i in 0..ypm.len() {
+                let r = ypm[i] - pred[i];
+                sse += r * r;
+                let w = if r.abs() <= eps { 1.0 } else { eps / r.abs() };
+                let sw = w.sqrt();
+                ys[i] = ypm[i] * sw;
+                for j in 0..design.ncols() {
+                    xs.set(i, j, design.get(i, j) * sw);
+                }
+            }
+            let mut step = signlred::Report::new("huber_clf", "step");
+            let Some(next) = least_squares(&mut step, &xs, &ys, &ctx.policy) else {
+                break;
+            };
+            let d = next.sub(&beta).norm();
+            beta = next;
+            ctx.session.step(it as u64, sse, None);
+            if d < 1e-8 {
+                break;
+            }
+        }
+        let intercept = beta.as_slice().first().copied().unwrap_or(0.0);
+        let coef = if beta.len() > 1 {
+            Vector::from_iter((1..beta.len()).map(|j| beta[j]))
+        } else {
+            Vector::zeros(x.ncols())
+        };
+        ctx.finish(FittedHuberClassifier {
+            coef,
+            intercept,
+            classes,
+        })
+    }
+}
+
+impl Predict for FittedHuberClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            from_score(s, &self.classes)
+        }));
+        ctx.finish(out)
     }
 }
 
@@ -839,6 +963,16 @@ mod tests {
                 "pa",
                 PassiveAggressive::new(1.0)
                     .fit(&x, &y, &Session::new("clf", "pa"))
+                    .unwrap()
+                    .value
+                    .predict(&x, &Session::new("clf", "p"))
+                    .unwrap()
+                    .value,
+            ),
+            (
+                "huber",
+                HuberClassifier::new()
+                    .fit(&x, &y, &Session::new("clf", "huber"))
                     .unwrap()
                     .value
                     .predict(&x, &Session::new("clf", "p"))

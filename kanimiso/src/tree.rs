@@ -8,7 +8,7 @@
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::rng::Rng;
-use crate::traits::{Fit, FitUnsupervised, Predict};
+use crate::traits::{Fit, FitUnsupervised, Predict, Transform};
 use crate::validate::{inspect_classes, inspect_xy};
 use ojizou_san::Session;
 use signlred::{Issue, IssueCode, Meaninglessness, Qualified, Result};
@@ -2453,6 +2453,138 @@ impl FitUnsupervised for IsolationForest {
     }
 }
 
+fn iso_leaf_code(node: &IsoNode, x: &Matrix, i: usize) -> u64 {
+    match node {
+        IsoNode::External { size, depth } => (*depth as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(*size as u64),
+        IsoNode::Internal {
+            feature,
+            threshold,
+            left,
+            right,
+        } => {
+            let bit = if x.get(i, *feature) <= *threshold {
+                1
+            } else {
+                2
+            };
+            iso_leaf_code(if bit == 1 { left } else { right }, x, i)
+                .wrapping_mul(3)
+                .wrapping_add(*feature as u64 + bit)
+        }
+    }
+}
+
+/// Completely-random tree leaf embedding (sklearn `RandomTreesEmbedding`).
+///
+/// Tree count and hash width are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RandomTreesEmbedding {
+    /// Number of random trees.
+    pub n_estimators: usize,
+    /// Hashed leaf-code width.
+    pub n_components: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for RandomTreesEmbedding {
+    fn default() -> Self {
+        Self {
+            n_estimators: 8,
+            n_components: 8,
+            seed: 0,
+        }
+    }
+}
+
+impl RandomTreesEmbedding {
+    /// Embedding with `n_estimators` trees and `n_components` hash bins.
+    pub fn new(n_estimators: usize, n_components: usize) -> Self {
+        Self {
+            n_estimators,
+            n_components,
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted random-tree leaf embedding.
+#[derive(Clone, Debug)]
+pub struct FittedRandomTreesEmbedding {
+    trees: Vec<IsoNode>,
+    n_components: usize,
+    n_features: usize,
+}
+
+impl FitUnsupervised for RandomTreesEmbedding {
+    type Fitted = FittedRandomTreesEmbedding;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedRandomTreesEmbedding>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let n = x.nrows();
+        let n_est = self.n_estimators.max(1);
+        let n_comp = self.n_components.max(1);
+        if n == 0 || x.ncols() == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .severity(signlred::Severity::Warning)
+                    .message("RandomTreesEmbedding received an empty design")
+                    .build(),
+            );
+            return ctx.finish(FittedRandomTreesEmbedding {
+                trees: Vec::new(),
+                n_components: n_comp,
+                n_features: x.ncols(),
+            });
+        }
+        let max_depth = (n as f64).log2().ceil().max(1.0) as usize;
+        let mut rng = Rng::new(self.seed ^ 0xA11CE);
+        let mut trees = Vec::with_capacity(n_est);
+        for t in 0..n_est {
+            let mut trng = Rng::new(rng.next_u64());
+            let idx: Vec<usize> = (0..n).collect();
+            trees.push(grow_iso(x, &idx, 0, max_depth.max(2), &mut trng));
+            ctx.session.step(t as u64, 0.0, None);
+        }
+        ctx.finish(FittedRandomTreesEmbedding {
+            trees,
+            n_components: n_comp,
+            n_features: x.ncols(),
+        })
+    }
+}
+
+impl Transform for FittedRandomTreesEmbedding {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.ncols() != self.n_features {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(signlred::Severity::Warning)
+                    .message("RandomTreesEmbedding column count changed")
+                    .build(),
+            );
+        }
+        let m = self.n_components.max(1);
+        let mut out = Matrix::zeros(x.nrows(), m);
+        for i in 0..x.nrows() {
+            for (t, tree) in self.trees.iter().enumerate() {
+                let code = iso_leaf_code(tree, x, i).wrapping_add(t as u64);
+                let bin = (code as usize) % m;
+                out.set(i, bin, out.get(i, bin) + 1.0);
+            }
+        }
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2650,6 +2782,17 @@ mod tests {
             s_out[0],
             mean_in
         );
+        let emb = RandomTreesEmbedding::new(4, 6)
+            .fit_unsupervised(&x, &Session::new("rte", "fit"))
+            .expect("rte");
+        let z = emb
+            .value
+            .transform(&x, &Session::new("rte", "t"))
+            .unwrap()
+            .value;
+        assert_eq!(z.nrows(), x.nrows());
+        assert_eq!(z.ncols(), 6);
+        assert!(z.get(0, 0).is_finite());
     }
 
     #[test]

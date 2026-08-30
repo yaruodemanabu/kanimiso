@@ -7031,11 +7031,7 @@ pub fn cdist_sax(
 /// One-step canonical time warping (tslearn `ctw` lite).
 ///
 /// DTW-align, OLS-scale the first series onto the second, then DTW again.
-pub fn canonical_time_warping(
-    a: &Vector,
-    b: &Vector,
-    session: &Session,
-) -> Result<Qualified<f64>> {
+pub fn canonical_time_warping(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if a.is_empty() || b.is_empty() {
         ctx.push(Issue::builder(IssueCode::EmptyMatrix).build());
@@ -7497,8 +7493,11 @@ pub fn cdist_ctw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<
     let mut scaled = out.clone();
     for i in 0..a.nrows() {
         for j in 0..b.nrows() {
-            match canonical_time_warping(&a.row(i), &b.row(j), &session.child(format!("ctw_{i}_{j}")))
-            {
+            match canonical_time_warping(
+                &a.row(i),
+                &b.row(j),
+                &session.child(format!("ctw_{i}_{j}")),
+            ) {
                 Ok(q) if q.value.is_finite() => scaled.set(i, j, q.value),
                 _ => {}
             }
@@ -7535,12 +7534,7 @@ fn erp_raw(a: &[f64], b: &[f64], g: f64) -> f64 {
 /// Pairwise ERP (tslearn `cdist_erp`).
 ///
 /// Gap reference `g` is not identification `p`.
-pub fn cdist_erp(
-    a: &Matrix,
-    b: &Matrix,
-    g: f64,
-    session: &Session,
-) -> Result<Qualified<Matrix>> {
+pub fn cdist_erp(a: &Matrix, b: &Matrix, g: f64, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -7671,7 +7665,8 @@ impl FitUnsupervised for TimeSeriesKMedoids {
                     changed = true;
                 }
             }
-            ctx.session.step(it as u64, if changed { 1.0 } else { 0.0 }, None);
+            ctx.session
+                .step(it as u64, if changed { 1.0 } else { 0.0 }, None);
             if !changed && it > 0 {
                 ctx.session.converged("DTW k-medoids", it as u64);
                 break;
@@ -7820,7 +7815,11 @@ impl Fit for CnnClassifier {
         if x.ncols() < self.width {
             ctx.push(
                 Issue::builder(IssueCode::WindowTooShort)
-                    .message(format!("CnnClassifier width={} > T={}", self.width, x.ncols()))
+                    .message(format!(
+                        "CnnClassifier width={} > T={}",
+                        self.width,
+                        x.ncols()
+                    ))
                     .build(),
             );
         }
@@ -7867,11 +7866,7 @@ impl TimeSeriesImputer {
 
 impl FitUnsupervised for TimeSeriesImputer {
     type Fitted = Self;
-    fn fit_unsupervised(
-        &mut self,
-        x: &Matrix,
-        session: &Session,
-    ) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let mut means = vec![0.0; x.ncols()];
         for j in 0..x.ncols() {
@@ -7977,7 +7972,9 @@ impl Fit for InceptionTimeClassifier {
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_classes(&mut ctx.report, y, &ctx.policy);
         let t = x.ncols().max(1);
-        let widths = [3usize, 5, t.min(7)].into_iter().filter(|&w| w <= t && w > 0);
+        let widths = [3usize, 5, t.min(7)]
+            .into_iter()
+            .filter(|&w| w <= t && w > 0);
         let mut rng = Rng::new(self.seed);
         let mut kernels: Vec<Vec<f64>> = Vec::new();
         for w in widths {
@@ -8012,7 +8009,12 @@ impl Predict for FittedInceptionTimeClassifier {
 /// Split count is not identification `p`.
 pub fn clasp_change_point(y: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
-    inspect_xy(&mut ctx.report, &Matrix::from_vector(y), Some(y), &ctx.policy);
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y),
+        Some(y),
+        &ctx.policy,
+    );
     let n = y.len();
     if n < 6 {
         ctx.push(
@@ -8063,6 +8065,179 @@ pub fn clasp_change_point(y: &Vector, session: &Session) -> Result<Qualified<f64
     ctx.finish(best_t as f64)
 }
 
+/// PELT mean-change points (sktime `Pelt` / ruptures `Pelt`).
+///
+/// Change-point count is not identification `p`.
+pub fn pelt(y: &Vector, penalty: f64, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y),
+        Some(y),
+        &ctx.policy,
+    );
+    let n = y.len();
+    if n < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("PELT needs n≥4")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(0));
+    }
+    let pen = if penalty.is_finite() && penalty > 0.0 {
+        penalty
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("PELT penalty={penalty}; using 2 log n"))
+                .build(),
+        );
+        2.0 * (n as f64).ln().max(1.0)
+    };
+    let mut ps = vec![0.0; n + 1];
+    let mut qs = vec![0.0; n + 1];
+    for i in 0..n {
+        ps[i + 1] = ps[i] + y[i];
+        qs[i + 1] = qs[i] + y[i] * y[i];
+    }
+    let cost = |s: usize, t: usize| -> f64 {
+        let m = (t - s) as f64;
+        if m <= 0.0 {
+            return 0.0;
+        }
+        qs[t] - qs[s] - (ps[t] - ps[s]) * (ps[t] - ps[s]) / m
+    };
+    let mut f = vec![0.0; n + 1];
+    let mut last = vec![0usize; n + 1];
+    f[0] = -pen;
+    for t in 1..=n {
+        let mut best = f64::INFINITY;
+        let mut arg = 0usize;
+        for s in 0..t {
+            let v = f[s] + cost(s, t) + pen;
+            if v < best {
+                best = v;
+                arg = s;
+            }
+        }
+        f[t] = best;
+        last[t] = arg;
+    }
+    let mut cps = Vec::new();
+    let mut t = n;
+    while t > 0 {
+        let s = last[t];
+        if s > 0 {
+            cps.push(s as f64);
+        }
+        if s >= t {
+            break;
+        }
+        t = s;
+    }
+    cps.reverse();
+    ctx.finish(Vector::from_iter(cps))
+}
+
+/// ClaSP-feature ridge classifier (sktime `ClaSPClassifier` lite).
+///
+/// The ClaSP split index is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ClaSPClassifier {
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for ClaSPClassifier {
+    fn default() -> Self {
+        Self { alpha: 0.1 }
+    }
+}
+
+impl ClaSPClassifier {
+    /// Default ClaSP-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted ClaSP-lite ridge.
+#[derive(Clone, Debug)]
+pub struct FittedClaSPClassifier {
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+fn clasp_row_features(row: &Vector) -> [f64; 4] {
+    let n = row.len().max(1);
+    let mut s = 0.0;
+    let mut q = 0.0;
+    for i in 0..row.len() {
+        s += row[i];
+        q += row[i] * row[i];
+    }
+    let nf = n as f64;
+    let mean = s / nf;
+    let var = (q / nf - mean * mean).max(0.0);
+    let slope = if n >= 2 {
+        (row[n - 1] - row[0]) / (nf - 1.0)
+    } else {
+        0.0
+    };
+    let mut best_t = 1.0;
+    let mut best_s = f64::NEG_INFINITY;
+    if n >= 6 {
+        for t in 2..n - 2 {
+            let mut sl = 0.0;
+            for i in 0..t {
+                sl += row[i];
+            }
+            let ml = sl / t as f64;
+            let mr = (s - sl) / (n - t) as f64;
+            let d = ml - mr;
+            let stat = d * d;
+            if stat > best_s {
+                best_s = stat;
+                best_t = t as f64 / nf;
+            }
+        }
+    }
+    [mean, var.sqrt(), slope, best_t]
+}
+
+impl Fit for ClaSPClassifier {
+    type Fitted = FittedClaSPClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedClaSPClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let z = Matrix::from_fn(x.nrows(), 4, |i, j| {
+            let f = clasp_row_features(&x.row(i));
+            f[j]
+        });
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "clasp");
+        ctx.finish(FittedClaSPClassifier { inner })
+    }
+}
+
+impl Predict for FittedClaSPClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = Matrix::from_fn(x.nrows(), 4, |i, j| {
+            let f = clasp_row_features(&x.row(i));
+            f[j]
+        });
+        self.inner.predict(&z, session)
+    }
+}
+
 /// Catch22 feature transformer (sktime `Catch22`).
 ///
 /// Feature count is not identification `p`.
@@ -8080,11 +8255,7 @@ impl Catch22Transformer {
 
 impl FitUnsupervised for Catch22Transformer {
     type Fitted = Self;
-    fn fit_unsupervised(
-        &mut self,
-        x: &Matrix,
-        session: &Session,
-    ) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         self.fitted = true;
@@ -8489,7 +8660,11 @@ impl Fit for TapNetClassifier {
             .collect();
         let z = conv_maxpool(&z0, &kernels);
         let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "tapnet");
-        ctx.finish(FittedTapNetClassifier { proj, kernels, inner })
+        ctx.finish(FittedTapNetClassifier {
+            proj,
+            kernels,
+            inner,
+        })
     }
 }
 
@@ -8723,7 +8898,11 @@ impl Fit for TapNetRegressor {
             .collect();
         let z = conv_maxpool(&z0, &kernels);
         let inner = ridge_reg_from_features(&z, y, self.alpha, &ctx.policy, "tapnet_reg");
-        ctx.finish(FittedTapNetRegressor { proj, kernels, inner })
+        ctx.finish(FittedTapNetRegressor {
+            proj,
+            kernels,
+            inner,
+        })
     }
 }
 
@@ -9712,5 +9891,18 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(tcnp.len(), 6);
+        let cp = pelt(&yramp, 2.0, &Session::new("ts", "pelt"))
+            .unwrap()
+            .value;
+        assert!(cp.as_slice().iter().all(|v| v.is_finite()));
+        let clc = ClaSPClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "claspclf"))
+            .unwrap();
+        let clp = clc
+            .value
+            .predict(&x, &Session::new("ts", "claspclfp"))
+            .unwrap()
+            .value;
+        assert_eq!(clp.len(), 6);
     }
 }

@@ -448,6 +448,8 @@ pub struct GaussianHmm {
     pub max_iter: usize,
     /// Seed for k-means++ mean initialization.
     pub seed: u64,
+    /// If true, transitions to earlier states are zeroed (hmmlearn `left_right`).
+    pub left_right: bool,
 }
 
 impl Default for GaussianHmm {
@@ -456,6 +458,7 @@ impl Default for GaussianHmm {
             n_states: 2,
             max_iter: 50,
             seed: 0,
+            left_right: false,
         }
     }
 }
@@ -465,6 +468,17 @@ impl GaussianHmm {
     pub fn new(n_states: usize) -> Self {
         Self {
             n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Left-right (Bakis) Gaussian HMM: \(A_{ij}=0\) for \(j<i\).
+    ///
+    /// State count is not treated as an extra identification `p` here.
+    pub fn left_right(n_states: usize) -> Self {
+        Self {
+            n_states,
+            left_right: true,
             ..Self::default()
         }
     }
@@ -657,6 +671,22 @@ impl FitUnsupervised for GaussianHmm {
         let mut covs = Matrix::from_fn(k, d, |_, j| gvar[j]);
         let mut start = init_start(k);
         let mut trans = init_trans(k);
+        if self.left_right {
+            for i in 0..k {
+                for j in 0..k {
+                    if j < i {
+                        trans.set(i, j, 0.0);
+                    }
+                }
+            }
+            renormalize_rows(&mut trans, TRANS_FLOOR);
+            if k > 1 {
+                for j in 1..k {
+                    start[j] = 0.0;
+                }
+                renormalize_vec(&mut start, TRANS_FLOOR);
+            }
+        }
         let mut loglik = f64::NEG_INFINITY;
         let mut last_gamma: Vec<Vec<f64>> = Vec::new();
         for it in 0..self.max_iter.max(1) {
@@ -699,7 +729,22 @@ impl FitUnsupervised for GaussianHmm {
                         );
                     }
                 }
+                if self.left_right {
+                    for i in 0..k {
+                        for j in 0..k {
+                            if j < i {
+                                trans.set(i, j, 0.0);
+                            }
+                        }
+                    }
+                }
                 renormalize_rows(&mut trans, TRANS_FLOOR);
+            }
+            if self.left_right && k > 1 {
+                for j in 1..k {
+                    start[j] = 0.0;
+                }
+                renormalize_vec(&mut start, TRANS_FLOOR);
             }
             // Means / variances.
             for j in 0..k {
@@ -2275,6 +2320,7 @@ mod tests {
             n_states: 2,
             max_iter: 40,
             seed: 2,
+            left_right: false,
         }
         .fit(&x, &session)
         .expect("hmm");
@@ -2301,6 +2347,11 @@ mod tests {
             .score(&x, &Session::new("gaussian_hmm", "score"))
             .expect("score");
         assert!(sc.value.is_finite());
+        let lr = GaussianHmm::left_right(2)
+            .fit(&x, &Session::new("lr_hmm", "fit"))
+            .expect("lr");
+        assert!(lr.value.trans.get(1, 0) <= 1e-8);
+        assert!(lr.value.start[0] >= lr.value.start[1] - 1e-9);
     }
 
     #[test]
@@ -2311,6 +2362,7 @@ mod tests {
             n_states: 2,
             max_iter: 5,
             seed: 0,
+            left_right: false,
         }
         .fit(&x, &session)
         .unwrap_err();

@@ -5370,7 +5370,9 @@ pub fn burg_ar(y: &Vector, order: usize, session: &Session) -> Result<Qualified<
         ctx.push(
             Issue::builder(IssueCode::InvalidWeight)
                 .severity(Severity::Warning)
-                .message(format!("Burg order={order} is not in 1..n-1 (n={n}); using 1"))
+                .message(format!(
+                    "Burg order={order} is not in 1..n-1 (n={n}); using 1"
+                ))
                 .build(),
         );
         1.min(n.saturating_sub(1))
@@ -5537,10 +5539,12 @@ pub fn hannan_rissanen(
     }
     ctx.finish(HannanRissanen {
         ar: Vector::from_iter((0..pp).map(|j| beta.as_slice().get(j).copied().unwrap_or(0.0))),
-        ma: Vector::from_iter(
-            (0..qq).map(|j| beta.as_slice().get(pp + j).copied().unwrap_or(0.0)),
-        ),
-        sigma2: if rows > 0 { sse / rows as f64 } else { f64::NAN },
+        ma: Vector::from_iter((0..qq).map(|j| beta.as_slice().get(pp + j).copied().unwrap_or(0.0))),
+        sigma2: if rows > 0 {
+            sse / rows as f64
+        } else {
+            f64::NAN
+        },
     })
 }
 
@@ -5690,6 +5694,124 @@ pub fn schoenfeld(
     ctx.finish(out)
 }
 
+/// Grambsch–Therneau proportional-hazards check (statsmodels / lifelines `cox_zph`).
+///
+/// Correlates Schoenfeld residuals with event time. Feature count is not
+/// identification `p`.
+pub fn cox_zph(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    let sch = match schoenfeld(durations, events, x, &session.child("sch")) {
+        Ok(q) => q.value,
+        Err(e) => {
+            if !matches!(
+                e.primary.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::CholeskyFailed
+                    | IssueCode::MeaninglessFit
+            ) {
+                ctx.push(e.primary);
+            }
+            return ctx.finish(HypothesisTest {
+                statistic: f64::NAN,
+                pvalue: f64::NAN,
+                df: x.ncols() as f64,
+                nobs: 0.0,
+            });
+        }
+    };
+    let mut times = Vec::new();
+    let n = x.nrows().min(durations.len()).min(events.len());
+    for i in 0..n {
+        if events[i] >= 0.5 && durations[i].is_finite() {
+            times.push(durations[i]);
+        }
+    }
+    let m = sch.nrows().min(times.len());
+    if m < 3 || sch.ncols() == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("cox_zph needs at least three Schoenfeld rows")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: sch.ncols() as f64,
+            nobs: m as f64,
+        });
+    }
+    let tmean = times.iter().take(m).sum::<f64>() / m as f64;
+    let mut tss = 0.0;
+    for t in times.iter().take(m) {
+        let d = *t - tmean;
+        tss += d * d;
+    }
+    if tss <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("cox_zph event times are constant")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: sch.ncols() as f64,
+            nobs: m as f64,
+        });
+    }
+    let mut chi = 0.0;
+    let mut used = 0.0;
+    for j in 0..sch.ncols() {
+        let mut sm = 0.0;
+        for i in 0..m {
+            sm += sch.get(i, j);
+        }
+        sm /= m as f64;
+        let mut num = 0.0;
+        let mut sss = 0.0;
+        for i in 0..m {
+            let ds = sch.get(i, j) - sm;
+            num += ds * (times[i] - tmean);
+            sss += ds * ds;
+        }
+        if sss <= 1e-18 {
+            continue;
+        }
+        let r = num / (sss.sqrt() * tss.sqrt());
+        chi += (m as f64 - 2.0) * r * r / (1.0 - r * r).max(1e-8);
+        used += 1.0;
+    }
+    if used <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("cox_zph residuals had no variation")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 0.0,
+            nobs: m as f64,
+        });
+    }
+    ctx.finish(HypothesisTest {
+        statistic: chi,
+        pvalue: chi2_pvalue(chi.max(0.0), used),
+        df: used,
+        nobs: m as f64,
+    })
+}
+
 /// D'Agostino–Pearson \(K^2\) normality test (scipy `normaltest` / statsmodels
 /// `omni_normtest`).
 ///
@@ -5709,7 +5831,11 @@ pub fn omni_normtest(x: &Vector, session: &Session) -> Result<Qualified<Hypothes
     }
     let (skew, kurt) = fisher_skew_kurt(x.as_slice(), st.mean, st.std());
     let n = st.count as f64;
-    let zs = if n > 0.0 { skew * (n / 6.0).sqrt() } else { f64::NAN };
+    let zs = if n > 0.0 {
+        skew * (n / 6.0).sqrt()
+    } else {
+        f64::NAN
+    };
     let zk = if n > 0.0 {
         kurt * (n / 24.0).sqrt()
     } else {
@@ -5808,7 +5934,9 @@ pub fn proportion_confint(
         ctx.push(
             Issue::builder(IssueCode::InvalidWeight)
                 .severity(Severity::Warning)
-                .message(format!("proportion_confint alpha={alpha} not in (0,1); using 0.05"))
+                .message(format!(
+                    "proportion_confint alpha={alpha} not in (0,1); using 0.05"
+                ))
                 .build(),
         );
         0.05
@@ -5838,7 +5966,10 @@ pub fn proportion_confint(
     if n * p < 5.0 || n * (1.0 - p) < 5.0 {
         ctx.push(
             Issue::builder(IssueCode::PValueUnreliable)
-                .message(format!("Wald interval nπ={:.2} is thin; do not treat bounds as exact", n * p))
+                .message(format!(
+                    "Wald interval nπ={:.2} is thin; do not treat bounds as exact",
+                    n * p
+                ))
                 .build(),
         );
     }
@@ -5863,17 +5994,18 @@ pub fn proportions_ztest_power(
     session: &Session,
 ) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
-    if ![p1, p2, nobs1, nobs2, alpha]
-        .iter()
-        .all(|v| v.is_finite())
-    {
+    if ![p1, p2, nobs1, nobs2, alpha].iter().all(|v| v.is_finite()) {
         ctx.push(
             Issue::builder(IssueCode::NonFiniteInput)
                 .message("proportions_ztest_power received a non-finite argument")
                 .build(),
         );
     }
-    let a = if alpha > 0.0 && alpha < 1.0 { alpha } else { 0.05 };
+    let a = if alpha > 0.0 && alpha < 1.0 {
+        alpha
+    } else {
+        0.05
+    };
     if a != alpha {
         ctx.push(
             Issue::builder(IssueCode::InvalidWeight)
@@ -5894,10 +6026,16 @@ pub fn proportions_ztest_power(
     let se0: f64 = (pbar * (1.0 - pbar) * (1.0 / nobs1 + 1.0 / nobs2)).sqrt();
     let se1: f64 = (p1 * (1.0 - p1) / nobs1 + p2 * (1.0 - p2) / nobs2).sqrt();
     let zcrit = norm_ppf(1.0 - a / 2.0);
-    let ncp = if se1 > 1e-18 { (p1 - p2).abs() / se1 } else { 0.0 };
+    let ncp = if se1 > 1e-18 {
+        (p1 - p2).abs() / se1
+    } else {
+        0.0
+    };
     ctx.push(
         Issue::builder(IssueCode::PValueUnreliable)
-            .message("proportions_ztest_power uses a normal approximation, not the exact binomial power")
+            .message(
+                "proportions_ztest_power uses a normal approximation, not the exact binomial power",
+            )
             .compromise(NumericalCompromise::new(
                 "exact two-binomial power",
                 "1 − Φ(z_crit − ncp) + Φ(−z_crit − ncp)",
@@ -5908,8 +6046,7 @@ pub fn proportions_ztest_power(
     );
     let _ = se0;
     let power = if zcrit.is_finite() && ncp.is_finite() {
-        (1.0 - norm_cdf(zcrit - ncp) + norm_cdf(-zcrit - ncp))
-            .clamp(0.0, 1.0)
+        (1.0 - norm_cdf(zcrit - ncp) + norm_cdf(-zcrit - ncp)).clamp(0.0, 1.0)
     } else {
         f64::NAN
     };
@@ -5995,7 +6132,12 @@ pub fn compare_j(
 pub fn robust_skewness(x: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
-    let mut xs: Vec<f64> = x.as_slice().iter().copied().filter(|v| v.is_finite()).collect();
+    let mut xs: Vec<f64> = x
+        .as_slice()
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
     xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     if xs.len() < 4 {
         ctx.push(
@@ -6025,7 +6167,12 @@ pub fn robust_skewness(x: &Vector, session: &Session) -> Result<Qualified<f64>> 
 pub fn robust_kurtosis(x: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
-    let mut xs: Vec<f64> = x.as_slice().iter().copied().filter(|v| v.is_finite()).collect();
+    let mut xs: Vec<f64> = x
+        .as_slice()
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
     xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     if xs.len() < 8 {
         ctx.push(
@@ -6343,7 +6490,11 @@ pub fn fdrcorrection(p: &Vector, alpha: f64, session: &Session) -> Result<Qualif
         0.05
     };
     let _ = a;
-    match multipletests(p.as_slice(), MultiTest::BenjaminiHochberg, &session.child("bh")) {
+    match multipletests(
+        p.as_slice(),
+        MultiTest::BenjaminiHochberg,
+        &session.child("bh"),
+    ) {
         Ok(q) => {
             for issue in q.report.issues() {
                 if issue.code == IssueCode::InvalidWeight {
@@ -6365,10 +6516,7 @@ pub fn fdrcorrection(p: &Vector, alpha: f64, session: &Session) -> Result<Qualif
 /// Mantel–Haenszel pooled odds ratio (statsmodels `StratifiedTable`).
 ///
 /// Stratum count is not identification `p`. Each table must be 2×2.
-pub fn mantel_haenszel(
-    tables: &[Matrix],
-    session: &Session,
-) -> Result<Qualified<HypothesisTest>> {
+pub fn mantel_haenszel(tables: &[Matrix], session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if tables.is_empty() {
         ctx.push(
@@ -6403,7 +6551,9 @@ pub fn mantel_haenszel(
         if ![a, b, c, d].iter().all(|v| v.is_finite() && *v >= 0.0) {
             ctx.push(
                 Issue::builder(IssueCode::NonFiniteInput)
-                    .message(format!("mantel_haenszel stratum {s} has a non-finite or negative cell"))
+                    .message(format!(
+                        "mantel_haenszel stratum {s} has a non-finite or negative cell"
+                    ))
                     .build(),
             );
             continue;
@@ -6445,7 +6595,11 @@ pub fn mantel_haenszel(
 
 fn rankdata(xs: &[f64]) -> Vec<f64> {
     let mut idx: Vec<usize> = (0..xs.len()).filter(|&i| xs[i].is_finite()).collect();
-    idx.sort_by(|&i, &j| xs[i].partial_cmp(&xs[j]).unwrap_or(std::cmp::Ordering::Equal));
+    idx.sort_by(|&i, &j| {
+        xs[i]
+            .partial_cmp(&xs[j])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut ranks = vec![f64::NAN; xs.len()];
     let mut i = 0;
     while i < idx.len() {
@@ -6586,7 +6740,8 @@ pub fn ansari(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<Hyp
         }
     }
     let mean = n1 * (n as f64 + 2.0) / 4.0;
-    let var = n1 * (n as f64 - n1) * (n as f64 + 1.0) * (n as f64 + 2.0) / (48.0 * (n as f64 - 1.0).max(1.0));
+    let var = n1 * (n as f64 - n1) * (n as f64 + 1.0) * (n as f64 + 2.0)
+        / (48.0 * (n as f64 - 1.0).max(1.0));
     let z = if var > 1e-18 {
         (s - mean) / var.sqrt()
     } else {
@@ -6754,7 +6909,12 @@ pub fn power_divergence(
 ) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, obs);
-    let xs: Vec<f64> = obs.as_slice().iter().copied().filter(|v| v.is_finite()).collect();
+    let xs: Vec<f64> = obs
+        .as_slice()
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
     if xs.iter().any(|v| *v < 0.0) {
         ctx.push(
             Issue::builder(IssueCode::NonPositiveSeries)
@@ -7152,7 +7312,11 @@ pub fn hotelling(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<
         }
     }
     let df = (n1 + n2 - 2) as f64;
-    let var = if df > 0.0 { ss / (df * p.max(1) as f64) } else { 0.0 };
+    let var = if df > 0.0 {
+        ss / (df * p.max(1) as f64)
+    } else {
+        0.0
+    };
     let se2 = var * (1.0 / n1 as f64 + 1.0 / n2 as f64);
     let mut t2 = 0.0;
     if se2 > 1e-18 {
@@ -7186,11 +7350,7 @@ pub fn hotelling(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<
 }
 
 /// Cohen's *h* for two proportions (statsmodels `proportion_effectsize`).
-pub fn proportion_effectsize(
-    p1: f64,
-    p2: f64,
-    session: &Session,
-) -> Result<Qualified<f64>> {
+pub fn proportion_effectsize(p1: f64, p2: f64, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if ![p1, p2].iter().all(|v| v.is_finite()) {
         ctx.push(
@@ -7461,7 +7621,9 @@ pub fn descr_stats_w(
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
                     .severity(Severity::Warning)
-                    .message(format!("DescrStatsW weight[{i}]={w} is not a finite ≥0 value"))
+                    .message(format!(
+                        "DescrStatsW weight[{i}]={w} is not a finite ≥0 value"
+                    ))
                     .build(),
             );
             continue;
@@ -7584,11 +7746,7 @@ impl Mice {
 /// Draw `n_imputations` MICE completions (statsmodels `MICE`).
 ///
 /// Imputation count is not identification `p`.
-pub fn mice(
-    x: &Matrix,
-    n_imputations: usize,
-    session: &Session,
-) -> Result<Qualified<Vec<Matrix>>> {
+pub fn mice(x: &Matrix, n_imputations: usize, session: &Session) -> Result<Qualified<Vec<Matrix>>> {
     Mice::new(n_imputations).impute(x, session)
 }
 
@@ -7672,7 +7830,8 @@ fn mice_impute(x: &Matrix, spec: &Mice, session: &Session) -> Result<Qualified<V
                 let z = Matrix::from_fn(n, others.len(), |i, t| filled.get(i, others[t]));
                 let yj = filled.column(j);
                 let mut scratch = Report::new("mice", "ridge");
-                let Some(beta) = crate::linalg::ridge_solve(&mut scratch, &z, &yj, alpha, &ctx.policy)
+                let Some(beta) =
+                    crate::linalg::ridge_solve(&mut scratch, &z, &yj, alpha, &ctx.policy)
                 else {
                     continue;
                 };
@@ -8083,6 +8242,124 @@ pub fn anova_twoway(
         df_b,
         df_ab,
         df_error,
+    })
+}
+
+/// One-way repeated-measures ANOVA (statsmodels `AnovaRM`).
+///
+/// `table` is subjects × treatments. Treatment count is not identification `p`.
+pub fn anova_rm(table: &Matrix, session: &Session) -> Result<Qualified<AnovaResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, table, None, &ctx.policy);
+    let (n, k) = table.shape();
+    if n < 2 || k < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "AnovaRM needs ≥2 subjects and ≥2 treatments (got {n}×{k})"
+                ))
+                .build(),
+        );
+        return ctx.finish(AnovaResult {
+            f_stat: f64::NAN,
+            pvalue: f64::NAN,
+            df_between: (k as f64 - 1.0).max(0.0),
+            df_within: 0.0,
+            ss_between: 0.0,
+            ss_within: 0.0,
+        });
+    }
+    let mut grand = 0.0;
+    let mut nobs = 0.0;
+    for i in 0..n {
+        for j in 0..k {
+            let v = table.get(i, j);
+            if v.is_finite() {
+                grand += v;
+                nobs += 1.0;
+            }
+        }
+    }
+    if nobs < 4.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("AnovaRM has fewer than four finite cells")
+                .build(),
+        );
+        return ctx.finish(AnovaResult {
+            f_stat: f64::NAN,
+            pvalue: f64::NAN,
+            df_between: (k - 1) as f64,
+            df_within: 0.0,
+            ss_between: 0.0,
+            ss_within: 0.0,
+        });
+    }
+    grand /= nobs;
+    let mut ss_t = 0.0;
+    for j in 0..k {
+        let col = table.column(j);
+        let st = slice_stats(col.as_slice());
+        if st.count == 0 {
+            continue;
+        }
+        let d = st.mean - grand;
+        ss_t += st.count as f64 * d * d;
+    }
+    let mut ss_s = 0.0;
+    for i in 0..n {
+        let mut s = 0.0;
+        let mut c = 0.0;
+        for j in 0..k {
+            let v = table.get(i, j);
+            if v.is_finite() {
+                s += v;
+                c += 1.0;
+            }
+        }
+        if c > 0.0 {
+            let d = s / c - grand;
+            ss_s += c * d * d;
+        }
+    }
+    let mut ss_tot = 0.0;
+    for i in 0..n {
+        for j in 0..k {
+            let v = table.get(i, j);
+            if v.is_finite() {
+                let d = v - grand;
+                ss_tot += d * d;
+            }
+        }
+    }
+    let ss_e = (ss_tot - ss_t - ss_s).max(0.0);
+    let df_t = (k - 1) as f64;
+    let df_e = ((n - 1) * (k - 1)) as f64;
+    if ss_e <= 1e-18 || df_e <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("AnovaRM residual SS vanished")
+                .build(),
+        );
+        return ctx.finish(AnovaResult {
+            f_stat: f64::NAN,
+            pvalue: f64::NAN,
+            df_between: df_t,
+            df_within: df_e,
+            ss_between: ss_t,
+            ss_within: ss_e,
+        });
+    }
+    let f_stat: f64 = (ss_t / df_t) / (ss_e / df_e);
+    ctx.finish(AnovaResult {
+        f_stat,
+        pvalue: f_pvalue(f_stat.max(0.0), df_t, df_e),
+        df_between: df_t,
+        df_within: df_e,
+        ss_between: ss_t,
+        ss_within: ss_e,
     })
 }
 
@@ -8804,7 +9081,10 @@ mod tests {
         let cx = Matrix::from_fn(20, 1, |i, _| if i < 10 { 0.0 } else { 1.0 });
         let sch = schoenfeld(&dur, &ev, &cx, &Session::new("sch", "t")).expect("sch");
         assert_eq!(sch.value.ncols(), 1);
-        assert!(sch.value.nrows() == 0 || (0..sch.value.nrows()).all(|i| sch.value.get(i, 0).is_finite()));
+        assert!(
+            sch.value.nrows() == 0
+                || (0..sch.value.nrows()).all(|i| sch.value.get(i, 0).is_finite())
+        );
         let om = omni_normtest(&y, &Session::new("omni", "t")).expect("omni");
         assert!(om.value.statistic.is_finite() || om.value.pvalue.is_nan());
         let nt = normaltest(&y, &Session::new("nt", "t")).expect("nt");
@@ -8851,7 +9131,10 @@ mod tests {
         let chi = chisquare(&cnt, &Session::new("chi", "t")).expect("chi");
         assert!(chi.value.statistic.is_finite() || chi.value.pvalue.is_nan());
         let pdv = power_divergence(&cnt, 1.0, &Session::new("pdv", "t")).expect("pdv");
-        assert!((pdv.value.statistic - chi.value.statistic).abs() < 1e-9 || pdv.value.statistic.is_nan());
+        assert!(
+            (pdv.value.statistic - chi.value.statistic).abs() < 1e-9
+                || pdv.value.statistic.is_nan()
+        );
         let qtab = Matrix::from_fn(8, 3, |i, j| if (i + j) % 2 == 0 { 1.0 } else { 0.0 });
         let cq = cochran_q(&qtab, &Session::new("cq", "t")).expect("cq");
         assert!(cq.value.statistic.is_finite() || cq.value.pvalue.is_nan());
@@ -8860,7 +9143,8 @@ mod tests {
         let rr = risk_ratio(&tab2, &Session::new("rr", "t")).expect("rr");
         assert!(rr.value.is_finite() && rr.value > 1.0);
         let ys_close = Vector::from_iter((0..20).map(|i| i as f64 + 0.05 * (i as f64).sin()));
-        let tost = tost_paired(&xs, &ys_close, -1.0, 1.0, &Session::new("tost", "t")).expect("tost");
+        let tost =
+            tost_paired(&xs, &ys_close, -1.0, 1.0, &Session::new("tost", "t")).expect("tost");
         assert!(tost.value.pvalue.is_finite() || tost.value.statistic.is_nan());
         let ap = ftest_anova_power(0.5, 3.0, 12.0, 0.05, &Session::new("fap", "t")).expect("fap");
         assert!(ap.value.is_finite() && ap.value >= 0.0 && ap.value <= 1.0);
@@ -8896,5 +9180,12 @@ mod tests {
         assert!(hbp.value.statistic.is_finite() || hbp.value.pvalue.is_nan());
         let lbq = acorr_ljungbox(&e, 2, &Session::new("alb", "t")).expect("alb");
         assert!(lbq.value.stat.is_finite() || lbq.value.pvalue.is_nan());
+        let rmt = Matrix::from_fn(12, 3, |i, j| {
+            a[i] + 0.4 * j as f64 + 0.05 * ((i + j) as f64).sin()
+        });
+        let arm = anova_rm(&rmt, &Session::new("arm", "t")).expect("arm");
+        assert!(arm.value.f_stat.is_finite() || arm.value.pvalue.is_nan());
+        let zph = cox_zph(&dur, &ev, &cx, &Session::new("zph", "t")).expect("zph");
+        assert!(zph.value.statistic.is_finite() || zph.value.pvalue.is_nan());
     }
 }

@@ -12019,7 +12019,8 @@ impl PartialFit for OnlinePearson {
         }
         self.updates += 1;
         let after = self.score();
-        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
         q.effective_sample_size = self.n;
         q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
             (after - before).abs()
@@ -12249,13 +12250,16 @@ impl Predict for AdwinBagging {
                 k += 1.0;
             }
         }
-        let out = Vector::from_iter(votes.iter().map(|v| {
-            if k > 0.0 && *v / k >= 0.5 {
-                1.0
-            } else {
-                0.0
-            }
-        }));
+        let out =
+            Vector::from_iter(votes.iter().map(
+                |v| {
+                    if k > 0.0 && *v / k >= 0.5 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                },
+            ));
         ctx.finish(out)
     }
 }
@@ -12545,7 +12549,11 @@ impl Transform for RandomUnderSampler {
         let mut rng = self.rng.clone();
         let minc = self.counts.values().copied().min().unwrap_or(1) as f64;
         let maxc = self.counts.values().copied().max().unwrap_or(1) as f64;
-        let keep = if maxc > 0.0 { (minc / maxc).clamp(0.2, 1.0) } else { 1.0 };
+        let keep = if maxc > 0.0 {
+            (minc / maxc).clamp(0.2, 1.0)
+        } else {
+            1.0
+        };
         let mut rows = Vec::new();
         for i in 0..x.nrows() {
             if rng.uniform() <= keep {
@@ -13032,11 +13040,7 @@ impl Transform for OnlineVarianceThreshold {
         let mut keep = Vec::new();
         for j in 0..x.ncols().min(self.n_features) {
             let n = self.n.get(j).copied().unwrap_or(0.0);
-            let v = if n > 1.0 {
-                self.m2[j] / (n - 1.0)
-            } else {
-                0.0
-            };
+            let v = if n > 1.0 { self.m2[j] / (n - 1.0) } else { 0.0 };
             if v > self.threshold {
                 keep.push(j);
             }
@@ -13187,7 +13191,9 @@ impl PartialFit for HardSamplingClassifier {
         };
         let before = self.buffer_x.len();
         if self.n_seen == 0 {
-            let _ = self.inner.partial_fit(x, Some(y), &session.child("hs_init"));
+            let _ = self
+                .inner
+                .partial_fit(x, Some(y), &session.child("hs_init"));
         }
         let pred = if self.n_seen == 0 {
             Vector::zeros(x.nrows())
@@ -13198,8 +13204,7 @@ impl PartialFit for HardSamplingClassifier {
             }
         };
         for i in 0..x.nrows().min(y.len()) {
-            let wrong = self.n_seen == 0
-                || (i < pred.len() && (pred[i] - y[i]).abs() >= 0.5);
+            let wrong = self.n_seen == 0 || (i < pred.len() && (pred[i] - y[i]).abs() >= 0.5);
             if wrong && y[i].is_finite() {
                 self.buffer_x
                     .push((0..x.ncols()).map(|j| x.get(i, j)).collect());
@@ -13462,9 +13467,7 @@ impl Transform for FuncTransformer {
                 ctx.push(
                     Issue::builder(IssueCode::NonPositiveSeries)
                         .severity(Severity::Warning)
-                        .message(format!(
-                            "FuncTransformer::Log1p left {bad} cells undefined"
-                        ))
+                        .message(format!("FuncTransformer::Log1p left {bad} cells undefined"))
                         .build(),
                 );
             }
@@ -13638,7 +13641,9 @@ impl Predict for FactorizationMachine {
             ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
             return ctx.finish(Vector::zeros(x.nrows()));
         }
-        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.predict_row(x, i)),
+        ))
     }
 }
 
@@ -13803,7 +13808,9 @@ impl Predict for AdaGradRegressor {
             ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
             return ctx.finish(Vector::zeros(x.nrows()));
         }
-        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.predict_row(x, i)),
+        ))
     }
 }
 
@@ -13966,7 +13973,9 @@ impl Predict for AdamRegressor {
             ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
             return ctx.finish(Vector::zeros(x.nrows()));
         }
-        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.predict_row(x, i)),
+        ))
     }
 }
 
@@ -14114,7 +14123,9 @@ impl Predict for RmsPropRegressor {
             ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
             return ctx.finish(Vector::zeros(x.nrows()));
         }
-        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.predict_row(x, i)),
+        ))
     }
 }
 
@@ -14439,7 +14450,8 @@ impl PartialFit for OnlineGamma {
         }
         self.updates += 1;
         let after = self.shape();
-        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
         q.effective_sample_size = self.n;
         q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
             (after - before).abs()
@@ -14529,7 +14541,12 @@ impl Transform for ColumnSelect {
     fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         inspect_online_xy(&mut ctx, x, None);
-        let cols: Vec<usize> = self.cols.iter().copied().filter(|&j| j < x.ncols()).collect();
+        let cols: Vec<usize> = self
+            .cols
+            .iter()
+            .copied()
+            .filter(|&j| j < x.ncols())
+            .collect();
         if cols.is_empty() {
             ctx.push(
                 Issue::builder(IssueCode::EmptyMatrix)
@@ -14602,9 +14619,7 @@ impl Transform for ColumnDiscard {
     fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         inspect_online_xy(&mut ctx, x, None);
-        let keep: Vec<usize> = (0..x.ncols())
-            .filter(|j| !self.cols.contains(j))
-            .collect();
+        let keep: Vec<usize> = (0..x.ncols()).filter(|j| !self.cols.contains(j)).collect();
         if keep.is_empty() {
             ctx.push(
                 Issue::builder(IssueCode::EmptyMatrix)
@@ -14680,8 +14695,8 @@ impl FtrlRegressor {
                 w[j] = 0.0;
             } else {
                 let sign = if self.z[j] < 0.0 { -1.0 } else { 1.0 };
-                w[j] = -(self.z[j] - sign * self.l1)
-                    / ((beta + self.n[j].sqrt()) / alpha + self.l2);
+                w[j] =
+                    -(self.z[j] - sign * self.l1) / ((beta + self.n[j].sqrt()) / alpha + self.l2);
             }
         }
         w
@@ -14789,7 +14804,9 @@ impl Predict for FtrlRegressor {
             ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
             return ctx.finish(Vector::zeros(x.nrows()));
         }
-        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.predict_row(x, i)),
+        ))
     }
 }
 
@@ -14934,7 +14951,9 @@ impl Predict for AdaDeltaRegressor {
             ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
             return ctx.finish(Vector::zeros(x.nrows()));
         }
-        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.predict_row(x, i)),
+        ))
     }
 }
 
@@ -15074,7 +15093,9 @@ impl Predict for MomentumRegressor {
             ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
             return ctx.finish(Vector::zeros(x.nrows()));
         }
-        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.predict_row(x, i)),
+        ))
     }
 }
 
@@ -15135,7 +15156,8 @@ impl PartialFit for OnlinePoisson {
         }
         self.updates += 1;
         let after = self.score();
-        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
         q.effective_sample_size = self.n;
         q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
             (after - before).abs()
@@ -15647,7 +15669,9 @@ impl Predict for AdaMaxRegressor {
             ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
             return ctx.finish(Vector::zeros(x.nrows()));
         }
-        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.predict_row(x, i)),
+        ))
     }
 }
 
@@ -15818,7 +15842,9 @@ impl Predict for AMSGradRegressor {
             ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
             return ctx.finish(Vector::zeros(x.nrows()));
         }
-        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.predict_row(x, i)),
+        ))
     }
 }
 
@@ -15922,7 +15948,11 @@ impl PartialFit for OnlineQuantile {
         q.information_gain = Some(x.nrows() as f64);
         q.still_identified = self.buf.len() >= 2;
         q.warmup = self.buf.len() < 2;
-        q.explanation = format!("OnlineQuantile q={:.3} value={after:.6e} n={}", self.q, self.buf.len());
+        q.explanation = format!(
+            "OnlineQuantile q={:.3} value={after:.6e} n={}",
+            self.q,
+            self.buf.len()
+        );
         flag_info(&mut ctx, &q);
         finish_explain(
             ctx,
@@ -16408,7 +16438,9 @@ impl Predict for NewtonRegressor {
             ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
             return ctx.finish(Vector::zeros(x.nrows()));
         }
-        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.predict_row(x, i)),
+        ))
     }
 }
 
@@ -16899,6 +16931,371 @@ impl PartialFit for AdamWRegressor {
     }
 }
 
+/// Hogwild!-style SGD linear regressor (river `optim.SGD` / Hogwild).
+///
+/// Feature count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct HogwildRegressor {
+    /// Step \(\eta\).
+    pub learning_rate: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for HogwildRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl HogwildRegressor {
+    /// Default Hogwild regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for HogwildRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message("HogwildRegressor feature dim changed")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.coef.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            for j in 0..dim.min(z.len()) {
+                self.coef[j] -= eta * err * z[j];
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "Hogwild linear weights",
+            "unlocked SGD steps; each row writes θ immediately",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+/// Content-based recommender (river `reco.Content`).
+///
+/// `X` is `[user, item, …content]`, `y` is the rating. Item count is not
+/// identification `p`.
+#[derive(Clone, Debug)]
+pub struct ContentReco {
+    /// SGD step on content weights.
+    pub learning_rate: f64,
+    user_mean: HashMap<i64, (f64, u64)>,
+    coef: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for ContentReco {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            user_mean: HashMap::new(),
+            coef: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl ContentReco {
+    /// Empty content recommender.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for ContentReco {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no ratings"),
+            );
+        };
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("ContentReco needs [user, item, …content]")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need two columns"),
+            );
+        }
+        let p = x.ncols().saturating_sub(2);
+        if !self.initialized {
+            self.coef = Vector::zeros(p.max(1));
+            self.initialized = true;
+        } else if self.coef.len() != p.max(1) {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message("ContentReco content dim changed")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "content dim changed"),
+            );
+        }
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let mut moved = 0.0;
+        let mut sse = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let user = x.get(i, 0).round() as i64;
+            let (um, un) = self.user_mean.get(&user).copied().unwrap_or((0.0, 0));
+            let mut pred = um;
+            for j in 0..p.min(self.coef.len()) {
+                pred += self.coef[j] * x.get(i, j + 2);
+            }
+            let err = pred - y[i];
+            sse += err * err;
+            for j in 0..p.min(self.coef.len()) {
+                let step = eta * err * x.get(i, j + 2);
+                self.coef[j] -= step;
+                moved += step.abs();
+            }
+            let nxt_n = un + 1;
+            let nxt_m = um + (y[i] - um) / nxt_n as f64;
+            self.user_mean.insert(user, (nxt_m, nxt_n));
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(moved);
+        q.information_gain = Some(moved.max(x.nrows() as f64));
+        q.loss_after = Some(sse);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!(
+            "ContentReco {} users, ||Δw||={moved:.6e}",
+            self.user_mean.len()
+        );
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("ContentReco has seen fewer than two ratings")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "user mean + content SGD",
+                "residual of the user mean is fit on columns 2..; item count is not p",
+                "previous user means / content weights",
+                format!("{} users", self.user_mean.len()),
+            ),
+        )
+    }
+}
+
+/// Group-wise target mean encoder (river `feature_extraction.TargetAgg`).
+///
+/// Group count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct TargetAgg {
+    means: HashMap<i64, (f64, u64)>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for TargetAgg {
+    fn default() -> Self {
+        Self {
+            means: HashMap::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl TargetAgg {
+    /// Empty target aggregator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for TargetAgg {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        if x.ncols() < 1 {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .severity(Severity::Warning)
+                    .message("TargetAgg needs a group column")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no group column"),
+            );
+        }
+        let mut moved = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let g = x.get(i, 0).round() as i64;
+            let (m, n) = self.means.get(&g).copied().unwrap_or((0.0, 0));
+            let nxt_n = n + 1;
+            let nxt = m + (y[i] - m) / nxt_n as f64;
+            moved += (nxt - m).abs();
+            self.means.insert(g, (nxt, nxt_n));
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(moved);
+        q.information_gain = Some(moved);
+        q.still_identified = !self.means.is_empty();
+        q.warmup = self.means.is_empty();
+        q.explanation = format!("TargetAgg {} groups, ||Δμ||={moved:.6e}", self.means.len());
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("TargetAgg has no groups yet")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "group target means",
+                "Welford mean of y keyed by X[:,0]; group count is not p",
+                "previous group means",
+                format!("{} groups", self.means.len()),
+            ),
+        )
+    }
+}
+
 impl Predict for AdaBoundRegressor {
     type Output = Vector;
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
@@ -16908,7 +17305,9 @@ impl Predict for AdaBoundRegressor {
             ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
             return ctx.finish(Vector::zeros(x.nrows()));
         }
-        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.predict_row(x, i)),
+        ))
     }
 }
 
@@ -17362,6 +17761,15 @@ mod tests {
         AdamWRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamw");
+        HogwildRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("hogwild");
+        ContentReco::new()
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("content");
+        TargetAgg::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("tagg");
 
         let n_expl = session
             .ledger()

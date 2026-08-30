@@ -307,6 +307,144 @@ impl PartialFit for Ucb1 {
     }
 }
 
+/// UCB-Tuned (Auer et al.): variance-aware bonus.
+///
+/// Arm count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct UcbTuned {
+    n_arms: usize,
+    counts: Vec<u64>,
+    values: Vec<f64>,
+    m2: Vec<f64>,
+    updates: u64,
+    n_seen: u64,
+}
+
+impl UcbTuned {
+    /// `k` arms.
+    pub fn new(n_arms: usize) -> Self {
+        let k = n_arms.max(1);
+        Self {
+            n_arms: k,
+            counts: vec![0; k],
+            values: vec![0.0; k],
+            m2: vec![0.0; k],
+            updates: 0,
+            n_seen: 0,
+        }
+    }
+
+    fn index(&self, arm: usize) -> f64 {
+        let n = self.counts[arm] as f64;
+        if n <= 0.0 {
+            return f64::INFINITY;
+        }
+        let t = self.n_seen.max(1) as f64;
+        let var = (self.m2[arm] / n).max(0.0);
+        let extra = (2.0 * t.ln() / n).sqrt();
+        let v = (var + extra).min(0.25);
+        self.values[arm] + (t.ln() / n * v).sqrt()
+    }
+
+    /// Choose the arm with the largest UCB-Tuned index.
+    pub fn pull(&mut self, session: &Session) -> Result<Qualified<(usize, IncrementalExplain)>> {
+        let mut ctx = FitCtx::with_session(session.child("pull"));
+        let mut arm = 0usize;
+        let mut best = f64::NEG_INFINITY;
+        let mut indexes = vec![f64::INFINITY; self.n_arms];
+        for a in 0..self.n_arms {
+            if self.counts[a] == 0 {
+                ctx.push(
+                    Issue::builder(IssueCode::WarmupIncomplete)
+                        .message(format!("UCB-Tuned has never pulled arm {a}"))
+                        .build(),
+                );
+            }
+            let idx = self.index(a);
+            indexes[a] = idx;
+            if idx > best {
+                best = idx;
+                arm = a;
+            }
+        }
+        let mut q = IncrementalQuality::new(self.updates, 1, self.n_seen);
+        q.warmup = self.counts.iter().any(|&c| c == 0);
+        q.still_identified = self.counts.iter().all(|&c| c > 0);
+        q.explanation = format!("UCB-Tuned chose {arm} indexes={indexes:?}");
+        let expl = IncrementalExplain::from_quality(
+            q,
+            format!("pull arm {arm}"),
+            "argmax of mean + sqrt(ln t / n × min(1/4, V̂))",
+            format!("counts={:?}", self.counts),
+            format!("ucb={indexes:?}"),
+        );
+        ctx.session.record_incremental(expl.clone());
+        ctx.finish((arm, expl))
+    }
+}
+
+impl PartialFit for UcbTuned {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish(
+                &ctx,
+                reject(self.updates, 0, self.n_seen, "UCB-Tuned needs rewards"),
+            );
+        };
+        let before = self.values.clone();
+        let mut dsum = 0.0;
+        for i in 0..y.len() {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let arm = if x.ncols() == 0 || x.nrows() == 0 {
+                0
+            } else {
+                x.get(i.min(x.nrows() - 1), 0).round().abs() as usize
+            };
+            if arm >= self.n_arms {
+                ctx.push(
+                    Issue::builder(IssueCode::DimensionMismatch)
+                        .severity(Severity::Warning)
+                        .message(format!("UCB-Tuned arm {arm} is outside 0..{}", self.n_arms))
+                        .build(),
+                );
+                continue;
+            }
+            let c = self.counts[arm] as f64;
+            let prev = self.values[arm];
+            self.counts[arm] += 1;
+            self.values[arm] = prev + (y[i] - prev) / (c + 1.0);
+            let d = y[i] - prev;
+            self.m2[arm] += d * (y[i] - self.values[arm]);
+            self.n_seen += 1;
+            self.updates += 1;
+            dsum += (self.values[arm] - prev).abs();
+        }
+        let expl = pack_bandit(
+            &mut ctx,
+            self.updates,
+            y.len(),
+            self.n_seen,
+            dsum,
+            self.counts.iter().all(|&c| c > 0),
+            self.counts.iter().any(|&c| c == 0),
+            &before,
+            &self.values,
+            "UCB-Tuned sample means",
+            "Welford mean/variance; the next pull uses a variance-aware bonus",
+        );
+        finish(&ctx, expl)
+    }
+}
+
 /// Thompson sampling for Bernoulli arms (`Beta(α, β)` posteriors).
 #[derive(Clone, Debug)]
 pub struct ThompsonBernoulli {
@@ -529,13 +667,7 @@ impl LinUcb {
     }
 
     fn context(x: &Matrix, i: usize, p: usize) -> Vector {
-        Vector::from_iter((0..p).map(|j| {
-            if j < x.ncols() {
-                x.get(i, j)
-            } else {
-                0.0
-            }
-        }))
+        Vector::from_iter((0..p).map(|j| if j < x.ncols() { x.get(i, j) } else { 0.0 }))
     }
 
     fn matvec(a: &[f64], p: usize, v: &Vector) -> Vector {
@@ -770,7 +902,9 @@ impl LinTs {
                 ctx.push(
                     Issue::builder(IssueCode::CholeskyFailed)
                         .severity(Severity::Warning)
-                        .message(format!("LinTS arm {arm} A⁻¹ was not SPD; using a diagonal draw"))
+                        .message(format!(
+                            "LinTS arm {arm} A⁻¹ was not SPD; using a diagonal draw"
+                        ))
                         .compromise(NumericalCompromise::new(
                             "θ ~ N(A⁻¹b, v A⁻¹)",
                             "independent N(μ_j, v A⁻¹_jj) draws",
@@ -895,9 +1029,7 @@ impl PartialFit for LinTs {
         }
         let after: Vec<f64> = self.b.iter().map(|v| v.norm()).collect();
         let identified = self.counts.iter().all(|&c| c > 0);
-        let why = format!(
-            "chose arm {last_arm} by a Gaussian draw of θ; arm count is not p"
-        );
+        let why = format!("chose arm {last_arm} by a Gaussian draw of θ; arm count is not p");
         let expl = pack_bandit(
             &mut ctx,
             self.updates,
@@ -1405,6 +1537,9 @@ mod tests {
         assert!(!q.value.narrative.is_empty());
         let mut bu = BayesianUcb::new(2);
         let q = bu.partial_fit(&x, Some(&y), &session).expect("bayesucb");
+        assert!(!q.value.narrative.is_empty());
+        let mut ut = UcbTuned::new(2);
+        let q = ut.partial_fit(&x, Some(&y), &session).expect("ucbt");
         assert!(!q.value.narrative.is_empty());
     }
 }
