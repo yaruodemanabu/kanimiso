@@ -856,6 +856,408 @@ impl FitUnsupervised for GaussianHmm {
     }
 }
 
+fn try_chol_lower(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
+    let n = a.len();
+    let mut l = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..=i {
+            let mut s = a[i][j];
+            for k in 0..j {
+                s -= l[i][k] * l[j][k];
+            }
+            if i == j {
+                if s <= 1e-18 {
+                    return None;
+                }
+                l[i][j] = s.sqrt();
+            } else if l[j][j] > 1e-18 {
+                l[i][j] = s / l[j][j];
+            } else {
+                return None;
+            }
+        }
+    }
+    Some(l)
+}
+
+fn log_full_gauss(x: &Matrix, t: usize, means: &Matrix, state: usize, cov: &Matrix) -> f64 {
+    let d = x
+        .ncols()
+        .min(means.ncols())
+        .min(cov.nrows())
+        .min(cov.ncols());
+    if d == 0 {
+        return f64::NEG_INFINITY;
+    }
+    let mut a = vec![vec![0.0_f64; d]; d];
+    for i in 0..d {
+        for j in 0..d {
+            a[i][j] = cov.get(i, j);
+        }
+        a[i][i] += COV_FLOOR;
+    }
+    let l = match try_chol_lower(&a) {
+        Some(l) => l,
+        None => {
+            for i in 0..d {
+                a[i][i] += 1e-3;
+            }
+            match try_chol_lower(&a) {
+                Some(l) => l,
+                None => {
+                    let mut s = 0.0_f64;
+                    for j in 0..d {
+                        let v = cov.get(j, j).max(COV_FLOOR);
+                        let z = x.get(t, j) - means.get(state, j);
+                        s += z * z / v + v.ln();
+                    }
+                    return -0.5 * (s + d as f64 * LN_2PI);
+                }
+            }
+        }
+    };
+    let mut z = vec![0.0_f64; d];
+    for i in 0..d {
+        let mut s = x.get(t, i) - means.get(state, i);
+        for j in 0..i {
+            s -= l[i][j] * z[j];
+        }
+        z[i] = s / l[i][i].max(1e-18);
+    }
+    let quad: f64 = z.iter().map(|v| v * v).sum();
+    let mut ld = 0.0_f64;
+    for i in 0..d {
+        ld += l[i][i].max(1e-18).ln();
+    }
+    -0.5 * (quad + 2.0 * ld + d as f64 * LN_2PI)
+}
+
+fn global_full_cov(x: &Matrix) -> Matrix {
+    let (n, d) = x.shape();
+    let mut mean = vec![0.0_f64; d];
+    if n > 0 {
+        for j in 0..d {
+            mean[j] = x.column(j).mean();
+        }
+    }
+    let mut c = Matrix::zeros(d, d);
+    let nf = n.max(1) as f64;
+    for t in 0..n {
+        for a in 0..d {
+            let da = x.get(t, a) - mean[a];
+            for b in 0..d {
+                c.set(a, b, c.get(a, b) + da * (x.get(t, b) - mean[b]));
+            }
+        }
+    }
+    for a in 0..d {
+        for b in 0..d {
+            c.set(a, b, c.get(a, b) / nf);
+        }
+        c.set(a, a, c.get(a, a).max(COV_FLOOR));
+    }
+    c
+}
+
+/// Gaussian HMM with a full (dense) covariance per state (hmmlearn `covariance_type="full"`).
+///
+/// Covariance free-parameter count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct GaussianHmmFull {
+    /// Number of hidden states.
+    pub n_states: usize,
+    /// Baum–Welch iteration cap.
+    pub max_iter: usize,
+    /// Seed for k-means++ mean initialization.
+    pub seed: u64,
+    /// If true, transitions to earlier states are zeroed (hmmlearn `left_right`).
+    pub left_right: bool,
+}
+
+impl Default for GaussianHmmFull {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 50,
+            seed: 0,
+            left_right: false,
+        }
+    }
+}
+
+impl GaussianHmmFull {
+    /// `n_states` hidden full-covariance Gaussians.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Left-right full-covariance Gaussian HMM.
+    pub fn left_right(n_states: usize) -> Self {
+        Self {
+            n_states,
+            left_right: true,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedGaussianHmmFull>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted full-covariance Gaussian HMM.
+#[derive(Clone, Debug)]
+pub struct FittedGaussianHmmFull {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Number of states.
+    pub n_states: usize,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// State means (`n_states` × `d`).
+    pub means: Matrix,
+    /// Per-state dense covariances (`d` × `d` each).
+    pub covs: Vec<Matrix>,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedGaussianHmmFull {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let s = self.n_states;
+        let mut out = vec![vec![f64::NEG_INFINITY; s]; t];
+        for ti in 0..t {
+            for j in 0..s {
+                let cov = self
+                    .covs
+                    .get(j)
+                    .cloned()
+                    .unwrap_or_else(|| Matrix::zeros(0, 0));
+                out[ti][j] = log_full_gauss(x, ti, &self.means, j, &cov);
+            }
+        }
+        out
+    }
+
+    /// Viterbi state path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("decode"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.ncols() != self.means.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(signlred::Severity::Warning)
+                    .message("full-covariance decode X has a different observation dimension")
+                    .build(),
+            );
+        }
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+
+    /// Scaled-forward log-likelihood.
+    pub fn score(&self, x: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+        let mut ctx = FitCtx::with_session(session.child("score"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.nrows() == 0 {
+            return ctx.finish(f64::NEG_INFINITY);
+        }
+        let fb = scaled_forward_backward(&mut ctx, &self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(fb.map(|f| f.loglik).unwrap_or(f64::NEG_INFINITY))
+    }
+}
+
+impl Predict for FittedGaussianHmmFull {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for GaussianHmmFull {
+    type Fitted = FittedGaussianHmmFull;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedGaussianHmmFull>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_states.max(1),
+            &ctx.policy,
+        );
+        let (t_len, d) = x.shape();
+        let k = self.n_states.max(1);
+        if t_len == 0 || d == 0 {
+            return ctx.finish(FittedGaussianHmmFull {
+                labels: empty_labels(t_len),
+                n_states: k,
+                start: init_start(k),
+                trans: init_trans(k),
+                means: Matrix::zeros(k, d),
+                covs: vec![Matrix::zeros(d, d); k],
+                loglik: f64::NAN,
+            });
+        }
+        if series_zero_variance(x, ctx.policy.near_zero_variance) {
+            ctx.push(emission_degenerate_issue(
+                "full-covariance observation series has zero variance",
+            ));
+        }
+        let mut rng = Rng::new(self.seed | 1);
+        let mut means = kmeans_pp_rows(x, k.min(t_len), &mut rng);
+        if means.nrows() < k {
+            let mut padded = Matrix::zeros(k, d);
+            for i in 0..means.nrows() {
+                for j in 0..d {
+                    padded.set(i, j, means.get(i, j));
+                }
+            }
+            means = padded;
+        }
+        let gcov = global_full_cov(x);
+        let mut covs = vec![gcov.clone(); k];
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        if self.left_right {
+            enforce_left_right(&mut start, &mut trans);
+        }
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let mut log_emit = vec![vec![0.0; k]; t_len];
+            for t in 0..t_len {
+                for j in 0..k {
+                    log_emit[t][j] = log_full_gauss(x, t, &means, j, &covs[j]);
+                }
+            }
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &log_emit) else {
+                break;
+            };
+            loglik = fb.loglik;
+            ctx.session.step(it as u64, -loglik, None);
+            last_gamma = fb.gamma.clone();
+            for j in 0..k {
+                start[j] = fb.gamma[0][j];
+            }
+            renormalize_vec(&mut start, TRANS_FLOOR);
+            if t_len > 1 {
+                for i in 0..k {
+                    let mut den = 0.0_f64;
+                    for t in 0..t_len - 1 {
+                        den += fb.gamma[t][i];
+                    }
+                    for j in 0..k {
+                        let mut num = 0.0_f64;
+                        for t in 0..t_len - 1 {
+                            num += fb.xi[t][i][j];
+                        }
+                        trans.set(
+                            i,
+                            j,
+                            if den > 0.0 {
+                                num / den
+                            } else {
+                                trans.get(i, j)
+                            },
+                        );
+                    }
+                }
+                if self.left_right {
+                    enforce_left_right(&mut start, &mut trans);
+                } else {
+                    renormalize_rows(&mut trans, TRANS_FLOOR);
+                }
+            }
+            if self.left_right && k > 1 {
+                enforce_left_right(&mut start, &mut trans);
+            }
+            for j in 0..k {
+                let mut nj = 0.0_f64;
+                let mut acc = vec![0.0_f64; d];
+                for t in 0..t_len {
+                    let g = fb.gamma[t][j];
+                    nj += g;
+                    for c in 0..d {
+                        acc[c] += g * x.get(t, c);
+                    }
+                }
+                if nj > TRANS_FLOOR {
+                    for c in 0..d {
+                        means.set(j, c, acc[c] / nj);
+                    }
+                    let mut cmat = Matrix::zeros(d, d);
+                    for t in 0..t_len {
+                        let g = fb.gamma[t][j];
+                        for a in 0..d {
+                            let da = x.get(t, a) - means.get(j, a);
+                            for b in 0..d {
+                                cmat.set(
+                                    a,
+                                    b,
+                                    cmat.get(a, b) + g * da * (x.get(t, b) - means.get(j, b)),
+                                );
+                            }
+                        }
+                    }
+                    for a in 0..d {
+                        for b in 0..d {
+                            cmat.set(a, b, cmat.get(a, b) / nj);
+                        }
+                        cmat.set(a, a, cmat.get(a, a).max(COV_FLOOR));
+                    }
+                    covs[j] = cmat;
+                }
+            }
+        }
+        let occup: Vec<f64> = (0..k)
+            .map(|j| {
+                last_gamma
+                    .iter()
+                    .map(|g| g.get(j).copied().unwrap_or(0.0))
+                    .sum()
+            })
+            .collect();
+        diagnose_chain(&mut ctx, &start, &trans, &occup);
+        if self.left_right {
+            enforce_left_right(&mut start, &mut trans);
+        }
+        let fitted_tmp = FittedGaussianHmmFull {
+            labels: Vector::zeros(0),
+            n_states: k,
+            start: start.clone(),
+            trans: trans.clone(),
+            means: means.clone(),
+            covs: covs.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &fitted_tmp.log_emit_seq(x));
+        ctx.finish(FittedGaussianHmmFull {
+            labels,
+            n_states: k,
+            start,
+            trans,
+            means,
+            covs,
+            loglik,
+        })
+    }
+}
+
 /// Discrete-emission HMM. Observation codes are the rounded entries of `X`
 /// (typically a `T` × 1 matrix of integer symbols).
 ///
@@ -2430,6 +2832,24 @@ mod tests {
             .fit(&x, &Session::new("glr_hmm", "fit"))
             .expect("glr");
         assert!(glr.value.trans.get(1, 0) <= 1e-8);
+        let full = GaussianHmmFull::new(2)
+            .fit(&x, &Session::new("full_hmm", "fit"))
+            .expect("full");
+        let mut fm0 = full.value.means.get(0, 0);
+        let mut fm1 = full.value.means.get(1, 0);
+        if fm0 > fm1 {
+            std::mem::swap(&mut fm0, &mut fm1);
+        }
+        assert!(
+            (fm0 + 3.0).abs() < 0.75,
+            "full-cov expected a mean near -3, got {fm0} and {fm1}"
+        );
+        assert!(
+            (fm1 - 3.0).abs() < 0.75,
+            "full-cov expected a mean near +3, got {fm0} and {fm1}"
+        );
+        assert_eq!(full.value.covs.len(), 2);
+        assert_eq!(full.value.covs[0].shape(), (1, 1));
     }
 
     #[test]

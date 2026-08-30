@@ -3827,6 +3827,19 @@ const INVENTORY: &[Algorithm] = &[
         "online",
     ),
     a("hmm.GmmHmmLeftRight", "hmmlearn.hmm.GMMHMM", "hmm"),
+    a("hmm.GaussianHmmFull", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.SgtClassifier", "river.tree.SGTClassifier", "online"),
+    a("online.SgtRegressor", "river.tree.SGTRegressor", "online"),
+    a(
+        "online.IsoUPTree",
+        "river.multioutput.iSOUPTreeRegressor",
+        "online",
+    ),
+    a(
+        "online.OnlineSvm",
+        "sklearn.linear_model.SGDClassifier",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4034,6 +4047,11 @@ mod tests {
             "bandit.Exp4",
             "online.BagOfWords",
             "hmm.GmmHmmLeftRight",
+            "hmm.GaussianHmmFull",
+            "online.SgtClassifier",
+            "online.SgtRegressor",
+            "online.IsoUPTree",
+            "online.OnlineSvm",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

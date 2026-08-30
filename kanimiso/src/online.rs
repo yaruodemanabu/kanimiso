@@ -11897,6 +11897,439 @@ impl Transform for BagOfWords {
     }
 }
 
+/// Stochastic gradient tree classifier (river `tree.SGTClassifier`).
+///
+/// Lite: a single logit leaf updated by log-loss SGD. Split / leaf counts
+/// are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SgtClassifier {
+    /// Step size.
+    pub learning_rate: f64,
+    logit: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for SgtClassifier {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.1,
+            logit: 0.0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl SgtClassifier {
+    /// Default SGT classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for SgtClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "SGT needs labels"),
+            );
+        };
+        let before = self.logit;
+        let lr = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("SgtClassifier learning_rate is not a positive finite; using 0.1")
+                    .build(),
+            );
+            0.1
+        };
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let yi = if y[i] >= 0.5 { 1.0 } else { 0.0 };
+            let p0 = 1.0 / (1.0 + (-self.logit).exp());
+            loss_before += -(yi * p0.max(1e-15).ln() + (1.0 - yi) * (1.0 - p0).max(1e-15).ln());
+            self.logit -= lr * (p0 - yi);
+            let p1 = 1.0 / (1.0 + (-self.logit).exp());
+            loss_after += -(yi * p1.max(1e-15).ln() + (1.0 - yi) * (1.0 - p1).max(1e-15).ln());
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.logit - before).abs());
+        q.information_gain = Some((loss_before - loss_after).abs());
+        q.loss_before = Some(loss_before);
+        q.loss_after = Some(loss_after);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 5;
+        q.explanation = format!("SgtClassifier logit {:.6e} → {:.6e}", before, self.logit);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "SGT leaf logit",
+                "log-loss SGD on a single stochastic-gradient tree leaf",
+                format!("logit={before:.6e}"),
+                format!("logit={:.6e}", self.logit),
+            ),
+        )
+    }
+}
+
+/// Stochastic gradient tree regressor (river `tree.SGTRegressor`).
+///
+/// Lite: a single leaf mean updated by squared-error SGD. Leaf count is not
+/// identification `p`.
+#[derive(Clone, Debug)]
+pub struct SgtRegressor {
+    /// Step size.
+    pub learning_rate: f64,
+    level: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for SgtRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.1,
+            level: 0.0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl SgtRegressor {
+    /// Default SGT regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for SgtRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "SGT needs y"),
+            );
+        };
+        let before = self.level;
+        let lr = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("SgtRegressor learning_rate is not a positive finite; using 0.1")
+                    .build(),
+            );
+            0.1
+        };
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let e0 = self.level - y[i];
+            loss_before += e0 * e0;
+            self.level -= lr * e0;
+            let e1 = self.level - y[i];
+            loss_after += e1 * e1;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.level - before).abs());
+        q.information_gain = Some((loss_before - loss_after).abs());
+        q.loss_before = Some(loss_before);
+        q.loss_after = Some(loss_after);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 5;
+        q.explanation = format!("SgtRegressor level {:.6e} → {:.6e}", before, self.level);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "SGT leaf level",
+                "squared-error SGD on a single stochastic-gradient tree leaf",
+                format!("level={before:.6e}"),
+                format!("level={:.6e}", self.level),
+            ),
+        )
+    }
+}
+
+/// Incremental multi-output Hoeffding-style tree (river `iSOUPTreeRegressor`).
+///
+/// Output 0 is `y`. Extra `X` columns beyond the first are additional targets.
+/// Output count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct IsoUPTree {
+    /// Number of output heads.
+    pub n_outputs: usize,
+    means: Vec<f64>,
+    counts: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for IsoUPTree {
+    fn default() -> Self {
+        Self {
+            n_outputs: 2,
+            means: vec![0.0; 2],
+            counts: vec![0.0; 2],
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl IsoUPTree {
+    /// `n_outputs` target heads.
+    pub fn new(n_outputs: usize) -> Self {
+        let k = n_outputs.max(1);
+        Self {
+            n_outputs: k,
+            means: vec![0.0; k],
+            counts: vec![0.0; k],
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl PartialFit for IsoUPTree {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "iSOUP needs y"),
+            );
+        };
+        if self.n_outputs > 1 && x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("IsoUPTree extra outputs have no extra X columns; only y is updated")
+                    .build(),
+            );
+        }
+        if self.means.len() != self.n_outputs.max(1) {
+            self.means.resize(self.n_outputs.max(1), 0.0);
+            self.counts.resize(self.n_outputs.max(1), 0.0);
+        }
+        let before = self.means.clone();
+        for i in 0..x.nrows().min(y.len()) {
+            if y[i].is_finite() {
+                let c = self.counts[0] + 1.0;
+                self.means[0] += (y[i] - self.means[0]) / c;
+                self.counts[0] = c;
+            }
+            for o in 1..self.n_outputs.min(self.means.len()) {
+                if o < x.ncols() {
+                    let v = x.get(i, o);
+                    if v.is_finite() {
+                        let c = self.counts[o] + 1.0;
+                        self.means[o] += (v - self.means[o]) / c;
+                        self.counts[o] = c;
+                    }
+                }
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut dsum = 0.0_f64;
+        for (a, b) in before.iter().zip(self.means.iter()) {
+            dsum += (b - a).abs();
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(dsum);
+        q.still_identified = self.counts.iter().all(|&c| c > 0.0);
+        q.warmup = self.counts.iter().any(|&c| c < 2.0);
+        q.explanation = format!("IsoUPTree means={:?}", self.means);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "iSOUP per-output leaf means",
+                "incremental multi-target means; extra X columns are additional targets",
+                format!("means={before:?}"),
+                format!("means={:?}", self.means),
+            ),
+        )
+    }
+}
+
+/// Pegasos hinge SVM (online linear SVM; river / SGD hinge peer).
+///
+/// Feature count is not treated as an extra identification `p` on a stream.
+#[derive(Clone, Debug)]
+pub struct OnlineSvm {
+    /// Regularization \(\lambda > 0\).
+    pub lambda: f64,
+    coef: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineSvm {
+    fn default() -> Self {
+        Self {
+            lambda: 1e-3,
+            coef: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineSvm {
+    /// Default Pegasos SVM.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for OnlineSvm {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "OnlineSvm needs labels",
+                ),
+            );
+        };
+        if !self.initialized {
+            self.coef = Vector::zeros(x.ncols());
+            self.initialized = true;
+        } else if self.coef.len() != x.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message("OnlineSvm feature count changed")
+                    .build(),
+            );
+            self.coef = Vector::zeros(x.ncols());
+        }
+        let mut lam = self.lambda;
+        if !lam.is_finite() || lam <= 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "OnlineSvm λ={lam} is not a positive finite; using 1e-3"
+                    ))
+                    .build(),
+            );
+            lam = 1e-3;
+            self.lambda = lam;
+        }
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let yi = if y[i] >= 0.5 { 1.0 } else { -1.0 };
+            let mut pred = 0.0_f64;
+            for j in 0..x.ncols() {
+                pred += self.coef[j] * x.get(i, j);
+            }
+            loss_before += (1.0 - yi * pred).max(0.0);
+            self.n_seen += 1;
+            let eta = 1.0 / (lam * self.n_seen as f64);
+            let decay = (1.0 - eta * lam).max(0.0);
+            for j in 0..x.ncols() {
+                self.coef[j] *= decay;
+            }
+            if yi * pred < 1.0 {
+                for j in 0..x.ncols() {
+                    self.coef[j] += eta * yi * x.get(i, j);
+                }
+            }
+            let mut pred1 = 0.0_f64;
+            for j in 0..x.ncols() {
+                pred1 += self.coef[j] * x.get(i, j);
+            }
+            loss_after += (1.0 - yi * pred1).max(0.0);
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "Pegasos hinge weights",
+            "online SVM: decay toward the regularizer, then a hinge subgradient step",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
 /// Streaming median absolute deviation (river `stats.MAD`).
 #[derive(Clone, Debug, Default)]
 pub struct OnlineMad {
@@ -18065,6 +18498,18 @@ mod tests {
         BagOfWords::new(4)
             .partial_fit(&x, None, &session)
             .expect("bow");
+        SgtClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("sgtc");
+        SgtRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("sgtr");
+        IsoUPTree::new(2)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("isoup");
+        OnlineSvm::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("osvm");
 
         let n_expl = session
             .ledger()
