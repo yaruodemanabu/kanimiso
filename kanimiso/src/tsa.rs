@@ -5936,6 +5936,226 @@ pub fn periodogram(y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
     ctx.finish(out)
 }
 
+/// Welch averaged periodogram (statsmodels `signal.spectral.welch` / SciPy).
+///
+/// Segment length is not identification `p`. A Hann taper is applied; a
+/// single segment is recorded as spectral leakage.
+pub fn welch(y: &Vector, nperseg: usize, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let n = y.len();
+    let mut seg = nperseg;
+    if seg < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("welch nperseg={nperseg} < 2; using 8"))
+                .build(),
+        );
+        seg = 8;
+    }
+    if n < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .message(format!("welch needs n≥4; got {n}"))
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(0));
+    }
+    if seg > n {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .message(format!("welch nperseg={seg} > n={n}; using n"))
+                .build(),
+        );
+        seg = n;
+    }
+    let step = (seg / 2).max(1);
+    let n_seg = if n >= seg { (n - seg) / step + 1 } else { 1 };
+    if n_seg <= 1 {
+        ctx.push(
+            Issue::builder(IssueCode::SpectralLeakage)
+                .message("welch used a single segment; the average is one tapered periodogram")
+                .compromise(NumericalCompromise::new(
+                    "overlapped Welch average",
+                    "one Hann-tapered periodogram",
+                    "n is too short for a second hop",
+                    "do not read a single-segment Welch as a variance-reduced spectrum",
+                ))
+                .build(),
+        );
+    }
+    let m = (seg / 2).max(1);
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let mut acc = vec![0.0; m];
+    let mut used: f64 = 0.0;
+    for s in 0..n_seg {
+        let start = s * step;
+        if start + seg > n {
+            break;
+        }
+        let mut wsum = 0.0;
+        let mut win = vec![0.0; seg];
+        for t in 0..seg {
+            let w = if seg == 1 {
+                1.0
+            } else {
+                0.5 * (1.0 - (two_pi * t as f64 / (seg - 1) as f64).cos())
+            };
+            win[t] = w * y[start + t];
+            wsum += w * w;
+        }
+        let den = wsum.max(1e-18);
+        for k in 1..=m {
+            let mut re: f64 = 0.0;
+            let mut im: f64 = 0.0;
+            for t in 0..seg {
+                let ang = two_pi * k as f64 * t as f64 / seg as f64;
+                re += win[t] * ang.cos();
+                im += win[t] * ang.sin();
+            }
+            acc[k - 1] += (re * re + im * im) / den;
+        }
+        used += 1.0;
+    }
+    if used <= 0.0 {
+        return ctx.finish(Vector::zeros(0));
+    }
+    ctx.finish(Vector::from_iter(acc.iter().map(|v| *v / used)))
+}
+
+/// AIC / BIC grid over ARMA(\(p,q\)) = ARIMA(\(p,0,q\)) (statsmodels
+/// `arma_order_select_ic`).
+///
+/// Order bounds are not identification `p`. Inner Hannan–Rissanen residuals
+/// that would abort a standalone ARIMA are skipped.
+#[derive(Clone, Debug)]
+pub struct ArmaOrderSelect {
+    /// Winning AR order.
+    pub p: usize,
+    /// Winning MA order.
+    pub q: usize,
+    /// AIC of the winner.
+    pub aic: f64,
+    /// BIC of the winner.
+    pub bic: f64,
+    /// `(p, q, aic, bic)` for every successful grid point.
+    pub scores: Vec<(usize, usize, f64, f64)>,
+}
+
+/// Select ARMA(\(p,q\)) by AIC on a Hannan–Rissanen grid with \(d=0\).
+pub fn arma_order_select_ic(
+    y: &Vector,
+    max_p: usize,
+    max_q: usize,
+    session: &Session,
+) -> Result<Qualified<ArmaOrderSelect>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let pmax = max_p.min(4);
+    let qmax = max_q.min(4);
+    if max_p > 4 || max_q > 4 {
+        ctx.push(
+            Issue::builder(IssueCode::Overparameterized)
+                .severity(Severity::Advisory)
+                .message(format!(
+                    "arma_order_select_ic clamped max_p={max_p} max_q={max_q} to 4"
+                ))
+                .build(),
+        );
+    }
+    let mut scores = Vec::new();
+    let mut best: Option<(f64, usize, usize, f64)> = None;
+    for p in 0..=pmax {
+        for q in 0..=qmax {
+            let mut spec = Arima { p, d: 0, q };
+            match spec.fit_series(y, &session.child(format!("arma_{p}0{q}"))) {
+                Ok(fit) => {
+                    for issue in fit.report.issues() {
+                        if matches!(
+                            issue.code,
+                            IssueCode::ResidualTooLarge
+                                | IssueCode::NearSingular
+                                | IssueCode::RankZero
+                                | IssueCode::R2IsOne
+                                | IssueCode::ShortSeriesForArima
+                                | IssueCode::PerfectCollinearity
+                        ) {
+                            continue;
+                        }
+                        ctx.push(issue.clone());
+                    }
+                    if !fit.value.sigma2.is_finite() {
+                        continue;
+                    }
+                    let n = fit.value.resid.len().max(1) as f64;
+                    let k = (1 + p + q) as f64;
+                    let s2 = fit.value.sigma2.max(1e-18);
+                    let aic = n * s2.ln() + 2.0 * k;
+                    let bic = n * s2.ln() + k * n.ln();
+                    scores.push((p, q, aic, bic));
+                    match &best {
+                        Some((b, _, _, _)) if aic >= *b => {}
+                        _ => best = Some((aic, p, q, bic)),
+                    }
+                }
+                Err(e) => {
+                    if !matches!(
+                        e.primary.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::RankZero
+                            | IssueCode::R2IsOne
+                            | IssueCode::ShortSeriesForArima
+                    ) {
+                        ctx.push(
+                            Issue::builder(IssueCode::DidNotConverge)
+                                .severity(Severity::Advisory)
+                                .message(format!("ARMA({p},{q}) rejected: {}", e.primary().code))
+                                .build(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    ctx.push(
+        Issue::builder(IssueCode::Overparameterized)
+            .severity(Severity::Advisory)
+            .message("arma_order_select_ic AIC/BIC use Hannan–Rissanen σ², not the exact Gaussian likelihood")
+            .compromise(NumericalCompromise::new(
+                "exact-likelihood ARMA order selection",
+                "Hannan–Rissanen OLS grid + n ln σ² + 2k / k ln n",
+                "failed orders and residual-too-large trials are skipped",
+                "the selected (p,q) is a relative AIC winner on this grid only",
+            ))
+            .build(),
+    );
+    match best {
+        Some((aic, p, q, bic)) => ctx.finish(ArmaOrderSelect {
+            p,
+            q,
+            aic,
+            bic,
+            scores,
+        }),
+        None => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("arma_order_select_ic found no identified ARMA on the grid")
+                    .build(),
+            );
+            ctx.finish(ArmaOrderSelect {
+                p: 0,
+                q: 0,
+                aic: f64::NAN,
+                bic: f64::NAN,
+                scores,
+            })
+        }
+    }
+}
+
 /// Multiple seasonal-trend LOESS (sktime `MSTL`).
 ///
 /// Second-period STL is run on the first residual. Periods are not
@@ -7559,5 +7779,15 @@ mod tests {
             .value;
         assert_eq!(kakf.len(), 3);
         assert!(kakf.as_slice().iter().all(|v| v.is_finite()));
+        let w = welch(&y, 16, &Session::new("welch", "fit"))
+            .expect("welch")
+            .value;
+        assert!(!w.is_empty());
+        assert!(w.as_slice().iter().all(|v| v.is_finite() && *v >= 0.0));
+        let ao = arma_order_select_ic(&y, 1, 1, &Session::new("armaic", "fit"))
+            .expect("armaic")
+            .value;
+        assert!(ao.aic.is_finite() || ao.scores.is_empty());
+        assert!(ao.p <= 1 && ao.q <= 1);
     }
 }

@@ -9,7 +9,9 @@ use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::validate::{inspect_classes, inspect_xy};
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Meaninglessness, Qualified, Result, Severity};
+use signlred::{
+    Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result, Severity,
+};
 
 /// Precision, recall, and F1 (binary or macro-averaged).
 #[derive(Clone, Debug, PartialEq)]
@@ -1224,6 +1226,375 @@ pub fn calibration_curve(
     })
 }
 
+/// ROC curve points (sklearn `roc_curve`).
+#[derive(Clone, Debug)]
+pub struct RocCurve {
+    /// False-positive rates, high-score first then descending thresholds.
+    pub fpr: Vector,
+    /// True-positive rates.
+    pub tpr: Vector,
+    /// Score thresholds (one per point, plus a leading `+∞` sentinel dropped).
+    pub thresholds: Vector,
+}
+
+/// Binary ROC curve from scores. Constant `y` is vacuous.
+pub fn roc_curve(
+    y_true: &Vector,
+    scores: &Vector,
+    session: &Session,
+) -> Result<Qualified<RocCurve>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, scores, "roc_curve") {
+        return ctx.finish(RocCurve {
+            fpr: Vector::zeros(0),
+            tpr: Vector::zeros(0),
+            thresholds: Vector::zeros(0),
+        });
+    }
+    inspect_classes(&mut ctx.report, y_true, &ctx.policy);
+    warn_constant_target(&mut ctx, y_true, true);
+    let yt = labels_of(y_true);
+    let classes = unique_sorted(&yt);
+    if classes.len() != 2 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message(format!(
+                    "roc_curve is defined for two classes; found {}",
+                    classes.len()
+                ))
+                .meaninglessness(Meaninglessness::vacuous(
+                    "ROC curve",
+                    "the curve is a two-class functional",
+                    "use a one-vs-rest reduction",
+                ))
+                .build(),
+        );
+        return ctx.finish(RocCurve {
+            fpr: Vector::zeros(0),
+            tpr: Vector::zeros(0),
+            thresholds: Vector::zeros(0),
+        });
+    }
+    let pos = classes[1];
+    let mut pairs: Vec<(f64, bool)> = (0..yt.len())
+        .filter(|&i| y_true[i].is_finite() && scores[i].is_finite())
+        .map(|i| (scores[i], yt[i] == pos))
+        .collect();
+    pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let n_pos = pairs.iter().filter(|p| p.1).count() as f64;
+    let n_neg = pairs.len() as f64 - n_pos;
+    if n_pos <= 0.0 || n_neg <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyClass)
+                .message("roc_curve needs both a positive and a negative class")
+                .build(),
+        );
+        return ctx.finish(RocCurve {
+            fpr: Vector::zeros(0),
+            tpr: Vector::zeros(0),
+            thresholds: Vector::zeros(0),
+        });
+    }
+    let mut fpr = vec![0.0];
+    let mut tpr = vec![0.0];
+    let mut thr = vec![f64::INFINITY];
+    let mut tp: f64 = 0.0;
+    let mut fp: f64 = 0.0;
+    let mut i = 0;
+    while i < pairs.len() {
+        let t = pairs[i].0;
+        while i < pairs.len() && (pairs[i].0 - t).abs() <= 0.0 {
+            if pairs[i].1 {
+                tp += 1.0;
+            } else {
+                fp += 1.0;
+            }
+            i += 1;
+        }
+        fpr.push(fp / n_neg);
+        tpr.push(tp / n_pos);
+        thr.push(t);
+    }
+    ctx.finish(RocCurve {
+        fpr: Vector::from_slice(&fpr),
+        tpr: Vector::from_slice(&tpr),
+        thresholds: Vector::from_slice(&thr),
+    })
+}
+
+/// Precision–recall curve (sklearn `precision_recall_curve`).
+#[derive(Clone, Debug)]
+pub struct PrecisionRecallCurve {
+    /// Precision at each threshold.
+    pub precision: Vector,
+    /// Recall at each threshold.
+    pub recall: Vector,
+    /// Score thresholds.
+    pub thresholds: Vector,
+}
+
+/// Binary precision–recall curve from scores.
+pub fn precision_recall_curve(
+    y_true: &Vector,
+    scores: &Vector,
+    session: &Session,
+) -> Result<Qualified<PrecisionRecallCurve>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, scores, "precision_recall_curve") {
+        return ctx.finish(PrecisionRecallCurve {
+            precision: Vector::zeros(0),
+            recall: Vector::zeros(0),
+            thresholds: Vector::zeros(0),
+        });
+    }
+    inspect_classes(&mut ctx.report, y_true, &ctx.policy);
+    warn_constant_target(&mut ctx, y_true, true);
+    let yt = labels_of(y_true);
+    let classes = unique_sorted(&yt);
+    if classes.len() != 2 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message(format!(
+                    "precision_recall_curve is defined for two classes; found {}",
+                    classes.len()
+                ))
+                .meaninglessness(Meaninglessness::vacuous(
+                    "precision–recall curve",
+                    "the curve is a two-class functional",
+                    "use a one-vs-rest reduction",
+                ))
+                .build(),
+        );
+        return ctx.finish(PrecisionRecallCurve {
+            precision: Vector::zeros(0),
+            recall: Vector::zeros(0),
+            thresholds: Vector::zeros(0),
+        });
+    }
+    let pos = classes[1];
+    let mut pairs: Vec<(f64, bool)> = (0..yt.len())
+        .filter(|&i| y_true[i].is_finite() && scores[i].is_finite())
+        .map(|i| (scores[i], yt[i] == pos))
+        .collect();
+    pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let n_pos = pairs.iter().filter(|p| p.1).count() as f64;
+    if n_pos <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyClass)
+                .message("precision_recall_curve has no positive labels")
+                .build(),
+        );
+        return ctx.finish(PrecisionRecallCurve {
+            precision: Vector::zeros(0),
+            recall: Vector::zeros(0),
+            thresholds: Vector::zeros(0),
+        });
+    }
+    let mut prec = Vec::new();
+    let mut rec = Vec::new();
+    let mut thr = Vec::new();
+    let mut tp: f64 = 0.0;
+    let mut fp: f64 = 0.0;
+    let mut i = 0;
+    while i < pairs.len() {
+        let t = pairs[i].0;
+        while i < pairs.len() && (pairs[i].0 - t).abs() <= 0.0 {
+            if pairs[i].1 {
+                tp += 1.0;
+            } else {
+                fp += 1.0;
+            }
+            i += 1;
+        }
+        prec.push(tp / (tp + fp).max(1e-12));
+        rec.push(tp / n_pos);
+        thr.push(t);
+    }
+    ctx.finish(PrecisionRecallCurve {
+        precision: Vector::from_slice(&prec),
+        recall: Vector::from_slice(&rec),
+        thresholds: Vector::from_slice(&thr),
+    })
+}
+
+/// Mean hinge loss \(\max(0, 1 - y s)\) with \(y\in\{\pm 1\}\).
+pub fn hinge_loss(y_true: &Vector, scores: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, scores, "hinge_loss") {
+        return ctx.finish(f64::NAN);
+    }
+    warn_constant_target(&mut ctx, y_true, true);
+    let mut acc = 0.0;
+    let mut n = 0.0;
+    for i in 0..y_true.len().min(scores.len()) {
+        if !y_true[i].is_finite() || !scores[i].is_finite() {
+            continue;
+        }
+        let y = if y_true[i] > 0.5 { 1.0 } else { -1.0 };
+        acc += (1.0 - y * scores[i]).max(0.0);
+        n += 1.0;
+    }
+    ctx.finish(if n > 0.0 { acc / n } else { f64::NAN })
+}
+
+/// Zero–one loss \(1-\mathrm{accuracy}\).
+pub fn zero_one_loss(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let q = accuracy(y_true, y_pred, session)?;
+    let mut ctx = FitCtx::with_session(session.child("zo"));
+    for issue in q.report.issues() {
+        ctx.push(issue.clone());
+    }
+    ctx.finish(1.0 - q.value)
+}
+
+/// Binary Jaccard index (sklearn `jaccard_score`).
+pub fn jaccard_score(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "jaccard_score") {
+        return ctx.finish(f64::NAN);
+    }
+    inspect_classes(&mut ctx.report, y_true, &ctx.policy);
+    warn_constant_target(&mut ctx, y_true, true);
+    let mut inter = 0.0;
+    let mut union = 0.0;
+    for i in 0..y_true.len().min(y_pred.len()) {
+        let a = y_true[i] > 0.5;
+        let b = y_pred[i] > 0.5;
+        if a && b {
+            inter += 1.0;
+        }
+        if a || b {
+            union += 1.0;
+        }
+    }
+    if union <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyClass)
+                .severity(Severity::Warning)
+                .message("jaccard_score union is empty; both sides are all-negative")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(inter / union)
+}
+
+fn tweedie_deviance(y: f64, mu: f64, power: f64) -> f64 {
+    let mu = mu.max(1e-12);
+    let y = y.max(0.0);
+    if (power - 0.0).abs() < 1e-12 {
+        let e = y - mu;
+        return e * e;
+    }
+    if (power - 1.0).abs() < 1e-12 {
+        let yl = if y > 0.0 { y * (y / mu).ln() } else { 0.0 };
+        return 2.0 * (yl - (y - mu));
+    }
+    if (power - 2.0).abs() < 1e-12 {
+        let yl = if y > 0.0 { (mu / y).ln() } else { mu.ln() };
+        return 2.0 * (yl + y / mu - 1.0);
+    }
+    let p = power;
+    2.0 * (y.max(0.0).powf(2.0 - p) / ((1.0 - p) * (2.0 - p)) - y * mu.powf(1.0 - p) / (1.0 - p)
+        + mu.powf(2.0 - p) / (2.0 - p))
+}
+
+/// Mean Tweedie deviance (sklearn `mean_tweedie_deviance` / Poisson).
+pub fn mean_poisson_deviance(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    mean_tweedie_deviance(y_true, y_pred, 1.0, session)
+}
+
+/// Mean Tweedie deviance at power `p`.
+pub fn mean_tweedie_deviance(
+    y_true: &Vector,
+    y_pred: &Vector,
+    power: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "mean_tweedie_deviance") {
+        return ctx.finish(f64::NAN);
+    }
+    if !power.is_finite() {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("Tweedie power={power} is not finite; using 0"))
+                .build(),
+        );
+    }
+    let p = if power.is_finite() { power } else { 0.0 };
+    let mut acc = 0.0;
+    let mut n = 0.0;
+    for i in 0..y_true.len().min(y_pred.len()) {
+        if !y_true[i].is_finite() || !y_pred[i].is_finite() {
+            continue;
+        }
+        if y_true[i] < 0.0 || (p >= 1.0 && y_pred[i] <= 0.0) {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "Tweedie deviance skipped y={}, μ={} at power {p}",
+                        y_true[i], y_pred[i]
+                    ))
+                    .build(),
+            );
+            continue;
+        }
+        acc += tweedie_deviance(y_true[i], y_pred[i], p);
+        n += 1.0;
+    }
+    ctx.finish(if n > 0.0 { acc / n } else { f64::NAN })
+}
+
+/// \(D^2\) Tweedie score (sklearn `d2_tweedie_score`).
+pub fn d2_tweedie_score(
+    y_true: &Vector,
+    y_pred: &Vector,
+    power: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let d_model = mean_tweedie_deviance(y_true, y_pred, power, &session.child("d_model"))?;
+    for issue in d_model.report.issues() {
+        if issue.code == IssueCode::MeaninglessFit {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let mean = y_true.mean();
+    let null = Vector::from_iter((0..y_true.len()).map(|_| mean));
+    let d_null = mean_tweedie_deviance(y_true, &null, power, &session.child("d_null"))?;
+    if !d_null.value.is_finite() || d_null.value.abs() <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::R2IsZero)
+                .message("D² Tweedie null deviance is ~0; the score is undefined")
+                .compromise(NumericalCompromise::new(
+                    "positive null Tweedie deviance",
+                    "D² set to NaN",
+                    "the intercept-only deviance vanished",
+                    "do not read a missing D² as a perfect fit",
+                ))
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(1.0 - d_model.value / d_null.value)
+}
+
 fn bump<K: PartialEq>(xs: &mut Vec<(K, f64)>, key: K) {
     if let Some(e) = xs.iter_mut().find(|(k, _)| *k == key) {
         e.1 += 1.0;
@@ -1259,6 +1630,23 @@ mod tests {
             .unwrap()
             .value;
         assert!((auc - 1.0).abs() < 1e-12);
+        let roc = roc_curve(&y, &s, &Session::new("metrics", "roc"))
+            .unwrap()
+            .value;
+        assert!(roc.tpr.len() >= 2);
+        assert!(roc.tpr.as_slice().iter().any(|v| *v >= 1.0 - 1e-12));
+        let prc = precision_recall_curve(&y, &s, &Session::new("metrics", "prc"))
+            .unwrap()
+            .value;
+        assert!(prc.recall.as_slice().last().copied().unwrap_or(0.0) >= 1.0 - 1e-12);
+        let hl = hinge_loss(
+            &Vector::from_slice(&[-1.0, -1.0, 1.0, 1.0]),
+            &s,
+            &Session::new("metrics", "hinge"),
+        )
+        .unwrap()
+        .value;
+        assert!(hl >= 0.0 && hl.is_finite());
     }
 
     #[test]
@@ -1401,5 +1789,33 @@ mod tests {
             .value;
         assert!(cal.prob_true.len() >= 2);
         assert_eq!(cal.prob_true.len(), cal.prob_pred.len());
+        let zo = zero_one_loss(
+            &y,
+            &Vector::from_slice(&[0.0, 1.0, 1.0, 0.0]),
+            &Session::new("m", "zo"),
+        )
+        .unwrap()
+        .value;
+        assert!(zo.abs() < 1e-12);
+        let jac = jaccard_score(
+            &y,
+            &Vector::from_slice(&[0.0, 1.0, 1.0, 0.0]),
+            &Session::new("m", "jac"),
+        )
+        .unwrap()
+        .value;
+        assert!((jac - 1.0).abs() < 1e-12);
+        let pd = mean_poisson_deviance(&y2, &h2, &Session::new("m", "pois"))
+            .unwrap()
+            .value;
+        assert!(pd.is_finite() && pd >= 0.0);
+        let td = mean_tweedie_deviance(&y2, &h2, 0.0, &Session::new("m", "tw"))
+            .unwrap()
+            .value;
+        assert!(td.is_finite() && td >= 0.0);
+        let d2 = d2_tweedie_score(&y2, &h2, 0.0, &Session::new("m", "d2"))
+            .unwrap()
+            .value;
+        assert!(d2.is_finite());
     }
 }

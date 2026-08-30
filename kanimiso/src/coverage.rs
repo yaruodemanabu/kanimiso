@@ -2503,6 +2503,79 @@ const INVENTORY: &[Algorithm] = &[
         "river.anomaly.GaussianScorer",
         "online",
     ),
+    a("metrics.roc_curve", "sklearn.metrics.roc_curve", "metric"),
+    a(
+        "metrics.precision_recall_curve",
+        "sklearn.metrics.precision_recall_curve",
+        "metric",
+    ),
+    a("metrics.hinge_loss", "sklearn.metrics.hinge_loss", "metric"),
+    a(
+        "metrics.zero_one_loss",
+        "sklearn.metrics.zero_one_loss",
+        "metric",
+    ),
+    a(
+        "metrics.jaccard_score",
+        "sklearn.metrics.jaccard_score",
+        "metric",
+    ),
+    a(
+        "metrics.mean_poisson_deviance",
+        "sklearn.metrics.mean_poisson_deviance",
+        "metric",
+    ),
+    a(
+        "metrics.mean_tweedie_deviance",
+        "sklearn.metrics.mean_tweedie_deviance",
+        "metric",
+    ),
+    a(
+        "metrics.d2_tweedie_score",
+        "sklearn.metrics.d2_tweedie_score",
+        "metric",
+    ),
+    a(
+        "reducer.DirRecReducer",
+        "sktime.forecasting.compose.DirRecReducer",
+        "forecast",
+    ),
+    a(
+        "tslearn.RocketRegressor",
+        "sktime.regression.kernel_based.RocketRegressor",
+        "timeseries",
+    ),
+    a("tslearn.msm", "tslearn.metrics.msm", "timeseries"),
+    a("tslearn.twe", "tslearn.metrics.twe", "timeseries"),
+    a(
+        "tslearn.OneDSax",
+        "tslearn.piecewise.OneD_SAX",
+        "timeseries",
+    ),
+    a("tsa.welch", "scipy.signal.welch", "forecast"),
+    a(
+        "tsa.arma_order_select_ic",
+        "statsmodels.tsa.stattools.arma_order_select_ic",
+        "forecast",
+    ),
+    a("online.OnlineF1", "river.metrics.F1", "online"),
+    a(
+        "online.OnlinePrecision",
+        "river.metrics.Precision",
+        "online",
+    ),
+    a("online.OnlineRecall", "river.metrics.Recall", "online"),
+    a(
+        "online.OnlineBernoulliNb",
+        "river.naive_bayes.BernoulliNB",
+        "online",
+    ),
+    a("online.EwaRegressor", "river.optim.EWARegressor", "online"),
+    a(
+        "online.QuantileFilter",
+        "river.anomaly.QuantileFilter",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -2594,6 +2667,12 @@ mod tests {
             "online.OnlineMultinomialNb",
             "tsa.LogTransformer",
             "iv.hc1",
+            "metrics.roc_curve",
+            "reducer.DirRecReducer",
+            "tslearn.RocketRegressor",
+            "tslearn.msm",
+            "tsa.welch",
+            "online.OnlineF1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

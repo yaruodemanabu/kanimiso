@@ -1504,6 +1504,100 @@ impl Predict for FittedRocketClassifier {
     }
 }
 
+/// ROCKET features plus ridge (sktime `RocketRegressor`).
+///
+/// Kernel count is not identification `p`. The ridge solve is scratch-reported
+/// so a large kernel map on a short panel cannot abort via identification.
+#[derive(Clone, Debug)]
+pub struct RocketRegressor {
+    /// Random kernels.
+    pub n_kernels: usize,
+    /// Kernel length.
+    pub kernel_len: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for RocketRegressor {
+    fn default() -> Self {
+        Self {
+            n_kernels: 16,
+            kernel_len: 5,
+            alpha: 1.0,
+            seed: 5,
+        }
+    }
+}
+
+impl RocketRegressor {
+    /// Default ROCKET regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted ROCKET + ridge regressor.
+#[derive(Clone, Debug)]
+pub struct FittedRocketRegressor {
+    rocket: Rocket,
+    inner: FittedPenalized,
+}
+
+impl Fit for RocketRegressor {
+    type Fitted = FittedRocketRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRocketRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let rocket = Rocket {
+            n_kernels: self.n_kernels.max(1),
+            kernel_len: self.kernel_len.max(1),
+            seed: self.seed,
+        };
+        let feat = rocket.transform(x, &session.child("rocket"))?;
+        let mut scratch = signlred::Report::new("rocket_reg", "ridge");
+        let design = feat.value.with_intercept();
+        let beta = ridge_solve(&mut scratch, &design, y, self.alpha.max(0.0), &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::PerfectCollinearity
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedRocketRegressor {
+            rocket,
+            inner: FittedPenalized {
+                coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+                alpha: self.alpha,
+                l1_ratio: 0.0,
+            },
+        })
+    }
+}
+
+impl Predict for FittedRocketRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let feat = self.rocket.transform(x, &session.child("rocket"))?;
+        self.inner.predict(&feat.value, session)
+    }
+}
+
 /// Majority vote of ROCKET and a time-series forest (sktime `HIVECOTE` lite).
 ///
 /// Ensemble size is not identification `p`.
@@ -1880,6 +1974,93 @@ impl Transform for Sax {
             let v = z.get(i, j);
             let u = 0.5 + 0.5 * crate::special::erf(v / std::f64::consts::SQRT_2);
             ((u * a as f64).floor() as usize).min(a - 1) as f64
+        });
+        ctx.finish(out)
+    }
+}
+
+/// 1d-SAX: PAA mean and slope, then symbolic bins (tslearn `OneD_SAX`).
+///
+/// Segment / alphabet counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct OneDSax {
+    /// PAA segments.
+    pub n_segments: usize,
+    /// Alphabet size for each of mean and slope.
+    pub alphabet: usize,
+}
+
+impl Default for OneDSax {
+    fn default() -> Self {
+        Self {
+            n_segments: 4,
+            alphabet: 4,
+        }
+    }
+}
+
+impl OneDSax {
+    /// 1d-SAX with the given segments and alphabet.
+    pub fn new(n_segments: usize, alphabet: usize) -> Self {
+        Self {
+            n_segments: n_segments.max(1),
+            alphabet: alphabet.max(2),
+        }
+    }
+}
+
+impl Transform for OneDSax {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("oned_sax"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let m = self.n_segments.max(1).min(x.ncols().max(1));
+        let a = if self.alphabet >= 2 {
+            self.alphabet
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("OneDSax alphabet={} < 2; using 2", self.alphabet))
+                    .build(),
+            );
+            2
+        };
+        let symbol = |v: f64| -> f64 {
+            let u = 0.5 + 0.5 * crate::special::erf(v / std::f64::consts::SQRT_2);
+            ((u * a as f64).floor() as usize).min(a - 1) as f64
+        };
+        let out = Matrix::from_fn(x.nrows(), m * 2, |i, col| {
+            let s = col / 2;
+            let want_slope = col % 2 == 1;
+            let lo = s * x.ncols() / m;
+            let hi = ((s + 1) * x.ncols() / m).max(lo + 1).min(x.ncols());
+            let n = (hi - lo) as f64;
+            if n <= 0.0 {
+                return 0.0;
+            }
+            let mut sy = 0.0;
+            let mut st = 0.0;
+            let mut stt = 0.0;
+            let mut sty = 0.0;
+            for (k, j) in (lo..hi).enumerate() {
+                let t = k as f64;
+                let y = x.get(i, j);
+                sy += y;
+                st += t;
+                stt += t * t;
+                sty += t * y;
+            }
+            let mean = sy / n;
+            if !want_slope {
+                return symbol(mean);
+            }
+            let den = stt - st * st / n;
+            let slope = if den.abs() <= ctx.policy.near_zero_variance {
+                0.0
+            } else {
+                (sty - st * sy / n) / den
+            };
+            symbol(slope)
         });
         ctx.finish(out)
     }
@@ -2502,6 +2683,131 @@ pub fn erp(a: &Vector, b: &Vector, g: f64, session: &Session) -> Result<Qualifie
             let match_c = dp[at(i - 1, j - 1)] + (a[i - 1] - b[j - 1]).abs();
             let del = dp[at(i - 1, j)] + (a[i - 1] - g).abs();
             let ins = dp[at(i, j - 1)] + (b[j - 1] - g).abs();
+            dp[at(i, j)] = match_c.min(del).min(ins);
+        }
+    }
+    ctx.finish(dp[at(n, m)])
+}
+
+fn msm_cost(new_p: f64, x: f64, y: f64, c: f64) -> f64 {
+    let lo = x.min(y);
+    let hi = x.max(y);
+    if new_p >= lo && new_p <= hi {
+        c
+    } else {
+        c + (new_p - x).abs().min((new_p - y).abs())
+    }
+}
+
+/// Move–Split–Merge distance (tslearn `msm`).
+///
+/// The move cost is \(|x_i-y_j|\); split/merge pay `c` plus a possible extra
+/// jump. `c` is not identification `p`.
+pub fn msm(a: &Vector, b: &Vector, c: f64, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let c = if c.is_finite() && c >= 0.0 {
+        c
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "msm c={c} is not a finite non-negative cost; using 0.1"
+                ))
+                .build(),
+        );
+        0.1
+    };
+    if a.is_empty() || b.is_empty() {
+        ctx.push(Issue::builder(IssueCode::EmptyMatrix).build());
+        return ctx.finish(f64::NAN);
+    }
+    let n = a.len();
+    let m = b.len();
+    let mut dp = vec![0.0; n * m];
+    let at = |i: usize, j: usize| i * m + j;
+    dp[at(0, 0)] = (a[0] - b[0]).abs();
+    for i in 1..n {
+        dp[at(i, 0)] = dp[at(i - 1, 0)] + msm_cost(a[i], a[i - 1], b[0], c);
+    }
+    for j in 1..m {
+        dp[at(0, j)] = dp[at(0, j - 1)] + msm_cost(b[j], b[j - 1], a[0], c);
+    }
+    for i in 1..n {
+        for j in 1..m {
+            let mv = dp[at(i - 1, j - 1)] + (a[i] - b[j]).abs();
+            let split = dp[at(i - 1, j)] + msm_cost(a[i], a[i - 1], b[j], c);
+            let merge = dp[at(i, j - 1)] + msm_cost(b[j], b[j - 1], a[i], c);
+            dp[at(i, j)] = mv.min(split).min(merge);
+        }
+    }
+    ctx.finish(dp[at(n - 1, m - 1)])
+}
+
+/// Time Warp Edit distance (tslearn `twe`).
+///
+/// Stiffness `nu` and mismatch penalty `lambda` are not identification `p`.
+pub fn twe(
+    a: &Vector,
+    b: &Vector,
+    nu: f64,
+    lambda: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let nu = if nu.is_finite() && nu >= 0.0 {
+        nu
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "twe nu={nu} is not a finite non-negative stiffness; using 0"
+                ))
+                .build(),
+        );
+        0.0
+    };
+    let lambda = if lambda.is_finite() && lambda >= 0.0 {
+        lambda
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "twe lambda={lambda} is not a finite non-negative penalty; using 1"
+                ))
+                .build(),
+        );
+        1.0
+    };
+    if a.is_empty() || b.is_empty() {
+        ctx.push(Issue::builder(IssueCode::EmptyMatrix).build());
+        return ctx.finish(f64::NAN);
+    }
+    let n = a.len();
+    let m = b.len();
+    let mut dp = vec![f64::INFINITY; (n + 1) * (m + 1)];
+    let at = |i: usize, j: usize| i * (m + 1) + j;
+    dp[at(0, 0)] = 0.0;
+    for i in 1..=n {
+        let prev = if i == 1 { 0.0 } else { a[i - 2] };
+        dp[at(i, 0)] = dp[at(i - 1, 0)] + (a[i - 1] - prev).abs() + lambda + nu;
+    }
+    for j in 1..=m {
+        let prev = if j == 1 { 0.0 } else { b[j - 2] };
+        dp[at(0, j)] = dp[at(0, j - 1)] + (b[j - 1] - prev).abs() + lambda + nu;
+    }
+    for i in 1..=n {
+        for j in 1..=m {
+            let ai_prev = if i == 1 { 0.0 } else { a[i - 2] };
+            let bj_prev = if j == 1 { 0.0 } else { b[j - 2] };
+            let match_c = dp[at(i - 1, j - 1)]
+                + (a[i - 1] - b[j - 1]).abs()
+                + (ai_prev - bj_prev).abs()
+                + nu * (i as f64 - j as f64).abs();
+            let del = dp[at(i - 1, j)] + (a[i - 1] - ai_prev).abs() + lambda + nu;
+            let ins = dp[at(i, j - 1)] + (b[j - 1] - bj_prev).abs() + lambda + nu;
             dp[at(i, j)] = match_c.min(del).min(ins);
         }
     }
@@ -3815,5 +4121,34 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(cp.len(), 6);
+        let ms = msm(&q0, &q0, 0.1, &Session::new("ts", "msm"))
+            .unwrap()
+            .value;
+        assert!(ms.abs() < 1e-12);
+        let tw = twe(&q0, &q0, 0.0, 1.0, &Session::new("ts", "twe"))
+            .unwrap()
+            .value;
+        assert!(tw.abs() < 1e-12);
+        let ods = OneDSax::new(2, 4)
+            .transform(&x, &Session::new("ts", "ods"))
+            .unwrap()
+            .value;
+        assert_eq!(ods.ncols(), 4);
+        let yramp = Vector::from_iter((0..6).map(|i| i as f64));
+        let rr = RocketRegressor {
+            n_kernels: 8,
+            kernel_len: 3,
+            alpha: 0.5,
+            seed: 3,
+        }
+        .fit(&x, &yramp, &Session::new("ts", "rr"))
+        .unwrap();
+        let rp = rr
+            .value
+            .predict(&x, &Session::new("ts", "rrp"))
+            .unwrap()
+            .value;
+        assert_eq!(rp.len(), 6);
+        assert!(rp.as_slice().iter().all(|v| v.is_finite()));
     }
 }

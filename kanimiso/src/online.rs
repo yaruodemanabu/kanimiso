@@ -8310,6 +8310,611 @@ impl Transform for GaussianScorer {
     }
 }
 
+/// Streaming F1 (river `metrics.F1`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineF1 {
+    tp: f64,
+    fp: f64,
+    fn_: f64,
+    updates: u64,
+}
+
+impl OnlineF1 {
+    /// Empty F1.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current F1, or NaN when no positive predictions or labels.
+    pub fn score(&self) -> f64 {
+        let den = 2.0 * self.tp + self.fp + self.fn_;
+        if den <= 0.0 {
+            f64::NAN
+        } else {
+            2.0 * self.tp / den
+        }
+    }
+}
+
+impl PartialFit for OnlineF1 {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        metric_partial(
+            session,
+            "f1",
+            x,
+            y,
+            self.updates,
+            self.tp as u64,
+            |pred, truth| {
+                let p = pred > 0.5;
+                let t = truth > 0.5;
+                if p && t {
+                    self.tp += 1.0;
+                } else if p && !t {
+                    self.fp += 1.0;
+                } else if !p && t {
+                    self.fn_ += 1.0;
+                }
+                self.updates += 1;
+                self.score()
+            },
+        )
+    }
+}
+
+/// Streaming precision (river `metrics.Precision`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlinePrecision {
+    tp: f64,
+    fp: f64,
+    updates: u64,
+}
+
+impl OnlinePrecision {
+    /// Empty precision.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current precision, or NaN when no positive predictions.
+    pub fn score(&self) -> f64 {
+        let den = self.tp + self.fp;
+        if den <= 0.0 {
+            f64::NAN
+        } else {
+            self.tp / den
+        }
+    }
+}
+
+impl PartialFit for OnlinePrecision {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        metric_partial(
+            session,
+            "precision",
+            x,
+            y,
+            self.updates,
+            self.tp as u64,
+            |pred, truth| {
+                if pred > 0.5 {
+                    if truth > 0.5 {
+                        self.tp += 1.0;
+                    } else {
+                        self.fp += 1.0;
+                    }
+                }
+                self.updates += 1;
+                self.score()
+            },
+        )
+    }
+}
+
+/// Streaming recall (river `metrics.Recall`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineRecall {
+    tp: f64,
+    fn_: f64,
+    updates: u64,
+}
+
+impl OnlineRecall {
+    /// Empty recall.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current recall, or NaN when no positive labels.
+    pub fn score(&self) -> f64 {
+        let den = self.tp + self.fn_;
+        if den <= 0.0 {
+            f64::NAN
+        } else {
+            self.tp / den
+        }
+    }
+}
+
+impl PartialFit for OnlineRecall {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        metric_partial(
+            session,
+            "recall",
+            x,
+            y,
+            self.updates,
+            self.tp as u64,
+            |pred, truth| {
+                if truth > 0.5 {
+                    if pred > 0.5 {
+                        self.tp += 1.0;
+                    } else {
+                        self.fn_ += 1.0;
+                    }
+                }
+                self.updates += 1;
+                self.score()
+            },
+        )
+    }
+}
+
+/// Streaming Bernoulli naïve Bayes (river `naive_bayes.BernoulliNB`).
+///
+/// Class count is not identification `p`. Features are treated as
+/// \(\{0,1\}\) via a \(0.5\) threshold.
+#[derive(Clone, Debug)]
+pub struct OnlineBernoulliNb {
+    /// Additive smoothing.
+    pub alpha: f64,
+    classes: Vec<i64>,
+    ones: Matrix,
+    class_n: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineBernoulliNb {
+    fn default() -> Self {
+        Self {
+            alpha: 1.0,
+            classes: Vec::new(),
+            ones: Matrix::zeros(0, 0),
+            class_n: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineBernoulliNb {
+    /// Empty Bernoulli NB.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for OnlineBernoulliNb {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        let p = x.ncols();
+        if self.initialized && self.ones.ncols() != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.n_seen;
+        for i in 0..x.nrows() {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let lab = y[i].round() as i64;
+            let idx = if let Some(t) = self.classes.iter().position(|&c| c == lab) {
+                t
+            } else {
+                self.classes.push(lab);
+                self.class_n.push(0.0);
+                let k = self.classes.len();
+                let mut nc = Matrix::zeros(k, p);
+                for r in 0..self.ones.nrows() {
+                    for c in 0..p.min(self.ones.ncols()) {
+                        nc.set(r, c, self.ones.get(r, c));
+                    }
+                }
+                self.ones = nc;
+                self.initialized = true;
+                k - 1
+            };
+            self.class_n[idx] += 1.0;
+            for j in 0..p {
+                if x.get(i, j) > 0.5 {
+                    self.ones.set(idx, j, self.ones.get(idx, j) + 1.0);
+                }
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before) as f64);
+        q.information_gain = Some((self.n_seen - before) as f64);
+        q.still_identified = self.classes.len() >= 2 && self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!("online BernoulliNB on {} rows", x.nrows());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "class-conditional Bernoulli ones counts",
+                "threshold features at 0.5 and accumulate",
+                format!("n={before}"),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for OnlineBernoulliNb {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized || self.classes.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let k = self.classes.len();
+        let p = self.ones.ncols();
+        let tot: f64 = self.class_n.iter().sum();
+        let alpha = self.alpha.max(0.0);
+        let y = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut best = 0usize;
+            let mut bv = f64::NEG_INFINITY;
+            for c in 0..k {
+                let mut s = ((self.class_n[c] + alpha) / (tot + alpha * k as f64)).ln();
+                for j in 0..x.ncols().min(p) {
+                    let phat =
+                        (self.ones.get(c, j) + alpha) / (self.class_n[c] + 2.0 * alpha).max(1e-12);
+                    let phat = phat.clamp(1e-12, 1.0 - 1e-12);
+                    let on = if x.get(i, j) > 0.5 { 1.0 } else { 0.0 };
+                    s += on * phat.ln() + (1.0 - on) * (1.0 - phat).ln();
+                }
+                if s > bv {
+                    bv = s;
+                    best = c;
+                }
+            }
+            self.classes[best] as f64
+        }));
+        ctx.finish(y)
+    }
+}
+
+/// Exponentially weighted average of a mean expert and a last-value expert
+/// (river `optim.EWARegressor` lite).
+///
+/// Features are ignored; the mix is a two-expert forecast of the target.
+#[derive(Clone, Debug)]
+pub struct EwaRegressor {
+    /// Multiplicative weight step \(\eta > 0\).
+    pub eta: f64,
+    w_mean: f64,
+    w_last: f64,
+    mean: f64,
+    last: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for EwaRegressor {
+    fn default() -> Self {
+        Self {
+            eta: 0.5,
+            w_mean: 1.0,
+            w_last: 1.0,
+            mean: 0.0,
+            last: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl EwaRegressor {
+    /// EWA mix with step `eta`.
+    pub fn new(eta: f64) -> Self {
+        Self {
+            eta,
+            ..Self::default()
+        }
+    }
+
+    fn mix(&self) -> f64 {
+        let z = self.w_mean + self.w_last;
+        if z <= 0.0 {
+            self.mean
+        } else {
+            (self.w_mean * self.mean + self.w_last * self.last) / z
+        }
+    }
+}
+
+impl PartialFit for EwaRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        let eta = if self.eta.is_finite() && self.eta > 0.0 {
+            self.eta
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "EwaRegressor.eta={} is not positive; using 0.5",
+                        self.eta
+                    ))
+                    .build(),
+            );
+            0.5
+        };
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message(
+                    "EwaRegressor mixes a running-mean expert and a last-value expert; x is unused",
+                )
+                .compromise(NumericalCompromise::new(
+                    "feature-conditioned expert mix",
+                    "two target-only experts with multiplicative weights",
+                    "no model of x → y is identified",
+                    "read the mix as an online forecast of y, not a feature effect",
+                ))
+                .build(),
+        );
+        let before = self.mix();
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let yt = y[i];
+            if self.initialized {
+                let e_mean = (self.mean - yt) * (self.mean - yt);
+                let e_last = (self.last - yt) * (self.last - yt);
+                self.w_mean *= (-eta * e_mean).exp();
+                self.w_last *= (-eta * e_last).exp();
+                let z = (self.w_mean + self.w_last).max(1e-18);
+                self.w_mean = (self.w_mean / z).max(1e-12);
+                self.w_last = (self.w_last / z).max(1e-12);
+                let n = self.n_seen as f64;
+                self.mean = (self.mean * n + yt) / (n + 1.0);
+                self.last = yt;
+            } else {
+                self.mean = yt;
+                self.last = yt;
+                self.initialized = true;
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.mix();
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((after - before).abs());
+        q.information_gain = Some((after - before).abs().max(1.0 / self.n_seen.max(1) as f64));
+        q.still_identified = self.initialized && self.n_seen >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("EWA mix after {} rows, pred={after:.6e}", x.nrows());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "mean/last expert weights",
+                "multiplicative loss update, then renormalize",
+                format!("mix={before:.6e}"),
+                format!("mix={after:.6e}"),
+            ),
+        )
+    }
+}
+
+impl Predict for EwaRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let m = self.mix();
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|_| m)))
+    }
+}
+
+/// Running-quantile clip (river `anomaly.QuantileFilter` / winsorize).
+///
+/// Values above the empirical `q`-quantile of a 256-row window are clipped
+/// to that quantile. `q` is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct QuantileFilter {
+    /// Upper quantile in \((0, 1)\).
+    pub q: f64,
+    window: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for QuantileFilter {
+    fn default() -> Self {
+        Self {
+            q: 0.95,
+            window: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl QuantileFilter {
+    /// Filter at quantile `q`.
+    pub fn new(q: f64) -> Self {
+        Self {
+            q,
+            ..Self::default()
+        }
+    }
+
+    fn quantile(&self, q: f64) -> f64 {
+        if self.window.is_empty() {
+            return f64::NAN;
+        }
+        let mut xs = self.window.clone();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = ((q.clamp(0.0, 1.0)) * (xs.len() - 1) as f64).round() as usize;
+        xs[idx.min(xs.len() - 1)]
+    }
+}
+
+impl PartialFit for QuantileFilter {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let qv = if self.q.is_finite() && self.q > 0.0 && self.q < 1.0 {
+            self.q
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "QuantileFilter.q={} is not in (0,1); using 0.95",
+                        self.q
+                    ))
+                    .build(),
+            );
+            0.95
+        };
+        let before = self.quantile(qv);
+        for i in 0..x.nrows() {
+            for j in 0..x.ncols() {
+                let v = x.get(i, j);
+                if v.is_finite() {
+                    self.window.push(v);
+                    if self.window.len() > 256 {
+                        self.window.remove(0);
+                    }
+                    self.n_seen += 1;
+                }
+            }
+        }
+        self.updates += 1;
+        let after = self.quantile(qv);
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.window.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.window.len() >= 4;
+        q.warmup = self.window.len() < 4;
+        q.explanation = format!("QuantileFilter q={qv:.3} threshold={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "empirical upper quantile",
+                "256-row sliding window order statistic",
+                format!("q={before:.6e}"),
+                format!("q={after:.6e}"),
+            ),
+        )
+    }
+}
+
+impl Transform for QuantileFilter {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if self.window.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(x.clone());
+        }
+        let qv = if self.q.is_finite() && self.q > 0.0 && self.q < 1.0 {
+            self.q
+        } else {
+            0.95
+        };
+        let cap = self.quantile(qv);
+        let out = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            let v = x.get(i, j);
+            if v.is_finite() && v > cap {
+                cap
+            } else {
+                v
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8538,6 +9143,24 @@ mod tests {
         GaussianScorer::new()
             .partial_fit(&x, None, &session)
             .expect("gsc");
+        OnlineF1::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("f1");
+        OnlinePrecision::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("prec");
+        OnlineRecall::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("rec");
+        OnlineBernoulliNb::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("bnb");
+        EwaRegressor::new(0.4)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("ewa");
+        QuantileFilter::new(0.9)
+            .partial_fit(&x, None, &session)
+            .expect("qf");
 
         let n_expl = session
             .ledger()

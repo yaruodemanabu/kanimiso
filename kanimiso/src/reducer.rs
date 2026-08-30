@@ -363,6 +363,197 @@ impl FitSeries for DirectReducer {
     }
 }
 
+/// DirRec reduction: a horizon-specific OLS whose forecast window
+/// absorbs previous-step predictions (sktime `DirRec` / `DirRecReducer`).
+///
+/// Horizon count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct DirRecReducer {
+    /// Autoregressive order (window length).
+    pub window: usize,
+    /// Number of horizon-specific models.
+    pub horizon: usize,
+}
+
+impl Default for DirRecReducer {
+    fn default() -> Self {
+        Self {
+            window: 3,
+            horizon: 3,
+        }
+    }
+}
+
+impl DirRecReducer {
+    /// DirRec reducer with lag `window` and `horizon` models.
+    pub fn new(window: usize, horizon: usize) -> Self {
+        Self { window, horizon }
+    }
+}
+
+/// Fitted DirRec reducer.
+#[derive(Clone, Debug)]
+pub struct FittedDirRecReducer {
+    /// `(coef, intercept)` per horizon (1-based order).
+    pub models: Vec<(Vector, f64)>,
+    last: Vector,
+    /// Lag order.
+    pub window: usize,
+}
+
+impl FittedDirRecReducer {
+    /// DirRec `h`-step forecast: each step feeds the previous prediction
+    /// into the lag window before the next horizon-specific model fires.
+    pub fn forecast(&self, horizon: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        if horizon == 0 {
+            return ctx.finish(Vector::zeros(0));
+        }
+        if horizon > self.models.len() {
+            ctx.push(
+                Issue::builder(IssueCode::ForecastHorizonExceedsIdentifiability)
+                    .message(format!(
+                        "requested DirRec horizon {horizon} > identified {}",
+                        self.models.len()
+                    ))
+                    .meaninglessness(Meaninglessness::new(
+                        "DirRec multi-horizon path",
+                        "horizons past the fitted set reuse the last model on a predicted window",
+                        signlred::InterpretiveValue::Misleading,
+                        "only the first fitted horizons are identified",
+                    ))
+                    .build(),
+            );
+        }
+        let mut hist = self.last.as_slice().to_vec();
+        let mut out = Vector::zeros(horizon);
+        for h in 0..horizon {
+            let (coef, intercept) = self
+                .models
+                .get(h)
+                .or_else(|| self.models.last())
+                .cloned()
+                .unwrap_or_else(|| (Vector::zeros(self.window), 0.0));
+            let mut s = intercept;
+            let start = hist.len().saturating_sub(self.window);
+            for j in 0..coef.len().min(self.window) {
+                if start + j < hist.len() {
+                    s += coef[j] * hist[start + j];
+                }
+            }
+            out[h] = s;
+            hist.push(s);
+        }
+        ctx.finish(out)
+    }
+}
+
+impl FitSeries for DirRecReducer {
+    type Fitted = FittedDirRecReducer;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedDirRecReducer>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let p = self.window.max(1);
+        let hmax = self.horizon.max(1);
+        if y.len() <= p + hmax {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!(
+                        "DirRecReducer window {p} horizon {hmax} needs n>{} (n={})",
+                        p + hmax,
+                        y.len()
+                    ))
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "DirRec horizon regressions",
+                        "n ≤ p+H leaves a horizon without rows",
+                        "lengthen the series or shorten the window/horizon",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedDirRecReducer {
+                models: vec![(Vector::zeros(p), y.mean()); hmax],
+                last: y.clone(),
+                window: p,
+            });
+        }
+        let mut models = Vec::with_capacity(hmax);
+        for h in 1..=hmax {
+            let n = y.len().saturating_sub(p + h - 1);
+            if n == 0 {
+                models.push((Vector::zeros(p), y.mean()));
+                continue;
+            }
+            let x = Matrix::from_fn(n, p, |i, j| y[i + j]);
+            let target = Vector::from_iter((0..n).map(|i| y[i + p + h - 1]));
+            let design = x.with_intercept();
+            let mut scratch = signlred::Report::new("dirrec", "ols");
+            let beta = least_squares(&mut scratch, &design, &target, &ctx.policy);
+            for issue in scratch.issues() {
+                if matches!(
+                    issue.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::PerfectCollinearity
+                        | IssueCode::NearSingular
+                        | IssueCode::SingularMatrix
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                ) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            if scratch.contains(IssueCode::PerfectCollinearity)
+                || scratch.contains(IssueCode::NearSingular)
+                || scratch.contains(IssueCode::SingularMatrix)
+            {
+                ctx.push(
+                    Issue::builder(IssueCode::HighMulticollinearity)
+                        .message(format!(
+                            "DirRec horizon {h}: lag columns of a trend are nearly collinear"
+                        ))
+                        .meaninglessness(Meaninglessness::new(
+                            "lag coefficients",
+                            "consecutive levels of a trend share one direction",
+                            signlred::InterpretiveValue::Misleading,
+                            "forecast the path; do not interpret individual lag coefficients",
+                        ))
+                        .build(),
+                );
+            }
+            match beta {
+                Some(b) => models.push((
+                    Vector::from_iter((1..b.len()).map(|j| b[j])),
+                    b.as_slice().first().copied().unwrap_or(0.0),
+                )),
+                None => models.push((Vector::zeros(p), target.mean())),
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::AutocorrelatedResiduals)
+                .severity(Severity::Advisory)
+                .message(
+                    "DirRec fits each horizon independently then iterates predictions into the lag window",
+                )
+                .compromise(NumericalCompromise::new(
+                    "joint multi-horizon likelihood",
+                    "horizon-specific OLS + recursive lag update",
+                    "horizons do not share parameters",
+                    "the H models are not a single identified dynamic system",
+                ))
+                .build(),
+        );
+        let last = Vector::from_iter(y.as_slice()[y.len() - p..].iter().copied());
+        ctx.finish(FittedDirRecReducer {
+            models,
+            last,
+            window: p,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +586,16 @@ mod tests {
             .value;
         assert_eq!(fc.len(), 3);
         assert!((fc[0] - 24.0).abs() < 1.5, "{:?}", fc.as_slice());
+        let dr = DirRecReducer::new(2, 3)
+            .fit_series(&y, &Session::new("dirrec", "fit"))
+            .expect("dirrec");
+        let dfc = dr
+            .value
+            .forecast(3, &Session::new("dirrec", "fc"))
+            .unwrap()
+            .value;
+        assert_eq!(dfc.len(), 3);
+        assert!((dfc[0] - 24.0).abs() < 1.5, "{:?}", dfc.as_slice());
+        assert!(dfc.as_slice().iter().all(|v| v.is_finite()));
     }
 }
