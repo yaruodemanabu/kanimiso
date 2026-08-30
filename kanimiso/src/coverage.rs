@@ -6341,6 +6341,64 @@ const INVENTORY: &[Algorithm] = &[
         "sktime.forecasting.catch22.Catch22Forecaster",
         "forecast",
     ),
+    a("stats.DrLearner", "econml.dr.LinearDRLearner", "estimator"),
+    a(
+        "stats.DomainAdaptationLearner",
+        "econml.metalearners.DomainAdaptationLearner",
+        "estimator",
+    ),
+    a(
+        "stats.SparseLinearDml",
+        "econml.dml.SparseLinearDML",
+        "estimator",
+    ),
+    a("stats.DmlIv", "econml.iv.dml.DMLIV", "estimator"),
+    a("stats.WaldLate", "statsmodels.sandbox.regression.gmm.IV2SLS", "estimator"),
+    a(
+        "stats.InstrumentalForest",
+        "econml.grf.InstrumentalForest",
+        "estimator",
+    ),
+    a(
+        "stats.ForestDrLearner",
+        "econml.dr.ForestDRLearner",
+        "estimator",
+    ),
+    a(
+        "panel.DeChaisemartin",
+        "statsmodels.treatment.api",
+        "estimator",
+    ),
+    a(
+        "panel.GardnerTwoStage",
+        "statsmodels.treatment.api",
+        "estimator",
+    ),
+    a(
+        "tsa.FcnForecaster",
+        "sktime.forecasting.fcn.FCNForecaster",
+        "forecast",
+    ),
+    a(
+        "tsa.ResNetForecaster",
+        "sktime.forecasting.resnet.ResNetForecaster",
+        "forecast",
+    ),
+    a(
+        "tsa.InceptionTimeForecaster",
+        "sktime.forecasting.inceptiontime.InceptionTimeForecaster",
+        "forecast",
+    ),
+    a(
+        "tsa.TcnForecaster",
+        "sktime.forecasting.tcn.TCNForecaster",
+        "forecast",
+    ),
+    a(
+        "online.AMRulesClassifier",
+        "river.rules.AMRulesClassifier",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6861,6 +6919,13 @@ mod tests {
             "stats.CausalForest",
             "tsa.RocketForecaster",
             "tsa.CnnForecaster",
+            "stats.DrLearner",
+            "stats.DmlIv",
+            "stats.InstrumentalForest",
+            "tsa.FcnForecaster",
+            "tsa.InceptionTimeForecaster",
+            "online.AMRulesClassifier",
+            "panel.DeChaisemartin",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

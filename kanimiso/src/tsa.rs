@@ -17946,6 +17946,533 @@ impl FitSeries for Catch22Forecaster {
     }
 }
 
+fn conv_seq(win: &[f64], ker: &[f64]) -> Vec<f64> {
+    let w = ker.len();
+    let t = win.len();
+    if w == 0 || t < w {
+        return vec![0.0];
+    }
+    (0..=t - w)
+        .map(|start| {
+            let mut acc = 0.0;
+            for u in 0..w {
+                acc += ker[u] * win[start + u];
+            }
+            acc
+        })
+        .collect()
+}
+
+fn relu_vec(v: &mut [f64]) {
+    for x in v {
+        if *x < 0.0 {
+            *x = 0.0;
+        }
+    }
+}
+
+fn gap_mean(v: &[f64]) -> f64 {
+    if v.is_empty() {
+        0.0
+    } else {
+        v.iter().sum::<f64>() / v.len() as f64
+    }
+}
+
+fn fcn_window(win: &[f64], layer1: &[Vec<f64>], layer2: &[Vec<f64>]) -> Vec<f64> {
+    let mut out = Vec::with_capacity(layer1.len().max(1) * layer2.len().max(1));
+    for k1 in layer1 {
+        let mut a = conv_seq(win, k1);
+        relu_vec(&mut a);
+        for k2 in layer2 {
+            let mut b = conv_seq(&a, k2);
+            relu_vec(&mut b);
+            out.push(gap_mean(&b));
+        }
+    }
+    if out.is_empty() {
+        out.push(gap_mean(win));
+    }
+    out
+}
+
+fn resnet_window(win: &[f64], kernels: &[Vec<f64>]) -> Vec<f64> {
+    let mut out: Vec<f64> = kernels
+        .iter()
+        .map(|ker| {
+            let conv = conv_seq(win, ker);
+            let mut s = 0.0_f64;
+            let mut c = 0.0_f64;
+            for (i, &v) in conv.iter().enumerate() {
+                let skip = win.get(i).copied().unwrap_or(0.0);
+                s += (v + skip).max(0.0);
+                c += 1.0;
+            }
+            if c > 0.0 {
+                s / c
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    if out.is_empty() {
+        out.push(gap_mean(win));
+    }
+    out
+}
+
+fn dilated_max(win: &[f64], ker: &[f64], dilation: usize) -> f64 {
+    let w = ker.len();
+    let d = dilation.max(1);
+    let span = 1 + (w.saturating_sub(1)) * d;
+    let t = win.len();
+    if w == 0 || t < span {
+        return 0.0;
+    }
+    let mut mx = f64::NEG_INFINITY;
+    for start in 0..=t - span {
+        let mut acc = 0.0;
+        for u in 0..w {
+            acc += ker[u] * win[start + u * d];
+        }
+        if acc > mx {
+            mx = acc;
+        }
+    }
+    if mx.is_finite() {
+        mx
+    } else {
+        0.0
+    }
+}
+
+fn tcn_window(win: &[f64], kernels: &[Vec<f64>], dilations: &[usize]) -> Vec<f64> {
+    let mut out = Vec::with_capacity(kernels.len() * dilations.len().max(1));
+    for ker in kernels {
+        for &d in dilations {
+            out.push(dilated_max(win, ker, d));
+        }
+    }
+    if out.is_empty() {
+        out.push(gap_mean(win));
+    }
+    out
+}
+
+/// Fully-convolutional reduction forecaster (sktime `FCNForecaster` lite).
+///
+/// Two ReLU conv layers then global-average-pool; kernel count is not
+/// identification `p`. Distinct from [`CnnForecaster`] (single-layer max-pool).
+#[derive(Clone, Debug)]
+pub struct FcnForecaster {
+    /// Lag window. Not identification `p`.
+    pub window: usize,
+    /// Layer-1 kernels.
+    pub n_kernels: usize,
+    /// Kernel width.
+    pub width: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for FcnForecaster {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            n_kernels: 2,
+            width: 3,
+            alpha: 0.1,
+            seed: 31,
+        }
+    }
+}
+
+impl FcnForecaster {
+    /// Default FCN-lite forecaster.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted FCN-window ridge.
+#[derive(Clone, Debug)]
+pub struct FittedFcnForecaster {
+    layer1: Vec<Vec<f64>>,
+    layer2: Vec<Vec<f64>>,
+    coef: Vector,
+    intercept: f64,
+    last: Vec<f64>,
+}
+
+impl FittedFcnForecaster {
+    /// Recursive FCN-window forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(recurse_features(
+            &self.last,
+            h,
+            |w| fcn_window(w, &self.layer1, &self.layer2),
+            &self.coef,
+            self.intercept,
+        ))
+    }
+}
+
+impl FitSeries for FcnForecaster {
+    type Fitted = FittedFcnForecaster;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedFcnForecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let wlen = self.width.max(1).min(self.window.max(1));
+        let mut rng = Rng::new(self.seed);
+        let layer1: Vec<Vec<f64>> = (0..self.n_kernels.max(1))
+            .map(|_| (0..wlen).map(|_| rng.standard_normal()).collect())
+            .collect();
+        let layer2: Vec<Vec<f64>> = (0..self.n_kernels.max(1))
+            .map(|_| (0..wlen).map(|_| rng.standard_normal()).collect())
+            .collect();
+        let (coef, intercept, last) = window_ridge_forecast(
+            y,
+            self.window,
+            |win| fcn_window(win, &layer1, &layer2),
+            self.alpha,
+            &ctx.policy,
+        );
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("FcnForecaster is two-layer ReLU GAP + ridge, not a trained FCN")
+                .compromise(NumericalCompromise::new(
+                    "sktime FCNForecaster",
+                    "random two-layer conv, ReLU, global average pool, then ridge",
+                    "learned filters and the published decoder are omitted",
+                    "read the path as a stacked-conv window sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedFcnForecaster {
+            layer1,
+            layer2,
+            coef,
+            intercept,
+            last,
+        })
+    }
+}
+
+/// Residual-convolution reduction forecaster (sktime `ResNetForecaster` lite).
+///
+/// Skip-connected conv then GAP; kernel count is not identification `p`.
+/// Distinct from [`FcnForecaster`] (no skip) and [`CnnForecaster`] (no residual).
+#[derive(Clone, Debug)]
+pub struct ResNetForecaster {
+    /// Lag window.
+    pub window: usize,
+    /// Residual kernels.
+    pub n_kernels: usize,
+    /// Kernel width.
+    pub width: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for ResNetForecaster {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            n_kernels: 3,
+            width: 3,
+            alpha: 0.1,
+            seed: 37,
+        }
+    }
+}
+
+impl ResNetForecaster {
+    /// Default ResNet-lite forecaster.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted ResNet-window ridge.
+#[derive(Clone, Debug)]
+pub struct FittedResNetForecaster {
+    kernels: Vec<Vec<f64>>,
+    coef: Vector,
+    intercept: f64,
+    last: Vec<f64>,
+}
+
+impl FittedResNetForecaster {
+    /// Recursive residual-conv forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(recurse_features(
+            &self.last,
+            h,
+            |w| resnet_window(w, &self.kernels),
+            &self.coef,
+            self.intercept,
+        ))
+    }
+}
+
+impl FitSeries for ResNetForecaster {
+    type Fitted = FittedResNetForecaster;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedResNetForecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let wlen = self.width.max(1).min(self.window.max(1));
+        let mut rng = Rng::new(self.seed);
+        let kernels: Vec<Vec<f64>> = (0..self.n_kernels.max(1))
+            .map(|_| (0..wlen).map(|_| rng.standard_normal()).collect())
+            .collect();
+        let (coef, intercept, last) = window_ridge_forecast(
+            y,
+            self.window,
+            |win| resnet_window(win, &kernels),
+            self.alpha,
+            &ctx.policy,
+        );
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("ResNetForecaster is skip-connected window conv + ridge")
+                .compromise(NumericalCompromise::new(
+                    "sktime ResNetForecaster",
+                    "random conv plus identity skip, ReLU GAP, then ridge",
+                    "learned residual blocks and the published decoder are omitted",
+                    "read the path as a residual-conv sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedResNetForecaster {
+            kernels,
+            coef,
+            intercept,
+            last,
+        })
+    }
+}
+
+/// InceptionTime reduction forecaster (sktime `InceptionTimeForecaster` lite).
+///
+/// Multi-width max-pooled kernels; width count is not identification `p`.
+/// Distinct from [`CnnForecaster`] (single width).
+#[derive(Clone, Debug)]
+pub struct InceptionTimeForecaster {
+    /// Lag window.
+    pub window: usize,
+    /// Kernels per width.
+    pub n_kernels: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for InceptionTimeForecaster {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            n_kernels: 2,
+            alpha: 0.1,
+            seed: 41,
+        }
+    }
+}
+
+impl InceptionTimeForecaster {
+    /// Default InceptionTime-lite forecaster.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted InceptionTime-window ridge.
+#[derive(Clone, Debug)]
+pub struct FittedInceptionTimeForecaster {
+    kernels: Vec<Vec<f64>>,
+    coef: Vector,
+    intercept: f64,
+    last: Vec<f64>,
+}
+
+impl FittedInceptionTimeForecaster {
+    /// Recursive multi-scale conv forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(recurse_features(
+            &self.last,
+            h,
+            |w| cnn_window(w, &self.kernels),
+            &self.coef,
+            self.intercept,
+        ))
+    }
+}
+
+impl FitSeries for InceptionTimeForecaster {
+    type Fitted = FittedInceptionTimeForecaster;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedInceptionTimeForecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let t = self.window.max(2);
+        let widths = [2usize, 3, 4]
+            .into_iter()
+            .filter(|&w| w <= t && w > 0);
+        let mut rng = Rng::new(self.seed);
+        let mut kernels: Vec<Vec<f64>> = Vec::new();
+        for w in widths {
+            for _ in 0..self.n_kernels.max(1) {
+                kernels.push((0..w).map(|_| rng.standard_normal()).collect());
+            }
+        }
+        if kernels.is_empty() {
+            kernels.push(vec![1.0]);
+        }
+        let (coef, intercept, last) = window_ridge_forecast(
+            y,
+            self.window,
+            |win| cnn_window(win, &kernels),
+            self.alpha,
+            &ctx.policy,
+        );
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("InceptionTimeForecaster is multi-width max-pool + ridge")
+                .compromise(NumericalCompromise::new(
+                    "sktime InceptionTimeForecaster",
+                    "random kernels at widths 2/3/4, max-pool, then ridge",
+                    "inception bottlenecks and the published residual stack are omitted",
+                    "read the path as a multi-scale conv sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedInceptionTimeForecaster {
+            kernels,
+            coef,
+            intercept,
+            last,
+        })
+    }
+}
+
+/// Temporal-convolution reduction forecaster (sktime `TCNForecaster` lite).
+///
+/// Dilated max-pool; dilation count is not identification `p`. Distinct from
+/// [`CnnForecaster`] (dilation 1 only).
+#[derive(Clone, Debug)]
+pub struct TcnForecaster {
+    /// Lag window.
+    pub window: usize,
+    /// Kernel bank.
+    pub n_kernels: usize,
+    /// Kernel width.
+    pub width: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for TcnForecaster {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            n_kernels: 2,
+            width: 3,
+            alpha: 0.1,
+            seed: 43,
+        }
+    }
+}
+
+impl TcnForecaster {
+    /// Default TCN-lite forecaster.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted TCN-window ridge.
+#[derive(Clone, Debug)]
+pub struct FittedTcnForecaster {
+    kernels: Vec<Vec<f64>>,
+    dilations: Vec<usize>,
+    coef: Vector,
+    intercept: f64,
+    last: Vec<f64>,
+}
+
+impl FittedTcnForecaster {
+    /// Recursive dilated-conv forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(recurse_features(
+            &self.last,
+            h,
+            |w| tcn_window(w, &self.kernels, &self.dilations),
+            &self.coef,
+            self.intercept,
+        ))
+    }
+}
+
+impl FitSeries for TcnForecaster {
+    type Fitted = FittedTcnForecaster;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedTcnForecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let wlen = self.width.max(1).min(self.window.max(1));
+        let mut rng = Rng::new(self.seed);
+        let kernels: Vec<Vec<f64>> = (0..self.n_kernels.max(1))
+            .map(|_| (0..wlen).map(|_| rng.standard_normal()).collect())
+            .collect();
+        let dilations = vec![1usize, 2];
+        let (coef, intercept, last) = window_ridge_forecast(
+            y,
+            self.window,
+            |win| tcn_window(win, &kernels, &dilations),
+            self.alpha,
+            &ctx.policy,
+        );
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("TcnForecaster is dilated max-pool + ridge, not a trained TCN")
+                .compromise(NumericalCompromise::new(
+                    "sktime TCNForecaster",
+                    "random kernels at dilations 1 and 2, max-pool, then ridge",
+                    "causal padding, residual TCN blocks, and learned filters are omitted",
+                    "read the path as a dilated-conv sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedTcnForecaster {
+            kernels,
+            dilations,
+            coef,
+            intercept,
+            last,
+        })
+    }
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -19277,5 +19804,39 @@ impl FitSeries for Catch22Forecaster {
             .expect("c22fp");
         assert_eq!(c22p.value.len(), 2);
         assert!(c22p.value.as_slice().iter().all(|v| v.is_finite()));
+        let fcn = FcnForecaster::new()
+            .fit_series(&y, &Session::new("fcn", "t"))
+            .expect("fcn");
+        let fcnp = fcn
+            .value
+            .forecast(2, &Session::new("fcnp", "t"))
+            .expect("fcnp");
+        assert_eq!(fcnp.value.len(), 2);
+        assert!(fcnp.value.as_slice().iter().all(|v| v.is_finite()));
+        let rnf = ResNetForecaster::new()
+            .fit_series(&y, &Session::new("rnf", "t"))
+            .expect("rnf");
+        let rnp = rnf
+            .value
+            .forecast(2, &Session::new("rnfp", "t"))
+            .expect("rnfp");
+        assert_eq!(rnp.value.len(), 2);
+        let itf = InceptionTimeForecaster::new()
+            .fit_series(&y, &Session::new("itf", "t"))
+            .expect("itf");
+        let itp = itf
+            .value
+            .forecast(2, &Session::new("itfp", "t"))
+            .expect("itfp");
+        assert_eq!(itp.value.len(), 2);
+        let tcf = TcnForecaster::new()
+            .fit_series(&y, &Session::new("tcf", "t"))
+            .expect("tcf");
+        let tcp = tcf
+            .value
+            .forecast(2, &Session::new("tcfp", "t"))
+            .expect("tcfp");
+        assert_eq!(tcp.value.len(), 2);
+        assert!(tcp.value.as_slice().iter().all(|v| v.is_finite()));
     }
 }

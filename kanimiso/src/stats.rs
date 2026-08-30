@@ -27112,6 +27112,968 @@ impl FittedCausalForest {
     }
 }
 
+fn dr_pseudo_outcome(
+    x: &Matrix,
+    y: &Vector,
+    treat: &Vector,
+    n: usize,
+    policy: &signlred::Policy,
+) -> (Vector, Vector, f64, Vector, f64, Vector, f64) {
+    let treated: Vec<usize> = (0..n).filter(|&i| treat[i] >= 0.5).collect();
+    let control: Vec<usize> = (0..n).filter(|&i| treat[i] < 0.5).collect();
+    let (b1, a1) = ols_arm(x, y, &treated, policy);
+    let (b0, a0) = ols_arm(x, y, &control, policy);
+    let (pe, pb) = ista_logit(x, treat, 40);
+    let psi = Vector::from_iter((0..n).map(|i| {
+        if !y[i].is_finite() {
+            return 0.0;
+        }
+        let mu1 = mu_lin(x, i, a1, &b1);
+        let mu0 = mu_lin(x, i, a0, &b0);
+        let e = propensity_row(x, i, &pe, pb);
+        let d = if treat[i] >= 0.5 { 1.0 } else { 0.0 };
+        mu1 - mu0 + d * (y[i] - mu1) / e - (1.0 - d) * (y[i] - mu0) / (1.0 - e)
+    }));
+    (psi, b1, a1, b0, a0, pe, pb)
+}
+
+fn instrument_varies(z: &Vector, idx: &[usize]) -> bool {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for &i in idx {
+        if i < z.len() && z[i].is_finite() {
+            lo = lo.min(z[i]);
+            hi = hi.max(z[i]);
+        }
+    }
+    hi.is_finite() && lo.is_finite() && hi - lo > 1e-12
+}
+
+fn wald_leaf(y: &Vector, treat: &Vector, instrument: &Vector, idx: &[usize]) -> f64 {
+    let mut sy = 0.0_f64;
+    let mut sd = 0.0_f64;
+    let mut sz = 0.0_f64;
+    let mut c = 0.0_f64;
+    for &i in idx {
+        if !y[i].is_finite() || !treat[i].is_finite() || !instrument[i].is_finite() {
+            continue;
+        }
+        sy += y[i];
+        sd += if treat[i] >= 0.5 { 1.0 } else { 0.0 };
+        sz += instrument[i];
+        c += 1.0;
+    }
+    if c < 2.0 {
+        return 0.0;
+    }
+    let my = sy / c;
+    let md = sd / c;
+    let mz = sz / c;
+    let mut num = 0.0_f64;
+    let mut den = 0.0_f64;
+    for &i in idx {
+        if !y[i].is_finite() || !treat[i].is_finite() || !instrument[i].is_finite() {
+            continue;
+        }
+        let zc = instrument[i] - mz;
+        num += zc * (y[i] - my);
+        den += zc * ((if treat[i] >= 0.5 { 1.0 } else { 0.0 }) - md);
+    }
+    if den.abs() <= 1e-12 {
+        0.0
+    } else {
+        num / den
+    }
+}
+
+fn leaf_mean(y: &Vector, idx: &[usize]) -> f64 {
+    let mut s = 0.0_f64;
+    let mut c = 0.0_f64;
+    for &i in idx {
+        if i < y.len() && y[i].is_finite() {
+            s += y[i];
+            c += 1.0;
+        }
+    }
+    if c > 0.0 {
+        s / c
+    } else {
+        0.0
+    }
+}
+
+fn grow_reg_tree(
+    x: &Matrix,
+    y: &Vector,
+    idx: &[usize],
+    depth: usize,
+    max_depth: usize,
+    min_leaf: usize,
+    rng: &mut Rng,
+) -> CateNode {
+    let mean = leaf_mean(y, idx);
+    if depth >= max_depth || idx.len() < min_leaf.saturating_mul(2) {
+        return CateNode::Leaf { cate: mean };
+    }
+    let p = x.ncols();
+    if p == 0 || idx.is_empty() {
+        return CateNode::Leaf { cate: mean };
+    }
+    let mut best_gain = 0.0_f64;
+    let mut best: Option<(usize, f64, Vec<usize>, Vec<usize>)> = None;
+    for _ in 0..8 {
+        let feat = rng.below(p);
+        let a = idx[rng.below(idx.len())];
+        let b = idx[rng.below(idx.len())];
+        let thresh = 0.5 * (x.get(a, feat) + x.get(b, feat));
+        if !thresh.is_finite() {
+            continue;
+        }
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for &i in idx {
+            if x.get(i, feat) <= thresh {
+                left.push(i);
+            } else {
+                right.push(i);
+            }
+        }
+        if left.len() < min_leaf || right.len() < min_leaf {
+            continue;
+        }
+        let ml = leaf_mean(y, &left);
+        let mr = leaf_mean(y, &right);
+        let gain = (ml - mr).abs() * ((left.len() * right.len()) as f64).sqrt();
+        if gain > best_gain {
+            best_gain = gain;
+            best = Some((feat, thresh, left, right));
+        }
+    }
+    match best {
+        Some((feat, thresh, left, right)) => CateNode::Split {
+            feat,
+            thresh,
+            left: Box::new(grow_reg_tree(
+                x, y, &left, depth + 1, max_depth, min_leaf, rng,
+            )),
+            right: Box::new(grow_reg_tree(
+                x, y, &right, depth + 1, max_depth, min_leaf, rng,
+            )),
+        },
+        None => CateNode::Leaf { cate: mean },
+    }
+}
+
+fn grow_iv_tree(
+    x: &Matrix,
+    y: &Vector,
+    treat: &Vector,
+    instrument: &Vector,
+    idx: &[usize],
+    depth: usize,
+    max_depth: usize,
+    min_leaf: usize,
+    rng: &mut Rng,
+) -> CateNode {
+    let wald = wald_leaf(y, treat, instrument, idx);
+    if depth >= max_depth
+        || idx.len() < min_leaf.saturating_mul(2)
+        || !instrument_varies(instrument, idx)
+        || !both_arms(treat, idx)
+    {
+        return CateNode::Leaf { cate: wald };
+    }
+    let p = x.ncols();
+    if p == 0 || idx.is_empty() {
+        return CateNode::Leaf { cate: wald };
+    }
+    let mut best_gain = 0.0_f64;
+    let mut best: Option<(usize, f64, Vec<usize>, Vec<usize>)> = None;
+    for _ in 0..8 {
+        let feat = rng.below(p);
+        let a = idx[rng.below(idx.len())];
+        let b = idx[rng.below(idx.len())];
+        let thresh = 0.5 * (x.get(a, feat) + x.get(b, feat));
+        if !thresh.is_finite() {
+            continue;
+        }
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for &i in idx {
+            if x.get(i, feat) <= thresh {
+                left.push(i);
+            } else {
+                right.push(i);
+            }
+        }
+        if left.len() < min_leaf || right.len() < min_leaf {
+            continue;
+        }
+        if !instrument_varies(instrument, &left)
+            || !instrument_varies(instrument, &right)
+            || !both_arms(treat, &left)
+            || !both_arms(treat, &right)
+        {
+            continue;
+        }
+        let wl = wald_leaf(y, treat, instrument, &left);
+        let wr = wald_leaf(y, treat, instrument, &right);
+        let gain = (wl - wr).abs() * ((left.len() * right.len()) as f64).sqrt();
+        if gain > best_gain {
+            best_gain = gain;
+            best = Some((feat, thresh, left, right));
+        }
+    }
+    match best {
+        Some((feat, thresh, left, right)) => CateNode::Split {
+            feat,
+            thresh,
+            left: Box::new(grow_iv_tree(
+                x,
+                y,
+                treat,
+                instrument,
+                &left,
+                depth + 1,
+                max_depth,
+                min_leaf,
+                rng,
+            )),
+            right: Box::new(grow_iv_tree(
+                x,
+                y,
+                treat,
+                instrument,
+                &right,
+                depth + 1,
+                max_depth,
+                min_leaf,
+                rng,
+            )),
+        },
+        None => CateNode::Leaf { cate: wald },
+    }
+}
+
+/// Doubly robust CATE (econml `LinearDRLearner`).
+///
+/// Pseudo-outcome
+/// \(\psi=\mu_1-\mu_0+D(Y-\mu_1)/e-(1-D)(Y-\mu_0)/(1-e)\), then OLS of
+/// \(\psi\) on \([1,X]\). Distinct from [`AipwAte`] (scalar ATE) and
+/// [`DoubleMl`] (residual-on-residual ATE).
+#[derive(Clone, Debug, Default)]
+pub struct DrLearner;
+
+/// Fitted linear DR-learner.
+#[derive(Clone, Debug)]
+pub struct FittedDrLearner {
+    /// CATE slopes on \([1, X]\).
+    pub coef: Vector,
+}
+
+impl DrLearner {
+    /// Default linear DR-learner.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit the AIPW pseudo-outcome CATE.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedDrLearner>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let p = x.ncols();
+        if !both_arms(treat, &(0..n).collect::<Vec<_>>()) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("DrLearner needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "DR-learner CATE",
+                        "μ₁ and μ₀ are unidentified with a single arm",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedDrLearner {
+                coef: Vector::zeros(p + 1),
+            });
+        }
+        let (psi, _, _, _, _, _, _) = dr_pseudo_outcome(x, y, treat, n, &ctx.policy);
+        let design = Matrix::from_fn(n, p + 1, |i, j| {
+            if j == 0 {
+                1.0
+            } else {
+                x.get(i, j - 1)
+            }
+        });
+        let mut scratch = Report::new("dr-learner", "ols");
+        let coef = least_squares(&mut scratch, &design, &psi, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(p + 1));
+        for issue in scratch.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("DrLearner is one-shot AIPW pseudo-outcome OLS, not cross-fit DR")
+                .compromise(NumericalCompromise::new(
+                    "Kennedy / econml LinearDRLearner",
+                    "AIPW ψ then OLS of ψ on [1, X]",
+                    "cross-fitting, a nonparametric head, and influence SE are omitted",
+                    "read CATE as [1, x] β on the DR pseudo-outcome",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedDrLearner { coef })
+    }
+}
+
+impl FittedDrLearner {
+    /// Linear CATE on the DR pseudo-outcome.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.coef.as_slice().first().copied().unwrap_or(0.0);
+            for j in 0..x.ncols() {
+                if 1 + j < self.coef.len() {
+                    s += x.get(i, j) * self.coef[1 + j];
+                }
+            }
+            s
+        })))
+    }
+}
+
+/// Domain-adaptation learner CATE (Künzel / econml `DomainAdaptationLearner`).
+///
+/// Control outcome \(\mu_0\) is fit first; the treated arm then regresses
+/// \(Y-\mu_0(X)\) on \(X\). Distinct from [`XLearner`] (two-sided imputed
+/// \(\tau\) plus propensity mix) and [`TLearner`] (two raw outcome models).
+#[derive(Clone, Debug, Default)]
+pub struct DomainAdaptationLearner;
+
+/// Fitted domain-adaptation CATE.
+#[derive(Clone, Debug)]
+pub struct FittedDomainAdaptation {
+    /// Treated-side residual slopes.
+    pub coef: Vector,
+    /// Treated-side residual intercept.
+    pub intercept: f64,
+}
+
+impl DomainAdaptationLearner {
+    /// Default domain-adaptation learner.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit \(\mu_0\) on control, then treated residual CATE.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedDomainAdaptation>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let p = x.ncols();
+        let treated: Vec<usize> = (0..n).filter(|&i| treat[i] >= 0.5).collect();
+        let control: Vec<usize> = (0..n).filter(|&i| treat[i] < 0.5).collect();
+        if treated.is_empty() || control.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("DomainAdaptationLearner needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "domain-adaptation CATE",
+                        "the treated residual needs a control μ₀ and a treated arm",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedDomainAdaptation {
+                coef: Vector::zeros(p),
+                intercept: 0.0,
+            });
+        }
+        let (b0, a0) = ols_arm(x, y, &control, &ctx.policy);
+        let resid = Vector::from_iter(treated.iter().map(|&i| y[i] - mu_lin(x, i, a0, &b0)));
+        let xt = Matrix::from_fn(treated.len(), p, |r, j| x.get(treated[r], j));
+        let (coef, intercept) =
+            ols_arm(&xt, &resid, &(0..treated.len()).collect::<Vec<_>>(), &ctx.policy);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("DomainAdaptationLearner is treated-side residual OLS, not Künzel's published DAL")
+                .compromise(NumericalCompromise::new(
+                    "Künzel domain-adaptation learner",
+                    "control μ₀ then OLS of Y−μ₀ on the treated",
+                    "the published target-shift weights and a nonparametric head are omitted",
+                    "read CATE as the treated residual surface",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedDomainAdaptation { coef, intercept })
+    }
+}
+
+impl FittedDomainAdaptation {
+    /// Treated-side residual CATE.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| mu_lin(x, i, self.intercept, &self.coef)),
+        ))
+    }
+}
+
+/// Sparse linear DML CATE (econml `SparseLinearDML`).
+///
+/// Same residual-on-residual design as [`RLearner`], then ISTA soft-threshold
+/// instead of OLS. Penalty is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SparseLinearDml {
+    /// L1 penalty. Not identification `p`.
+    pub l1: f64,
+}
+
+impl Default for SparseLinearDml {
+    fn default() -> Self {
+        Self { l1: 0.05 }
+    }
+}
+
+impl SparseLinearDml {
+    /// Sparse DML with L1 `l1`.
+    pub fn new(l1: f64) -> Self {
+        Self { l1 }
+    }
+
+    /// Fit ISTA residual-on-residual CATE.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSparseLinearDml>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let p = x.ncols();
+        if !both_arms(treat, &(0..n).collect::<Vec<_>>()) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("SparseLinearDml needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "sparse DML CATE",
+                        "D−e is unidentified with a single arm",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedSparseLinearDml {
+                coef: Vector::zeros(p + 1),
+            });
+        }
+        let (bm, am) = ols_arm(x, y, &(0..n).collect::<Vec<_>>(), &ctx.policy);
+        let (pe, pb) = ista_logit(x, treat, 40);
+        let q = p + 1;
+        let mut coef = Vector::zeros(q);
+        let lam = if self.l1.is_finite() && self.l1 >= 0.0 {
+            self.l1
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("SparseLinearDml l1 is not a non-negative finite; using 0.05")
+                    .build(),
+            );
+            0.05
+        };
+        let lr = 0.1 / (1.0 + q as f64);
+        for _ in 0..80 {
+            let mut grad = Vector::zeros(q);
+            for i in 0..n {
+                if !y[i].is_finite() {
+                    continue;
+                }
+                let e = propensity_row(x, i, &pe, pb);
+                let d = if treat[i] >= 0.5 { 1.0 } else { 0.0 };
+                let r = d - e;
+                let mut pred = coef[0] * r;
+                for j in 0..p {
+                    pred += coef[1 + j] * r * x.get(i, j);
+                }
+                let resid = pred - (y[i] - mu_lin(x, i, am, &bm));
+                grad[0] += resid * r;
+                for j in 0..p {
+                    grad[1 + j] += resid * r * x.get(i, j);
+                }
+            }
+            let nf = n.max(1) as f64;
+            for j in 0..q {
+                coef[j] = soft_threshold(coef[j] - lr * grad[j] / nf, lam * lr);
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SparseLinearDml is ISTA residual-on-residual, not cross-fit sparse DML")
+                .compromise(NumericalCompromise::new(
+                    "econml SparseLinearDML",
+                    "ISTA L1 on (Y−m) ~ (D−e)[1, X]",
+                    "cross-fitting, debiased Lasso, and the published penalty path are omitted",
+                    "read CATE as a soft-thresholded Robinson sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedSparseLinearDml { coef })
+    }
+}
+
+/// Fitted sparse linear DML.
+#[derive(Clone, Debug)]
+pub struct FittedSparseLinearDml {
+    /// CATE slopes on \([1, X]\).
+    pub coef: Vector,
+}
+
+impl FittedSparseLinearDml {
+    /// Linear CATE.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.coef.as_slice().first().copied().unwrap_or(0.0);
+            for j in 0..x.ncols() {
+                if 1 + j < self.coef.len() {
+                    s += x.get(i, j) * self.coef[1 + j];
+                }
+            }
+            s
+        })))
+    }
+}
+
+/// Residualized IV ATE (econml `DMLIV` / `OrthoIV`).
+///
+/// \(\hat\theta=\sum\tilde Z\tilde Y/\sum\tilde Z\tilde D\) after OLS
+/// residualization of \(Y,D,Z\) on \(X\). Distinct from [`DoubleMl`]
+/// (uses \(D\) as its own instrument) and from a Wald LATE (no \(X\)).
+#[derive(Clone, Debug, Default)]
+pub struct DmlIv;
+
+/// Fitted residualized IV ATE.
+#[derive(Clone, Debug)]
+pub struct FittedDmlIv {
+    /// Residualized IV ATE.
+    pub ate: f64,
+}
+
+impl DmlIv {
+    /// Default DML-IV.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit residualized IV.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        instrument: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedDmlIv>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x
+            .nrows()
+            .min(y.len())
+            .min(treat.len())
+            .min(instrument.len());
+        let idx: Vec<usize> = (0..n).collect();
+        if !both_arms(treat, &idx) || !instrument_varies(instrument, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("DmlIv needs treatment and instrument variation")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "DML-IV ATE",
+                        "Z̃D̃ is unidentified without variation in D and Z",
+                        "collect a non-degenerate instrument and both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedDmlIv { ate: f64::NAN });
+        }
+        let (by, ay) = ols_arm(x, y, &idx, &ctx.policy);
+        let (bd, ad) = ols_arm(x, treat, &idx, &ctx.policy);
+        let (bz, az) = ols_arm(x, instrument, &idx, &ctx.policy);
+        let mut num = 0.0_f64;
+        let mut den = 0.0_f64;
+        for i in 0..n {
+            if !y[i].is_finite() || !treat[i].is_finite() || !instrument[i].is_finite() {
+                continue;
+            }
+            let yr = y[i] - mu_lin(x, i, ay, &by);
+            let dr = treat[i] - mu_lin(x, i, ad, &bd);
+            let zr = instrument[i] - mu_lin(x, i, az, &bz);
+            num += zr * yr;
+            den += zr * dr;
+        }
+        if den.abs() <= 1e-15 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("DmlIv first-stage residual Z̃D̃ is zero")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "DML-IV ATE",
+                        "a weak residual first stage leaves θ unidentified",
+                        "need an instrument that moves D after residualizing X",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("DmlIv is one-shot residual IV, not cross-fit OrthoIV")
+                .compromise(NumericalCompromise::new(
+                    "Chernozhukov / econml DMLIV",
+                    "θ = Σ Z̃Ỹ / Σ Z̃D̃ after OLS residualization",
+                    "cross-fitting, a nonparametric first stage, and influence SE are omitted",
+                    "read θ as a residualized Wald sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedDmlIv {
+            ate: if den.abs() > 1e-15 { num / den } else { f64::NAN },
+        })
+    }
+}
+
+/// Wald LATE: \((\bar Y_{Z=1}-\bar Y_{Z=0})/(\bar D_{Z=1}-\bar D_{Z=0})\).
+///
+/// Instrument / arm counts are not identification `p`. Distinct from
+/// [`DmlIv`] (no \(X\) residualization).
+#[derive(Clone, Debug, Default)]
+pub struct WaldLate;
+
+/// Fitted Wald LATE.
+#[derive(Clone, Debug)]
+pub struct FittedWaldLate {
+    /// Wald ratio.
+    pub late: f64,
+}
+
+impl WaldLate {
+    /// Default Wald LATE.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit the two-mean Wald ratio.
+    pub fn fit(
+        &self,
+        y: &Vector,
+        treat: &Vector,
+        instrument: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedWaldLate>> {
+        let n = y.len().min(treat.len()).min(instrument.len());
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_fn(n, 1, |i, _| instrument[i]),
+            Some(y),
+            &ctx.policy,
+        );
+        let idx: Vec<usize> = (0..n).collect();
+        if !instrument_varies(instrument, &idx) || !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("WaldLate needs variation in Z and D")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "Wald LATE",
+                        "the first-stage gap is undefined without Z and D contrast",
+                        "collect a non-degenerate instrument and both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedWaldLate { late: f64::NAN });
+        }
+        let late = wald_leaf(y, treat, instrument, &idx);
+        if late.abs() == 0.0 && !instrument_varies(instrument, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("WaldLate first stage is zero")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "Wald LATE",
+                        "Cov(Z, D)=0 leaves the ratio unidentified",
+                        "need an instrument that moves treatment",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("WaldLate is a two-mean ratio, not a published IV LATE")
+                .compromise(NumericalCompromise::new(
+                    "Wald / Imbens–Angrist LATE",
+                    "(Ȳ₁−Ȳ₀)/(D̄₁−D̄₀) by instrument arm",
+                    "covariates, 2SLS, and a weak-instrument diagnostic are omitted",
+                    "read LATE as a raw Wald sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedWaldLate { late })
+    }
+}
+
+/// Instrumental forest LATE (econml / grf `InstrumentalForest`).
+///
+/// Leaf parameter is the Wald ratio; split score is
+/// \(\sqrt{n_L n_R}\,|\hat\tau_L-\hat\tau_R|\). Tree count is not
+/// identification `p`. Distinct from [`CausalForest`] (unconfounded arm gap).
+#[derive(Clone, Debug)]
+pub struct InstrumentalForest {
+    /// Trees. Not identification `p`.
+    pub n_estimators: usize,
+    /// Depth cap.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for InstrumentalForest {
+    fn default() -> Self {
+        Self {
+            n_estimators: 8,
+            max_depth: 3,
+            seed: 19,
+        }
+    }
+}
+
+impl InstrumentalForest {
+    /// Default instrumental forest.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted IV forest.
+#[derive(Clone, Debug)]
+pub struct FittedInstrumentalForest {
+    trees: Vec<CateNode>,
+}
+
+impl InstrumentalForest {
+    /// Grow extra-trees Wald forest.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        instrument: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedInstrumentalForest>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x
+            .nrows()
+            .min(y.len())
+            .min(treat.len())
+            .min(instrument.len());
+        let idx: Vec<usize> = (0..n).collect();
+        if !both_arms(treat, &idx) || !instrument_varies(instrument, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("InstrumentalForest needs treatment and instrument variation")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "instrumental-forest LATE",
+                        "a leaf Wald is undefined without Z and D contrast",
+                        "collect a non-degenerate instrument and both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedInstrumentalForest { trees: Vec::new() });
+        }
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        for _ in 0..self.n_estimators.max(1) {
+            trees.push(grow_iv_tree(
+                x,
+                y,
+                treat,
+                instrument,
+                &idx,
+                0,
+                self.max_depth.max(1),
+                2,
+                &mut rng,
+            ));
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("InstrumentalForest is extra-trees Wald leaves, not Athey–Wager honest IV forests")
+                .compromise(NumericalCompromise::new(
+                    "Athey–Wager / grf InstrumentalForest",
+                    "random-split trees with leaf Wald LATE",
+                    "honesty, residualization, and asymptotic SE are omitted",
+                    "read CATE as an ensemble Wald leaf, not a published IV forest",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedInstrumentalForest { trees })
+    }
+}
+
+impl FittedInstrumentalForest {
+    /// Ensemble-mean leaf Wald.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let m = self.trees.len().max(1) as f64;
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            if self.trees.is_empty() {
+                0.0
+            } else {
+                self.trees.iter().map(|t| walk_cate(t, x, i)).sum::<f64>() / m
+            }
+        })))
+    }
+}
+
+/// Forest DR-learner (econml `ForestDRLearner`).
+///
+/// AIPW pseudo-outcome as in [`DrLearner`], then extra-trees regression on
+/// \(\psi\). Distinct from [`CausalForest`] (arm-mean gaps, no propensity).
+#[derive(Clone, Debug)]
+pub struct ForestDrLearner {
+    /// Trees. Not identification `p`.
+    pub n_estimators: usize,
+    /// Depth cap.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for ForestDrLearner {
+    fn default() -> Self {
+        Self {
+            n_estimators: 8,
+            max_depth: 3,
+            seed: 29,
+        }
+    }
+}
+
+impl ForestDrLearner {
+    /// Default forest DR-learner.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted forest DR-learner.
+#[derive(Clone, Debug)]
+pub struct FittedForestDr {
+    trees: Vec<CateNode>,
+}
+
+impl ForestDrLearner {
+    /// Grow extra-trees on the DR pseudo-outcome.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedForestDr>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let idx: Vec<usize> = (0..n).collect();
+        if !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("ForestDrLearner needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "forest DR CATE",
+                        "the AIPW pseudo-outcome needs both arms",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedForestDr { trees: Vec::new() });
+        }
+        let (psi, _, _, _, _, _, _) = dr_pseudo_outcome(x, y, treat, n, &ctx.policy);
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        for _ in 0..self.n_estimators.max(1) {
+            trees.push(grow_reg_tree(
+                x,
+                &psi,
+                &idx,
+                0,
+                self.max_depth.max(1),
+                2,
+                &mut rng,
+            ));
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("ForestDrLearner is extra-trees on ψ, not a published honest DR forest")
+                .compromise(NumericalCompromise::new(
+                    "econml ForestDRLearner",
+                    "AIPW ψ then extra-trees regression",
+                    "honesty, cross-fitting, and the published forest weights are omitted",
+                    "read CATE as an ensemble leaf mean of ψ",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedForestDr { trees })
+    }
+}
+
+impl FittedForestDr {
+    /// Ensemble-mean leaf of \(\psi\).
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let m = self.trees.len().max(1) as f64;
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            if self.trees.is_empty() {
+                0.0
+            } else {
+                self.trees.iter().map(|t| walk_cate(t, x, i)).sum::<f64>() / m
+            }
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -28339,6 +29301,70 @@ mod tests {
             cfr.value
                 .predict_cate(&xate, &Session::new("cfrp", "t"))
                 .expect("cfrp")
+                .value
+                .len(),
+            20
+        );
+        let ivz = Vector::from_iter((0..20).map(|i| if i >= 8 { 1.0 } else { 0.0 }));
+        let drl = DrLearner::new()
+            .fit(&xate, &dur, &grp, &Session::new("drl", "t"))
+            .expect("drl");
+        assert_eq!(
+            drl.value
+                .predict_cate(&xate, &Session::new("drlp", "t"))
+                .expect("drlp")
+                .value
+                .len(),
+            20
+        );
+        let dal = DomainAdaptationLearner::new()
+            .fit(&xate, &dur, &grp, &Session::new("dal", "t"))
+            .expect("dal");
+        assert_eq!(
+            dal.value
+                .predict_cate(&xate, &Session::new("dalp", "t"))
+                .expect("dalp")
+                .value
+                .len(),
+            20
+        );
+        let sld = SparseLinearDml::new(0.05)
+            .fit(&xate, &dur, &grp, &Session::new("sld", "t"))
+            .expect("sld");
+        assert_eq!(
+            sld.value
+                .predict_cate(&xate, &Session::new("sldp", "t"))
+                .expect("sldp")
+                .value
+                .len(),
+            20
+        );
+        let div = DmlIv::new()
+            .fit(&xate, &dur, &grp, &ivz, &Session::new("div", "t"))
+            .expect("div");
+        assert!(div.value.ate.is_finite() || div.value.ate.is_nan());
+        let wld = WaldLate::new()
+            .fit(&dur, &grp, &ivz, &Session::new("wld", "t"))
+            .expect("wld");
+        assert!(wld.value.late.is_finite() || wld.value.late.is_nan());
+        let ivf = InstrumentalForest::new()
+            .fit(&xate, &dur, &grp, &ivz, &Session::new("ivf", "t"))
+            .expect("ivf");
+        assert_eq!(
+            ivf.value
+                .predict_cate(&xate, &Session::new("ivfp", "t"))
+                .expect("ivfp")
+                .value
+                .len(),
+            20
+        );
+        let fdr = ForestDrLearner::new()
+            .fit(&xate, &dur, &grp, &Session::new("fdr", "t"))
+            .expect("fdr");
+        assert_eq!(
+            fdr.value
+                .predict_cate(&xate, &Session::new("fdrp", "t"))
+                .expect("fdrp")
                 .value
                 .len(),
             20

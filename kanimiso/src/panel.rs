@@ -3612,6 +3612,271 @@ pub struct FittedSunAbraham {
     pub n_cells: usize,
 }
 
+/// de Chaisemartin–D'Haultfœuille instantaneous switcher DiD.
+///
+/// Calendar / switcher counts are not identification `p`. At each \(t\),
+/// units with `first_treat = t` are compared to not-yet / never-treated
+/// units in a consecutive 2×2. Distinct from [`CallawaySantanna`]
+/// (never-treated only, every post \(t\ge g\)) and [`SunAbraham`]
+/// (cohort-size weighted never-treated cells).
+#[derive(Clone, Debug, Default)]
+pub struct DeChaisemartin;
+
+/// Instantaneous switcher ATT.
+#[derive(Clone, Debug)]
+pub struct FittedDeChaisemartin {
+    /// Simple average of calendar switcher 2×2 ATTs.
+    pub att: f64,
+    /// Number of identified switcher times.
+    pub n_times: usize,
+}
+
+impl DeChaisemartin {
+    /// Default DCDH switcher DiD.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Consecutive-time 2×2 for first-time switchers vs not-yet-treated.
+    pub fn fit(
+        &self,
+        y: &Vector,
+        times: &Vector,
+        first_treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedDeChaisemartin>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let n = y.len().min(times.len()).min(first_treat.len());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_fn(n, 1, |i, _| times[i]),
+            Some(y),
+            &ctx.policy,
+        );
+        let mut switch_t: Vec<i64> = Vec::new();
+        for i in 0..n {
+            if first_treat[i].is_finite() {
+                let g = first_treat[i].round() as i64;
+                if !switch_t.contains(&g) {
+                    switch_t.push(g);
+                }
+            }
+        }
+        switch_t.sort_unstable();
+        let mut atts: Vec<f64> = Vec::new();
+        for &t in &switch_t {
+            let pre = t - 1;
+            let mean = |pred: &dyn Fn(usize) -> bool, at: i64| -> Option<f64> {
+                let mut s = 0.0_f64;
+                let mut m = 0.0_f64;
+                for i in 0..n {
+                    if !pred(i) || !times[i].is_finite() || times[i].round() as i64 != at {
+                        continue;
+                    }
+                    if y[i].is_finite() {
+                        s += y[i];
+                        m += 1.0;
+                    }
+                }
+                if m > 0.0 {
+                    Some(s / m)
+                } else {
+                    None
+                }
+            };
+            let switcher =
+                |i: usize| first_treat[i].is_finite() && first_treat[i].round() as i64 == t;
+            let not_yet = |i: usize| {
+                !first_treat[i].is_finite() || first_treat[i].round() as i64 > t
+            };
+            let (Some(ys), Some(ys0), Some(yc), Some(yc0)) = (
+                mean(&switcher, t),
+                mean(&switcher, pre),
+                mean(&not_yet, t),
+                mean(&not_yet, pre),
+            ) else {
+                continue;
+            };
+            atts.push((ys - ys0) - (yc - yc0));
+        }
+        if atts.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("DeChaisemartin found no switcher 2×2 with a pre period")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "DCDH instantaneous ATT",
+                        "every first-treat calendar lacked switchers or not-yet controls",
+                        "need a pre period and not-yet / never-treated units",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("DeChaisemartin is consecutive switcher 2×2, not the published DCDH estimator")
+                .compromise(NumericalCompromise::new(
+                    "de Chaisemartin–D'Haultfœuille DID_l",
+                    "simple average of first-switch 2×2 vs not-yet-treated",
+                    "placebo pre-trends, weighted DID_ℓ, and the published influence SE are omitted",
+                    "read ATT as a switcher-cell average, not a published DCDH estimate",
+                ))
+                .build(),
+        );
+        let att = if atts.is_empty() {
+            f64::NAN
+        } else {
+            atts.iter().sum::<f64>() / atts.len() as f64
+        };
+        ctx.finish(FittedDeChaisemartin {
+            att,
+            n_times: atts.len(),
+        })
+    }
+}
+
+/// Gardner two-stage DiD (full-sample two-way FE then residual-on-treatment).
+///
+/// Entity / calendar counts are not identification `p`. Distinct from
+/// [`BorusyakJaravelSpiess`]: FE is fit on **all** rows (including treated
+/// post), then the treated-post residual mean is the ATT. That leaks
+/// treatment into \(Y(0)\) — documented as a numerical compromise.
+#[derive(Clone, Debug, Default)]
+pub struct GardnerTwoStage;
+
+/// Two-stage TWFE ATT.
+#[derive(Clone, Debug)]
+pub struct FittedGardner {
+    /// Mean treated-post residual after full-sample two-way FE.
+    pub att: f64,
+    /// Number of treated-post residuals.
+    pub n_treated: usize,
+}
+
+impl GardnerTwoStage {
+    /// Default Gardner two-stage DiD.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Residualize \(Y\) on entity + time FE using every finite row, then
+    /// average treated-post residuals.
+    pub fn fit(
+        &self,
+        y: &Vector,
+        times: &Vector,
+        first_treat: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedGardner>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let n = y
+            .len()
+            .min(times.len())
+            .min(first_treat.len())
+            .min(groups.len());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_fn(n, 1, |i, _| times[i]),
+            Some(y),
+            &ctx.policy,
+        );
+        let rows: Vec<usize> = (0..n)
+            .filter(|&i| y[i].is_finite() && times[i].is_finite() && groups[i].is_finite())
+            .collect();
+        if rows.len() < 4 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("GardnerTwoStage needs ≥4 finite panel rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "two-stage TWFE ATT",
+                        "entity + time FE is unidentified on a handful of cells",
+                        "keep a longer panel",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedGardner {
+                att: f64::NAN,
+                n_treated: 0,
+            });
+        }
+        let mut a: BTreeMap<i64, f64> = BTreeMap::new();
+        let mut b: BTreeMap<i64, f64> = BTreeMap::new();
+        for _ in 0..20 {
+            let mut gsum: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
+            for &i in &rows {
+                let g = groups[i].round() as i64;
+                let t = times[i].round() as i64;
+                let adj = y[i] - b.get(&t).copied().unwrap_or(0.0);
+                let e = gsum.entry(g).or_insert((0.0, 0.0));
+                e.0 += adj;
+                e.1 += 1.0;
+            }
+            a.clear();
+            for (g, (s, c)) in gsum {
+                if c > 0.0 {
+                    a.insert(g, s / c);
+                }
+            }
+            let mut tb: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
+            for &i in &rows {
+                let g = groups[i].round() as i64;
+                let t = times[i].round() as i64;
+                let adj = y[i] - a.get(&g).copied().unwrap_or(0.0);
+                let e = tb.entry(t).or_insert((0.0, 0.0));
+                e.0 += adj;
+                e.1 += 1.0;
+            }
+            b.clear();
+            for (t, (s, c)) in tb {
+                if c > 0.0 {
+                    b.insert(t, s / c);
+                }
+            }
+        }
+        let mut att = 0.0_f64;
+        let mut nt = 0usize;
+        for &i in &rows {
+            if !first_treat[i].is_finite() || times[i] + 1e-12 < first_treat[i] {
+                continue;
+            }
+            let g = groups[i].round() as i64;
+            let t = times[i].round() as i64;
+            let y0 = a.get(&g).copied().unwrap_or(0.0) + b.get(&t).copied().unwrap_or(0.0);
+            att += y[i] - y0;
+            nt += 1;
+        }
+        if nt == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("GardnerTwoStage has no treated-post residuals")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "two-stage TWFE ATT",
+                        "no row is treated at or after first_treat",
+                        "mark a treated cohort with post periods",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("GardnerTwoStage is full-sample two-way FE, not the published two-stage DiD")
+                .compromise(NumericalCompromise::new(
+                    "Gardner two-stage DiD",
+                    "entity + time means on every row, then treated-post residuals",
+                    "untreated-only imputation and the published residual-on-D OLS are omitted; treatment leaks into Y(0)",
+                    "read ATT as a TWFE residual gap, not a published Gardner estimate",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedGardner {
+            att: if nt > 0 { att / nt as f64 } else { f64::NAN },
+            n_treated: nt,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3813,5 +4078,13 @@ mod tests {
             .fit(&y, &time, &first, &Session::new("sa", "fit"))
             .expect("sa");
         assert!(sa.value.att.is_finite() || sa.value.att.is_nan());
+        let dcdh = DeChaisemartin::new()
+            .fit(&y, &time, &first, &Session::new("dcdh", "fit"))
+            .expect("dcdh");
+        assert!(dcdh.value.att.is_finite() || dcdh.value.att.is_nan());
+        let g2s = GardnerTwoStage::new()
+            .fit(&y, &time, &first, &g, &Session::new("g2s", "fit"))
+            .expect("g2s");
+        assert!(g2s.value.att.is_finite() || g2s.value.att.is_nan());
     }
 }

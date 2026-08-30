@@ -37700,6 +37700,327 @@ impl Predict for PriorClassifier {
     }
 }
 
+#[derive(Clone, Debug)]
+struct LogitLeaf {
+    theta: Vector,
+    n: u64,
+}
+
+impl LogitLeaf {
+    fn new(p: usize) -> Self {
+        Self {
+            theta: Vector::zeros(p),
+            n: 0,
+        }
+    }
+
+    fn predict(&self, z: &Vector) -> f64 {
+        let mut s = 0.0;
+        for j in 0..self.theta.len().min(z.len()) {
+            s += self.theta[j] * z[j];
+        }
+        sigmoid(s.clamp(-20.0, 20.0))
+    }
+
+    fn update(&mut self, z: &Vector, y: f64, lr: f64) -> f64 {
+        if self.theta.len() != z.len() {
+            *self = Self::new(z.len());
+        }
+        let p_hat = self.predict(z);
+        let t = as01(y);
+        let err = p_hat - t;
+        let mut dn = 0.0;
+        for j in 0..self.theta.len().min(z.len()) {
+            let d = lr * err * z[j];
+            self.theta[j] -= d;
+            dn += d * d;
+        }
+        self.n += 1;
+        dn.sqrt()
+    }
+}
+
+fn binary_gini(n: f64, pos: f64) -> f64 {
+    if n <= 0.0 {
+        return 0.0;
+    }
+    let p = (pos / n).clamp(0.0, 1.0);
+    1.0 - p * p - (1.0 - p) * (1.0 - p)
+}
+
+/// Adaptive model rules for classification (river `rules.AMRulesClassifier`).
+///
+/// Hoeffding split on **Gini** of the label, logistic-SGD leaves. Distinct
+/// from [`AdaptiveModelRules`] (SSE + RLS regression) and
+/// [`VeryFastDecisionRules`] (named wrapper of the regressor).
+#[derive(Clone, Debug)]
+pub struct AMRulesClassifier {
+    /// SGD step.
+    pub learning_rate: f64,
+    /// Hoeffding \(\delta\).
+    pub delta: f64,
+    p: usize,
+    split: Option<(usize, f64)>,
+    default: LogitLeaf,
+    left: Option<LogitLeaf>,
+    right: Option<LogitLeaf>,
+    feat_mean: Vector,
+    feat_n: u64,
+    parent_n: u64,
+    parent_pos: f64,
+    left_n: Vector,
+    left_pos: Vector,
+    right_n: Vector,
+    right_pos: Vector,
+    updates: u64,
+    n_seen: u64,
+}
+
+impl Default for AMRulesClassifier {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.1,
+            delta: 0.01,
+            p: 0,
+            split: None,
+            default: LogitLeaf::new(0),
+            left: None,
+            right: None,
+            feat_mean: Vector::zeros(0),
+            feat_n: 0,
+            parent_n: 0,
+            parent_pos: 0.0,
+            left_n: Vector::zeros(0),
+            left_pos: Vector::zeros(0),
+            right_n: Vector::zeros(0),
+            right_pos: Vector::zeros(0),
+            updates: 0,
+            n_seen: 0,
+        }
+    }
+}
+
+impl AMRulesClassifier {
+    /// AMRules classifier with SGD step `learning_rate`.
+    pub fn new(learning_rate: f64) -> Self {
+        Self {
+            learning_rate,
+            ..Self::default()
+        }
+    }
+
+    fn ensure(&mut self, p_x: usize) {
+        let p = p_x + 1;
+        if self.p == p {
+            return;
+        }
+        self.p = p;
+        self.default = LogitLeaf::new(p);
+        self.feat_mean = Vector::zeros(p_x);
+        self.left_n = Vector::zeros(p_x);
+        self.left_pos = Vector::zeros(p_x);
+        self.right_n = Vector::zeros(p_x);
+        self.right_pos = Vector::zeros(p_x);
+    }
+
+    fn row(x: &Matrix, i: usize) -> Vector {
+        let mut z = Vector::zeros(x.ncols() + 1);
+        z[0] = 1.0;
+        for j in 0..x.ncols() {
+            z[j + 1] = x.get(i, j);
+        }
+        z
+    }
+
+    fn route(&mut self, x: &Matrix, i: usize) -> &mut LogitLeaf {
+        match self.split {
+            Some((j, t)) if x.get(i, j) <= t => {
+                if self.left.is_none() {
+                    self.left = Some(LogitLeaf::new(self.p));
+                }
+                self.left.as_mut().unwrap()
+            }
+            Some((_j, _)) => {
+                if self.right.is_none() {
+                    self.right = Some(LogitLeaf::new(self.p));
+                }
+                self.right.as_mut().unwrap()
+            }
+            None => &mut self.default,
+        }
+    }
+
+    fn maybe_split(&mut self, ctx: &mut FitCtx) -> Option<(usize, f64, f64)> {
+        if self.split.is_some() || self.feat_mean.is_empty() || self.parent_n < 20 {
+            return None;
+        }
+        let eps = ((1.0 / self.delta.max(1e-12)).ln() / (2.0 * self.parent_n as f64)).sqrt();
+        let parent = binary_gini(self.parent_n as f64, self.parent_pos);
+        let mut best = None;
+        let mut best_gain = 0.0;
+        let mut second = 0.0;
+        for j in 0..self.feat_mean.len() {
+            let nl = self.left_n[j];
+            let nr = self.right_n[j];
+            if nl < 5.0 || nr < 5.0 {
+                continue;
+            }
+            let gl = binary_gini(nl, self.left_pos[j]);
+            let gr = binary_gini(nr, self.right_pos[j]);
+            let gain = parent - (nl * gl + nr * gr) / (nl + nr);
+            if gain > best_gain {
+                second = best_gain;
+                best_gain = gain;
+                best = Some((j, self.feat_mean[j], gain));
+            } else if gain > second {
+                second = gain;
+            }
+        }
+        if let Some((j, t, gain)) = best {
+            if gain - second > eps && gain > 0.0 {
+                self.split = Some((j, t));
+                self.left = Some(LogitLeaf::new(self.p));
+                self.right = Some(LogitLeaf::new(self.p));
+                ctx.push(
+                    Issue::builder(IssueCode::ConceptDriftDetected)
+                        .severity(Severity::Advisory)
+                        .message(format!(
+                            "AMRulesClassifier split on feature {j} at {t:.6e} (gain={gain:.6e}, ε={eps:.6e})"
+                        ))
+                        .build(),
+                );
+                return Some((j, t, gain));
+            }
+        }
+        None
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = Self::row(x, i);
+        match self.split {
+            Some((j, t)) if x.get(i, j) <= t => {
+                self.left.as_ref().map(|l| l.predict(&z)).unwrap_or(0.5)
+            }
+            Some(_) => self.right.as_ref().map(|l| l.predict(&z)).unwrap_or(0.5),
+            None => self.default.predict(&z),
+        }
+    }
+}
+
+impl PartialFit for AMRulesClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            if self.n_seen == 0 {
+                ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            }
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, 0, self.n_seen, "AMRulesClassifier needs a target"),
+            );
+        };
+        self.ensure(x.ncols());
+        let lr = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("AMRulesClassifier learning_rate is not a positive finite; using 0.1")
+                    .build(),
+            );
+            0.1
+        };
+        let mut dsum = 0.0;
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        let mut leaf_hits = [0u64; 3];
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            let z = Self::row(x, i);
+            let pred_b = self.predict_row(x, i);
+            let t = as01(y[i]);
+            loss_before += -(t * (pred_b + 1e-12).ln() + (1.0 - t) * (1.0 - pred_b + 1e-12).ln());
+            let which = match self.split {
+                Some((j, th)) if x.get(i, j) <= th => 1,
+                Some(_) => 2,
+                None => 0,
+            };
+            leaf_hits[which] += 1;
+            let dn = self.route(x, i).update(&z, y[i], lr);
+            dsum += dn;
+            let pred_a = self.predict_row(x, i);
+            loss_after += -(t * (pred_a + 1e-12).ln() + (1.0 - t) * (1.0 - pred_a + 1e-12).ln());
+            if self.split.is_none() {
+                self.parent_n += 1;
+                self.parent_pos += t;
+                self.feat_n += 1;
+                for j in 0..x.ncols() {
+                    let v = x.get(i, j);
+                    self.feat_mean[j] += (v - self.feat_mean[j]) / self.feat_n as f64;
+                    if v <= self.feat_mean[j] {
+                        self.left_n[j] += 1.0;
+                        self.left_pos[j] += t;
+                    } else {
+                        self.right_n[j] += 1.0;
+                        self.right_pos[j] += t;
+                    }
+                }
+            }
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let split = self.maybe_split(&mut ctx);
+        let identified = self.n_seen as usize > self.p.max(1);
+        let warmup = self.n_seen < 10;
+        let what = if let Some((j, t, g)) = split {
+            format!("split on x[{j}]≤{t:.4e} gain={g:.4e}; leaf hits {leaf_hits:?}")
+        } else if self.split.is_some() {
+            format!("updated split logistic leaves; hits {leaf_hits:?}")
+        } else {
+            format!("updated default logistic leaf; hits {leaf_hits:?}")
+        };
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &Vector::from_slice(&[dsum]),
+            loss_before,
+            loss_after,
+            identified,
+            warmup,
+            &what,
+            "logistic-SGD leaf update; a Hoeffding Gini test may grow a stump",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for AMRulesClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.p == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            if self.predict_row(x, i) >= 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38357,6 +38678,9 @@ mod tests {
         PriorClassifier::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("prior");
+        AMRulesClassifier::new(0.1)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("amrc");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
