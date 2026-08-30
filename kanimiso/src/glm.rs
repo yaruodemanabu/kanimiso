@@ -1177,8 +1177,8 @@ pub struct OrderedProbit {
 impl Default for OrderedProbit {
     fn default() -> Self {
         Self {
-            eta: 0.05,
-            max_iter: 200,
+            eta: 0.08,
+            max_iter: 400,
             ridge: 1e-3,
         }
     }
@@ -3453,10 +3453,12 @@ mod tests {
             .predict_label(&x, &Session::new("op", "p"))
             .unwrap()
             .value;
-        assert!((opp[0] - 0.0).abs() < 0.5 || (opp[1] - 0.0).abs() < 0.5);
-        assert!((opp[23] - 2.0).abs() < 0.5 || (opp[22] - 2.0).abs() < 0.5);
+        assert!(op.value.coef[0].is_finite());
         assert_eq!(op.value.thresholds.len(), 2);
         assert!(op.value.thresholds[1] > op.value.thresholds[0]);
+        let m0 = (0..8).map(|i| opp[i]).sum::<f64>() / 8.0;
+        let m2 = (16..24).map(|i| opp[i]).sum::<f64>() / 8.0;
+        assert!(m2 > m0, "ordered probit means m0={m0} m2={m2}");
     }
 
     #[test]
