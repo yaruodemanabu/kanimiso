@@ -13556,6 +13556,347 @@ impl Transform for FittedSfaTransformer {
     }
 }
 
+/// Named soft-DTW barycentre (tslearn `softdtw_barycenter`).
+#[derive(Clone, Debug)]
+pub struct SoftDtwBarycenter {
+    /// Soft-DTW \(\gamma\).
+    pub gamma: f64,
+    /// Gradient steps.
+    pub max_iter: usize,
+}
+
+impl Default for SoftDtwBarycenter {
+    fn default() -> Self {
+        Self {
+            gamma: 1.0,
+            max_iter: 8,
+        }
+    }
+}
+
+impl SoftDtwBarycenter {
+    /// Default soft-DTW barycentre.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit the barycentre of equal-length series rows.
+    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        softdtw_barycenter(x, self.gamma, self.max_iter, session)
+    }
+}
+
+/// Named alias of [`LearningShapelets`] (tslearn `ShapeletModel`).
+#[derive(Clone, Debug)]
+pub struct ShapeletModel {
+    inner: LearningShapelets,
+}
+
+impl Default for ShapeletModel {
+    fn default() -> Self {
+        Self {
+            inner: LearningShapelets::default(),
+        }
+    }
+}
+
+impl ShapeletModel {
+    /// `k` shapelets of length `length`.
+    pub fn new(n_shapelets: usize, length: usize) -> Self {
+        Self {
+            inner: LearningShapelets::new(n_shapelets, length),
+        }
+    }
+}
+
+impl Fit for ShapeletModel {
+    type Fitted = FittedShapelets;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedShapelets>> {
+        self.inner.fit(x, y, session)
+    }
+}
+
+/// Shapelet ridge regressor (tslearn `LearningShapelets` regression).
+///
+/// Shapelet count is not identification `p`. Does not call `inspect_classes`.
+#[derive(Clone, Debug)]
+pub struct LearningShapeletsRegressor {
+    /// Random shapelets.
+    pub n_shapelets: usize,
+    /// Shapelet length.
+    pub length: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for LearningShapeletsRegressor {
+    fn default() -> Self {
+        Self {
+            n_shapelets: 4,
+            length: 4,
+            alpha: 0.5,
+            seed: 3,
+        }
+    }
+}
+
+impl LearningShapeletsRegressor {
+    /// Default shapelet regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted shapelet distances + ridge.
+#[derive(Clone, Debug)]
+pub struct FittedLearningShapeletsReg {
+    shapelets: Matrix,
+    ridge: FittedPenalized,
+}
+
+impl Fit for LearningShapeletsRegressor {
+    type Fitted = FittedLearningShapeletsReg;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLearningShapeletsReg>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let l = self.length.min(x.ncols().max(2)).max(2);
+        if x.ncols() < l {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "LearningShapeletsRegressor length={l} > T={}",
+                        x.ncols()
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .severity(Severity::Advisory)
+                .message("LearningShapeletsRegressor samples random windows")
+                .compromise(NumericalCompromise::new(
+                    "gradient-learned shapelets for regression",
+                    "random subsequences + min-distance + ridge",
+                    "shapelets are not optimized against the SSE",
+                    "treat the features as a random convolutional sketch",
+                ))
+                .build(),
+        );
+        let k = self.n_shapelets.max(1);
+        let mut rng = Rng::new(self.seed | 11);
+        let slen = l.min(x.ncols().max(1));
+        let mut shapelets = Matrix::zeros(k, slen);
+        if x.nrows() > 0 && x.ncols() >= slen {
+            for s in 0..k {
+                let row = rng.below(x.nrows());
+                let start = if x.ncols() > slen {
+                    rng.below(x.ncols() - slen + 1)
+                } else {
+                    0
+                };
+                for u in 0..slen {
+                    shapelets.set(s, u, x.get(row, start + u));
+                }
+            }
+        }
+        let feat = Matrix::from_fn(x.nrows(), k, |i, s| min_shapelet_dist(x, i, &shapelets, s));
+        let ridge = ridge_reg_from_features(&feat, y, self.alpha, &ctx.policy, "lshreg");
+        ctx.finish(FittedLearningShapeletsReg { shapelets, ridge })
+    }
+}
+
+impl Predict for FittedLearningShapeletsReg {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let k = self.shapelets.nrows();
+        let feat = Matrix::from_fn(x.nrows(), k, |i, s| {
+            min_shapelet_dist(x, i, &self.shapelets, s)
+        });
+        let out = if feat.ncols() == self.ridge.coef.len() {
+            let mut yhat = feat.matvec(&self.ridge.coef);
+            for i in 0..yhat.len() {
+                yhat[i] += self.ridge.intercept;
+            }
+            yhat
+        } else {
+            Vector::filled(x.nrows(), self.ridge.intercept)
+        };
+        ctx.finish(out)
+    }
+}
+
+/// 1-D locally linear embedding of series rows (tslearn `LocallyLinearEmbedding`).
+///
+/// Neighbour count is not identification `p`. SVD uses a scratch report.
+#[derive(Clone, Debug)]
+pub struct OneDLle {
+    /// Neighbourhood size.
+    pub n_neighbors: usize,
+}
+
+impl Default for OneDLle {
+    fn default() -> Self {
+        Self { n_neighbors: 3 }
+    }
+}
+
+impl OneDLle {
+    /// 1-D LLE with `n_neighbors`.
+    pub fn new(n_neighbors: usize) -> Self {
+        Self {
+            n_neighbors: n_neighbors.max(2),
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+impl FitUnsupervised for OneDLle {
+    type Fitted = Vector;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let n = x.nrows();
+        let k = self.n_neighbors.max(2).min(n.saturating_sub(1).max(1));
+        if n < 3 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("OneDLle needs at least 3 series")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(n));
+        }
+        let mut w = Matrix::zeros(n, n);
+        for i in 0..n {
+            let mut dist: Vec<(f64, usize)> = (0..n)
+                .filter(|&j| j != i)
+                .map(|j| {
+                    let mut s = 0.0_f64;
+                    for t in 0..x.ncols() {
+                        let d = x.get(i, t) - x.get(j, t);
+                        s += d * d;
+                    }
+                    (s, j)
+                })
+                .collect();
+            dist.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let neigh: Vec<usize> = dist.iter().take(k).map(|d| d.1).collect();
+            let kk = neigh.len();
+            if kk == 0 {
+                continue;
+            }
+            let gram = Matrix::from_fn(kk, kk, |a, b| {
+                let mut s = 0.0_f64;
+                for t in 0..x.ncols() {
+                    s += (x.get(i, t) - x.get(neigh[a], t)) * (x.get(i, t) - x.get(neigh[b], t));
+                }
+                s
+            });
+            let ones = Vector::filled(kk, 1.0);
+            let mut scratch = Report::new("onelle", "w");
+            let wt = ridge_solve(&mut scratch, &gram, &ones, 1e-3, &ctx.policy)
+                .unwrap_or_else(|| Vector::filled(kk, 1.0 / kk as f64));
+            let s = wt.as_slice().iter().sum::<f64>();
+            let inv = if s.abs() > 1e-12 { 1.0 / s } else { 1.0 / kk as f64 };
+            for (a, &j) in neigh.iter().enumerate() {
+                w.set(i, j, wt[a] * inv);
+            }
+        }
+        let m = Matrix::from_fn(n, n, |i, j| {
+            let mut s = if i == j { 1.0 } else { 0.0 };
+            s -= w.get(i, j);
+            s
+        });
+        let gram_m = Matrix::from_fn(n, n, |i, j| {
+            let mut s = 0.0_f64;
+            for t in 0..n {
+                s += m.get(t, i) * m.get(t, j);
+            }
+            s
+        });
+        let mut scratch = Report::new("onelle", "svd");
+        let Some(svd) = thin_svd(&mut scratch, &gram_m, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("OneDLle scatter SVD failed")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(n));
+        };
+        let axis = if svd.v.ncols() >= 2 { 1 } else { 0 };
+        let emb = Vector::from_iter((0..n).map(|i| {
+            if i < svd.v.nrows() && axis < svd.v.ncols() {
+                svd.v[(i, axis)]
+            } else {
+                0.0
+            }
+        }));
+        ctx.finish(emb)
+    }
+}
+
+/// SVD of series rows (tslearn `TimeSeriesSVD`).
+///
+/// Component count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct TimeSeriesSvd {
+    /// Retained axes.
+    pub n_components: usize,
+}
+
+impl Default for TimeSeriesSvd {
+    fn default() -> Self {
+        Self { n_components: 1 }
+    }
+}
+
+impl TimeSeriesSvd {
+    /// Keep `n_components` axes.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components: n_components.max(1),
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedTimeSeriesPca>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+impl FitUnsupervised for TimeSeriesSvd {
+    type Fitted = FittedTimeSeriesPca;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedTimeSeriesPca>> {
+        TimeSeriesPca::new(self.n_components).fit_unsupervised(x, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -13892,6 +14233,39 @@ mod tests {
             .value;
         assert_eq!(zsf.nrows(), 8);
         assert!(zsf.get(0, 0).is_finite());
+        let sdb = SoftDtwBarycenter::new()
+            .fit(&x, &Session::new("ts", "sdb"))
+            .unwrap();
+        assert_eq!(sdb.value.len(), 6);
+        assert!(sdb.value.as_slice().iter().all(|v| v.is_finite()));
+        let shm = ShapeletModel::new(3, 3)
+            .fit(&x, &y, &Session::new("ts", "shm"))
+            .unwrap();
+        let pshm = shm
+            .value
+            .predict(&x, &Session::new("ts", "shmp"))
+            .unwrap()
+            .value;
+        assert_eq!(pshm.len(), 8);
+        let lsr = LearningShapeletsRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "lsr"))
+            .unwrap();
+        let plsr = lsr
+            .value
+            .predict(&x, &Session::new("ts", "lsrp"))
+            .unwrap()
+            .value;
+        assert_eq!(plsr.len(), 8);
+        assert!(plsr.as_slice().iter().all(|v| v.is_finite()));
+        let lle1 = OneDLle::new(3)
+            .fit_unsupervised(&x, &Session::new("ts", "lle1"))
+            .unwrap();
+        assert_eq!(lle1.value.len(), 8);
+        assert!(lle1.value.as_slice().iter().all(|v| v.is_finite()));
+        let tss = TimeSeriesSvd::new(1)
+            .fit_unsupervised(&x, &Session::new("ts", "tssvd"))
+            .unwrap();
+        assert_eq!(tss.value.components.nrows(), 1);
         let rst = Rstsf::new()
             .fit(&x, &y, &Session::new("ts", "rstsf"))
             .unwrap();

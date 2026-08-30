@@ -5571,6 +5571,42 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.piecewise.SymbolicFourierApproximation",
         "estimator",
     ),
+    a("stats.gray_test", "lifelines.statistics.multivariate_logrank_test", "function"),
+    a(
+        "stats.cause_specific_cox",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "stats",
+    ),
+    a("stats.ipcw_cindex", "sksurv.metrics.concordance_index_ipcw", "function"),
+    a("stats.brier_survival", "sksurv.metrics.brier_score", "function"),
+    a("stats.exponential_fitter", "lifelines.ExponentialFitter", "function"),
+    a("stats.ExponentialFitter", "lifelines.ExponentialFitter", "estimator"),
+    a("stats.weibull_fitter", "lifelines.WeibullFitter", "function"),
+    a("stats.WeibullFitter", "lifelines.WeibullFitter", "estimator"),
+    a("online.KnnAdwin", "river.neighbors.KNNADWINClassifier", "online"),
+    a("online.SamKnn", "river.neighbors.SAMKNNClassifier", "online"),
+    a("online.OnlineOneClassSvm", "river.anomaly.SVM", "online"),
+    a("online.FwFmRegressor", "river.facto.FwFMRegressor", "online"),
+    a("online.MultivariateGaussian", "river.proba.MultivariateGaussian", "online"),
+    a("online.ScaleCovariances", "river.preprocessing.ScaleCovariances", "online"),
+    a(
+        "online.VeryFastDecisionRules",
+        "river.rules.VeryFastDecisionRulesClassifier",
+        "online",
+    ),
+    a("tslearn.SoftDtwBarycenter", "tslearn.barycenters.softdtw_barycenter", "estimator"),
+    a("tslearn.ShapeletModel", "tslearn.shapelets.ShapeletModel", "estimator"),
+    a(
+        "tslearn.LearningShapeletsRegressor",
+        "tslearn.shapelets.LearningShapelets",
+        "estimator",
+    ),
+    a(
+        "tslearn.OneDLle",
+        "tslearn.manifold.LocallyLinearEmbedding",
+        "estimator",
+    ),
+    a("tslearn.TimeSeriesSvd", "tslearn.decomposition.TimeSeriesSVD", "estimator"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5983,6 +6019,10 @@ mod tests {
             "tslearn.TimeSeriesPca",
             "online.BayesianLinearRegression",
             "tslearn.SfaTransformer",
+            "stats.gray_test",
+            "stats.ipcw_cindex",
+            "online.SamKnn",
+            "tslearn.LearningShapeletsRegressor",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

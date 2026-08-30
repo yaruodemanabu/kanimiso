@@ -32550,6 +32550,685 @@ impl PartialFit for HedgeRegressor {
     }
 }
 
+/// Named alias of [`AdwinKnn`] (river `neighbors.KNNADWINClassifier`).
+#[derive(Clone, Debug)]
+pub struct KnnAdwin {
+    inner: AdwinKnn,
+}
+
+impl Default for KnnAdwin {
+    fn default() -> Self {
+        Self {
+            inner: AdwinKnn::default(),
+        }
+    }
+}
+
+impl KnnAdwin {
+    /// kNN + ADWIN with neighbourhood `k`.
+    pub fn new(k: usize) -> Self {
+        Self {
+            inner: AdwinKnn::new(k),
+        }
+    }
+}
+
+impl PartialFit for KnnAdwin {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+/// Self-adjusting memory kNN (river `neighbors.SAMKNNClassifier`).
+///
+/// STM window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SamKnn {
+    /// Neighbourhood size.
+    pub k: usize,
+    /// Short-term memory length.
+    pub window: usize,
+    stm_x: Vec<Vec<f64>>,
+    stm_y: Vec<i64>,
+    ltm_x: Vec<Vec<f64>>,
+    ltm_y: Vec<i64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for SamKnn {
+    fn default() -> Self {
+        Self {
+            k: 3,
+            window: 8,
+            stm_x: Vec::new(),
+            stm_y: Vec::new(),
+            ltm_x: Vec::new(),
+            ltm_y: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl SamKnn {
+    /// STM of length `window` and neighbourhood `k`.
+    pub fn new(k: usize, window: usize) -> Self {
+        Self {
+            k: k.max(1),
+            window: window.max(2),
+            ..Self::default()
+        }
+    }
+
+    fn vote(xs: &[Vec<f64>], ys: &[i64], row: &Matrix, i: usize, k: usize) -> Option<i64> {
+        if xs.is_empty() {
+            return None;
+        }
+        let mut dist: Vec<(f64, i64)> = xs
+            .iter()
+            .zip(ys.iter())
+            .map(|(z, &lab)| {
+                let mut s = 0.0;
+                for j in 0..row.ncols().min(z.len()) {
+                    let d = row.get(i, j) - z[j];
+                    s += d * d;
+                }
+                (s, lab)
+            })
+            .collect();
+        dist.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let take = k.max(1).min(dist.len());
+        let mut votes = std::collections::BTreeMap::<i64, usize>::new();
+        for (_, lab) in dist.into_iter().take(take) {
+            *votes.entry(lab).or_insert(0) += 1;
+        }
+        votes
+            .into_iter()
+            .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+            .map(|(lab, _)| lab)
+    }
+}
+
+impl PartialFit for SamKnn {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        let before = self.stm_x.len() + self.ltm_x.len();
+        let w = self.window.max(2);
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let row: Vec<f64> = (0..x.ncols()).map(|j| x.get(i, j)).collect();
+            let lab = y[i].round() as i64;
+            self.stm_x.push(row);
+            self.stm_y.push(lab);
+            if self.stm_x.len() > w {
+                if let Some(old) = self.stm_x.first().cloned() {
+                    self.ltm_x.push(old);
+                    self.ltm_y.push(self.stm_y[0]);
+                }
+                self.stm_x.remove(0);
+                self.stm_y.remove(0);
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.stm_x.len() + self.ltm_x.len();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((after - before) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = after >= self.k;
+        q.warmup = after < self.k;
+        q.explanation = format!("SAM-kNN STM={} LTM={}", self.stm_x.len(), self.ltm_x.len());
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "short-term and long-term kNN memories",
+                "STM is a sliding window; overflow is promoted to LTM; k is not p",
+                format!("mem={before}"),
+                format!("mem={after}"),
+            ),
+        )
+    }
+}
+
+impl Predict for SamKnn {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.stm_x.is_empty() && self.ltm_x.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let stm = Self::vote(&self.stm_x, &self.stm_y, x, i, self.k);
+            let ltm = Self::vote(&self.ltm_x, &self.ltm_y, x, i, self.k);
+            match (stm, ltm) {
+                (Some(a), Some(b)) if a == b => a as f64,
+                (Some(a), Some(_)) => a as f64,
+                (Some(a), None) | (None, Some(a)) => a as f64,
+                _ => 0.0,
+            }
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// Streaming one-class SVM (river `anomaly.SVM`).
+///
+/// Feature count is not identification `p` for a 1-row stream.
+#[derive(Clone, Debug)]
+pub struct OnlineOneClassSvm {
+    /// Step \(\eta\).
+    pub learning_rate: f64,
+    /// Fraction of outliers \(\nu\).
+    pub nu: f64,
+    w: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineOneClassSvm {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            nu: 0.1,
+            w: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineOneClassSvm {
+    /// Default one-class stream.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        let n = x.ncols().min(self.w.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.w[j] * x.get(i, j);
+        }
+        s
+    }
+}
+
+impl PartialFit for OnlineOneClassSvm {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let dim = x.ncols();
+        if !self.initialized {
+            self.w = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.w.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self.w.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let nu = self.nu.clamp(1e-3, 0.999);
+        for i in 0..x.nrows() {
+            let score = self.score_row(x, i);
+            if score < 1.0 {
+                for j in 0..dim {
+                    self.w[j] += eta * (x.get(i, j) - nu * self.w[j]);
+                }
+            } else {
+                for j in 0..dim {
+                    self.w[j] -= eta * nu * self.w[j];
+                }
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.w.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            0.0,
+            0.0,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "one-class SVM weights",
+            "Pegasos-style ν-SVM on the incoming rows; ν is not p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+/// Field-weighted factorization machine (river `facto.FwFM`).
+///
+/// Factor / field counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct FwFmRegressor {
+    /// Latent width.
+    pub n_factors: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    w0: f64,
+    w: Vector,
+    v: Matrix,
+    r: Matrix,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for FwFmRegressor {
+    fn default() -> Self {
+        Self {
+            n_factors: 2,
+            learning_rate: 0.05,
+            w0: 0.0,
+            w: Vector::zeros(0),
+            v: Matrix::zeros(0, 0),
+            r: Matrix::zeros(0, 0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl FwFmRegressor {
+    /// FwFM with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let p = x.ncols().min(self.w.len());
+        let mut s = self.w0;
+        for j in 0..p {
+            s += self.w[j] * x.get(i, j);
+        }
+        let k = self.v.ncols();
+        if k == 0 || p < 2 {
+            return s;
+        }
+        for a in 0..p {
+            for b in (a + 1)..p {
+                let mut dot = 0.0;
+                for f in 0..k {
+                    dot += self.v.get(a, f) * self.v.get(b, f);
+                }
+                let rw = if a < self.r.nrows() && b < self.r.ncols() {
+                    self.r.get(a, b)
+                } else {
+                    1.0
+                };
+                s += rw * dot * x.get(i, a) * x.get(i, b);
+            }
+        }
+        s
+    }
+}
+
+impl PartialFit for FwFmRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let p = x.ncols();
+        let k = self.n_factors.max(1);
+        if !self.initialized {
+            self.w = Vector::zeros(p);
+            self.v = Matrix::from_fn(p, k, |i, f| 0.01 * ((i + f + 1) as f64).sin());
+            self.r = Matrix::from_fn(p, p, |a, b| if a == b { 0.0 } else { 1.0 });
+            self.initialized = true;
+        } else if self.w.len() != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self.w.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            self.w0 -= eta * err;
+            for j in 0..p {
+                self.w[j] -= eta * err * x.get(i, j);
+            }
+            for a in 0..p {
+                for b in (a + 1)..p {
+                    let xa = x.get(i, a);
+                    let xb = x.get(i, b);
+                    let mut dot = 0.0;
+                    for f in 0..k {
+                        dot += self.v.get(a, f) * self.v.get(b, f);
+                    }
+                    let rw = self.r.get(a, b);
+                    self.r.set(a, b, rw - eta * err * dot * xa * xb);
+                    self.r.set(b, a, self.r.get(a, b));
+                    for f in 0..k {
+                        let va = self.v.get(a, f);
+                        let vb = self.v.get(b, f);
+                        self.v.set(a, f, va - eta * err * rw * vb * xa * xb);
+                        self.v.set(b, f, vb - eta * err * rw * va * xa * xb);
+                    }
+                }
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.w.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= 2,
+            self.n_seen < 2,
+            "FwFM linear + field-pair weights",
+            "SGD on w, V and a symmetric field-interaction matrix; k is not p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+/// Online multivariate Gaussian (river `proba.MultivariateGaussian`).
+///
+/// Dimension is not identification `p` for a 1-row stream.
+#[derive(Clone, Debug)]
+pub struct MultivariateGaussian {
+    n: f64,
+    mean: Vector,
+    m2: Matrix,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for MultivariateGaussian {
+    fn default() -> Self {
+        Self {
+            n: 0.0,
+            mean: Vector::zeros(0),
+            m2: Matrix::zeros(0, 0),
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl MultivariateGaussian {
+    /// Empty accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for MultivariateGaussian {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let p = x.ncols();
+        if !self.initialized {
+            self.mean = Vector::zeros(p);
+            self.m2 = Matrix::zeros(p, p);
+            self.initialized = true;
+        } else if self.mean.len() != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n as u64, "feature space changed"),
+            );
+        }
+        let before = self.mean.clone();
+        for i in 0..x.nrows() {
+            self.n += 1.0;
+            let mut delta = Vector::zeros(p);
+            for j in 0..p {
+                delta[j] = x.get(i, j) - self.mean[j];
+                self.mean[j] += delta[j] / self.n;
+            }
+            for a in 0..p {
+                for b in 0..p {
+                    let db = x.get(i, b) - self.mean[b];
+                    self.m2.set(a, b, self.m2.get(a, b) + delta[a] * db);
+                }
+            }
+        }
+        self.updates += 1;
+        let dmean = self.mean.sub(&before);
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(dmean.norm());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 2.0;
+        q.warmup = self.n < 2.0;
+        q.explanation = format!("MultivariateGaussian n={:.0}", self.n);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "running mean and scatter",
+                "Welford multivariate update; dimension is not identification p",
+                format!("||μ||={:.6e}", before.norm()),
+                format!("||μ||={:.6e}", self.mean.norm()),
+            ),
+        )
+    }
+}
+
+/// Online covariance scaling (river `preprocessing.ScaleCovariances` / LDA prep).
+///
+/// Column count is not identification `p` for a 1-row stream.
+#[derive(Clone, Debug)]
+pub struct ScaleCovariances {
+    n: f64,
+    mean: Vector,
+    var: Vector,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for ScaleCovariances {
+    fn default() -> Self {
+        Self {
+            n: 0.0,
+            mean: Vector::zeros(0),
+            var: Vector::zeros(0),
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl ScaleCovariances {
+    /// Empty scaler.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for ScaleCovariances {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let p = x.ncols();
+        if !self.initialized {
+            self.mean = Vector::zeros(p);
+            self.var = Vector::filled(p, 1.0);
+            self.initialized = true;
+        } else if self.mean.len() != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n as u64, "feature space changed"),
+            );
+        }
+        let before = self.var.clone();
+        for i in 0..x.nrows() {
+            self.n += 1.0;
+            for j in 0..p {
+                let d = x.get(i, j) - self.mean[j];
+                self.mean[j] += d / self.n;
+                let d2 = x.get(i, j) - self.mean[j];
+                self.var[j] += (d * d2 - self.var[j]) / self.n;
+            }
+        }
+        self.updates += 1;
+        let delta = self.var.sub(&before);
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(delta.norm());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 2.0;
+        q.warmup = self.n < 2.0;
+        q.explanation = format!("ScaleCovariances n={:.0}", self.n);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "per-column variance used as a whitening scale",
+                "Welford variances; a later transform divides by sqrt(var)",
+                format!("||σ²||={:.6e}", before.norm()),
+                format!("||σ²||={:.6e}", self.var.norm()),
+            ),
+        )
+    }
+}
+
+impl Transform for ScaleCovariances {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(x.clone());
+        }
+        let z = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            let s = if j < self.var.len() {
+                self.var[j].abs().sqrt().max(1e-12)
+            } else {
+                1.0
+            };
+            let m = if j < self.mean.len() { self.mean[j] } else { 0.0 };
+            (x.get(i, j) - m) / s
+        });
+        ctx.finish(z)
+    }
+}
+
+/// Named alias of [`AdaptiveModelRules`] (river `rules.VeryFastDecisionRulesClassifier`).
+#[derive(Clone, Debug)]
+pub struct VeryFastDecisionRules {
+    inner: AdaptiveModelRules,
+}
+
+impl Default for VeryFastDecisionRules {
+    fn default() -> Self {
+        Self {
+            inner: AdaptiveModelRules::default(),
+        }
+    }
+}
+
+impl VeryFastDecisionRules {
+    /// Default VFDR wrapper.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for VeryFastDecisionRules {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -33054,6 +33733,27 @@ mod tests {
         HedgeRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("hedge");
+        KnnAdwin::new(3)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("knnadwin");
+        SamKnn::new(3, 8)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("samknn");
+        OnlineOneClassSvm::new()
+            .partial_fit(&x, None, &session)
+            .expect("ocsvm");
+        FwFmRegressor::new(2)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("fwfm");
+        MultivariateGaussian::new()
+            .partial_fit(&x, None, &session)
+            .expect("mvg");
+        ScaleCovariances::new()
+            .partial_fit(&x, None, &session)
+            .expect("scov");
+        VeryFastDecisionRules::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("vfdr");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

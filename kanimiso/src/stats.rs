@@ -18292,6 +18292,608 @@ pub fn mcnemar_bowker(
     bowker(y1, y2, session)
 }
 
+/// Gray's test of equal cumulative incidence (competing-risks log-rank).
+///
+/// Group / cause counts are not identification `p`. Inspect times with
+/// `y=None`. Competing events stay in the risk set.
+pub fn gray_test(
+    times: &Vector,
+    events: &Vector,
+    groups: &Vector,
+    cause: i64,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(times),
+        None,
+        &ctx.policy,
+    );
+    let n = times.len().min(events.len()).min(groups.len());
+    if events.len() != times.len() || groups.len() != times.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("gray_test lengths do not match")
+                .build(),
+        );
+    }
+    let cause = if cause == 0 { 1 } else { cause };
+    let mut counts: Vec<(i64, usize)> = Vec::new();
+    let mut n_cause = 0usize;
+    for i in 0..n {
+        if !times[i].is_finite() || !groups[i].is_finite() {
+            continue;
+        }
+        if events[i].is_finite() && events[i].round() as i64 == cause {
+            n_cause += 1;
+        }
+        let g = groups[i].round() as i64;
+        if let Some(e) = counts.iter_mut().find(|(k, _)| *k == g) {
+            e.1 += 1;
+        } else {
+            counts.push((g, 1));
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    if n_cause == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("gray_test has no events of the requested cause")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "Gray competing-risks statistic",
+                    "the subdistribution score is empty without cause events",
+                    "choose a cause that occurs",
+                ))
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: n as f64,
+        });
+    }
+    if counts.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("gray_test needs two groups")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: n as f64,
+        });
+    }
+    let g0 = counts[0].0;
+    let g1 = counts[1].0;
+    let mut rows: Vec<(f64, i64, i64)> = (0..n)
+        .filter(|&i| times[i].is_finite() && groups[i].is_finite())
+        .map(|i| {
+            (
+                times[i],
+                if events[i].is_finite() {
+                    events[i].round() as i64
+                } else {
+                    0
+                },
+                groups[i].round() as i64,
+            )
+        })
+        .filter(|(_, _, g)| *g == g0 || *g == g1)
+        .collect();
+    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut times_u: Vec<f64> = rows
+        .iter()
+        .filter(|(_, ev, _)| *ev == cause)
+        .map(|(t, _, _)| *t)
+        .collect();
+    times_u.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    times_u.dedup_by(|a, b| (*a - *b).abs() <= 1e-15);
+    let mut oe = 0.0_f64;
+    let mut var = 0.0_f64;
+    for &t in &times_u {
+        let mut y0 = 0.0_f64;
+        let mut y1 = 0.0_f64;
+        let mut d0 = 0.0_f64;
+        let mut d1 = 0.0_f64;
+        for &(ti, ev, g) in &rows {
+            let competing = ev != 0 && ev != cause;
+            let at_risk = ti + 1e-15 >= t || (ti < t && competing);
+            if !at_risk {
+                continue;
+            }
+            if g == g0 {
+                y0 += 1.0;
+            } else {
+                y1 += 1.0;
+            }
+            if (ti - t).abs() <= 1e-15 && ev == cause {
+                if g == g0 {
+                    d0 += 1.0;
+                } else {
+                    d1 += 1.0;
+                }
+            }
+        }
+        let y = y0 + y1;
+        let d = d0 + d1;
+        if y <= 1.0 || d <= 0.0 {
+            continue;
+        }
+        let e1 = d * y1 / y;
+        oe += d1 - e1;
+        var += d * (y - d) / (y - 1.0) * (y0 / y) * (y1 / y);
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("gray_test uses a two-group Gray score, not a k-sample Pepe–Mori")
+            .compromise(NumericalCompromise::new(
+                "k-sample Gray test with IPCW variance",
+                "two-group O−E on a competing-risk risk set",
+                "weights are unweighted and only two groups are compared",
+                "read as a competing-risks log-rank, not the published Gray k-sample",
+            ))
+            .build(),
+    );
+    let stat = if var > 1e-18 { oe * oe / var } else { f64::NAN };
+    if !stat.is_finite() {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("gray_test variance vanished")
+                .build(),
+        );
+    }
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: if stat.is_finite() {
+            chi2_pvalue(stat, 1.0)
+        } else {
+            f64::NAN
+        },
+        df: 1.0,
+        nobs: n as f64,
+    })
+}
+
+/// Cause-specific Cox (other causes treated as censored).
+///
+/// Cause count is not identification `p`. Inner Fatal Cox codes are not
+/// promoted. Inspect times with `y=None`.
+pub fn cause_specific_cox(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    cause: i64,
+    session: &Session,
+) -> Result<Qualified<FittedCoxPH>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+    let n = durations.len().min(events.len()).min(x.nrows());
+    let cause = if cause == 0 { 1 } else { cause };
+    let cs = Vector::from_iter((0..n).map(|i| {
+        if events[i].is_finite() && events[i].round() as i64 == cause {
+            1.0
+        } else {
+            0.0
+        }
+    }));
+    let n_events = cs.as_slice().iter().filter(|v| **v > 0.5).count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("cause_specific_cox has no events of the requested cause")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "cause-specific Cox coefficients",
+                    "the partial likelihood is empty without cause events",
+                    "choose a cause that occurs",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedCoxPH {
+            coef: Vector::zeros(x.ncols()),
+            loglik: f64::NAN,
+            n_events: 0,
+            n,
+            converged: false,
+        });
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("cause_specific_cox censors competing events; it is not Fine–Gray")
+            .compromise(NumericalCompromise::new(
+                "subdistribution Fine–Gray hazard",
+                "ordinary Cox with other causes recoded as censored",
+                "competing events leave the risk set",
+                "do not read slopes as CIF effects",
+            ))
+            .build(),
+    );
+    match CoxPH::new().fit(durations, &cs, x, &session.child("cs-cox")) {
+        Ok(q) => {
+            for issue in q.report.issues() {
+                if skip_aborting_inner(issue) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            ctx.finish(q.value)
+        }
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("cause-specific Cox Newton failed")
+                    .build(),
+            );
+            ctx.finish(FittedCoxPH {
+                coef: Vector::zeros(x.ncols()),
+                loglik: f64::NAN,
+                n_events,
+                n,
+                converged: false,
+            })
+        }
+    }
+}
+
+/// Uno IPCW concordance (sksurv `concordance_index_ipcw`).
+///
+/// Pair count is not identification `p`. Inspect times with `y=None`.
+pub fn ipcw_cindex(
+    durations: &Vector,
+    events: &Vector,
+    scores: &Vector,
+    session: &Session,
+) -> Result<Qualified<ConcordanceResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    let n = durations.len().min(events.len()).min(scores.len());
+    if events.len() != durations.len() || scores.len() != durations.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("ipcw_cindex lengths do not match")
+                .build(),
+        );
+    }
+    let g_hat = censoring_km(durations, events);
+    let mut n_pairs = 0.0_f64;
+    let mut n_conc = 0.0_f64;
+    let mut n_tie = 0.0_f64;
+    for i in 0..n {
+        if !durations[i].is_finite() || events[i] < 0.5 || !scores[i].is_finite() {
+            continue;
+        }
+        let wi = 1.0 / censor_surv_at(&g_hat, durations[i]).powi(2);
+        if !wi.is_finite() {
+            continue;
+        }
+        for j in 0..n {
+            if i == j || !durations[j].is_finite() || !scores[j].is_finite() {
+                continue;
+            }
+            if durations[i] + 1e-15 >= durations[j] {
+                continue;
+            }
+            n_pairs += wi;
+            let d = scores[i] - scores[j];
+            if d.abs() <= 1e-15 {
+                n_tie += wi;
+            } else if d > 0.0 {
+                n_conc += wi;
+            }
+        }
+    }
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .message("ipcw_cindex uses a local censoring KM, not a Cox-adjusted G")
+            .compromise(NumericalCompromise::new(
+                "Uno C with a covariate-adjusted censoring law",
+                "Harrell pairs weighted by 1/G(t_i)² from a pooled KM",
+                "G is not stratified on X",
+                "the number is an IPCW C, not a published Uno SE",
+            ))
+            .build(),
+    );
+    if n_pairs <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("ipcw_cindex has no comparable pairs")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "Uno IPCW C-index",
+                    "need an event that precedes another finite time",
+                    "collect events with distinct times",
+                ))
+                .build(),
+        );
+        return ctx.finish(ConcordanceResult {
+            c_index: f64::NAN,
+            n_pairs: 0.0,
+            n_concordant: 0.0,
+            n_tied: 0.0,
+        });
+    }
+    ctx.finish(ConcordanceResult {
+        c_index: (n_conc + 0.5 * n_tie) / n_pairs,
+        n_pairs,
+        n_concordant: n_conc,
+        n_tied: n_tie,
+    })
+}
+
+/// IPCW Brier score at a fixed time (sksurv `brier_score`).
+///
+/// The horizon is not identification `p`. Inspect times with `y=None`.
+pub fn brier_survival(
+    durations: &Vector,
+    events: &Vector,
+    pred_surv: &Vector,
+    time: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    let n = durations.len().min(events.len()).min(pred_surv.len());
+    let t = if time.is_finite() && time > 0.0 {
+        time
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("brier_survival time={time}; using the median duration"))
+                .build(),
+        );
+        let mut ts: Vec<f64> = (0..n)
+            .filter(|&i| durations[i].is_finite())
+            .map(|i| durations[i])
+            .collect();
+        ts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        ts.get(ts.len() / 2).copied().unwrap_or(1.0)
+    };
+    let g_hat = censoring_km(durations, events);
+    let gt = censor_surv_at(&g_hat, t);
+    let mut acc = 0.0_f64;
+    let mut wsum = 0.0_f64;
+    for i in 0..n {
+        if !durations[i].is_finite() || !pred_surv[i].is_finite() {
+            continue;
+        }
+        let s = pred_surv[i].clamp(0.0, 1.0);
+        if durations[i] > t {
+            let w = 1.0 / gt;
+            acc += w * (1.0 - s) * (1.0 - s);
+            wsum += w;
+        } else if events[i] > 0.5 {
+            let w = 1.0 / censor_surv_at(&g_hat, durations[i]);
+            acc += w * s * s;
+            wsum += w;
+        }
+    }
+    if wsum <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("brier_survival has no IPCW-usable rows at the horizon")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "survival Brier score",
+                    "every row is censored before the horizon",
+                    "pick an earlier time or collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(acc / wsum)
+}
+
+/// Fitted parametric lifetime (lifelines `*Fitter`).
+#[derive(Clone, Debug)]
+pub struct FittedParametricSurv {
+    /// Shape (\(k=1\) for exponential).
+    pub shape: f64,
+    /// Scale \(\lambda\).
+    pub scale: f64,
+    /// Uncensored events.
+    pub n_events: usize,
+    /// Sample size.
+    pub n: usize,
+}
+
+/// Exponential lifetime MLE (lifelines `ExponentialFitter`).
+///
+/// Event count is not identification `p`. Inspect times with `y=None`.
+pub fn exponential_fitter(
+    durations: &Vector,
+    events: &Vector,
+    session: &Session,
+) -> Result<Qualified<FittedParametricSurv>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    let n = durations.len().min(events.len());
+    let mut sum_t = 0.0_f64;
+    let mut n_events = 0usize;
+    for i in 0..n {
+        if !durations[i].is_finite() || durations[i] <= 0.0 {
+            continue;
+        }
+        sum_t += durations[i];
+        if events[i] > 0.5 {
+            n_events += 1;
+        }
+    }
+    if n_events == 0 || sum_t <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("exponential_fitter has no positive event times")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "exponential rate",
+                    "the exponential MLE is events / Σt and is undefined without events",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedParametricSurv {
+            shape: 1.0,
+            scale: f64::NAN,
+            n_events: 0,
+            n,
+        });
+    }
+    let rate = n_events as f64 / sum_t;
+    ctx.finish(FittedParametricSurv {
+        shape: 1.0,
+        scale: 1.0 / rate,
+        n_events,
+        n,
+    })
+}
+
+/// Named exponential fitter.
+#[derive(Clone, Debug, Default)]
+pub struct ExponentialFitter;
+
+impl ExponentialFitter {
+    /// Default exponential lifetime.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on durations and event indicators.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedParametricSurv>> {
+        exponential_fitter(durations, events, session)
+    }
+}
+
+/// Weibull lifetime via Gumbel moments on log event times (lifelines `WeibullFitter`).
+///
+/// Event count is not identification `p`. Inspect times with `y=None`.
+pub fn weibull_fitter(
+    durations: &Vector,
+    events: &Vector,
+    session: &Session,
+) -> Result<Qualified<FittedParametricSurv>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    let n = durations.len().min(events.len());
+    let mut logs: Vec<f64> = Vec::new();
+    for i in 0..n {
+        if events[i] > 0.5 && durations[i].is_finite() && durations[i] > 0.0 {
+            logs.push(durations[i].ln());
+        }
+    }
+    if logs.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("weibull_fitter needs two positive event times")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "Weibull shape and scale",
+                    "Gumbel moments on log T are unidentified with <2 events",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedParametricSurv {
+            shape: f64::NAN,
+            scale: f64::NAN,
+            n_events: logs.len(),
+            n,
+        });
+    }
+    let m = logs.iter().sum::<f64>() / logs.len() as f64;
+    let var = logs.iter().map(|v| {
+        let d = v - m;
+        d * d
+    }).sum::<f64>()
+        / (logs.len() as f64 - 1.0);
+    let sd = var.max(0.0).sqrt();
+    let shape = if sd > 1e-12 {
+        std::f64::consts::PI / (sd * 6.0_f64.sqrt())
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::NearZeroVariance)
+                .message("weibull_fitter log-times are nearly constant; shape is large")
+                .build(),
+        );
+        8.0
+    };
+    let scale = (m + 0.5772156649015329 / shape).exp();
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("weibull_fitter is a Gumbel-moment shape, not a censored Weibull MLE")
+            .compromise(NumericalCompromise::new(
+                "right-censored Weibull MLE",
+                "Gumbel moments on log event times only",
+                "censored rows do not enter the shape",
+                "read (k, λ) as a moment sketch, not the lifelines MLE",
+            ))
+            .build(),
+    );
+    ctx.finish(FittedParametricSurv {
+        shape,
+        scale,
+        n_events: logs.len(),
+        n,
+    })
+}
+
+/// Named Weibull fitter.
+#[derive(Clone, Debug, Default)]
+pub struct WeibullFitter;
+
+impl WeibullFitter {
+    /// Default Weibull lifetime.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on durations and event indicators.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedParametricSurv>> {
+        weibull_fitter(durations, events, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -19085,5 +19687,20 @@ mod tests {
         assert!(pth.value.pairwise_stat.get(0, 2) > 0.0);
         let mb = mcnemar_bowker(&y1, &y2, &Session::new("mbow", "t")).expect("mbow");
         assert!(mb.value.statistic.is_finite() || mb.value.pvalue.is_nan());
+        let gyt = gray_test(&dur, &ev, &grp, 1, &Session::new("gray", "t")).expect("gray");
+        assert!(gyt.value.statistic.is_finite() || gyt.value.pvalue.is_nan());
+        let csc = cause_specific_cox(&dur, &ev, &xcox, 1, &Session::new("csc", "t")).expect("csc");
+        assert_eq!(csc.value.coef.len(), 1);
+        let ipcw = ipcw_cindex(&dur, &ev, &scores, &Session::new("ipcw", "t")).expect("ipcw");
+        assert!(ipcw.value.c_index.is_finite() || ipcw.value.c_index.is_nan());
+        let ps = Vector::filled(20, 0.5);
+        let brs = brier_survival(&dur, &ev, &ps, 10.0, &Session::new("brs", "t")).expect("brs");
+        assert!(brs.value.is_finite() && brs.value >= 0.0);
+        let exf = exponential_fitter(&dur, &ev, &Session::new("exf", "t")).expect("exf");
+        assert!(exf.value.scale.is_finite() && exf.value.scale > 0.0);
+        let wbf = WeibullFitter::new()
+            .fit(&dur, &ev, &Session::new("wbf", "t"))
+            .expect("wbf");
+        assert!(wbf.value.shape.is_finite() && wbf.value.shape > 0.0);
     }
 }
