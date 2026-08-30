@@ -37279,6 +37279,427 @@ impl Predict for AMFClassifier {
     }
 }
 
+/// Passive-aggressive PA-I regressor (river `linear_model.PARegressor`).
+///
+/// \(\varepsilon\)-insensitive residual; the step is capped at `c`.
+/// \(\varepsilon\) is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct PaRegressor {
+    /// Aggressiveness `C`.
+    pub c: f64,
+    /// Insensitive tube. Not identification `p`.
+    pub epsilon: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for PaRegressor {
+    fn default() -> Self {
+        Self {
+            c: 1.0,
+            epsilon: 0.1,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl PaRegressor {
+    /// PA-I regressor with aggressiveness `c`.
+    pub fn new(c: f64) -> Self {
+        Self {
+            c,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for PaRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        if !self.initialized {
+            if x.ncols() == 0 {
+                ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+                return finish_explain(
+                    ctx,
+                    reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+                );
+            }
+            self.coef = Vector::zeros(x.ncols());
+            self.initialized = true;
+        } else if self.coef.len() != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let eps = if self.epsilon.is_finite() && self.epsilon >= 0.0 {
+            self.epsilon
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("PaRegressor epsilon is not a non-negative finite; using 0.1")
+                    .build(),
+            );
+            0.1
+        };
+        let cap = if self.c.is_finite() && self.c > 0.0 {
+            self.c
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("PaRegressor C is not a positive finite; using 1")
+                    .build(),
+            );
+            1.0
+        };
+        let before = self.coef.clone();
+        let mut pinball = 0.0_f64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let mut s = self.intercept;
+            let mut n2 = 1.0_f64;
+            for j in 0..x.ncols() {
+                let v = x.get(i, j);
+                s += self.coef[j] * v;
+                n2 += v * v;
+            }
+            let r = y[i] - s;
+            let loss = (r.abs() - eps).max(0.0);
+            pinball += loss;
+            if loss > 0.0 && n2 > 0.0 {
+                let tau = (loss / n2).min(cap);
+                let sgn = if r >= 0.0 { 1.0 } else { -1.0 };
+                for j in 0..x.ncols() {
+                    self.coef[j] += tau * sgn * x.get(i, j);
+                }
+                self.intercept += tau * sgn;
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            pinball / x.nrows().max(1) as f64,
+            0.0,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "PA-I regressor",
+            "ε-insensitive residual with step capped at C",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for PaRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
+/// Running majority-class dummy (river `dummy.NoChangeClassifier` sibling).
+#[derive(Clone, Debug, Default)]
+pub struct MajorityClass {
+    n_pos: u64,
+    n_neg: u64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl MajorityClass {
+    /// Empty majority tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for MajorityClass {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        let before = self.n_pos;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            if y[i] >= 0.5 {
+                self.n_pos += 1;
+            } else {
+                self.n_neg += 1;
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_pos as f64 - before as f64).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("MajorityClass pos={} neg={}", self.n_pos, self.n_neg);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "majority counts",
+                "the predicted class is the more frequent label so far",
+                format!("pos={before}"),
+                format!("pos={}", self.n_pos),
+            ),
+        )
+    }
+}
+
+impl Predict for MajorityClass {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.n_seen == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let lab = if self.n_pos > self.n_neg { 1.0 } else { 0.0 };
+        ctx.finish(Vector::filled(x.nrows(), lab))
+    }
+}
+
+/// Predict the last observed label (river `dummy.NoChangeClassifier`).
+#[derive(Clone, Debug, Default)]
+pub struct NoChangeClassifier {
+    last: Option<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl NoChangeClassifier {
+    /// Empty last-label tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for NoChangeClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        let before = self.last;
+        for i in 0..x.nrows().min(y.len()) {
+            if y[i].is_finite() {
+                self.last = Some(if y[i] >= 0.5 { 1.0 } else { 0.0 });
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if before != self.last { 1.0 } else { 0.0 });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.last.is_some();
+        q.warmup = self.last.is_none();
+        q.explanation = format!("NoChangeClassifier last={:?}", self.last);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "last label",
+                "the next prediction repeats the most recent observed class",
+                format!("{before:?}"),
+                format!("{:?}", self.last),
+            ),
+        )
+    }
+}
+
+impl Predict for NoChangeClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        match self.last {
+            Some(lab) => ctx.finish(Vector::filled(x.nrows(), lab)),
+            None => {
+                ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+                ctx.finish(Vector::zeros(x.nrows()))
+            }
+        }
+    }
+}
+
+/// Predict the last observed target (river `dummy.NoChangeRegressor` / last-value).
+#[derive(Clone, Debug, Default)]
+pub struct LastValueRegressor {
+    last: Option<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl LastValueRegressor {
+    /// Empty last-value tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for LastValueRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        let before = self.last;
+        for i in 0..x.nrows().min(y.len()) {
+            if y[i].is_finite() {
+                self.last = Some(y[i]);
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.last.unwrap_or(0.0) - before.unwrap_or(0.0)).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.last.is_some();
+        q.warmup = self.last.is_none();
+        q.explanation = format!("LastValueRegressor last={:?}", self.last);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "last target",
+                "the next prediction repeats the most recent observed y",
+                format!("{before:?}"),
+                format!("{:?}", self.last),
+            ),
+        )
+    }
+}
+
+impl Predict for LastValueRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        match self.last {
+            Some(v) => ctx.finish(Vector::filled(x.nrows(), v)),
+            None => {
+                ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+                ctx.finish(Vector::zeros(x.nrows()))
+            }
+        }
+    }
+}
+
+/// Named prior / empirical-class dummy (river `dummy.Prior`).
+#[derive(Clone, Debug, Default)]
+pub struct PriorClassifier {
+    inner: MajorityClass,
+}
+
+impl PriorClassifier {
+    /// Empty prior tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for PriorClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for PriorClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -37921,6 +38342,21 @@ mod tests {
         AMFClassifier::new(2)
             .partial_fit(&x, Some(&yb), &session)
             .expect("amfc");
+        PaRegressor::new(1.0)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("par");
+        MajorityClass::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("maj");
+        NoChangeClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("nochg");
+        LastValueRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("lastv");
+        PriorClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("prior");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

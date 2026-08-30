@@ -6148,6 +6148,48 @@ const INVENTORY: &[Algorithm] = &[
         "statsmodels.regression.linear_model.OLS",
         "estimator",
     ),
+    a(
+        "stats.FuzzyRd",
+        "statsmodels.regression.linear_model.OLS",
+        "estimator",
+    ),
+    a(
+        "stats.EntropyBalancing",
+        "statsmodels.treatment.treatment_effects",
+        "estimator",
+    ),
+    a(
+        "panel.EventStudy",
+        "linearmodels.panel.model.PanelOLS",
+        "estimator",
+    ),
+    a(
+        "panel.CallawaySantanna",
+        "linearmodels.panel.model.PanelOLS",
+        "estimator",
+    ),
+    a(
+        "panel.StaggeredDid",
+        "linearmodels.panel.model.PanelOLS",
+        "estimator",
+    ),
+    a(
+        "online.PaRegressor",
+        "river.linear_model.PARegressor",
+        "online",
+    ),
+    a("online.MajorityClass", "river.dummy.NoChangeClassifier", "online"),
+    a(
+        "online.NoChangeClassifier",
+        "river.dummy.NoChangeClassifier",
+        "online",
+    ),
+    a(
+        "online.LastValueRegressor",
+        "river.dummy.NoChangeRegressor",
+        "online",
+    ),
+    a("online.PriorClassifier", "river.dummy.Prior", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6642,6 +6684,11 @@ mod tests {
             "stats.IpwAte",
             "panel.DiffInDiff",
             "panel.SyntheticControl",
+            "stats.FuzzyRd",
+            "stats.EntropyBalancing",
+            "panel.EventStudy",
+            "panel.CallawaySantanna",
+            "online.PaRegressor",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

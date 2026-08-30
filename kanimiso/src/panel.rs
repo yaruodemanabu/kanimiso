@@ -3055,6 +3055,276 @@ impl SyntheticControl {
     }
 }
 
+/// Event-study leads and lags (linearmodels / statsmodels TWFE lite).
+///
+/// Window width is not identification `p`. The omitted bin is \(k=-1\).
+#[derive(Clone, Debug)]
+pub struct EventStudy {
+    /// Maximum \(|k|\). Not identification `p`.
+    pub window: usize,
+}
+
+impl Default for EventStudy {
+    fn default() -> Self {
+        Self { window: 2 }
+    }
+}
+
+/// Event-time coefficients.
+#[derive(Clone, Debug)]
+pub struct FittedEventStudy {
+    /// Relative times (excluding \(-1\)).
+    pub event_times: Vector,
+    /// Coefficients on those bins.
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+}
+
+impl EventStudy {
+    /// Window of `window` leads and lags.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+        }
+    }
+
+    /// OLS of `y` on event-time dummies \(k=t-g\) for treated units.
+    ///
+    /// `first_treat` is the first treated calendar time per row (`NaN` = never).
+    pub fn fit(
+        &self,
+        y: &Vector,
+        times: &Vector,
+        first_treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedEventStudy>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let n = y.len().min(times.len()).min(first_treat.len());
+        let w = self.window.max(1);
+        let mut ks: Vec<i64> = Vec::new();
+        for k in -(w as i64)..=(w as i64) {
+            if k != -1 {
+                ks.push(k);
+            }
+        }
+        let p = ks.len();
+        let x = Matrix::from_fn(n, p, |i, j| {
+            if !first_treat[i].is_finite() || !times[i].is_finite() {
+                return 0.0;
+            }
+            let rel = times[i].round() as i64 - first_treat[i].round() as i64;
+            if rel == ks[j] {
+                1.0
+            } else {
+                0.0
+            }
+        });
+        inspect_xy(&mut ctx.report, &x, Some(y), &ctx.policy);
+        let n_treated = (0..n).filter(|&i| first_treat[i].is_finite()).count();
+        if n_treated == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("EventStudy has no treated units")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "event-time coefficients",
+                        "without a first-treat date the dummies are zero",
+                        "mark at least one treated cohort",
+                    ))
+                    .build(),
+            );
+        }
+        let design = x.with_intercept();
+        let yn = Vector::from_iter((0..n).map(|i| y[i]));
+        let mut scratch = signlred::Report::new("event", "ols");
+        let sol = least_squares(&mut scratch, &design, &yn, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(p + 1));
+        for issue in scratch.issues() {
+            if skip_panel_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("EventStudy is OLS on relative-time dummies, not Sun–Abraham / CS")
+                .compromise(NumericalCompromise::new(
+                    "event-study TWFE",
+                    "OLS of y on k=t−g bins with k=−1 omitted",
+                    "cohort-weighted aggregation and never-treated-only controls are omitted",
+                    "read the path as a binned mean gap, not a published event study",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedEventStudy {
+            event_times: Vector::from_iter(ks.iter().map(|k| *k as f64)),
+            coef: Vector::from_iter((1..sol.len()).map(|j| sol[j])),
+            intercept: sol.as_slice().first().copied().unwrap_or(0.0),
+        })
+    }
+}
+
+/// Callaway–Sant’Anna cohort-time ATTs (simple aggregation).
+///
+/// Cohort / calendar counts are not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct CallawaySantanna;
+
+/// Cohort-time ATT table.
+#[derive(Clone, Debug)]
+pub struct FittedCallawaySantanna {
+    /// Simple average of cohort-time ATTs.
+    pub att: f64,
+    /// One ATT per \((g,t)\) cell with a pre period.
+    pub cells: Vector,
+}
+
+impl CallawaySantanna {
+    /// Default CS estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Never-treated 2×2 ATTs for each cohort \(g\) and post time \(t\ge g\).
+    pub fn fit(
+        &self,
+        y: &Vector,
+        times: &Vector,
+        first_treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCallawaySantanna>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let n = y.len().min(times.len()).min(first_treat.len());
+        let dummy = Matrix::from_fn(n, 1, |i, _| times[i]);
+        inspect_xy(&mut ctx.report, &dummy, Some(y), &ctx.policy);
+        let mut cohorts: Vec<i64> = Vec::new();
+        for i in 0..n {
+            if first_treat[i].is_finite() {
+                let g = first_treat[i].round() as i64;
+                if !cohorts.contains(&g) {
+                    cohorts.push(g);
+                }
+            }
+        }
+        cohorts.sort_unstable();
+        if cohorts.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("CallawaySantanna has no treated cohorts")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "cohort-time ATTs",
+                        "without a first-treat date there is no (g,t) cell",
+                        "mark at least one treated cohort",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedCallawaySantanna {
+                att: f64::NAN,
+                cells: Vector::zeros(0),
+            });
+        }
+        let mut cells = Vec::new();
+        for &g in &cohorts {
+            let pre = g - 1;
+            let mut times_t: Vec<i64> = Vec::new();
+            for i in 0..n {
+                if times[i].is_finite() {
+                    let t = times[i].round() as i64;
+                    if t >= g && !times_t.contains(&t) {
+                        times_t.push(t);
+                    }
+                }
+            }
+            times_t.sort_unstable();
+            for t in times_t {
+                let mean = |pred: &dyn Fn(usize) -> bool, at: i64| -> Option<f64> {
+                    let mut s = 0.0_f64;
+                    let mut m = 0.0_f64;
+                    for i in 0..n {
+                        if !pred(i) || !times[i].is_finite() || times[i].round() as i64 != at {
+                            continue;
+                        }
+                        if y[i].is_finite() {
+                            s += y[i];
+                            m += 1.0;
+                        }
+                    }
+                    if m > 0.0 {
+                        Some(s / m)
+                    } else {
+                        None
+                    }
+                };
+                let treated = |i: usize| first_treat[i].is_finite() && first_treat[i].round() as i64 == g;
+                let never = |i: usize| !first_treat[i].is_finite();
+                let (Some(ytg), Some(ypg), Some(ytn), Some(ypn)) = (
+                    mean(&treated, t),
+                    mean(&treated, pre),
+                    mean(&never, t),
+                    mean(&never, pre),
+                ) else {
+                    continue;
+                };
+                cells.push((ytg - ypg) - (ytn - ypn));
+            }
+        }
+        if cells.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("CallawaySantanna found no (g,t) cell with a pre period and never-treated")
+                    .build(),
+            );
+        }
+        let att = if cells.is_empty() {
+            f64::NAN
+        } else {
+            cells.iter().sum::<f64>() / cells.len() as f64
+        };
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("CallawaySantanna is never-treated 2×2 cells, not the published CS estimator")
+                .compromise(NumericalCompromise::new(
+                    "Callaway–Sant’Anna group-time ATTs",
+                    "simple average of (g,t) 2×2 DiD cells vs never-treated",
+                    "not-yet-treated controls, doubly robust outcomes, and influence SE are omitted",
+                    "read ATT as a cell average, not a published CS aggregate",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedCallawaySantanna {
+            att,
+            cells: Vector::from_iter(cells),
+        })
+    }
+}
+
+/// Named staggered DiD alias.
+#[derive(Clone, Debug, Default)]
+pub struct StaggeredDid {
+    inner: CallawaySantanna,
+}
+
+impl StaggeredDid {
+    /// Default CS / staggered DiD.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit cohort-time ATTs.
+    pub fn fit(
+        &self,
+        y: &Vector,
+        times: &Vector,
+        first_treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCallawaySantanna>> {
+        self.inner.fit(y, times, first_treat, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3229,5 +3499,24 @@ mod tests {
             .expect("sc");
         assert_eq!(sc.value.weights.len(), 3);
         assert!(sc.value.att.is_finite());
+        let first = Vector::from_iter((0..32).map(|i| {
+            if i / 8 >= 2 {
+                4.0
+            } else {
+                f64::NAN
+            }
+        }));
+        let evs = EventStudy::new(2)
+            .fit(&y, &time, &first, &Session::new("evs", "fit"))
+            .expect("evs");
+        assert_eq!(evs.value.coef.len(), evs.value.event_times.len());
+        let cs = CallawaySantanna::new()
+            .fit(&y, &time, &first, &Session::new("cs", "fit"))
+            .expect("cs");
+        assert!(cs.value.att.is_finite() || cs.value.att.is_nan());
+        let sdid = StaggeredDid::new()
+            .fit(&y, &time, &first, &Session::new("sdid", "fit"))
+            .expect("sdid");
+        assert!(sdid.value.att.is_finite() || sdid.value.att.is_nan());
     }
 }

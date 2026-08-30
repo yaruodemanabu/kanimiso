@@ -24757,6 +24757,264 @@ impl RegressionDiscontinuity {
     }
 }
 
+fn local_linear_intercept(x: &Matrix, y: &Vector, idx: &[usize], cutoff: f64, policy: &signlred::Policy) -> f64 {
+    if idx.len() < 2 {
+        return f64::NAN;
+    }
+    let z = Matrix::from_fn(idx.len(), 1, |r, _| x.get(idx[r], 0) - cutoff).with_intercept();
+    let ys = Vector::from_iter(idx.iter().map(|&i| y[i]));
+    let mut scratch = Report::new("ll", "side");
+    least_squares(&mut scratch, &z, &ys, policy)
+        .and_then(|sol| sol.as_slice().first().copied())
+        .unwrap_or(f64::NAN)
+}
+
+/// Fuzzy / Wald regression discontinuity.
+///
+/// First-stage and reduced-form jumps are local linear. The first-stage
+/// jump is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct FuzzyRd {
+    /// Cutoff on the running variable (column 0).
+    pub cutoff: f64,
+}
+
+impl Default for FuzzyRd {
+    fn default() -> Self {
+        Self { cutoff: 0.0 }
+    }
+}
+
+/// Wald RD ratio.
+#[derive(Clone, Debug)]
+pub struct FittedFuzzyRd {
+    /// \(\hat\tau = \Delta Y / \Delta D\).
+    pub tau: f64,
+    /// Reduced-form jump.
+    pub reduced_form: f64,
+    /// First-stage jump.
+    pub first_stage: f64,
+}
+
+impl FuzzyRd {
+    /// Fuzzy RD at `cutoff`.
+    pub fn new(cutoff: f64) -> Self {
+        Self { cutoff }
+    }
+
+    /// Wald ratio of local-linear jumps in `y` and `treat`.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedFuzzyRd>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), 1, &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let c = self.cutoff;
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for i in 0..n {
+            if !x.get(i, 0).is_finite() {
+                continue;
+            }
+            if x.get(i, 0) < c {
+                left.push(i);
+            } else {
+                right.push(i);
+            }
+        }
+        if left.len() < 2 || right.len() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("FuzzyRd needs ≥2 rows on each side of the cutoff")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "Wald RD ratio",
+                        "a one-sided support cannot identify either jump",
+                        "widen the window or move the cutoff",
+                    ))
+                    .build(),
+            );
+        }
+        let rf = local_linear_intercept(x, y, &right, c, &ctx.policy)
+            - local_linear_intercept(x, y, &left, c, &ctx.policy);
+        let fs = local_linear_intercept(x, treat, &right, c, &ctx.policy)
+            - local_linear_intercept(x, treat, &left, c, &ctx.policy);
+        if !fs.is_finite() || fs.abs() < 1e-8 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("FuzzyRd first-stage jump is ~0; the Wald ratio is unidentified")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "Wald RD",
+                        "ΔD≈0 leaves τ = ΔY/ΔD undefined",
+                        "use a cutoff with a first-stage jump",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("FuzzyRd is a local-linear Wald ratio, not a published fuzzy RD")
+                .compromise(NumericalCompromise::new(
+                    "fuzzy regression discontinuity",
+                    "Wald ratio of local-linear intercept jumps",
+                    "2SLS, IK/CCT bandwidth, and weak-instrument robust inference are omitted",
+                    "read τ as a jump ratio, not a published fuzzy RD",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedFuzzyRd {
+            tau: rf / fs,
+            reduced_form: rf,
+            first_stage: fs,
+        })
+    }
+}
+
+/// Entropy balancing (Hainmueller) ATT weights.
+///
+/// Dual dimension equals covariate width, not a substitute `p` for the
+/// treated count. ISTA on the dual matches treated moments.
+#[derive(Clone, Debug, Default)]
+pub struct EntropyBalancing;
+
+/// Balanced ATT.
+#[derive(Clone, Debug)]
+pub struct FittedEntropyBalancing {
+    /// \(\widehat{\mathrm{ATT}}\).
+    pub att: f64,
+    /// Dual multipliers.
+    pub dual: Vector,
+    /// Control weights (0 on treated rows).
+    pub weights: Vector,
+}
+
+impl EntropyBalancing {
+    /// Default entropy balancer.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Match treated covariate means with exponential control weights.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedEntropyBalancing>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let p = x.ncols();
+        let treated: Vec<usize> = (0..n).filter(|&i| treat[i] >= 0.5).collect();
+        let control: Vec<usize> = (0..n).filter(|&i| treat[i] < 0.5).collect();
+        if treated.is_empty() || control.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("EntropyBalancing needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "entropy-balancing weights",
+                        "a missing arm cannot match moments",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedEntropyBalancing {
+                att: f64::NAN,
+                dual: Vector::zeros(p),
+                weights: Vector::zeros(n),
+            });
+        }
+        let mut mt = Vector::zeros(p);
+        for &i in &treated {
+            for j in 0..p {
+                mt[j] += x.get(i, j);
+            }
+        }
+        let nt = treated.len() as f64;
+        for j in 0..p {
+            mt[j] /= nt;
+        }
+        let mut lam = Vector::zeros(p);
+        let lr = 0.1 / (1.0 + p as f64);
+        for _ in 0..60 {
+            let mut wsum = 0.0_f64;
+            let mut wx = Vector::zeros(p);
+            for &i in &control {
+                let mut xb = 0.0;
+                for j in 0..p {
+                    xb += x.get(i, j) * lam[j];
+                }
+                xb = xb.clamp(-20.0, 20.0);
+                let w = (-xb).exp();
+                wsum += w;
+                for j in 0..p {
+                    wx[j] += w * x.get(i, j);
+                }
+            }
+            if wsum <= 1e-15 {
+                break;
+            }
+            for j in 0..p {
+                let g = wx[j] / wsum - mt[j];
+                lam[j] = (lam[j] + lr * g).clamp(-10.0, 10.0);
+            }
+        }
+        let mut weights = Vector::zeros(n);
+        let mut wsum = 0.0_f64;
+        let mut wy = 0.0_f64;
+        for &i in &control {
+            let mut xb = 0.0;
+            for j in 0..p {
+                xb += x.get(i, j) * lam[j];
+            }
+            xb = xb.clamp(-20.0, 20.0);
+            let w = (-xb).exp();
+            weights[i] = w;
+            wsum += w;
+            if y[i].is_finite() {
+                wy += w * y[i];
+            }
+        }
+        if wsum > 1e-15 {
+            for &i in &control {
+                weights[i] /= wsum;
+            }
+            wy /= wsum;
+        }
+        let mut yt = 0.0_f64;
+        for &i in &treated {
+            if y[i].is_finite() {
+                yt += y[i];
+            }
+        }
+        yt /= nt;
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("EntropyBalancing is dual ISTA, not Hainmueller's exact solver")
+                .compromise(NumericalCompromise::new(
+                    "entropy balancing",
+                    "exponential tilt of controls matching treated means",
+                    "exact moment equality and base-weight priors are omitted",
+                    "read ATT as a reweighted gap, not a published EB estimate",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedEntropyBalancing {
+            att: yt - wy,
+            dual: lam,
+            weights,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -25849,5 +26107,14 @@ mod tests {
             .fit(&xate, &dur, &Session::new("rd", "t"))
             .expect("rd");
         assert!(rdest.value.tau.is_finite() || rdest.value.tau.is_nan());
+        let frd = FuzzyRd::new(9.5)
+            .fit(&xate, &dur, &grp, &Session::new("frd", "t"))
+            .expect("frd");
+        assert!(frd.value.first_stage.is_finite() || frd.value.tau.is_nan());
+        let ebal = EntropyBalancing::new()
+            .fit(&xate, &dur, &grp, &Session::new("ebal", "t"))
+            .expect("ebal");
+        assert!(ebal.value.att.is_finite());
+        assert_eq!(ebal.value.weights.len(), 20);
     }
 }
