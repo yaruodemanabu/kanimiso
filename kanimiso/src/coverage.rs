@@ -3840,6 +3840,17 @@ const INVENTORY: &[Algorithm] = &[
         "sklearn.linear_model.SGDClassifier",
         "online",
     ),
+    a(
+        "tslearn.dtw_alignment",
+        "tslearn.metrics.dtw_path",
+        "timeseries",
+    ),
+    a("hmm.HmmAnnotator", "sktime.annotation.hmm.HMM", "hmm"),
+    a(
+        "tsa.ForecastByLevel",
+        "sktime.forecasting.compose.ForecastByLevel",
+        "forecast",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4052,6 +4063,9 @@ mod tests {
             "online.SgtRegressor",
             "online.IsoUPTree",
             "online.OnlineSvm",
+            "tslearn.dtw_alignment",
+            "hmm.HmmAnnotator",
+            "tsa.ForecastByLevel",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

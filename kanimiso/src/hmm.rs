@@ -1258,6 +1258,55 @@ impl FitUnsupervised for GaussianHmmFull {
     }
 }
 
+/// Sequence annotator wrapping a diagonal Gaussian HMM (sktime `HMM` annotator).
+///
+/// State count is not treated as an extra identification `p` here; the inner
+/// [`GaussianHmm`] already identifies on `n_states`.
+#[derive(Clone, Debug)]
+pub struct HmmAnnotator {
+    /// Hidden states forwarded to [`GaussianHmm`].
+    pub n_states: usize,
+}
+
+impl Default for HmmAnnotator {
+    fn default() -> Self {
+        Self { n_states: 2 }
+    }
+}
+
+impl HmmAnnotator {
+    /// Annotator with `n_states` regimes.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states: n_states.max(1),
+        }
+    }
+}
+
+/// Fitted HMM annotator.
+#[derive(Clone, Debug)]
+pub struct FittedHmmAnnotator {
+    /// Decoded state path.
+    pub labels: Vector,
+    /// Underlying Gaussian HMM.
+    pub inner: FittedGaussianHmm,
+}
+
+impl FitUnsupervised for HmmAnnotator {
+    type Fitted = FittedHmmAnnotator;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedHmmAnnotator>> {
+        let q = GaussianHmm::new(self.n_states).fit_unsupervised(x, session)?;
+        Ok(q.map(|inner| FittedHmmAnnotator {
+            labels: inner.labels.clone(),
+            inner,
+        }))
+    }
+}
+
 /// Discrete-emission HMM. Observation codes are the rounded entries of `X`
 /// (typically a `T` × 1 matrix of integer symbols).
 ///
@@ -2850,6 +2899,10 @@ mod tests {
         );
         assert_eq!(full.value.covs.len(), 2);
         assert_eq!(full.value.covs[0].shape(), (1, 1));
+        let ann = HmmAnnotator::new(2)
+            .fit_unsupervised(&x, &Session::new("ann_hmm", "fit"))
+            .expect("ann");
+        assert_eq!(ann.value.labels.len(), 80);
     }
 
     #[test]

@@ -6574,6 +6574,57 @@ impl ColumnEnsembleForecaster {
     }
 }
 
+/// One last-value walk per hierarchy level / column (sktime `ForecastByLevel`).
+///
+/// Column count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct ForecastByLevel;
+
+/// Fitted per-column last-value forecasts.
+#[derive(Clone, Debug)]
+pub struct FittedForecastByLevel {
+    /// Last observed value of each column.
+    pub last: Vector,
+}
+
+impl ForecastByLevel {
+    /// Default level-wise naive ensemble.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit a last-value walker on each column of `y`.
+    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedForecastByLevel>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        if y.nrows() == 0 || y.ncols() == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .severity(Severity::Warning)
+                    .message("ForecastByLevel received an empty panel")
+                    .build(),
+            );
+            return ctx.finish(FittedForecastByLevel {
+                last: Vector::zeros(y.ncols()),
+            });
+        }
+        ctx.finish(FittedForecastByLevel {
+            last: Vector::from_iter((0..y.ncols()).map(|j| {
+                let col = y.column(j);
+                col.as_slice().last().copied().unwrap_or(0.0)
+            })),
+        })
+    }
+}
+
+impl FittedForecastByLevel {
+    /// Repeat each column's last value for `h` horizons.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(Matrix::from_fn(h, self.last.len(), |_, j| self.last[j]))
+    }
+}
+
 /// Fitted per-column AutoReg ensemble.
 #[derive(Clone, Debug)]
 pub struct FittedColumnEnsemble {
@@ -9090,6 +9141,16 @@ mod tests {
             .expect("colf")
             .value;
         assert_eq!(cf.shape(), (3, 2));
+        let fbl = ForecastByLevel
+            .fit(&y2, &Session::new("fbl", "fit"))
+            .expect("fbl");
+        let fblf = fbl
+            .value
+            .forecast(3, &Session::new("fbl", "fc"))
+            .expect("fblf")
+            .value;
+        assert_eq!(fblf.shape(), (3, 2));
+        assert!(fblf.get(0, 0).is_finite() && fblf.get(2, 1).is_finite());
         let cc = ccf(&y, &y, 3, &Session::new("ccf", "t"))
             .expect("ccf")
             .value;

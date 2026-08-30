@@ -462,6 +462,36 @@ fn dtw_path(a: &[f64], b: &[f64]) -> Vec<(usize, usize)> {
     path
 }
 
+/// DTW alignment path as an `n_path × 2` index matrix (tslearn `dtw_path`).
+///
+/// Path length is not identification `p`.
+pub fn dtw_alignment(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("dtw_path.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("dtw_path.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .severity(Severity::Warning)
+                .message("dtw_alignment on an empty series")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(0, 2));
+    }
+    let path = dtw_path(a.as_slice(), b.as_slice());
+    ctx.finish(Matrix::from_fn(path.len(), 2, |i, j| {
+        if j == 0 {
+            path[i].0 as f64
+        } else {
+            path[i].1 as f64
+        }
+    }))
+}
+
 /// DTW barycentre averaging (DBA) of the rows of `x`.
 pub fn dtw_barycenter(x: &Matrix, max_iter: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
@@ -10082,6 +10112,12 @@ mod tests {
             .unwrap()
             .value;
         assert!(ctwv.is_finite() && ctwv >= 0.0);
+        let path = dtw_alignment(&q0, &q0, &Session::new("ts", "dtwp"))
+            .unwrap()
+            .value;
+        assert_eq!(path.ncols(), 2);
+        assert_eq!(path.nrows(), q0.len());
+        assert!((path.get(0, 0) - 0.0).abs() < 1e-12);
         let hmr = HydraMultiRocket::new()
             .fit(&x, &yb, &Session::new("ts", "hmr"))
             .unwrap();
