@@ -5609,6 +5609,12 @@ pub fn schoenfeld(
                     | IssueCode::NearSingular
                     | IssueCode::RankZero
                     | IssueCode::R2IsOne
+                    | IssueCode::LossIsNan
+                    | IssueCode::GradientExploded
+                    | IssueCode::MeaninglessFit
+                    | IssueCode::UnidentifiedModel
+                    | IssueCode::DidNotConverge
+                    | IssueCode::CholeskyFailed
             ) {
                 ctx.push(e.primary);
             }
@@ -6756,7 +6762,7 @@ mod tests {
         assert!(hr.value.sigma2.is_finite());
         let hn = breaks_hansen(&x, &y, &Session::new("han", "t")).expect("hansen");
         assert!(hn.value.statistic.is_finite() || hn.value.pvalue.is_nan());
-        let cx = Matrix::from_fn(20, 1, |i, _| i as f64);
+        let cx = Matrix::from_fn(20, 1, |i, _| if i < 10 { 0.0 } else { 1.0 });
         let sch = schoenfeld(&dur, &ev, &cx, &Session::new("sch", "t")).expect("sch");
         assert_eq!(sch.value.ncols(), 1);
         assert!(sch.value.nrows() == 0 || (0..sch.value.nrows()).all(|i| sch.value.get(i, 0).is_finite()));
