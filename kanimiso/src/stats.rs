@@ -7,11 +7,12 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linalg::{chol_solve, least_squares};
+use crate::linalg::{chol_solve, least_squares, thin_svd};
 use crate::rng::Rng;
 use crate::special::{
     chi2_cdf, chi2_pvalue, f_pvalue, ln_gamma, norm_cdf, student_t_cdf, student_t_pvalue,
 };
+use crate::traits::{Fit, Predict};
 use crate::validate::{inspect_identification, inspect_xy};
 use faer::Mat;
 use ojizou_san::Session;
@@ -8363,6 +8364,239 @@ pub fn anova_rm(table: &Matrix, session: &Session) -> Result<Qualified<AnovaResu
     })
 }
 
+/// Quantile regression (statsmodels `QuantReg`) via IRLS.
+///
+/// The quantile is not identification `p`. Inner residual / rank issues are
+/// kept on a scratch report so they do not abort a valid outer fit.
+#[derive(Clone, Debug)]
+pub struct QuantReg {
+    /// Quantile in (0, 1).
+    pub q: f64,
+    /// IRLS iteration cap.
+    pub max_iter: usize,
+}
+
+impl Default for QuantReg {
+    fn default() -> Self {
+        Self {
+            q: 0.5,
+            max_iter: 40,
+        }
+    }
+}
+
+impl QuantReg {
+    /// Quantile `q`.
+    pub fn new(q: f64) -> Self {
+        Self {
+            q,
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted statsmodels-style quantile regression.
+#[derive(Clone, Debug)]
+pub struct FittedQuantReg {
+    /// Slopes.
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+    /// Requested quantile.
+    pub q: f64,
+}
+
+impl Fit for QuantReg {
+    type Fitted = FittedQuantReg;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedQuantReg>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let q = if self.q.is_finite() && self.q > 0.0 && self.q < 1.0 {
+            self.q
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("QuantReg q={} is not in (0,1); using 0.5", self.q))
+                    .build(),
+            );
+            0.5
+        };
+        let design = x.with_intercept();
+        let mut scratch = Report::new("quantreg", "init");
+        let mut beta = least_squares(&mut scratch, &design, y, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        for it in 0..self.max_iter.max(1) {
+            let pred = design.matvec(&beta);
+            let mut xs = Matrix::zeros(design.nrows(), design.ncols());
+            let mut ys = Vector::zeros(y.len());
+            for i in 0..y.len() {
+                let r = y[i] - pred[i];
+                let w = if r >= 0.0 { q } else { 1.0 - q };
+                let sw = (w / r.abs().max(1e-6)).sqrt();
+                ys[i] = y[i] * sw;
+                for j in 0..design.ncols() {
+                    xs.set(i, j, design.get(i, j) * sw);
+                }
+            }
+            let mut step = Report::new("quantreg", "step");
+            let Some(next) = least_squares(&mut step, &xs, &ys, &ctx.policy) else {
+                break;
+            };
+            let d = next.sub(&beta).norm();
+            beta = next;
+            ctx.session.step(it as u64, d, None);
+            if d < 1e-8 {
+                break;
+            }
+        }
+        let intercept = beta.as_slice().first().copied().unwrap_or(0.0);
+        let coef = if beta.len() > 1 {
+            Vector::from_iter((1..beta.len()).map(|j| beta[j]))
+        } else {
+            Vector::zeros(x.ncols())
+        };
+        ctx.finish(FittedQuantReg { coef, intercept, q })
+    }
+}
+
+impl Predict for FittedQuantReg {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
+/// Canonical correlations (statsmodels `CanCorr`).
+///
+/// View / component counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct CanCorrResult {
+    /// Canonical correlations (nonincreasing).
+    pub correlations: Vector,
+    /// Number of finite observations used.
+    pub nobs: f64,
+}
+
+/// Canonical correlation of two views via SVD of the whitened cross-covariance.
+pub fn cancorr(x: &Matrix, y: &Matrix, session: &Session) -> Result<Qualified<CanCorrResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+    if x.nrows() != y.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "CanCorr row mismatch {} vs {}",
+                    x.nrows(),
+                    y.nrows()
+                ))
+                .build(),
+        );
+    }
+    let n = x.nrows().min(y.nrows());
+    if n < 3 || x.ncols() == 0 || y.ncols() == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("CanCorr needs n≥3 and two non-empty views")
+                .build(),
+        );
+        return ctx.finish(CanCorrResult {
+            correlations: Vector::zeros(0),
+            nobs: n as f64,
+        });
+    }
+    let xc = x.centered().0;
+    let yc = y.centered().0;
+    let mut sx = Report::new("cancorr", "svdx");
+    let mut sy = Report::new("cancorr", "svdy");
+    let Some(svx) = thin_svd(&mut sx, &xc, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("CanCorr X SVD failed")
+                .build(),
+        );
+        return ctx.finish(CanCorrResult {
+            correlations: Vector::zeros(0),
+            nobs: n as f64,
+        });
+    };
+    let Some(svy) = thin_svd(&mut sy, &yc, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("CanCorr Y SVD failed")
+                .build(),
+        );
+        return ctx.finish(CanCorrResult {
+            correlations: Vector::zeros(0),
+            nobs: n as f64,
+        });
+    };
+    let rx = svx
+        .rank(ctx.policy.rank_tol_relative)
+        .max(1)
+        .min(svx.u.ncols());
+    let ry = svy
+        .rank(ctx.policy.rank_tol_relative)
+        .max(1)
+        .min(svy.u.ncols());
+    let xw = Matrix::from_fn(n, rx, |i, j| {
+        if i < svx.u.nrows() && j < svx.u.ncols() {
+            svx.u[(i, j)]
+        } else {
+            0.0
+        }
+    });
+    let yw = Matrix::from_fn(n, ry, |i, j| {
+        if i < svy.u.nrows() && j < svy.u.ncols() {
+            svy.u[(i, j)]
+        } else {
+            0.0
+        }
+    });
+    let cross = Matrix::from_fn(rx, ry, |i, j| {
+        let mut s = 0.0;
+        for t in 0..n {
+            s += xw.get(t, i) * yw.get(t, j);
+        }
+        s
+    });
+    let mut sc = Report::new("cancorr", "cross");
+    let Some(svc) = thin_svd(&mut sc, &cross, &ctx.policy) else {
+        return ctx.finish(CanCorrResult {
+            correlations: Vector::zeros(0),
+            nobs: n as f64,
+        });
+    };
+    let corr = Vector::from_iter(svc.singular_values.iter().map(|v| v.abs().min(1.0)));
+    if corr.as_slice().iter().all(|v| *v <= 1e-12) {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("CanCorr found no shared variation")
+                .build(),
+        );
+    }
+    ctx.finish(CanCorrResult {
+        correlations: corr,
+        nobs: n as f64,
+    })
+}
+
 /// One-way MANOVA (statsmodels `multivariate.manova.MANOVA`) via Pillai's trace.
 ///
 /// Group and response counts are **not** identification `p`. A singular
@@ -9187,5 +9421,12 @@ mod tests {
         assert!(arm.value.f_stat.is_finite() || arm.value.pvalue.is_nan());
         let zph = cox_zph(&dur, &ev, &cx, &Session::new("zph", "t")).expect("zph");
         assert!(zph.value.statistic.is_finite() || zph.value.pvalue.is_nan());
+        let qr = QuantReg::new(0.5)
+            .fit(&x, &y, &Session::new("qr", "t"))
+            .expect("qr");
+        assert!(qr.value.coef.as_slice().iter().all(|v| v.is_finite()));
+        let ycc = Matrix::from_fn(x.nrows(), 1, |i, _| y[i]);
+        let cc = cancorr(&x, &ycc, &Session::new("cc", "t")).expect("cc");
+        assert!(cc.value.correlations.as_slice().iter().any(|v| *v > 0.5));
     }
 }

@@ -8238,6 +8238,185 @@ impl Predict for FittedClaSPClassifier {
     }
 }
 
+/// Greedy Gaussian segmentation (sktime `GreedyGaussianSegmentation`).
+///
+/// Change-point count is not identification `p`.
+pub fn ggs(y: &Vector, max_changes: usize, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y),
+        Some(y),
+        &ctx.policy,
+    );
+    let n = y.len();
+    if n < 6 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("GGS needs n≥6")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(0));
+    }
+    let kmax = max_changes.max(1).min(n / 3);
+    let mut ps = vec![0.0; n + 1];
+    let mut qs = vec![0.0; n + 1];
+    for i in 0..n {
+        ps[i + 1] = ps[i] + y[i];
+        qs[i + 1] = qs[i] + y[i] * y[i];
+    }
+    let seg_ll = |s: usize, t: usize| -> f64 {
+        let m = (t - s) as f64;
+        if m < 2.0 {
+            return f64::NEG_INFINITY;
+        }
+        let var = ((qs[t] - qs[s]) / m - ((ps[t] - ps[s]) / m).powi(2)).max(1e-12);
+        -0.5 * m * (var.ln() + 1.0)
+    };
+    let mut bounds = vec![0usize, n];
+    for _ in 0..kmax {
+        let mut best_gain = 0.0;
+        let mut best_k = 0usize;
+        let mut best_pos = 0usize;
+        for b in 0..bounds.len() - 1 {
+            let s = bounds[b];
+            let t = bounds[b + 1];
+            if t - s < 6 {
+                continue;
+            }
+            let base = seg_ll(s, t);
+            for k in (s + 2)..(t - 2) {
+                let gain = seg_ll(s, k) + seg_ll(k, t) - base;
+                if gain > best_gain {
+                    best_gain = gain;
+                    best_k = k;
+                    best_pos = b + 1;
+                }
+            }
+        }
+        if best_gain <= 1e-9 {
+            break;
+        }
+        bounds.insert(best_pos, best_k);
+    }
+    let cps = Vector::from_iter(
+        bounds
+            .iter()
+            .skip(1)
+            .take(bounds.len().saturating_sub(2))
+            .map(|v| *v as f64),
+    );
+    ctx.finish(cps)
+}
+
+/// MrSEQL-lite: SAX word counts + ridge (sktime `MrSEQLClassifier`).
+///
+/// Word / alphabet counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MrSeqlClassifier {
+    /// PAA segments.
+    pub n_segments: usize,
+    /// SAX alphabet size.
+    pub alphabet: usize,
+    /// Hashed word-bag width.
+    pub n_words: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for MrSeqlClassifier {
+    fn default() -> Self {
+        Self {
+            n_segments: 4,
+            alphabet: 4,
+            n_words: 8,
+            alpha: 0.1,
+        }
+    }
+}
+
+impl MrSeqlClassifier {
+    /// Default MrSEQL-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted MrSEQL-lite ridge.
+#[derive(Clone, Debug)]
+pub struct FittedMrSeqlClassifier {
+    inner: crate::classification::FittedRidgeClassifier,
+    n_segments: usize,
+    alphabet: usize,
+    n_words: usize,
+}
+
+fn mrseql_row_bag(row: &Vector, n_segments: usize, alphabet: usize, n_words: usize) -> Vector {
+    let m = n_words.max(1);
+    let mut bag = Vector::zeros(m);
+    let n = row.len();
+    if n == 0 {
+        return bag;
+    }
+    let segs = n_segments.max(1).min(n);
+    let a = alphabet.max(2);
+    let mut prev = 0u64;
+    for s in 0..segs {
+        let lo = s * n / segs;
+        let hi = ((s + 1) * n / segs).max(lo + 1);
+        let mut acc = 0.0;
+        let mut c = 0.0;
+        for j in lo..hi.min(n) {
+            acc += row[j];
+            c += 1.0;
+        }
+        let mean = if c > 0.0 { acc / c } else { 0.0 };
+        let u = 0.5 + 0.5 * crate::special::erf(mean / std::f64::consts::SQRT_2);
+        let sym = ((u * a as f64).floor() as u64).min(a as u64 - 1);
+        let word = prev.wrapping_mul(a as u64 + 1).wrapping_add(sym + 1);
+        let bin = (word as usize) % m;
+        bag[bin] += 1.0;
+        prev = sym + 1;
+    }
+    bag
+}
+
+impl Fit for MrSeqlClassifier {
+    type Fitted = FittedMrSeqlClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMrSeqlClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let w = self.n_words.max(1);
+        let z = Matrix::from_fn(x.nrows(), w, |i, j| {
+            mrseql_row_bag(&x.row(i), self.n_segments, self.alphabet, w)[j]
+        });
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "mrseql");
+        ctx.finish(FittedMrSeqlClassifier {
+            inner,
+            n_segments: self.n_segments.max(1),
+            alphabet: self.alphabet.max(2),
+            n_words: w,
+        })
+    }
+}
+
+impl Predict for FittedMrSeqlClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = Matrix::from_fn(x.nrows(), self.n_words.max(1), |i, j| {
+            mrseql_row_bag(&x.row(i), self.n_segments, self.alphabet, self.n_words)[j]
+        });
+        self.inner.predict(&z, session)
+    }
+}
+
 /// Catch22 feature transformer (sktime `Catch22`).
 ///
 /// Feature count is not identification `p`.
@@ -9904,5 +10083,16 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(clp.len(), 6);
+        let gg = ggs(&yramp, 2, &Session::new("ts", "ggs")).unwrap().value;
+        assert!(gg.as_slice().iter().all(|v| v.is_finite()));
+        let ms = MrSeqlClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "mrseql"))
+            .unwrap();
+        let msp = ms
+            .value
+            .predict(&x, &Session::new("ts", "mrseqlp"))
+            .unwrap()
+            .value;
+        assert_eq!(msp.len(), 6);
     }
 }

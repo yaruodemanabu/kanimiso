@@ -1139,7 +1139,9 @@ pub fn laplacian_kernel(
         ctx.push(
             Issue::builder(IssueCode::InvalidWeight)
                 .severity(Severity::Warning)
-                .message(format!("laplacian_kernel γ={gamma} is not positive; using 1"))
+                .message(format!(
+                    "laplacian_kernel γ={gamma} is not positive; using 1"
+                ))
                 .build(),
         );
         1.0
@@ -1294,8 +1296,7 @@ pub fn haversine_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<
         let lon2 = b.get(j, 1).to_radians();
         let dlat = lat2 - lat1;
         let dlon = lon2 - lon1;
-        let h = (dlat * 0.5).sin().powi(2)
-            + lat1.cos() * lat2.cos() * (dlon * 0.5).sin().powi(2);
+        let h = (dlat * 0.5).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon * 0.5).sin().powi(2);
         let h = h.clamp(0.0, 1.0);
         2.0 * R * h.sqrt().asin()
     });
@@ -1493,7 +1494,9 @@ pub fn nan_euclidean_distances(
     if empty > 0 {
         ctx.push(
             Issue::builder(IssueCode::AllMissing)
-                .message(format!("{empty} NaN-Euclidean pairs shared no finite coordinates"))
+                .message(format!(
+                    "{empty} NaN-Euclidean pairs shared no finite coordinates"
+                ))
                 .build(),
         );
     }
@@ -1706,29 +1709,17 @@ pub fn class_likelihood_ratios(
 }
 
 /// Alias of [`brier`] (sklearn `brier_score_loss`).
-pub fn brier_score_loss(
-    y_true: &Vector,
-    p: &Vector,
-    session: &Session,
-) -> Result<Qualified<f64>> {
+pub fn brier_score_loss(y_true: &Vector, p: &Vector, session: &Session) -> Result<Qualified<f64>> {
     brier(y_true, p, session)
 }
 
 /// Alias of [`hamming`] (sklearn `hamming_loss`).
-pub fn hamming_loss(
-    y_true: &Vector,
-    y_pred: &Vector,
-    session: &Session,
-) -> Result<Qualified<f64>> {
+pub fn hamming_loss(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
     hamming(y_true, y_pred, session)
 }
 
 /// Alias of [`silhouette`] (sklearn `silhouette_score`).
-pub fn silhouette_score(
-    x: &Matrix,
-    labels: &Vector,
-    session: &Session,
-) -> Result<Qualified<f64>> {
+pub fn silhouette_score(x: &Matrix, labels: &Vector, session: &Session) -> Result<Qualified<f64>> {
     silhouette(x, labels, session)
 }
 
@@ -4145,11 +4136,7 @@ pub fn roc_auc_ovr(y_true: &Vector, scores: &Matrix, session: &Session) -> Resul
 /// One-vs-one ROC-AUC from a score matrix (sklearn `roc_auc_score` `ovo`).
 ///
 /// Class count is not identification `p`.
-pub fn roc_auc_ovo(
-    y_true: &Vector,
-    scores: &Matrix,
-    session: &Session,
-) -> Result<Qualified<f64>> {
+pub fn roc_auc_ovo(y_true: &Vector, scores: &Matrix, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, scores, None, &ctx.policy);
     warn_constant_target(&mut ctx, y_true, true);
@@ -4187,7 +4174,11 @@ pub fn roc_auc_ovo(
                 if yt[r] != c1 && yt[r] != c2 {
                     continue;
                 }
-                let col = classes.iter().position(|&z| z == c1).unwrap_or(0).min(c - 1);
+                let col = classes
+                    .iter()
+                    .position(|&z| z == c1)
+                    .unwrap_or(0)
+                    .min(c - 1);
                 pos.push(yt[r] == c1);
                 sc.push(scores.get(r, col));
             }
@@ -4753,9 +4744,7 @@ mod tests {
         .unwrap()
         .value;
         assert!((accs - 1.0).abs() < 1e-12);
-        let r2s = r2_score(&y2, &y2, &Session::new("m", "r2s"))
-            .unwrap()
-            .value;
+        let r2s = r2_score(&y2, &y2, &Session::new("m", "r2s")).unwrap().value;
         assert!((r2s - 1.0).abs() < 1e-12);
         let mse2 = mean_squared_error(&y2, &h2, &Session::new("m", "mse2"))
             .unwrap()
@@ -4831,5 +4820,10 @@ mod tests {
             .unwrap()
             .value;
         assert!((ars - 1.0).abs() < 1e-12);
+        let arg = pairwise_distances_argmin(&xb, &xb, &Session::new("m", "arg"))
+            .unwrap()
+            .value;
+        assert_eq!(arg.len(), xb.nrows());
+        assert!((arg[1] - 1.0).abs() < 1e-12);
     }
 }

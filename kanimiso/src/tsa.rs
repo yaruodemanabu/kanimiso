@@ -13,6 +13,7 @@
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linalg::{chol_solve, thin_svd};
+use crate::rng::Rng;
 
 pub use crate::filters::{bk_filter, cf_filter, FittedLocalLinearTrend, LocalLinearTrend};
 use crate::traits::FitSeries;
@@ -3615,6 +3616,216 @@ impl FitSeries for Naive {
     }
 }
 
+/// Residual-bootstrap bagging of a last-value walk (sktime `BaggingForecaster`).
+///
+/// Bootstrap count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct BaggingForecaster {
+    /// Number of residual-bootstrap paths.
+    pub n_estimators: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for BaggingForecaster {
+    fn default() -> Self {
+        Self {
+            n_estimators: 8,
+            seed: 0,
+        }
+    }
+}
+
+impl BaggingForecaster {
+    /// `n_estimators` bootstrap paths.
+    pub fn new(n_estimators: usize) -> Self {
+        Self {
+            n_estimators: n_estimators.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted residual-bootstrap bagging forecaster.
+#[derive(Clone, Debug)]
+pub struct FittedBaggingForecaster {
+    /// Last observed level.
+    pub last: f64,
+    residuals: Vector,
+    n_estimators: usize,
+    seed: u64,
+}
+
+impl FittedBaggingForecaster {
+    /// Average of residual-bootstrap random-walk paths.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        if h == 0 {
+            return ctx.finish(Vector::zeros(0));
+        }
+        let bags = self.n_estimators.max(1);
+        let r = self.residuals.len();
+        if r == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("BaggingForecaster has no residuals; repeating the last value")
+                    .build(),
+            );
+            return ctx.finish(Vector::filled(h, self.last));
+        }
+        let mut acc = Vector::zeros(h);
+        let mut rng = Rng::new(self.seed ^ 0xBA6);
+        for _ in 0..bags {
+            let mut level = self.last;
+            for t in 0..h {
+                let j = rng.below(r);
+                level += self.residuals[j.min(r - 1)];
+                acc[t] += level;
+            }
+        }
+        let nf = bags as f64;
+        for t in 0..h {
+            acc[t] /= nf;
+        }
+        ctx.finish(acc)
+    }
+}
+
+impl FitSeries for BaggingForecaster {
+    type Fitted = FittedBaggingForecaster;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedBaggingForecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("BaggingForecaster needs n≥2 to form residuals")
+                    .build(),
+            );
+            return ctx.finish(FittedBaggingForecaster {
+                last: y.as_slice().last().copied().unwrap_or(f64::NAN),
+                residuals: Vector::zeros(0),
+                n_estimators: self.n_estimators.max(1),
+                seed: self.seed,
+            });
+        }
+        let residuals = Vector::from_iter((1..y.len()).map(|t| y[t] - y[t - 1]));
+        ctx.finish(FittedBaggingForecaster {
+            last: y[y.len() - 1],
+            residuals,
+            n_estimators: self.n_estimators.max(1),
+            seed: self.seed,
+        })
+    }
+}
+
+/// Split-conformal intervals around a last-value forecast (sktime conformal).
+///
+/// Coverage is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct NaiveConformal {
+    /// Nominal coverage in (0, 1).
+    pub coverage: f64,
+}
+
+impl Default for NaiveConformal {
+    fn default() -> Self {
+        Self { coverage: 0.8 }
+    }
+}
+
+impl NaiveConformal {
+    /// Nominal coverage `coverage`.
+    pub fn new(coverage: f64) -> Self {
+        Self { coverage }
+    }
+}
+
+/// Fitted last-value conformal interval.
+#[derive(Clone, Debug)]
+pub struct FittedNaiveConformal {
+    /// Last observed level.
+    pub last: f64,
+    /// Half-width from residual quantiles.
+    pub half_width: f64,
+    /// Effective coverage used.
+    pub coverage: f64,
+}
+
+impl FittedNaiveConformal {
+    /// Repeat the last value.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(Vector::filled(h, self.last))
+    }
+
+    /// Columns `[lower, mid, upper]` for `h` steps.
+    pub fn interval(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("interval"));
+        let w = self.half_width.max(0.0);
+        ctx.finish(Matrix::from_fn(h, 3, |_, j| match j {
+            0 => self.last - w,
+            2 => self.last + w,
+            _ => self.last,
+        }))
+    }
+}
+
+impl FitSeries for NaiveConformal {
+    type Fitted = FittedNaiveConformal;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedNaiveConformal>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let cov = if self.coverage.is_finite() && self.coverage > 0.0 && self.coverage < 1.0 {
+            self.coverage
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "NaiveConformal coverage={} is not in (0,1); using 0.8",
+                        self.coverage
+                    ))
+                    .build(),
+            );
+            0.8
+        };
+        if y.len() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("NaiveConformal needs n≥2 residuals")
+                    .build(),
+            );
+            return ctx.finish(FittedNaiveConformal {
+                last: y.as_slice().last().copied().unwrap_or(f64::NAN),
+                half_width: 0.0,
+                coverage: cov,
+            });
+        }
+        let mut absr: Vec<f64> = (1..y.len()).map(|t| (y[t] - y[t - 1]).abs()).collect();
+        absr.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let alpha = (1.0 - cov).max(0.0);
+        let q = ((1.0 - alpha) * (absr.len() as f64 - 1.0)).round() as usize;
+        let half = absr[q.min(absr.len() - 1)];
+        ctx.finish(FittedNaiveConformal {
+            last: y[y.len() - 1],
+            half_width: half,
+            coverage: cov,
+        })
+    }
+}
+
 /// Seasonal-naive forecaster (repeat the last period).
 #[derive(Clone, Debug)]
 pub struct SeasonalNaive {
@@ -6694,10 +6905,7 @@ pub fn innovations_algo(gamma: &Vector, session: &Session) -> Result<Qualified<I
         }
         v[n] = vn.max(0.0);
     }
-    ctx.finish(Innovations {
-        theta,
-        variance: v,
-    })
+    ctx.finish(Innovations { theta, variance: v })
 }
 
 /// One-step innovations residuals (statsmodels `innovations_filter`).
@@ -8082,6 +8290,26 @@ mod tests {
         let split = temporal_train_test_split(&y, 0.25, &Session::new("tts", "t")).expect("tts");
         assert_eq!(split.value.0.len() + split.value.1.len(), y.len());
         assert!(!split.value.1.is_empty());
+        let bag = BaggingForecaster::new(4)
+            .fit_series(&y, &Session::new("bag", "fit"))
+            .expect("bag");
+        let bf = bag
+            .value
+            .forecast(3, &Session::new("bag", "fc"))
+            .expect("bagf")
+            .value;
+        assert_eq!(bf.len(), 3);
+        assert!(bf.as_slice().iter().all(|v| v.is_finite()));
+        let cfm = NaiveConformal::new(0.8)
+            .fit_series(&y, &Session::new("ncf", "fit"))
+            .expect("ncf");
+        let iv = cfm
+            .value
+            .interval(3, &Session::new("ncf", "iv"))
+            .expect("ncfi")
+            .value;
+        assert_eq!(iv.shape(), (3, 3));
+        assert!(iv.get(0, 0) <= iv.get(0, 1) && iv.get(0, 1) <= iv.get(0, 2));
     }
 
     #[test]
@@ -8507,11 +8735,15 @@ mod tests {
             .value;
         assert_eq!(mint.shape(), (2, 3));
         assert!(mint.get(0, 0).is_finite() && mint.get(0, 2).is_finite());
-        let g = acovf(&y, 4, &Session::new("inn", "g")).expect("acovf-inn").value;
+        let g = acovf(&y, 4, &Session::new("inn", "g"))
+            .expect("acovf-inn")
+            .value;
         let inn = innovations_algo(&g, &Session::new("inn", "algo")).expect("inn");
         assert_eq!(inn.value.variance.len(), 5);
         assert!(inn.value.variance.as_slice().iter().all(|v| v.is_finite()));
-        let ef = innovations_filter(&y, 4, &Session::new("inn", "filt")).expect("ifilt").value;
+        let ef = innovations_filter(&y, 4, &Session::new("inn", "filt"))
+            .expect("ifilt")
+            .value;
         assert_eq!(ef.len(), 40);
         let psi = arma2ma(
             &Vector::from_slice(&[0.5]),

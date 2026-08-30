@@ -3737,6 +3737,37 @@ const INVENTORY: &[Algorithm] = &[
         "hmmlearn.hmm.GaussianHMM",
         "hmm",
     ),
+    a(
+        "stats.QuantReg",
+        "statsmodels.regression.quantile_regression.QuantReg",
+        "estimator",
+    ),
+    a(
+        "stats.cancorr",
+        "statsmodels.multivariate.cancorr.CanCorr",
+        "stats",
+    ),
+    a(
+        "tsa.BaggingForecaster",
+        "sktime.forecasting.compose.BaggingForecaster",
+        "forecast",
+    ),
+    a(
+        "tsa.NaiveConformal",
+        "sktime.forecasting.conformal.ConformalIntervals",
+        "forecast",
+    ),
+    a(
+        "tslearn.ggs",
+        "sktime.annotation.ggs.GreedyGaussianSegmentation",
+        "timeseries",
+    ),
+    a(
+        "tslearn.MrSeqlClassifier",
+        "sktime.classification.dictionary_based.MrSEQLClassifier",
+        "estimator",
+    ),
+    a("online.HoFm", "river.reco.HoFM", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -3922,6 +3953,13 @@ mod tests {
             "online.ContentReco",
             "online.TargetAgg",
             "hmm.GaussianHmmLeftRight",
+            "stats.QuantReg",
+            "stats.cancorr",
+            "tsa.BaggingForecaster",
+            "tsa.NaiveConformal",
+            "tslearn.ggs",
+            "tslearn.MrSeqlClassifier",
+            "online.HoFm",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

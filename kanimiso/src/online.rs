@@ -17296,6 +17296,194 @@ impl PartialFit for TargetAgg {
     }
 }
 
+/// Higher-order factorization machine (river `reco.HoFM`).
+///
+/// Factor count is not identification `p`. A design with fewer than three
+/// columns has no 3-way term.
+#[derive(Clone, Debug)]
+pub struct HoFm {
+    /// Pairwise factor width.
+    pub n_factors: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    w0: f64,
+    w: Vector,
+    v: Matrix,
+    t3: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for HoFm {
+    fn default() -> Self {
+        Self {
+            n_factors: 2,
+            learning_rate: 0.05,
+            w0: 0.0,
+            w: Vector::zeros(0),
+            v: Matrix::zeros(0, 0),
+            t3: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl HoFm {
+    /// HoFM with `k` pairwise factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let p = x.ncols().min(self.w.len());
+        let mut s = self.w0;
+        for j in 0..p {
+            s += self.w[j] * x.get(i, j);
+        }
+        let k = self.v.ncols();
+        if k > 0 && self.v.nrows() > 0 {
+            for f in 0..k {
+                let mut sum_vx = 0.0;
+                let mut sum_v2x2 = 0.0;
+                for j in 0..p.min(self.v.nrows()) {
+                    let vjf = self.v.get(j, f);
+                    let xj = x.get(i, j);
+                    sum_vx += vjf * xj;
+                    sum_v2x2 += vjf * vjf * xj * xj;
+                }
+                s += 0.5 * (sum_vx * sum_vx - sum_v2x2);
+            }
+        }
+        if p >= 3 {
+            s += self.t3 * x.get(i, 0) * x.get(i, 1) * x.get(i, 2);
+        }
+        s
+    }
+}
+
+impl PartialFit for HoFm {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no ratings"),
+            );
+        };
+        let p = x.ncols();
+        let k = self.n_factors.max(1);
+        if !self.initialized {
+            self.w = Vector::zeros(p.max(1));
+            self.v = Matrix::from_fn(p.max(1), k, |_, _| 0.01);
+            self.initialized = true;
+        } else if self.w.len() != p.max(1) {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message("HoFm feature dim changed")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let mut sse = 0.0;
+        let mut moved = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            sse += err * err;
+            self.w0 -= eta * err;
+            moved += (eta * err).abs();
+            let kf = k.min(self.v.ncols());
+            let mut sum_f = vec![0.0; kf];
+            for f in 0..kf {
+                for j in 0..p.min(self.v.nrows()) {
+                    sum_f[f] += self.v.get(j, f) * x.get(i, j);
+                }
+            }
+            for j in 0..p.min(self.w.len()) {
+                let xj = x.get(i, j);
+                let step = eta * err * xj;
+                self.w[j] -= step;
+                moved += step.abs();
+                if j >= self.v.nrows() {
+                    continue;
+                }
+                for f in 0..kf {
+                    let vjf = self.v.get(j, f);
+                    let grad = err * xj * (sum_f[f] - vjf * xj);
+                    let nxt = vjf - eta * grad;
+                    self.v.set(j, f, nxt);
+                    moved += (eta * grad).abs();
+                }
+            }
+            if p >= 3 {
+                let trip = x.get(i, 0) * x.get(i, 1) * x.get(i, 2);
+                let step = eta * err * trip;
+                self.t3 -= step;
+                moved += step.abs();
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(moved);
+        q.information_gain = Some(moved.max(x.nrows() as f64));
+        q.loss_after = Some(sse);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("HoFM ||Δ||={moved:.6e} sse={sse:.6e}");
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("HoFm has seen fewer than two rows")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "linear + pairwise FM + optional 3-way term",
+                "SGD on w, V and the first-three-column product; factor count is not p",
+                "previous HoFM weights",
+                format!("n_seen={}", self.n_seen),
+            ),
+        )
+    }
+}
+
 impl Predict for AdaBoundRegressor {
     type Output = Vector;
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
@@ -17770,6 +17958,9 @@ mod tests {
         TargetAgg::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("tagg");
+        HoFm::new(2)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("hofm");
 
         let n_expl = session
             .ledger()
