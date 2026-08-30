@@ -3370,6 +3370,42 @@ const INVENTORY: &[Algorithm] = &[
     a("online.AdaDeltaRegressor", "river.optim.AdaDelta", "online"),
     a("online.MomentumRegressor", "river.optim.Momentum", "online"),
     a("online.OnlinePoisson", "river.proba.Poisson", "online"),
+    a(
+        "metrics.class_likelihood_ratios",
+        "sklearn.metrics.class_likelihood_ratios",
+        "metric",
+    ),
+    a(
+        "metrics.brier_score_loss",
+        "sklearn.metrics.brier_score_loss",
+        "metric",
+    ),
+    a(
+        "metrics.hamming_loss",
+        "sklearn.metrics.hamming_loss",
+        "metric",
+    ),
+    a(
+        "tslearn.InceptionTimeRegressor",
+        "sktime.regression.deep_learning.inceptiontime.InceptionTimeRegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.TapNetClassifier",
+        "sktime.classification.deep_learning.tapnet.TapNetClassifier",
+        "timeseries",
+    ),
+    a(
+        "online.NesterovRegressor",
+        "river.optim.NesterovMomentum",
+        "online",
+    ),
+    a(
+        "online.OnlineDirichlet",
+        "river.proba.Multinomial",
+        "online",
+    ),
+    a("online.ImplicitMf", "river.reco.BiasedMF", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -3521,6 +3557,9 @@ mod tests {
             "tslearn.ResNetClassifier",
             "online.FtrlRegressor",
             "stats.fdrcorrection",
+            "metrics.class_likelihood_ratios",
+            "tslearn.TapNetClassifier",
+            "online.NesterovRegressor",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

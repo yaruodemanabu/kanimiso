@@ -15159,6 +15159,333 @@ impl PartialFit for OnlinePoisson {
     }
 }
 
+/// Nesterov accelerated gradient linear regressor (river `optim.NesterovMomentum`).
+#[derive(Clone, Debug)]
+pub struct NesterovRegressor {
+    /// Step \(\eta\).
+    pub learning_rate: f64,
+    /// Momentum \(\mu\).
+    pub mu: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    vel: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for NesterovRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            mu: 0.9,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            vel: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl NesterovRegressor {
+    /// Default Nesterov regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_with(&self, x: &Matrix, i: usize, w: &Vector) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(w.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += w[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for NesterovRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.vel = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.coef.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let mu = self.mu.clamp(0.0, 0.999);
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let look = Vector::from_iter((0..dim).map(|j| self.coef[j] + mu * self.vel[j]));
+            let pred = self.predict_with(x, i, &look);
+            let err = pred - y[i];
+            loss_before += err * err;
+            for j in 0..dim {
+                let g = err * z[j];
+                self.vel[j] = mu * self.vel[j] - eta * g;
+                self.coef[j] += self.vel[j];
+            }
+            let after = self.predict_with(x, i, &self.coef);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "Nesterov linear weights",
+            "the residual gradient is evaluated at the look-ahead point w+μv",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for NesterovRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.predict_with(x, i, &self.coef)),
+        ))
+    }
+}
+
+/// Streaming Dirichlet concentrations (river `proba.Multinomial` / Dirichlet).
+///
+/// Category count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct OnlineDirichlet {
+    alpha: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OnlineDirichlet {
+    fn default() -> Self {
+        Self {
+            alpha: vec![1.0, 1.0],
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlineDirichlet {
+    /// Symmetric Dirichlet prior over `k` categories.
+    pub fn new(k: usize) -> Self {
+        Self {
+            alpha: vec![1.0; k.max(2)],
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+
+    /// Posterior mean of category 1, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        let z: f64 = self.alpha.iter().sum();
+        if z <= 0.0 || self.alpha.len() < 2 {
+            f64::NAN
+        } else {
+            self.alpha[1] / z
+        }
+    }
+}
+
+impl PartialFit for OnlineDirichlet {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        let before = self.score();
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let k = y[i].round().max(0.0) as usize;
+            while self.alpha.len() <= k {
+                self.alpha.push(1.0);
+            }
+            self.alpha[k] += 1.0;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("OnlineDirichlet K={} mean1={after:.6e}", self.alpha.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Dirichlet concentrations",
+                "integer labels increment the matching concentration",
+                format!("mean1={before:.6e}"),
+                format!("mean1={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Implicit-feedback matrix factorization (river `reco.BiasedMF` implicit).
+///
+/// Factor count is not identification `p`. `X` is `[user, item]`.
+#[derive(Clone, Debug)]
+pub struct ImplicitMf {
+    inner: FunkMf,
+    /// Confidence scale on the implicit residual.
+    pub confidence: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for ImplicitMf {
+    fn default() -> Self {
+        Self {
+            inner: FunkMf::new(2),
+            confidence: 1.0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl ImplicitMf {
+    /// Implicit MF with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            inner: FunkMf::new(n_factors),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for ImplicitMf {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no ratings"),
+            );
+        };
+        let c = if self.confidence.is_finite() && self.confidence > 0.0 {
+            self.confidence
+        } else {
+            1.0
+        };
+        let yw = Vector::from_iter((0..y.len()).map(|i| {
+            let r = y[i];
+            if r.is_finite() && r > 0.0 {
+                r * (1.0 + c)
+            } else {
+                0.0
+            }
+        }));
+        let _ = self
+            .inner
+            .partial_fit(x, Some(&yw), &session.child("implicit"));
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(x.nrows() as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!("ImplicitMf confidence={c:.3} on {} rows", x.nrows());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "implicit MF factors",
+                "positive feedback is up-weighted and passed to FunkMF SGD",
+                "previous factors",
+                "updated factors",
+            ),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -15573,6 +15900,15 @@ mod tests {
         OnlinePoisson::new()
             .partial_fit(&x, None, &session)
             .expect("opoiss");
+        NesterovRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("nest");
+        OnlineDirichlet::new(2)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("odir");
+        ImplicitMf::new(2)
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("imf");
 
         let n_expl = session
             .ledger()

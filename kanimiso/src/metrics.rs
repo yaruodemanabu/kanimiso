@@ -1405,6 +1405,77 @@ pub fn pairwise_distances_argmin(
     ctx.finish(out)
 }
 
+/// Binary class likelihood ratios (sklearn `class_likelihood_ratios`).
+///
+/// Returns `[LR+, LR−]`. Class count is not identification `p`.
+pub fn class_likelihood_ratios(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "class_likelihood_ratios") {
+        return ctx.finish(Vector::from_slice(&[f64::NAN, f64::NAN]));
+    }
+    inspect_classes(&mut ctx.report, y_true, &ctx.policy);
+    warn_constant_target(&mut ctx, y_true, true);
+    let yt = labels_of(y_true);
+    let yp = labels_of(y_pred);
+    let (table, _, _, _) = contingency(&yt, &yp);
+    if table.len() < 2 || table[0].len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::SingleClass)
+                .message("class_likelihood_ratios needs two observed classes")
+                .build(),
+        );
+        return ctx.finish(Vector::from_slice(&[f64::NAN, f64::NAN]));
+    }
+    let tn = table[0][0];
+    let fp = table[0][1];
+    let fn_ = table[1][0];
+    let tp = table[1][1];
+    let tpr = if tp + fn_ > 0.0 { tp / (tp + fn_) } else { 0.0 };
+    let fpr = if fp + tn > 0.0 { fp / (fp + tn) } else { 0.0 };
+    let fnr = 1.0 - tpr;
+    let tnr = 1.0 - fpr;
+    if fpr.abs() <= 1e-18 || tnr.abs() <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("class_likelihood_ratios hit a zero FPR or TNR")
+                .build(),
+        );
+    }
+    let lrp = if fpr.abs() <= 1e-18 {
+        f64::INFINITY
+    } else {
+        tpr / fpr
+    };
+    let lrn = if tnr.abs() <= 1e-18 {
+        f64::INFINITY
+    } else {
+        fnr / tnr
+    };
+    ctx.finish(Vector::from_slice(&[lrp, lrn]))
+}
+
+/// Alias of [`brier`] (sklearn `brier_score_loss`).
+pub fn brier_score_loss(
+    y_true: &Vector,
+    p: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    brier(y_true, p, session)
+}
+
+/// Alias of [`hamming`] (sklearn `hamming_loss`).
+pub fn hamming_loss(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    hamming(y_true, y_pred, session)
+}
+
 /// Maximum residual (sklearn `max_error`).
 pub fn max_error(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
@@ -4186,5 +4257,26 @@ mod tests {
             .unwrap()
             .value;
         assert!((arg[1] - 1.0).abs() < 1e-12);
+        let clr = class_likelihood_ratios(
+            &y,
+            &Vector::from_slice(&[0.0, 1.0, 1.0, 1.0]),
+            &Session::new("m", "clr"),
+        )
+        .unwrap()
+        .value;
+        assert_eq!(clr.len(), 2);
+        assert!(clr[0].is_finite() || clr[0].is_infinite());
+        let bsl = brier_score_loss(&y, &p, &Session::new("m", "bsl"))
+            .unwrap()
+            .value;
+        assert!(bsl > 0.0 && bsl < 0.1);
+        let hl = hamming_loss(
+            &y,
+            &Vector::from_slice(&[0.0, 1.0, 1.0, 0.0]),
+            &Session::new("m", "hl"),
+        )
+        .unwrap()
+        .value;
+        assert!(hl.abs() < 1e-12);
     }
 }

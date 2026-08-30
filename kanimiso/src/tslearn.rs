@@ -8277,6 +8277,190 @@ pub fn binary_segmentation(y: &Vector, session: &Session) -> Result<Qualified<f6
     clasp_change_point(y, session)
 }
 
+fn ridge_reg_from_features(
+    z: &Matrix,
+    y: &Vector,
+    alpha: f64,
+    policy: &signlred::Policy,
+    name: &str,
+) -> FittedPenalized {
+    let mut scratch = signlred::Report::new(name, "ridge");
+    let design = z.with_intercept();
+    let beta = ridge_solve(&mut scratch, &design, y, alpha.max(0.0), policy)
+        .unwrap_or_else(|| Vector::zeros(design.ncols()));
+    FittedPenalized {
+        coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+        intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+        alpha,
+        l1_ratio: 0.0,
+    }
+}
+
+/// InceptionTime regressor (sktime `InceptionTimeRegressor` lite).
+///
+/// Kernel count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct InceptionTimeRegressor {
+    /// Kernels per width.
+    pub n_kernels: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for InceptionTimeRegressor {
+    fn default() -> Self {
+        Self {
+            n_kernels: 4,
+            alpha: 0.1,
+            seed: 31,
+        }
+    }
+}
+
+impl InceptionTimeRegressor {
+    /// Default InceptionTime-lite regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted InceptionTime-lite ridge regressor.
+#[derive(Clone, Debug)]
+pub struct FittedInceptionTimeRegressor {
+    kernels: Vec<Vec<f64>>,
+    inner: FittedPenalized,
+}
+
+fn inception_kernels(n_kernels: usize, t: usize, seed: u64) -> Vec<Vec<f64>> {
+    let widths = [3usize, 5, t.min(7)];
+    let mut rng = Rng::new(seed);
+    let mut kernels = Vec::new();
+    for w in widths {
+        if w == 0 || w > t {
+            continue;
+        }
+        for _ in 0..n_kernels.max(1) {
+            kernels.push((0..w).map(|_| rng.standard_normal()).collect());
+        }
+    }
+    if kernels.is_empty() {
+        kernels.push(vec![1.0]);
+    }
+    kernels
+}
+
+impl Fit for InceptionTimeRegressor {
+    type Fitted = FittedInceptionTimeRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedInceptionTimeRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let kernels = inception_kernels(self.n_kernels, x.ncols().max(1), self.seed);
+        let z = conv_maxpool(x, &kernels);
+        let inner = ridge_reg_from_features(&z, y, self.alpha, &ctx.policy, "incep_reg");
+        ctx.finish(FittedInceptionTimeRegressor { kernels, inner })
+    }
+}
+
+impl Predict for FittedInceptionTimeRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = conv_maxpool(x, &self.kernels);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Random-projection + conv classifier (sktime `TapNetClassifier` lite).
+///
+/// Projection width is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct TapNetClassifier {
+    /// Projected length.
+    pub proj: usize,
+    /// Conv kernels.
+    pub n_kernels: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for TapNetClassifier {
+    fn default() -> Self {
+        Self {
+            proj: 4,
+            n_kernels: 4,
+            alpha: 0.1,
+            seed: 37,
+        }
+    }
+}
+
+impl TapNetClassifier {
+    /// Default TapNet-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted TapNet-lite ridge.
+#[derive(Clone, Debug)]
+pub struct FittedTapNetClassifier {
+    proj: Matrix,
+    kernels: Vec<Vec<f64>>,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+fn tap_project(x: &Matrix, proj: &Matrix) -> Matrix {
+    Matrix::from_fn(x.nrows(), proj.ncols(), |i, j| {
+        let mut s = 0.0;
+        for t in 0..x.ncols().min(proj.nrows()) {
+            s += x.get(i, t) * proj.get(t, j);
+        }
+        s
+    })
+}
+
+impl Fit for TapNetClassifier {
+    type Fitted = FittedTapNetClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedTapNetClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let mut rng = Rng::new(self.seed);
+        let pdim = self.proj.max(1);
+        let proj = Matrix::from_fn(x.ncols().max(1), pdim, |_, _| rng.standard_normal());
+        let z0 = tap_project(x, &proj);
+        let w = 3usize.min(z0.ncols().max(1));
+        let kernels: Vec<Vec<f64>> = (0..self.n_kernels.max(1))
+            .map(|_| (0..w).map(|_| rng.standard_normal()).collect())
+            .collect();
+        let z = conv_maxpool(&z0, &kernels);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "tapnet");
+        ctx.finish(FittedTapNetClassifier { proj, kernels, inner })
+    }
+}
+
+impl Predict for FittedTapNetClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z0 = tap_project(x, &self.proj);
+        let z = conv_maxpool(&z0, &self.kernels);
+        self.inner.predict(&z, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9018,5 +9202,24 @@ mod tests {
             .unwrap()
             .value;
         assert!(bs.is_finite());
+        let itr = InceptionTimeRegressor::new()
+            .fit(&x, &yramp, &Session::new("ts", "itr"))
+            .unwrap();
+        let itrp = itr
+            .value
+            .predict(&x, &Session::new("ts", "itrp"))
+            .unwrap()
+            .value;
+        assert_eq!(itrp.len(), 6);
+        assert!(itrp.as_slice().iter().all(|v| v.is_finite()));
+        let tap = TapNetClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "tap"))
+            .unwrap();
+        let tapp = tap
+            .value
+            .predict(&x, &Session::new("ts", "tapp"))
+            .unwrap()
+            .value;
+        assert_eq!(tapp.len(), 6);
     }
 }
