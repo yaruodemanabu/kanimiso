@@ -5141,6 +5141,26 @@ const INVENTORY: &[Algorithm] = &[
         "statsmodels.regression.linear_model.OLSResults.get_robustcov_results",
         "function",
     ),
+    a("online.RollingFbeta", "river.metrics.FBeta", "online"),
+    a(
+        "online.RollingJaccard",
+        "river.metrics.Jaccard",
+        "online",
+    ),
+    a(
+        "online.RollingHamming",
+        "river.metrics.Hamming",
+        "online",
+    ),
+    a("online.RollingSmape", "river.metrics.SMAPE", "online"),
+    a("online.RollingMcc", "river.metrics.MCC", "online"),
+    a("online.RollingRocAuc", "river.metrics.ROCAUC", "online"),
+    a(
+        "online.QuantileThresholder",
+        "river.anomaly.QuantileThresholder",
+        "anomaly",
+    ),
+    a("online.Discard", "river.anomaly.Filter", "anomaly"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5499,6 +5519,10 @@ mod tests {
             "tslearn.Pelt",
             "stats.compare_lm",
             "iv.get_robustcov_results",
+            "online.RollingFbeta",
+            "online.RollingRocAuc",
+            "online.QuantileThresholder",
+            "online.Discard",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
