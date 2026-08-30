@@ -11476,6 +11476,612 @@ impl Predict for FittedRandomIntervalRegressor {
     }
 }
 
+/// CNN convolution + ridge (sktime `CNNRegressor` lite).
+///
+/// Kernel count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct CnnRegressor {
+    /// Random kernels.
+    pub n_kernels: usize,
+    /// Kernel width.
+    pub width: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for CnnRegressor {
+    fn default() -> Self {
+        Self {
+            n_kernels: 4,
+            width: 3,
+            alpha: 0.1,
+            seed: 11,
+        }
+    }
+}
+
+impl CnnRegressor {
+    /// Default CNN-lite regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted CNN-lite ridge regressor.
+#[derive(Clone, Debug)]
+pub struct FittedCnnRegressor {
+    kernels: Vec<Vec<f64>>,
+    inner: FittedPenalized,
+}
+
+impl Fit for CnnRegressor {
+    type Fitted = FittedCnnRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCnnRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let w = self.width.max(1).min(x.ncols().max(1));
+        if x.ncols() < self.width {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!(
+                        "CnnRegressor width={} > T={}",
+                        self.width,
+                        x.ncols()
+                    ))
+                    .build(),
+            );
+        }
+        let mut rng = Rng::new(self.seed);
+        let kernels: Vec<Vec<f64>> = (0..self.n_kernels.max(1))
+            .map(|_| (0..w).map(|_| rng.standard_normal()).collect())
+            .collect();
+        let z = conv_maxpool(x, &kernels);
+        let inner = ridge_reg_from_features(&z, y, self.alpha, &ctx.policy, "cnn_reg");
+        ctx.finish(FittedCnnRegressor { kernels, inner })
+    }
+}
+
+impl Predict for FittedCnnRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = conv_maxpool(x, &self.kernels);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Residual convolution + ridge (sktime `ResNetRegressor` lite).
+///
+/// Kernel count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ResNetRegressor {
+    /// Kernels.
+    pub n_kernels: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for ResNetRegressor {
+    fn default() -> Self {
+        Self {
+            n_kernels: 4,
+            alpha: 0.1,
+            seed: 23,
+        }
+    }
+}
+
+impl ResNetRegressor {
+    /// Default ResNet-lite regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted ResNet-lite ridge regressor.
+#[derive(Clone, Debug)]
+pub struct FittedResNetRegressor {
+    kernels: Vec<Vec<f64>>,
+    inner: FittedPenalized,
+}
+
+impl Fit for ResNetRegressor {
+    type Fitted = FittedResNetRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedResNetRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let w = 3usize.min(x.ncols().max(1));
+        if x.ncols() < 3 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!("ResNetRegressor width=3 > T={}", x.ncols()))
+                    .build(),
+            );
+        }
+        let mut rng = Rng::new(self.seed);
+        let kernels: Vec<Vec<f64>> = (0..self.n_kernels.max(1))
+            .map(|_| (0..w).map(|_| rng.standard_normal()).collect())
+            .collect();
+        let z = residual_conv_pool(x, &kernels);
+        let inner = ridge_reg_from_features(&z, y, self.alpha, &ctx.policy, "resnet_reg");
+        ctx.finish(FittedResNetRegressor { kernels, inner })
+    }
+}
+
+impl Predict for FittedResNetRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = residual_conv_pool(x, &self.kernels);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Fully-convolutional ridge on the raw series (sktime `FCNRegressor` lite).
+#[derive(Clone, Debug)]
+pub struct FCNRegressor {
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for FCNRegressor {
+    fn default() -> Self {
+        Self { alpha: 0.1 }
+    }
+}
+
+impl FCNRegressor {
+    /// Default FCN-lite regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted FCN-lite ridge.
+#[derive(Clone, Debug)]
+pub struct FittedFCNRegressor {
+    inner: FittedPenalized,
+}
+
+impl Fit for FCNRegressor {
+    type Fitted = FittedFCNRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedFCNRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let inner = ridge_reg_from_features(x, y, self.alpha, &ctx.policy, "fcn_reg");
+        ctx.finish(FittedFCNRegressor { inner })
+    }
+}
+
+impl Predict for FittedFCNRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+/// Random encoder + ridge (sktime `EncoderRegressor` lite).
+///
+/// Latent width is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct EncoderRegressor {
+    /// Bottleneck width.
+    pub latent: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for EncoderRegressor {
+    fn default() -> Self {
+        Self {
+            latent: 4,
+            alpha: 0.1,
+            seed: 47,
+        }
+    }
+}
+
+impl EncoderRegressor {
+    /// Default encoder-lite regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted encoder-lite ridge.
+#[derive(Clone, Debug)]
+pub struct FittedEncoderRegressor {
+    enc: Matrix,
+    inner: FittedPenalized,
+}
+
+impl Fit for EncoderRegressor {
+    type Fitted = FittedEncoderRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedEncoderRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let mut rng = Rng::new(self.seed);
+        let lat = self.latent.max(1);
+        let enc = Matrix::from_fn(x.ncols().max(1), lat, |_, _| rng.standard_normal());
+        let z = encode_series(x, &enc);
+        let inner = ridge_reg_from_features(&z, y, self.alpha, &ctx.policy, "enc_reg");
+        ctx.finish(FittedEncoderRegressor { enc, inner })
+    }
+}
+
+impl Predict for FittedEncoderRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = encode_series(x, &self.enc);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Random-hidden tanh + ridge (sktime `MLPRegressor` time-series lite).
+///
+/// Hidden width is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MlpTimeRegressor {
+    /// Hidden units.
+    pub hidden: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for MlpTimeRegressor {
+    fn default() -> Self {
+        Self {
+            hidden: 8,
+            alpha: 0.1,
+            seed: 29,
+        }
+    }
+}
+
+impl MlpTimeRegressor {
+    /// Default MLP-lite time regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted MLP-lite time ridge.
+#[derive(Clone, Debug)]
+pub struct FittedMlpTimeRegressor {
+    hidden: Matrix,
+    inner: FittedPenalized,
+}
+
+impl Fit for MlpTimeRegressor {
+    type Fitted = FittedMlpTimeRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMlpTimeRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let mut rng = Rng::new(self.seed);
+        let h = self.hidden.max(1);
+        let w = Matrix::from_fn(x.ncols().max(1), h, |_, _| rng.standard_normal());
+        let z = mlp_hidden(x, &w);
+        let inner = ridge_reg_from_features(&z, y, self.alpha, &ctx.policy, "mlp_reg");
+        ctx.finish(FittedMlpTimeRegressor { hidden: w, inner })
+    }
+}
+
+impl Predict for FittedMlpTimeRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = mlp_hidden(x, &self.hidden);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Shapelet distances + ridge (sktime `ShapeletTransformRegressor`).
+///
+/// Shapelet count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ShapeletTransformRegressor {
+    /// Shapelets.
+    pub n_shapelets: usize,
+    /// Shapelet length.
+    pub length: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for ShapeletTransformRegressor {
+    fn default() -> Self {
+        Self {
+            n_shapelets: 3,
+            length: 3,
+            alpha: 0.1,
+            seed: 2,
+        }
+    }
+}
+
+impl ShapeletTransformRegressor {
+    /// Default shapelet-transform regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted shapelet-transform ridge.
+#[derive(Clone, Debug)]
+pub struct FittedShapeletTransformRegressor {
+    shapelets: FittedShapeletTransform,
+    inner: FittedPenalized,
+}
+
+impl Fit for ShapeletTransformRegressor {
+    type Fitted = FittedShapeletTransformRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedShapeletTransformRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let st = ShapeletTransform {
+            n_shapelets: self.n_shapelets,
+            length: self.length,
+            seed: self.seed,
+        }
+        .fit_unsupervised(x, &session.child("streg"))?
+        .value;
+        let z = st.transform(x, &session.child("stregt"))?.value;
+        let inner = ridge_reg_from_features(&z, y, self.alpha, &ctx.policy, "streg");
+        ctx.finish(FittedShapeletTransformRegressor {
+            shapelets: st,
+            inner,
+        })
+    }
+}
+
+impl Predict for FittedShapeletTransformRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = self.shapelets.transform(x, &session.child("stregt"))?.value;
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Catch22 / tsfresh-lite features + ridge (sktime `TSFreshRegressor` lite).
+///
+/// Feature count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct TsFreshRegressor {
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for TsFreshRegressor {
+    fn default() -> Self {
+        Self { alpha: 0.1 }
+    }
+}
+
+impl TsFreshRegressor {
+    /// Default tsfresh-lite regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted tsfresh-lite ridge.
+#[derive(Clone, Debug)]
+pub struct FittedTsFreshRegressor {
+    inner: FittedPenalized,
+}
+
+impl Fit for TsFreshRegressor {
+    type Fitted = FittedTsFreshRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedTsFreshRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let z = catch22_rows(x, session, &mut ctx);
+        let inner = ridge_reg_from_features(&z, y, self.alpha, &ctx.policy, "tsfresh_reg");
+        ctx.finish(FittedTsFreshRegressor { inner })
+    }
+}
+
+impl Predict for FittedTsFreshRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let z = catch22_rows(x, session, &mut ctx);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Interval quantiles + ridge (sktime `QUANTRegressor` lite).
+///
+/// Interval count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct QuantRegressor {
+    /// Random intervals.
+    pub n_intervals: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for QuantRegressor {
+    fn default() -> Self {
+        Self {
+            n_intervals: 4,
+            alpha: 0.1,
+            seed: 21,
+        }
+    }
+}
+
+impl QuantRegressor {
+    /// Default QUANT-lite regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted QUANT-lite ridge.
+#[derive(Clone, Debug)]
+pub struct FittedQuantRegressor {
+    intervals: Vec<Interval>,
+    inner: FittedPenalized,
+}
+
+impl Fit for QuantRegressor {
+    type Fitted = FittedQuantRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedQuantRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let mut rng = Rng::new(self.seed);
+        let tlen = x.ncols().max(1);
+        let mut iv = Vec::new();
+        for _ in 0..self.n_intervals.max(1) {
+            let a = rng.below(tlen);
+            let span = 1 + rng.below(tlen);
+            let b = (a + span).min(tlen);
+            iv.push(Interval {
+                start: a,
+                end: b.max(a + 1),
+            });
+        }
+        let z = interval_quantiles(x, &iv);
+        let inner = ridge_reg_from_features(&z, y, self.alpha, &ctx.policy, "quant_reg");
+        ctx.finish(FittedQuantRegressor {
+            intervals: iv,
+            inner,
+        })
+    }
+}
+
+impl Predict for FittedQuantRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = interval_quantiles(x, &self.intervals);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// SAX bag-of-words + ridge (sktime `SAXVSM` lite).
+///
+/// Piece / alphabet counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SaxVsm {
+    /// PAA pieces.
+    pub n_pieces: usize,
+    /// SAX alphabet size.
+    pub alphabet: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for SaxVsm {
+    fn default() -> Self {
+        Self {
+            n_pieces: 4,
+            alphabet: 4,
+            alpha: 0.1,
+        }
+    }
+}
+
+impl SaxVsm {
+    /// Default SAX-VSM classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted SAX-VSM ridge.
+#[derive(Clone, Debug)]
+pub struct FittedSaxVsm {
+    n_pieces: usize,
+    alphabet: usize,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+fn sax_bow_rows(x: &Matrix, n_pieces: usize, alphabet: usize) -> Matrix {
+    let k = n_pieces.max(1);
+    let a = alphabet.max(2);
+    Matrix::from_fn(x.nrows(), a, |i, bin| {
+        let row = x.row(i);
+        sax_symbols(row.as_slice(), k, a)
+            .into_iter()
+            .filter(|s| (*s as usize) == bin)
+            .count() as f64
+    })
+}
+
+impl Fit for SaxVsm {
+    type Fitted = FittedSaxVsm;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSaxVsm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let z = sax_bow_rows(x, self.n_pieces, self.alphabet);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "saxvsm");
+        ctx.finish(FittedSaxVsm {
+            n_pieces: self.n_pieces.max(1),
+            alphabet: self.alphabet.max(2),
+            inner,
+        })
+    }
+}
+
+impl Predict for FittedSaxVsm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = sax_bow_rows(x, self.n_pieces, self.alphabet);
+        self.inner.predict(&z, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11853,6 +12459,105 @@ mod tests {
             .as_slice()
             .iter()
             .all(|v| v.is_finite()));
+        let cnr = CnnRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "cnr"))
+            .unwrap();
+        assert!(cnr
+            .value
+            .predict(&x, &Session::new("ts", "cnrp"))
+            .unwrap()
+            .value
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite()));
+        let rnr = ResNetRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "rnr"))
+            .unwrap();
+        assert!(rnr
+            .value
+            .predict(&x, &Session::new("ts", "rnrp"))
+            .unwrap()
+            .value
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite()));
+        let fcnr = FCNRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "fcnr"))
+            .unwrap();
+        assert!(fcnr
+            .value
+            .predict(&x, &Session::new("ts", "fcnrp"))
+            .unwrap()
+            .value
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite()));
+        let enr = EncoderRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "enr"))
+            .unwrap();
+        assert!(enr
+            .value
+            .predict(&x, &Session::new("ts", "enrp"))
+            .unwrap()
+            .value
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite()));
+        let mlpr = MlpTimeRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "mlpr"))
+            .unwrap();
+        assert!(mlpr
+            .value
+            .predict(&x, &Session::new("ts", "mlprp"))
+            .unwrap()
+            .value
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite()));
+        let strg = ShapeletTransformRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "strg"))
+            .unwrap();
+        assert!(strg
+            .value
+            .predict(&x, &Session::new("ts", "strgp"))
+            .unwrap()
+            .value
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite()));
+        let tsfr = TsFreshRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "tsfr2"))
+            .unwrap();
+        assert!(tsfr
+            .value
+            .predict(&x, &Session::new("ts", "tsfr2p"))
+            .unwrap()
+            .value
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite()));
+        let qr = QuantRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "qreg"))
+            .unwrap();
+        assert!(qr
+            .value
+            .predict(&x, &Session::new("ts", "qregp"))
+            .unwrap()
+            .value
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite()));
+        let sv = SaxVsm::new()
+            .fit(&x, &y, &Session::new("ts", "saxvsm"))
+            .unwrap();
+        assert_eq!(
+            sv.value
+                .predict(&x, &Session::new("ts", "saxvsmp"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
     }
 
     #[test]

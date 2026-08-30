@@ -16355,6 +16355,575 @@ impl PartialFit for RollingCov {
     }
 }
 
+fn window_quantile(xs: &[f64], q: f64) -> f64 {
+    if xs.is_empty() {
+        return f64::NAN;
+    }
+    let mut v: Vec<f64> = xs.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let qv = if q.is_finite() { q.clamp(0.0, 1.0) } else { 0.5 };
+    let idx = (qv * (v.len() - 1) as f64).round() as usize;
+    v[idx.min(v.len() - 1)]
+}
+
+/// Expanding median (river `stats.Quantile(0.5)` / `stats.Median`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineMedian {
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl OnlineMedian {
+    /// Empty median tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current median, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        window_quantile(&self.buf, 0.5)
+    }
+}
+
+impl PartialFit for OnlineMedian {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if v.is_finite() {
+                self.buf.push(v);
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.buf.is_empty();
+        q.warmup = self.buf.is_empty();
+        q.explanation = format!("OnlineMedian={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "expanding median",
+                "running median of column 0",
+                format!("med={before:.6e}"),
+                format!("med={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Rolling median (river `stats.RollingQuantile(0.5)`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingMedian {
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingMedian {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingMedian {
+    /// Rolling median with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Current window median, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        window_quantile(&self.buf, 0.5)
+    }
+}
+
+impl PartialFit for RollingMedian {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        let cap = self.window.max(2);
+        for i in 0..x.nrows() {
+            rolling_push(&mut self.buf, x.get(i, 0), cap);
+            if x.get(i, 0).is_finite() {
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.buf.is_empty();
+        q.warmup = self.buf.is_empty();
+        q.explanation = format!("RollingMedian={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed median",
+                "sliding median of column 0; window is not identification p",
+                format!("med={before:.6e}"),
+                format!("med={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Expanding standard deviation (river `stats.Var` square-root).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineStd {
+    n: f64,
+    mean: f64,
+    m2: f64,
+    updates: u64,
+}
+
+impl OnlineStd {
+    /// Empty standard-deviation accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current sample std, or NaN during warmup.
+    pub fn score(&self) -> f64 {
+        if self.n < 2.0 {
+            f64::NAN
+        } else {
+            (self.m2 / (self.n - 1.0)).sqrt()
+        }
+    }
+}
+
+impl PartialFit for OnlineStd {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            self.n += 1.0;
+            let d = v - self.mean;
+            self.mean += d / self.n;
+            self.m2 += d * (v - self.mean);
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 2.0;
+        q.warmup = self.n < 2.0;
+        q.explanation = format!("OnlineStd={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Welford standard deviation",
+                "running sample std of column 0",
+                format!("std={before:.6e}"),
+                format!("std={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Rolling standard deviation (river `stats.RollingVar` square-root).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingStd {
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingStd {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingStd {
+    /// Rolling std with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Current sample std, or NaN when the window has fewer than 2 points.
+    pub fn score(&self) -> f64 {
+        if self.buf.len() < 2 {
+            f64::NAN
+        } else {
+            let n = self.buf.len() as f64;
+            let mean = self.buf.iter().sum::<f64>() / n;
+            let ss = self.buf.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>();
+            (ss / (n - 1.0)).sqrt()
+        }
+    }
+}
+
+impl PartialFit for RollingStd {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        let cap = self.window.max(2);
+        for i in 0..x.nrows() {
+            rolling_push(&mut self.buf, x.get(i, 0), cap);
+            if x.get(i, 0).is_finite() {
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.buf.len() >= 2;
+        q.warmup = self.buf.len() < 2;
+        q.explanation = format!("RollingStd={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed standard deviation",
+                "sliding sample std of column 0; window is not identification p",
+                format!("std={before:.6e}"),
+                format!("std={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Rolling sum (river `stats.RollingSum`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingSum {
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingSum {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingSum {
+    /// Rolling sum with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window sum, or 0 when empty.
+    pub fn score(&self) -> f64 {
+        self.buf.iter().sum()
+    }
+}
+
+impl PartialFit for RollingSum {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        let cap = self.window.max(1);
+        for i in 0..x.nrows() {
+            rolling_push(&mut self.buf, x.get(i, 0), cap);
+            if x.get(i, 0).is_finite() {
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some((after - before).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.buf.is_empty();
+        q.warmup = self.buf.is_empty();
+        q.explanation = format!("RollingSum={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed sum",
+                "sliding sum of column 0; window is not identification p",
+                format!("sum={before:.6e}"),
+                format!("sum={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Rolling inter-quartile range (river `stats.RollingIQR`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingIqr {
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingIqr {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingIqr {
+    /// Rolling IQR with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Current IQR, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.buf.is_empty() {
+            f64::NAN
+        } else {
+            window_quantile(&self.buf, 0.75) - window_quantile(&self.buf, 0.25)
+        }
+    }
+}
+
+impl PartialFit for RollingIqr {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        let cap = self.window.max(2);
+        for i in 0..x.nrows() {
+            rolling_push(&mut self.buf, x.get(i, 0), cap);
+            if x.get(i, 0).is_finite() {
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.buf.len() >= 2;
+        q.warmup = self.buf.len() < 2;
+        q.explanation = format!("RollingIqr={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed IQR",
+                "sliding Q3−Q1 of column 0; window is not identification p",
+                format!("iqr={before:.6e}"),
+                format!("iqr={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Expanding peak-to-peak range (river `stats.PeakToPeak`).
+#[derive(Clone, Debug)]
+pub struct OnlinePeakToPeak {
+    min: f64,
+    max: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OnlinePeakToPeak {
+    fn default() -> Self {
+        Self {
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlinePeakToPeak {
+    /// Empty peak-to-peak tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current range, or NaN before the first finite value.
+    pub fn score(&self) -> f64 {
+        if self.n_seen == 0 {
+            f64::NAN
+        } else {
+            self.max - self.min
+        }
+    }
+}
+
+impl PartialFit for OnlinePeakToPeak {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            if v < self.min {
+                self.min = v;
+            }
+            if v > self.max {
+                self.max = v;
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 1;
+        q.explanation = format!("OnlinePeakToPeak={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "expanding peak-to-peak",
+                "running max−min of column 0",
+                format!("ptp={before:.6e}"),
+                format!("ptp={after:.6e}"),
+            ),
+        )
+    }
+}
+
 /// ADWIN-resetting bag of perceptrons (river `ensemble.ADWINBaggingClassifier`).
 #[derive(Clone, Debug)]
 pub struct AdwinBagging {
@@ -24998,6 +25567,27 @@ mod tests {
         RollingCov::new(4)
             .partial_fit(&x, Some(&y), &session)
             .expect("rcov");
+        OnlineMedian::new()
+            .partial_fit(&x, None, &session)
+            .expect("omed");
+        RollingMedian::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("rmed");
+        OnlineStd::new()
+            .partial_fit(&x, None, &session)
+            .expect("ostd");
+        RollingStd::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("rstd");
+        RollingSum::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("rsum");
+        RollingIqr::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("riqr");
+        OnlinePeakToPeak::new()
+            .partial_fit(&x, None, &session)
+            .expect("optp");
 
         let n_expl = session
             .ledger()

@@ -4594,6 +4594,64 @@ const INVENTORY: &[Algorithm] = &[
     ),
     a("online.RollingVar", "river.stats.RollingVar", "online"),
     a("online.RollingCov", "river.stats.RollingCov", "online"),
+    a(
+        "tslearn.CnnRegressor",
+        "sktime.regression.deep_learning.CNNRegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.ResNetRegressor",
+        "sktime.regression.deep_learning.ResNetRegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.FCNRegressor",
+        "sktime.regression.deep_learning.FCNRegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.EncoderRegressor",
+        "sktime.regression.deep_learning.EncoderRegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.MlpTimeRegressor",
+        "sktime.regression.deep_learning.MLPRegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.ShapeletTransformRegressor",
+        "sktime.regression.shapelet_based.ShapeletTransformRegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.TsFreshRegressor",
+        "sktime.regression.feature_based.TSFreshRegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.QuantRegressor",
+        "sktime.regression.interval_based.QUANTRegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.SaxVsm",
+        "sktime.classification.dictionary_based.SAXVSM",
+        "timeseries",
+    ),
+    a("tsa.add_trend", "statsmodels.tsa.tsatools.add_trend", "forecast"),
+    a("tsa.lagmat", "statsmodels.tsa.tsatools.lagmat", "forecast"),
+    a("tsa.pacf_yw", "statsmodels.tsa.stattools.pacf_yw", "forecast"),
+    a("tsa.spectrogram", "scipy.signal.spectrogram", "forecast"),
+    a("tsa.csd", "scipy.signal.csd", "forecast"),
+    a("tsa.coherence", "scipy.signal.coherence", "forecast"),
+    a("online.OnlineMedian", "river.stats.Quantile", "online"),
+    a("online.RollingMedian", "river.stats.RollingQuantile", "online"),
+    a("online.OnlineStd", "river.stats.Var", "online"),
+    a("online.RollingStd", "river.stats.RollingVar", "online"),
+    a("online.RollingSum", "river.stats.RollingSum", "online"),
+    a("online.RollingIqr", "river.stats.RollingIQR", "online"),
+    a("online.OnlinePeakToPeak", "river.stats.PeakToPeak", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4905,6 +4963,9 @@ mod tests {
             "tsa.Adida",
             "glm.TruncatedNegativeBinomial",
             "online.OnlineHarmonicMean",
+            "tslearn.CnnRegressor",
+            "tsa.coherence",
+            "online.OnlineMedian",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

@@ -15176,6 +15176,242 @@ impl FitSeries for HamiltonFilter {
     }
 }
 
+/// Add a constant and/or linear trend (statsmodels `add_trend`).
+///
+/// `kind` is `"c"`, `"t"`, or `"ct"`. Trend-column count is not identification
+/// `p`.
+pub fn add_trend(y: &Vector, kind: &str, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let n = y.len();
+    let k = kind.trim().to_ascii_lowercase();
+    let (const_, trend) = match k.as_str() {
+        "c" | "const" => (true, false),
+        "t" | "trend" => (false, true),
+        "ct" | "ctt" => (true, true),
+        other => {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("add_trend kind={other:?} unknown; using ct"))
+                    .build(),
+            );
+            (true, true)
+        }
+    };
+    let p = 1 + usize::from(const_) + usize::from(trend);
+    let out = Matrix::from_fn(n, p, |i, j| {
+        if j == 0 {
+            y[i]
+        } else if j == 1 && const_ {
+            1.0
+        } else {
+            i as f64
+        }
+    });
+    ctx.finish(out)
+}
+
+/// Lag embedding (statsmodels `lagmat`).
+///
+/// Column `j` is \(y_{t-j}\) for \(j=1,\ldots,\mathrm{maxlag}\). Lag count is
+/// not identification `p`.
+pub fn lagmat(y: &Vector, maxlag: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let n = y.len();
+    let p = maxlag.max(1);
+    if n <= p {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .severity(Severity::Warning)
+                .message(format!("lagmat maxlag={p} ≥ n={n}"))
+                .build(),
+        );
+    }
+    let out = Matrix::from_fn(n, p, |t, j| {
+        let lag = j + 1;
+        if t >= lag {
+            y[t - lag]
+        } else {
+            0.0
+        }
+    });
+    ctx.finish(out)
+}
+
+/// Yule–Walker PACF via Durbin–Levinson (statsmodels `pacf_yw`).
+///
+/// Lag count is not identification `p`.
+pub fn pacf_yw(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let rho = acf_raw(y.as_slice(), nlags);
+    let mut out = Vector::zeros(nlags + 1);
+    out[0] = 1.0;
+    for k in 1..=nlags {
+        if k >= y.len() {
+            out[k] = f64::NAN;
+        } else {
+            out[k] = durbin_levinson_kk(&rho, k);
+        }
+    }
+    ctx.finish(out)
+}
+
+fn dft_re_im(y: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let n = y.len();
+    let m = n / 2;
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let mut re = vec![0.0; m];
+    let mut im = vec![0.0; m];
+    for k in 1..=m {
+        for (t, &yt) in y.iter().enumerate() {
+            let ang = two_pi * k as f64 * t as f64 / n.max(1) as f64;
+            re[k - 1] += yt * ang.cos();
+            im[k - 1] += yt * ang.sin();
+        }
+    }
+    (re, im)
+}
+
+/// Sliding-window periodogram (SciPy / statsmodels `spectrogram`).
+///
+/// Segment length is not identification `p`.
+pub fn spectrogram(
+    y: &Vector,
+    nperseg: usize,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let n = y.len();
+    let mut seg = nperseg.max(2);
+    if nperseg < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("spectrogram nperseg={nperseg} < 2; using 8"))
+                .build(),
+        );
+        seg = 8;
+    }
+    if n < seg {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .severity(Severity::Warning)
+                .message(format!("spectrogram nperseg={seg} > n={n}"))
+                .build(),
+        );
+        seg = n.max(2);
+    }
+    let hop = (seg / 2).max(1);
+    let mut rows = Vec::new();
+    let mut t0 = 0usize;
+    while t0 + seg <= n {
+        let sl: Vec<f64> = (t0..t0 + seg).map(|t| y[t]).collect();
+        let (re, im) = dft_re_im(&sl);
+        rows.push(Vector::from_iter(
+            re.iter()
+                .zip(&im)
+                .map(|(a, b)| (a * a + b * b) / seg as f64),
+        ));
+        t0 += hop;
+        if hop == 0 {
+            break;
+        }
+    }
+    if rows.is_empty() {
+        let (re, im) = dft_re_im(y.as_slice());
+        rows.push(Vector::from_iter(
+            re.iter()
+                .zip(&im)
+                .map(|(a, b)| (a * a + b * b) / n.max(1) as f64),
+        ));
+    }
+    let nf = rows[0].len().max(1);
+    let out = Matrix::from_fn(rows.len(), nf, |i, j| {
+        if j < rows[i].len() {
+            rows[i][j]
+        } else {
+            0.0
+        }
+    });
+    ctx.finish(out)
+}
+
+/// Cross-spectral density (SciPy `csd` / statsmodels).
+///
+/// Frequency count is not identification `p`.
+pub fn csd(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, x);
+    inspect_univariate(&mut ctx, y);
+    let n = x.len().min(y.len());
+    if n < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .message("csd needs n≥2")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(0));
+    }
+    if x.len() != y.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!("csd lengths {} vs {}; using n={n}", x.len(), y.len()))
+                .build(),
+        );
+    }
+    let xs: Vec<f64> = (0..n).map(|t| x[t]).collect();
+    let ys: Vec<f64> = (0..n).map(|t| y[t]).collect();
+    let (xr, xi) = dft_re_im(&xs);
+    let (yr, yi) = dft_re_im(&ys);
+    let out = Vector::from_iter((0..xr.len()).map(|k| {
+        let re = xr[k] * yr[k] + xi[k] * yi[k];
+        let im = xi[k] * yr[k] - xr[k] * yi[k];
+        (re * re + im * im).sqrt() / n as f64
+    }));
+    ctx.finish(out)
+}
+
+/// Magnitude-squared coherence (SciPy `coherence`).
+///
+/// Frequency count is not identification `p`.
+pub fn coherence(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, x);
+    inspect_univariate(&mut ctx, y);
+    let n = x.len().min(y.len());
+    if n < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .message("coherence needs n≥2")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(0));
+    }
+    let xs: Vec<f64> = (0..n).map(|t| x[t]).collect();
+    let ys: Vec<f64> = (0..n).map(|t| y[t]).collect();
+    let (xr, xi) = dft_re_im(&xs);
+    let (yr, yi) = dft_re_im(&ys);
+    let out = Vector::from_iter((0..xr.len()).map(|k| {
+        let pxx = (xr[k] * xr[k] + xi[k] * xi[k]) / n as f64;
+        let pyy = (yr[k] * yr[k] + yi[k] * yi[k]) / n as f64;
+        let re = xr[k] * yr[k] + xi[k] * yi[k];
+        let im = xi[k] * yr[k] - xr[k] * yi[k];
+        let pxy = (re * re + im * im).sqrt() / n as f64;
+        let den = (pxx * pyy).sqrt();
+        if den > 1e-15 {
+            (pxy / den).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }));
+    ctx.finish(out)
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -16289,5 +16525,29 @@ impl FitSeries for HamiltonFilter {
             .expect("ham");
         assert_eq!(ham.value.cycle.len(), 40);
         assert!(ham.value.coef.as_slice().iter().all(|v| v.is_finite()));
+        let tr = add_trend(&y, "ct", &Session::new("atr", "t")).expect("atr");
+        assert_eq!(tr.value.shape(), (40, 3));
+        let lm = lagmat(&y, 3, &Session::new("lagm", "t")).expect("lagm");
+        assert_eq!(lm.value.shape(), (40, 3));
+        let pyw = pacf_yw(&y, 5, &Session::new("pyw", "t")).expect("pyw");
+        assert_eq!(pyw.value.len(), 6);
+        assert!((pyw.value[0] - 1.0).abs() < 1e-12);
+        let sp = spectrogram(&y, 8, &Session::new("spec", "t")).expect("spec");
+        assert!(sp.value.nrows() >= 1 && sp.value.ncols() >= 1);
+        assert!((0..sp.value.nrows()).all(|i| {
+            (0..sp.value.ncols()).all(|j| sp.value.get(i, j).is_finite())
+        }));
+        let a = y2.column(0);
+        let b = y2.column(1);
+        let cs = csd(&a, &b, &Session::new("csd", "t")).expect("csd");
+        assert!(!cs.value.is_empty());
+        assert!(cs.value.as_slice().iter().all(|v| v.is_finite()));
+        let coh = coherence(&a, &b, &Session::new("coh", "t")).expect("coh");
+        assert_eq!(coh.value.len(), cs.value.len());
+        assert!(coh
+            .value
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0));
     }
 }
