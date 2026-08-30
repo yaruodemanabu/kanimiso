@@ -4014,6 +4014,37 @@ const INVENTORY: &[Algorithm] = &[
         "river.facto.SFMRegressor",
         "online",
     ),
+    a(
+        "tsa.TrendForecaster",
+        "sktime.forecasting.trend.TrendForecaster",
+        "forecast",
+    ),
+    a("tsa.Imapa", "sktime.forecasting.imapa.IMAPA", "forecast"),
+    a(
+        "tsa.rogers_satchell",
+        "arch.univariate.RogersSatchell",
+        "forecast",
+    ),
+    a("tsa.yang_zhang", "arch.univariate.YangZhang", "forecast"),
+    a(
+        "tsa.Setar",
+        "statsmodels.tsa.regime_switching.SETAR",
+        "forecast",
+    ),
+    a("tsa.Ngarch", "arch.univariate.NGARCH", "forecast"),
+    a("tsa.DccGarch", "arch.univariate.DCC", "forecast"),
+    a(
+        "tsa.HierarchyEnsembleForecaster",
+        "sktime.forecasting.compose.HierarchyEnsembleForecaster",
+        "forecast",
+    ),
+    a("online.Dbstream", "river.cluster.DBSTREAM", "online"),
+    a(
+        "online.MiniBatchMlp",
+        "river.neural_net.MLPRegressor",
+        "online",
+    ),
+    a("online.FmReco", "river.reco.FM", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4271,6 +4302,14 @@ mod tests {
             "online.AdwinBoosting",
             "online.BoleClassifier",
             "online.SfmRegressor",
+            "tsa.TrendForecaster",
+            "tsa.Imapa",
+            "tsa.Setar",
+            "tsa.Ngarch",
+            "tsa.DccGarch",
+            "online.Dbstream",
+            "online.MiniBatchMlp",
+            "online.FmReco",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

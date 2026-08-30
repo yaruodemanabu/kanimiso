@@ -16452,6 +16452,268 @@ impl Predict for TextClust {
     }
 }
 
+/// DBSTREAM-style fading density micro-clusters (river `cluster.DBSTREAM`).
+///
+/// Radius / micro count are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Dbstream {
+    /// Merge radius.
+    pub radius: f64,
+    /// Per-step weight decay.
+    pub lambda: f64,
+    micros: Vec<(Vector, f64)>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for Dbstream {
+    fn default() -> Self {
+        Self {
+            radius: 1.0,
+            lambda: 0.99,
+            micros: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl Dbstream {
+    /// DBSTREAM with merge radius `radius`.
+    pub fn new(radius: f64) -> Self {
+        Self {
+            radius,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for Dbstream {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let rad = if self.radius.is_finite() && self.radius > 0.0 {
+            self.radius
+        } else {
+            1.0
+        };
+        let lam = self.lambda.clamp(1e-6, 1.0);
+        let before = self.n_seen;
+        let mut merged = 0u64;
+        let mut spawned = 0u64;
+        for i in 0..x.nrows() {
+            for mc in self.micros.iter_mut() {
+                mc.1 *= lam;
+            }
+            self.micros.retain(|mc| mc.1 >= 1e-3);
+            let row = x.row(i);
+            let mut best = None;
+            let mut best_d = f64::INFINITY;
+            for (c, (ctr, _)) in self.micros.iter().enumerate() {
+                let mut d = 0.0;
+                for j in 0..row.len().min(ctr.len()) {
+                    let z = row[j] - ctr[j];
+                    d += z * z;
+                }
+                d = d.sqrt();
+                if d < best_d {
+                    best_d = d;
+                    best = Some(c);
+                }
+            }
+            if let Some(c) = best {
+                if best_d <= rad {
+                    let w = self.micros[c].1;
+                    let nw = w + 1.0;
+                    for j in 0..self.micros[c].0.len().min(row.len()) {
+                        self.micros[c].0[j] = (w * self.micros[c].0[j] + row[j]) / nw;
+                    }
+                    self.micros[c].1 = nw;
+                    merged += 1;
+                    continue;
+                }
+            }
+            self.micros.push((row, 1.0));
+            spawned += 1;
+        }
+        // Shared-density merge of overlapping micros.
+        let mut i = 0;
+        while i < self.micros.len() {
+            let mut j = i + 1;
+            while j < self.micros.len() {
+                let mut d = 0.0;
+                let (a, b) = (&self.micros[i].0, &self.micros[j].0);
+                for k in 0..a.len().min(b.len()) {
+                    let z = a[k] - b[k];
+                    d += z * z;
+                }
+                if d.sqrt() <= 2.0 * rad {
+                    let wa = self.micros[i].1;
+                    let wb = self.micros[j].1;
+                    let nw = wa + wb;
+                    for k in 0..self.micros[i].0.len().min(self.micros[j].0.len()) {
+                        self.micros[i].0[k] =
+                            (wa * self.micros[i].0[k] + wb * self.micros[j].0[k]) / nw.max(1e-12);
+                    }
+                    self.micros[i].1 = nw;
+                    self.micros.remove(j);
+                    merged += 1;
+                } else {
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.micros.iter().map(|m| m.1).sum();
+        q.parameter_delta_norm = Some(spawned as f64);
+        q.information_gain = Some((merged + spawned) as f64);
+        q.still_identified = !self.micros.is_empty();
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "DBSTREAM micros={} spawned={spawned} merged={merged}",
+            self.micros.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "DBSTREAM micro-cluster update",
+                "fading centroids plus shared-density merge",
+                format!("n={before}"),
+                format!("n={} micros={}", self.n_seen, self.micros.len()),
+            ),
+        )
+    }
+}
+
+impl Predict for Dbstream {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.micros.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let row = x.row(i);
+            let mut best = 0usize;
+            let mut best_d = f64::INFINITY;
+            for (c, (ctr, _)) in self.micros.iter().enumerate() {
+                let mut d = 0.0;
+                for j in 0..row.len().min(ctr.len()) {
+                    let z = row[j] - ctr[j];
+                    d += z * z;
+                }
+                if d < best_d {
+                    best_d = d;
+                    best = c;
+                }
+            }
+            best as f64
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// Mini-batch MLP regressor (river `neural_net.MLPRegressor`).
+///
+/// Hidden width is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MiniBatchMlp {
+    inner: crate::neural::MLPRegressor,
+}
+
+impl Default for MiniBatchMlp {
+    fn default() -> Self {
+        let mut inner = crate::neural::MLPRegressor::new();
+        inner.hidden = 4;
+        inner.learning_rate = 0.05;
+        inner.max_iter = 1;
+        inner.seed = 3;
+        Self { inner }
+    }
+}
+
+impl MiniBatchMlp {
+    /// MLP with `hidden` ReLU units.
+    pub fn new(hidden: usize) -> Self {
+        let mut s = Self::default();
+        s.inner.hidden = hidden.max(1);
+        s
+    }
+}
+
+impl PartialFit for MiniBatchMlp {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for MiniBatchMlp {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+/// Factorization-machine recommender (river `reco` / `facto.FM`).
+///
+/// Factor count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct FmReco {
+    inner: FactorizationMachine,
+}
+
+impl Default for FmReco {
+    fn default() -> Self {
+        Self {
+            inner: FactorizationMachine::new(2),
+        }
+    }
+}
+
+impl FmReco {
+    /// FM recommender with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            inner: FactorizationMachine::new(n_factors),
+        }
+    }
+}
+
+impl PartialFit for FmReco {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for FmReco {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
 fn online_linear_dim(fit_intercept: bool, p: usize) -> usize {
     p + if fit_intercept { 1 } else { 0 }
 }
@@ -20835,6 +21097,15 @@ mod tests {
         TextClust::new(0.5)
             .partial_fit(&x, None, &session)
             .expect("textclust");
+        Dbstream::new(2.0)
+            .partial_fit(&x, None, &session)
+            .expect("dbstream");
+        MiniBatchMlp::new(4)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("mbmlp");
+        FmReco::new(2)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("fmreco");
 
         let n_expl = session
             .ledger()

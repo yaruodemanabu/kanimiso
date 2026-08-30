@@ -6409,6 +6409,693 @@ impl FitSeries for SquaringResiduals {
     }
 }
 
+/// Linear trend on the time index (sktime `TrendForecaster`).
+///
+/// Distinct from [`Drift`]: this is OLS of `y` on `[1, t]`, not last-plus-slope.
+#[derive(Clone, Debug, Default)]
+pub struct TrendForecaster;
+
+/// Fitted OLS time trend.
+#[derive(Clone, Debug)]
+pub struct FittedTrendForecaster {
+    /// Intercept.
+    pub intercept: f64,
+    /// Slope on `t = 0, 1, …`.
+    pub slope: f64,
+    /// Training length.
+    pub n: usize,
+}
+
+impl FittedTrendForecaster {
+    /// `intercept + slope · (n + h − 1)` for `h = 1..H`.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(Vector::from_iter(
+            (0..h).map(|s| self.intercept + self.slope * (self.n + s) as f64),
+        ))
+    }
+}
+
+impl FitSeries for TrendForecaster {
+    type Fitted = FittedTrendForecaster;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedTrendForecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        if n < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("TrendForecaster needs n≥2")
+                    .build(),
+            );
+            return ctx.finish(FittedTrendForecaster {
+                intercept: y.as_slice().last().copied().unwrap_or(0.0),
+                slope: 0.0,
+                n,
+            });
+        }
+        let x = Matrix::from_fn(n, 2, |i, j| if j == 0 { 1.0 } else { i as f64 });
+        let mut scratch = Report::new("trend", "ols");
+        let coef = least_squares(&mut scratch, &x, y, &ctx.policy)
+            .unwrap_or_else(|| Vector::from_slice(&[y.mean(), 0.0]));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedTrendForecaster {
+            intercept: coef.as_slice().first().copied().unwrap_or(0.0),
+            slope: coef.as_slice().get(1).copied().unwrap_or(0.0),
+            n,
+        })
+    }
+}
+
+/// Intermittent multi-alpha Croston average (sktime / IMAPA).
+///
+/// Alpha-grid size is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct Imapa;
+
+/// Fitted IMAPA average rate.
+#[derive(Clone, Debug)]
+pub struct FittedImapa {
+    /// Averaged `z/p` rate.
+    pub rate: f64,
+}
+
+impl FittedImapa {
+    /// Constant averaged Croston rate.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(Vector::filled(h, self.rate))
+    }
+}
+
+impl FitSeries for Imapa {
+    type Fitted = FittedImapa;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedImapa>> {
+        let mut rates = Vec::new();
+        for &a in &[0.1, 0.2, 0.3, 0.4] {
+            match Croston::new(a).fit_series(y, &session.child(format!("imapa_{a}"))) {
+                Ok(q) => {
+                    if q.value.p.abs() > 1e-15 {
+                        rates.push(q.value.z / q.value.p);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if rates.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("IMAPA found no finite Croston rate")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "IMAPA rate",
+                        "every Croston trial was unidentified",
+                        "need some positive demand",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedImapa { rate: f64::NAN });
+        }
+        let rate = rates.iter().sum::<f64>() / rates.len() as f64;
+        ctx.finish(FittedImapa { rate })
+    }
+}
+
+/// Rogers–Satchell OHLC variance (arch `RogersSatchell`).
+///
+/// \(\hat\sigma^2_t=\ln(H/C)\ln(H/O)+\ln(L/C)\ln(L/O)\).
+#[derive(Clone, Debug, Default)]
+pub struct RogersSatchell;
+
+/// Yang–Zhang OHLC variance (arch `YangZhang`).
+///
+/// Combines overnight, open-to-close, and Rogers–Satchell. Bar count is not `p`.
+#[derive(Clone, Debug, Default)]
+pub struct YangZhang;
+
+/// Rogers–Satchell estimator on columns `[open, high, low, close]`.
+pub fn rogers_satchell(ohlc: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, ohlc, None, &ctx.policy);
+    if ohlc.ncols() < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("Rogers–Satchell needs columns [open, high, low, close]")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(ohlc.nrows()));
+    }
+    let mut out = Vector::zeros(ohlc.nrows());
+    let mut skipped = 0u64;
+    for t in 0..ohlc.nrows() {
+        let o = ohlc.get(t, 0);
+        let h = ohlc.get(t, 1);
+        let l = ohlc.get(t, 2);
+        let c = ohlc.get(t, 3);
+        if o > 0.0 && h > 0.0 && l > 0.0 && c > 0.0 && h >= l {
+            out[t] = (h / c).ln() * (h / o).ln() + (l / c).ln() * (l / o).ln();
+        } else {
+            skipped += 1;
+            out[t] = f64::NAN;
+        }
+    }
+    if skipped > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::NonPositiveSeries)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "Rogers–Satchell skipped {skipped} non-positive or inverted bars"
+                ))
+                .build(),
+        );
+    }
+    ctx.finish(out)
+}
+
+/// Yang–Zhang series estimator on columns `[open, high, low, close]`.
+pub fn yang_zhang(ohlc: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, ohlc, None, &ctx.policy);
+    if ohlc.ncols() < 4 || ohlc.nrows() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Yang–Zhang needs n≥2 OHLC bars")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let rs = match rogers_satchell(ohlc, &session.child("rs")) {
+        Ok(q) => q.value,
+        Err(_) => Vector::zeros(ohlc.nrows()),
+    };
+    let n = ohlc.nrows();
+    let mut overnight = Vector::zeros(n);
+    let mut oc = Vector::zeros(n);
+    for t in 0..n {
+        let o = ohlc.get(t, 0);
+        let c = ohlc.get(t, 3);
+        if o > 0.0 && c > 0.0 {
+            oc[t] = (c / o).ln();
+            if t > 0 {
+                let prev_c = ohlc.get(t - 1, 3);
+                if prev_c > 0.0 {
+                    overnight[t] = (o / prev_c).ln();
+                }
+            }
+        }
+    }
+    let var_of = |z: &Vector| {
+        let sl: Vec<f64> = z
+            .as_slice()
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .collect();
+        if sl.len() < 2 {
+            return 0.0;
+        }
+        let m = sl.iter().sum::<f64>() / sl.len() as f64;
+        sl.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / (sl.len() - 1) as f64
+    };
+    let vo = var_of(&overnight);
+    let vc = var_of(&oc);
+    let vrs: f64 = {
+        let sl: Vec<f64> = rs
+            .as_slice()
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .collect();
+        if sl.is_empty() {
+            0.0
+        } else {
+            sl.iter().sum::<f64>() / sl.len() as f64
+        }
+    };
+    let nf = n as f64;
+    let k = 0.34 / (1.34 + (nf + 1.0) / (nf - 1.0).max(1.0));
+    ctx.finish(vo + k * vc + (1.0 - k) * vrs)
+}
+
+impl RogersSatchell {
+    /// Empty Rogers–Satchell estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Per-bar Rogers–Satchell variance.
+    pub fn estimate(&self, ohlc: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        rogers_satchell(ohlc, session)
+    }
+}
+
+impl YangZhang {
+    /// Empty Yang–Zhang estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Series Yang–Zhang variance.
+    pub fn estimate(&self, ohlc: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+        yang_zhang(ohlc, session)
+    }
+}
+
+/// Self-exciting threshold AR (statsmodels `SETAR` lite).
+///
+/// Two AR(1) regimes split by a delay-1 threshold. Regime / lag counts are not `p`.
+#[derive(Clone, Debug, Default)]
+pub struct Setar;
+
+/// Fitted two-regime SETAR.
+#[derive(Clone, Debug)]
+pub struct FittedSetar {
+    /// Threshold on `y_{t-1}`.
+    pub threshold: f64,
+    /// Low-regime intercept and AR(1).
+    pub low: Vector,
+    /// High-regime intercept and AR(1).
+    pub high: Vector,
+    /// Last observation.
+    pub last: f64,
+}
+
+impl FittedSetar {
+    /// Iterate the threshold recursion.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let mut prev = self.last;
+        let mut out = Vector::zeros(h);
+        for i in 0..h {
+            let coef = if prev <= self.threshold {
+                &self.low
+            } else {
+                &self.high
+            };
+            let yhat = coef.as_slice().first().copied().unwrap_or(0.0)
+                + coef.as_slice().get(1).copied().unwrap_or(0.0) * prev;
+            out[i] = yhat;
+            prev = yhat;
+        }
+        ctx.finish(out)
+    }
+}
+
+impl FitSeries for Setar {
+    type Fitted = FittedSetar;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedSetar>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        if n < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("SETAR needs a longer series")
+                    .build(),
+            );
+        }
+        let last = y.as_slice().last().copied().unwrap_or(0.0);
+        if n < 3 {
+            return ctx.finish(FittedSetar {
+                threshold: last,
+                low: Vector::from_slice(&[last, 0.0]),
+                high: Vector::from_slice(&[last, 0.0]),
+                last,
+            });
+        }
+        let mut sorted: Vec<f64> = y.as_slice()[..n - 1]
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .collect();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let qs = [0.3, 0.5, 0.7];
+        let mut best_sse = f64::INFINITY;
+        let mut best_c = sorted.get(sorted.len() / 2).copied().unwrap_or(last);
+        let mut best_lo = Vector::from_slice(&[0.0, 0.0]);
+        let mut best_hi = Vector::from_slice(&[0.0, 0.0]);
+        for &q in &qs {
+            let idx = ((q * (sorted.len().saturating_sub(1)) as f64).round() as usize)
+                .min(sorted.len().saturating_sub(1));
+            let c = sorted.get(idx).copied().unwrap_or(best_c);
+            let mut lo_x = Vec::new();
+            let mut lo_y = Vec::new();
+            let mut hi_x = Vec::new();
+            let mut hi_y = Vec::new();
+            for t in 1..n {
+                if !y[t].is_finite() || !y[t - 1].is_finite() {
+                    continue;
+                }
+                if y[t - 1] <= c {
+                    lo_x.push(y[t - 1]);
+                    lo_y.push(y[t]);
+                } else {
+                    hi_x.push(y[t - 1]);
+                    hi_y.push(y[t]);
+                }
+            }
+            if lo_x.len() < 3 || hi_x.len() < 3 {
+                continue;
+            }
+            let fit_reg = |xs: &[f64], ys: &[f64]| -> (Vector, f64) {
+                let m = Matrix::from_fn(xs.len(), 2, |i, j| if j == 0 { 1.0 } else { xs[i] });
+                let v = Vector::from_slice(ys);
+                let mut scratch = Report::new("setar", "ols");
+                let coef = least_squares(&mut scratch, &m, &v, &ctx.policy)
+                    .unwrap_or_else(|| Vector::from_slice(&[v.mean(), 0.0]));
+                let mut sse = 0.0;
+                for i in 0..xs.len() {
+                    let yhat = coef[0] + coef[1] * xs[i];
+                    let e = ys[i] - yhat;
+                    sse += e * e;
+                }
+                (coef, sse)
+            };
+            let (lo, sl) = fit_reg(&lo_x, &lo_y);
+            let (hi, sh) = fit_reg(&hi_x, &hi_y);
+            let sse = sl + sh;
+            if sse < best_sse {
+                best_sse = sse;
+                best_c = c;
+                best_lo = lo;
+                best_hi = hi;
+            }
+        }
+        ctx.finish(FittedSetar {
+            threshold: best_c,
+            low: best_lo,
+            high: best_hi,
+            last,
+        })
+    }
+}
+
+/// Nonlinear GARCH (Engle / arch `NGARCH`).
+///
+/// \(h_t=\omega+\alpha(\varepsilon_{t-1}-\gamma\sqrt{h_{t-1}})^2+\beta h_{t-1}\).
+#[derive(Clone, Debug)]
+pub struct Ngarch {
+    /// Coordinate-search iterations.
+    pub max_iter: usize,
+}
+
+impl Default for Ngarch {
+    fn default() -> Self {
+        Self { max_iter: 28 }
+    }
+}
+
+impl Ngarch {
+    /// Default NGARCH settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted NGARCH variances.
+#[derive(Clone, Debug)]
+pub struct FittedNgarch {
+    /// ω.
+    pub omega: f64,
+    /// ARCH coefficient.
+    pub alpha: f64,
+    /// Asymmetry.
+    pub gamma: f64,
+    /// GARCH coefficient.
+    pub beta: f64,
+    /// In-sample conditional variances.
+    pub sigma2: Vector,
+    /// Demeaned residuals.
+    pub resid: Vector,
+}
+
+fn ngarch_sigma2(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64) -> Vec<f64> {
+    let var0 = e.iter().map(|v| v * v).sum::<f64>() / e.len().max(1) as f64;
+    let mut s2 = vec![var0.max(omega).max(1e-12); e.len()];
+    for t in 1..e.len() {
+        let s = s2[t - 1].max(1e-12).sqrt();
+        let z = e[t - 1] - gamma * s;
+        s2[t] = omega + alpha * z * z + beta * s2[t - 1];
+        if !s2[t].is_finite() || s2[t] <= 0.0 {
+            s2[t] = omega.max(1e-12);
+        }
+    }
+    s2
+}
+
+fn ngarch_nll(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64) -> f64 {
+    if omega <= 0.0 || alpha < 0.0 || beta < 0.0 {
+        return f64::INFINITY;
+    }
+    let s2 = ngarch_sigma2(e, omega, alpha, gamma, beta);
+    let mut nll = 0.0;
+    for t in 0..e.len() {
+        let v = s2[t].max(1e-12);
+        nll += 0.5 * (v.ln() + e[t] * e[t] / v);
+    }
+    nll
+}
+
+impl FitSeries for Ngarch {
+    type Fitted = FittedNgarch;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedNgarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("NGARCH QMLE needs a longer series")
+                    .build(),
+            );
+        }
+        let mean = y.mean();
+        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
+        let var = e.as_slice().iter().map(|v| v * v).sum::<f64>() / y.len().max(1) as f64;
+        let mut omega = 0.05 * var.max(1e-8);
+        let mut alpha = 0.05;
+        let mut gamma = 0.1;
+        let mut beta = 0.80;
+        let mut best = ngarch_nll(e.as_slice(), omega, alpha, gamma, beta);
+        let mut step = 0.05;
+        for it in 0..self.max_iter {
+            let mut improved = false;
+            for (i, cur) in [omega, alpha, gamma, beta].into_iter().enumerate() {
+                for dir in [-step, step] {
+                    let mut cand = [omega, alpha, gamma, beta];
+                    cand[i] = if i == 2 {
+                        cur + dir
+                    } else {
+                        (cur + dir).max(1e-8)
+                    };
+                    if cand[1] + cand[3] >= 0.999 {
+                        continue;
+                    }
+                    let nll = ngarch_nll(e.as_slice(), cand[0], cand[1], cand[2], cand[3]);
+                    if nll < best {
+                        best = nll;
+                        omega = cand[0];
+                        alpha = cand[1];
+                        gamma = cand[2];
+                        beta = cand[3];
+                        improved = true;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, best, None);
+            if !improved {
+                step *= 0.5;
+                if step < 1e-5 {
+                    ctx.session.converged("NGARCH coordinate search", it as u64);
+                    break;
+                }
+            }
+        }
+        if !best.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("NGARCH QMLE likelihood is non-finite")
+                    .build(),
+            );
+        }
+        let sigma2 = ngarch_sigma2(e.as_slice(), omega, alpha, gamma, beta);
+        ctx.finish(FittedNgarch {
+            omega,
+            alpha,
+            gamma,
+            beta,
+            sigma2: Vector::from_iter(sigma2),
+            resid: e,
+        })
+    }
+}
+
+/// DCC-GARCH lite on a multivariate residual matrix (Engle).
+///
+/// Series count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct DccGarch;
+
+/// Fitted DCC correlations and marginal variances.
+#[derive(Clone, Debug)]
+pub struct FittedDccGarch {
+    /// Per-series GARCH(1,1) variances (`T` × `k`).
+    pub sigma2: Matrix,
+    /// Terminal correlation matrix (`k` × `k`).
+    pub corr: Matrix,
+    /// DCC `a`.
+    pub a: f64,
+    /// DCC `b`.
+    pub b: f64,
+}
+
+impl DccGarch {
+    /// Empty DCC estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit marginal GARCH(1,1) then a scalar DCC on standardized residuals.
+    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedDccGarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let (n, k) = y.shape();
+        if k < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("DCC needs at least two series")
+                    .build(),
+            );
+        }
+        let mut sigma2 = Matrix::zeros(n, k);
+        let mut z = Matrix::zeros(n, k);
+        for j in 0..k {
+            let col = y.column(j);
+            let mean = col.mean();
+            let e: Vec<f64> = col.as_slice().iter().map(|v| v - mean).collect();
+            let var = e.iter().map(|v| v * v).sum::<f64>() / n.max(1) as f64;
+            let s2 = garch_sigma2(&e, 0.05 * var.max(1e-8), 0.05, 0.80);
+            for t in 0..n {
+                let v = s2.get(t).copied().unwrap_or(var).max(1e-12);
+                sigma2.set(t, j, v);
+                z.set(t, j, e.get(t).copied().unwrap_or(0.0) / v.sqrt());
+            }
+        }
+        let mut qbar = Matrix::zeros(k, k);
+        if n > 0 {
+            for a in 0..k {
+                for b in 0..k {
+                    let mut s = 0.0;
+                    for t in 0..n {
+                        s += z.get(t, a) * z.get(t, b);
+                    }
+                    qbar.set(a, b, s / n as f64);
+                }
+            }
+        }
+        let mut a = 0.05_f64;
+        let mut b = 0.90_f64;
+        let mut q = qbar.clone();
+        for t in 1..n {
+            let mut nxt = Matrix::zeros(k, k);
+            for i in 0..k {
+                for j in 0..k {
+                    nxt.set(
+                        i,
+                        j,
+                        (1.0 - a - b) * qbar.get(i, j)
+                            + a * z.get(t - 1, i) * z.get(t - 1, j)
+                            + b * q.get(i, j),
+                    );
+                }
+            }
+            q = nxt;
+        }
+        let mut corr = Matrix::zeros(k, k);
+        for i in 0..k {
+            for j in 0..k {
+                let den = (q.get(i, i).max(1e-12) * q.get(j, j).max(1e-12)).sqrt();
+                corr.set(i, j, q.get(i, j) / den);
+            }
+        }
+        ctx.finish(FittedDccGarch { sigma2, corr, a, b })
+    }
+}
+
+/// Per-series naive forecasts plus a mean top level (sktime `HierarchyEnsembleForecaster`).
+///
+/// Series count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct HierarchyEnsembleForecaster;
+
+/// Fitted hierarchy ensemble.
+#[derive(Clone, Debug)]
+pub struct FittedHierarchyEnsemble {
+    /// Last value of each series.
+    pub last: Vector,
+}
+
+impl FittedHierarchyEnsemble {
+    /// Each column repeats its last value; an extra column is the mean.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let k = self.last.len();
+        let out = Matrix::from_fn(h, k + 1, |_, j| {
+            if j < k {
+                self.last[j]
+            } else if k == 0 {
+                0.0
+            } else {
+                self.last.mean()
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
+impl HierarchyEnsembleForecaster {
+    /// Empty hierarchy ensemble.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit last-value walkers on each column.
+    pub fn fit(
+        &self,
+        y: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedHierarchyEnsemble>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let last = Vector::from_iter((0..y.ncols()).map(|j| {
+            y.column(j)
+                .as_slice()
+                .last()
+                .copied()
+                .unwrap_or(0.0)
+        }));
+        ctx.finish(FittedHierarchyEnsemble { last })
+    }
+}
+
 fn fit_arima(spec: &Arima, y: &Vector, session: &Session) -> Result<Qualified<FittedArima>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
@@ -11382,5 +12069,70 @@ mod tests {
             .value;
         assert_eq!(sqf.len(), 3);
         assert!(sqf.as_slice().iter().all(|v| v.is_finite() && *v >= 0.0));
+        let tr = TrendForecaster
+            .fit_series(&y, &Session::new("trf", "fit"))
+            .expect("trf");
+        assert!(tr.value.slope.is_finite());
+        let trf = tr
+            .value
+            .forecast(3, &Session::new("trf", "fc"))
+            .expect("trff")
+            .value;
+        assert_eq!(trf.len(), 3);
+        let im = Imapa
+            .fit_series(&ypos, &Session::new("imapa", "fit"))
+            .expect("imapa");
+        let imf = im
+            .value
+            .forecast(3, &Session::new("imapa", "fc"))
+            .expect("imapaf")
+            .value;
+        assert_eq!(imf.len(), 3);
+        assert!(imf.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let rs = RogersSatchell::new()
+            .estimate(&ohlc, &Session::new("rs", "est"))
+            .expect("rs")
+            .value;
+        assert_eq!(rs.len(), ypos.len());
+        assert!(rs.as_slice().iter().all(|v| v.is_finite()));
+        let yz = YangZhang::new()
+            .estimate(&ohlc, &Session::new("yz", "est"))
+            .expect("yz")
+            .value;
+        assert!(yz.is_finite());
+        let se = Setar
+            .fit_series(&y, &Session::new("setar", "fit"))
+            .expect("setar");
+        let sef = se
+            .value
+            .forecast(3, &Session::new("setar", "fc"))
+            .expect("setarf")
+            .value;
+        assert_eq!(sef.len(), 3);
+        assert!(sef.as_slice().iter().all(|v| v.is_finite()));
+        let ng = Ngarch::new()
+            .fit_series(&y, &Session::new("ngarch", "fit"))
+            .expect("ngarch");
+        assert!(ng
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        assert!(ng.value.gamma.is_finite());
+        let dcc = DccGarch::new()
+            .fit(&y2, &Session::new("dcc", "fit"))
+            .expect("dcc");
+        assert_eq!(dcc.value.corr.shape(), (2, 2));
+        assert!(dcc.value.corr.get(0, 1).is_finite());
+        let hier = HierarchyEnsembleForecaster::new()
+            .fit(&y2, &Session::new("hier", "fit"))
+            .expect("hier");
+        let hierf = hier
+            .value
+            .forecast(3, &Session::new("hier", "fc"))
+            .expect("hierf")
+            .value;
+        assert_eq!(hierf.shape(), (3, 3));
     }
 }
