@@ -14,7 +14,7 @@ use crate::stats::HypothesisTest;
 use crate::traits::Predict;
 use crate::validate::inspect_xy;
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Meaninglessness, Qualified, Result, Severity};
+use signlred::{Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result, Severity};
 use std::collections::BTreeMap;
 
 fn group_sizes(groups: &Vector) -> BTreeMap<i64, usize> {
@@ -1114,6 +1114,211 @@ impl SystemGmm {
     }
 }
 
+/// Fama–MacBeth two-pass slopes (linearmodels `FamaMacBeth`).
+///
+/// Time count is not identification `p`. Cross-section OLS at each time uses a
+/// scratch report; aborting inner codes are not promoted.
+#[derive(Clone, Debug, Default)]
+pub struct FamaMacBeth;
+
+/// Averaged Fama–MacBeth slopes.
+#[derive(Clone, Debug)]
+pub struct FittedFamaMacBeth {
+    /// Mean cross-sectional slopes.
+    pub coef: Vector,
+    /// Mean cross-sectional intercept.
+    pub intercept: f64,
+    /// Time-series standard errors of the slopes.
+    pub se: Vector,
+    /// Times that produced a finite slope.
+    pub n_times: usize,
+    /// Average cross-section size.
+    pub n_cs_avg: f64,
+}
+
+impl FamaMacBeth {
+    /// Default two-pass estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit `y ~ 1 + X` in each time slice, then average the slopes.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        times: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedFamaMacBeth>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let n = y.len().min(x.nrows()).min(times.len());
+        if times.len() != y.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("FamaMacBeth times length ≠ n")
+                    .build(),
+            );
+        }
+        let p = x.ncols();
+        let mut by_t: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+        for i in 0..n {
+            if times[i].is_finite() {
+                by_t.entry(times[i].round() as i64).or_default().push(i);
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("FamaMacBeth is two-pass OLS, not Newey–West / clustered SE")
+                .compromise(NumericalCompromise::new(
+                    "Fama–MacBeth with HAC standard errors",
+                    "plain time-series SD of the cross-section slopes",
+                    "serial correlation across times is ignored",
+                    "read se as a planning SE, not a published FM t",
+                ))
+                .build(),
+        );
+        let mut betas: Vec<Vector> = Vec::new();
+        let mut intercepts: Vec<f64> = Vec::new();
+        let mut n_cs = 0.0_f64;
+        for (_t, rows) in &by_t {
+            if rows.len() < 2 {
+                continue;
+            }
+            let xt = Matrix::from_fn(rows.len(), p, |r, j| x.get(rows[r], j));
+            let yt = Vector::from_iter(rows.iter().map(|&i| y[i]));
+            let design = xt.with_intercept();
+            let mut scratch = signlred::Report::new("famamacbeth", "cs-ols");
+            let Some(sol) = least_squares(&mut scratch, &design, &yt, &ctx.policy) else {
+                continue;
+            };
+            for issue in scratch.issues() {
+                if matches!(
+                    issue.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::R2IsOne
+                        | IssueCode::RankZero
+                        | IssueCode::CholeskyFailed
+                ) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            if !sol.as_slice().iter().all(|v| v.is_finite()) {
+                continue;
+            }
+            intercepts.push(sol.as_slice().first().copied().unwrap_or(0.0));
+            betas.push(Vector::from_iter((0..p).map(|j| {
+                sol.as_slice().get(j + 1).copied().unwrap_or(0.0)
+            })));
+            n_cs += rows.len() as f64;
+        }
+        let n_times = betas.len();
+        if n_times == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("FamaMacBeth has no usable time slice")
+                    .build(),
+            );
+            return ctx.finish(FittedFamaMacBeth {
+                coef: Vector::zeros(p),
+                intercept: 0.0,
+                se: Vector::zeros(p),
+                n_times: 0,
+                n_cs_avg: 0.0,
+            });
+        }
+        let intercept = intercepts.iter().sum::<f64>() / n_times as f64;
+        let coef = Vector::from_iter((0..p).map(|j| {
+            betas.iter().map(|b| b[j]).sum::<f64>() / n_times as f64
+        }));
+        let se = Vector::from_iter((0..p).map(|j| {
+            if n_times < 2 {
+                return f64::NAN;
+            }
+            let m = coef[j];
+            let ss: f64 = betas.iter().map(|b| {
+                let d = b[j] - m;
+                d * d
+            }).sum();
+            (ss / (n_times as f64 - 1.0)).sqrt() / (n_times as f64).sqrt()
+        }));
+        ctx.finish(FittedFamaMacBeth {
+            coef,
+            intercept,
+            se,
+            n_times,
+            n_cs_avg: n_cs / n_times as f64,
+        })
+    }
+}
+
+/// Absorbing least squares (linearmodels `AbsorbingLS`): named within FE.
+///
+/// Group count is not identification `p`. Delegates to [`PanelFe`].
+#[derive(Clone, Debug, Default)]
+pub struct AbsorbingLs;
+
+impl AbsorbingLs {
+    /// Default one-way absorbed FE.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit after absorbing `groups`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPanel>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("AbsorbingLs is one-way within FE, not multi-way HDFE")
+                .compromise(NumericalCompromise::new(
+                    "multi-way absorbed least squares",
+                    "group-mean demeaning then OLS",
+                    "only one absorbed factor is implemented",
+                    "do not read this as a two-way or iterated HDFE fit",
+                ))
+                .build(),
+        );
+        match PanelFe::new().fit(x, y, groups, &session.child("abs-fe")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::R2IsOne
+                            | IssueCode::RankZero
+                            | IssueCode::CholeskyFailed
+                            | IssueCode::MeaninglessFit
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                ctx.finish(q.value)
+            }
+            Err(_) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("AbsorbingLs inner within OLS failed")
+                        .build(),
+                );
+                ctx.finish(empty_panel(x.ncols()))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1194,5 +1399,17 @@ mod tests {
             .expect("sgmm");
         assert!(sg.value.n_eff > 0);
         assert!(sg.value.rho.is_finite());
+        let time = Vector::from_iter((0..32).map(|i| (i % 8) as f64));
+        let xfm = Matrix::from_fn(32, 1, |i, _| (i / 8) as f64);
+        let fm = FamaMacBeth::new()
+            .fit(&xfm, &y, &time, &Session::new("fmb", "fit"))
+            .expect("fmb");
+        assert_eq!(fm.value.coef.len(), 1);
+        assert!(fm.value.coef[0].is_finite());
+        assert!(fm.value.n_times > 0);
+        let als = AbsorbingLs::new()
+            .fit(&x, &y, &g, &Session::new("als", "fit"))
+            .expect("als");
+        assert!((als.value.coef[0] - 2.0).abs() < 0.25, "als={}", als.value.coef[0]);
     }
 }

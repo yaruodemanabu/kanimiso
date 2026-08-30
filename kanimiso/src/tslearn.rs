@@ -13181,6 +13181,311 @@ impl Fit for KNeighborsTimeSeriesClassifier {
     }
 }
 
+/// PCA on equal-length series rows (tslearn `TimeSeriesPCA` / sklearn `PCA`).
+///
+/// Component count is not identification `p`. SVD uses a scratch report so a
+/// Fatal inner `SvdDidNotConverge` cannot abort a valid embedding.
+#[derive(Clone, Debug)]
+pub struct TimeSeriesPca {
+    /// Retained axes.
+    pub n_components: usize,
+}
+
+impl Default for TimeSeriesPca {
+    fn default() -> Self {
+        Self { n_components: 1 }
+    }
+}
+
+impl TimeSeriesPca {
+    /// Keep `n_components` axes.
+    pub fn new(n_components: usize) -> Self {
+        Self { n_components }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedTimeSeriesPca>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted series-row PCA.
+#[derive(Clone, Debug)]
+pub struct FittedTimeSeriesPca {
+    /// Principal axes (`k` × width).
+    pub components: Matrix,
+    /// Column means of the training series.
+    pub mean: Vector,
+    /// Retained singular values.
+    pub singular_values: Vector,
+}
+
+impl FitUnsupervised for TimeSeriesPca {
+    type Fitted = FittedTimeSeriesPca;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedTimeSeriesPca>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (n, p) = x.shape();
+        let k_req = self.n_components.max(1);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("TimeSeriesPca is column-centered SVD, not a shapelet / DTW embedding")
+                .compromise(NumericalCompromise::new(
+                    "tslearn TimeSeriesPCA with a DTW / soft-DTW metric",
+                    "ordinary thin SVD of column-centered series rows",
+                    "the Euclidean embedding ignores warping",
+                    "read scores as PCA coordinates, not a published TSC embedding",
+                ))
+                .build(),
+        );
+        if n == 0 || p == 0 {
+            return ctx.finish(FittedTimeSeriesPca {
+                components: Matrix::zeros(k_req, p),
+                mean: Vector::zeros(p),
+                singular_values: Vector::zeros(0),
+            });
+        }
+        let (xc, mean) = x.centered();
+        let mut scratch = Report::new("tspca", "svd");
+        let Some(svd) = thin_svd(&mut scratch, &xc, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("TimeSeriesPca thin SVD failed")
+                    .build(),
+            );
+            return ctx.finish(FittedTimeSeriesPca {
+                components: Matrix::zeros(k_req.min(p), p),
+                mean,
+                singular_values: Vector::zeros(0),
+            });
+        };
+        let rank = svd.rank(ctx.policy.rank_tol_relative).max(1);
+        let k = k_req.min(rank).min(svd.singular_values.len()).min(p);
+        if k_req > k {
+            ctx.push(
+                Issue::builder(IssueCode::TruncatedSvdUsed)
+                    .message(format!("TimeSeriesPca truncated to {k} axes"))
+                    .compromise(NumericalCompromise::new(
+                        format!("{k_req} series principal components"),
+                        format!("{k} components from a rank-limited SVD"),
+                        "extra axes lie in the numerical null space",
+                        "dropped scores are identically zero",
+                    ))
+                    .build(),
+            );
+        }
+        let components = Matrix::from_fn(k, p, |a, b| {
+            if b < svd.v.nrows() && a < svd.v.ncols() {
+                svd.v[(b, a)]
+            } else {
+                0.0
+            }
+        });
+        let singular_values = Vector::from_iter(svd.singular_values.iter().take(k).copied());
+        ctx.finish(FittedTimeSeriesPca {
+            components,
+            mean,
+            singular_values,
+        })
+    }
+}
+
+impl Transform for FittedTimeSeriesPca {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let k = self.components.nrows();
+        let p = self.mean.len().min(x.ncols()).min(self.components.ncols());
+        let z = Matrix::from_fn(x.nrows(), k, |i, a| {
+            let mut s = 0.0_f64;
+            for j in 0..p {
+                s += (x.get(i, j) - self.mean[j]) * self.components.get(a, j);
+            }
+            s
+        });
+        ctx.finish(z)
+    }
+}
+
+/// Composable time-series forest (sktime `ComposableTimeSeriesForestClassifier`).
+///
+/// Unweighted vote of [`TimeSeriesForestClassifier`] and
+/// [`CanonicalIntervalForest`]. Tree / interval counts are not identification
+/// `p`. Inner `MeaninglessFit` is not promoted.
+#[derive(Clone, Debug)]
+pub struct ComposableTimeSeriesForest {
+    /// Trees per member.
+    pub n_estimators: usize,
+    /// Intervals per tree.
+    pub n_intervals: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for ComposableTimeSeriesForest {
+    fn default() -> Self {
+        Self {
+            n_estimators: 4,
+            n_intervals: 3,
+            max_depth: 4,
+            seed: 5,
+        }
+    }
+}
+
+impl ComposableTimeSeriesForest {
+    /// Default two-member interval forest.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted TSF+CIF vote with a Catch22 ridge fallback.
+#[derive(Clone, Debug)]
+pub struct FittedComposableTimeSeriesForest {
+    tsf: Option<FittedTimeSeriesForest>,
+    cif: Option<FittedCanonicalIntervalForest>,
+    ridge: Option<FittedCatch22Classifier>,
+}
+
+impl Fit for ComposableTimeSeriesForest {
+    type Fitted = FittedComposableTimeSeriesForest;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedComposableTimeSeriesForest>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("ComposableTimeSeriesForest is an unweighted TSF+CIF vote")
+                .compromise(NumericalCompromise::new(
+                    "sktime ComposableTimeSeriesForest pipeline",
+                    "vote of TimeSeriesForest and CanonicalIntervalForest",
+                    "column-ensemble weights and extra members are omitted",
+                    "do not read the vote as a published CTSF accuracy",
+                ))
+                .build(),
+        );
+        let mut tsf = TimeSeriesForestClassifier {
+            n_estimators: self.n_estimators.max(1),
+            n_intervals: self.n_intervals.max(1),
+            max_depth: self.max_depth.max(1),
+            seed: self.seed,
+        };
+        let tsf_f = match tsf.fit(x, y, &session.child("ctsf-tsf")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::R2IsOne
+                            | IssueCode::RankZero
+                            | IssueCode::MeaninglessFit
+                            | IssueCode::UnidentifiedModel
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                Some(q.value)
+            }
+            Err(_) => None,
+        };
+        let mut cif = CanonicalIntervalForest {
+            n_estimators: self.n_estimators.max(1),
+            n_intervals: self.n_intervals.max(1),
+            max_depth: self.max_depth.max(1),
+            seed: self.seed.wrapping_add(1),
+        };
+        let cif_f = match cif.fit(x, y, &session.child("ctsf-cif")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::R2IsOne
+                            | IssueCode::RankZero
+                            | IssueCode::MeaninglessFit
+                            | IssueCode::UnidentifiedModel
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                Some(q.value)
+            }
+            Err(_) => None,
+        };
+        if tsf_f.is_some() || cif_f.is_some() {
+            return ctx.finish(FittedComposableTimeSeriesForest {
+                tsf: tsf_f,
+                cif: cif_f,
+                ridge: None,
+            });
+        }
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .message("both CTSF members failed; falling back to Catch22 ridge")
+                .build(),
+        );
+        let ridge = match Catch22Classifier::new(0.1).fit(x, y, &session.child("ctsf-ridge")) {
+            Ok(q) => Some(q.value),
+            Err(_) => None,
+        };
+        ctx.finish(FittedComposableTimeSeriesForest {
+            tsf: None,
+            cif: None,
+            ridge,
+        })
+    }
+}
+
+impl Predict for FittedComposableTimeSeriesForest {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        if let Some(r) = &self.ridge {
+            return r.predict(x, session);
+        }
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let mut votes = vec![BTreeMap::<i64, usize>::new(); x.nrows()];
+        if let Some(tsf) = &self.tsf {
+            if let Ok(q) = tsf.predict(x, &session.child("ctsf-tsf-p")) {
+                for i in 0..x.nrows().min(q.value.len()) {
+                    *votes[i].entry(q.value[i].round() as i64).or_insert(0) += 1;
+                }
+            }
+        }
+        if let Some(cif) = &self.cif {
+            if let Ok(q) = cif.predict(x, &session.child("ctsf-cif-p")) {
+                for i in 0..x.nrows().min(q.value.len()) {
+                    *votes[i].entry(q.value[i].round() as i64).or_insert(0) += 1;
+                }
+            }
+        }
+        let out = Vector::from_iter(votes.iter().map(|m| {
+            m.iter()
+                .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(k, _)| *k as f64)
+                .unwrap_or(0.0)
+        }));
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -13486,6 +13791,27 @@ mod tests {
             .value;
         assert_eq!(pcifr.len(), 8);
         assert!(pcifr.as_slice().iter().all(|v| v.is_finite()));
+        let tspca = TimeSeriesPca::new(1)
+            .fit_unsupervised(&x, &Session::new("ts", "tspca"))
+            .unwrap();
+        assert_eq!(tspca.value.components.nrows(), 1);
+        let zts = tspca
+            .value
+            .transform(&x, &Session::new("ts", "tspcap"))
+            .unwrap()
+            .value;
+        assert_eq!(zts.nrows(), 8);
+        assert!(zts.get(0, 0).is_finite());
+        let ctsf = ComposableTimeSeriesForest::new()
+            .fit(&x, &y, &Session::new("ts", "ctsf"))
+            .unwrap();
+        let pctsf = ctsf
+            .value
+            .predict(&x, &Session::new("ts", "ctsfp"))
+            .unwrap()
+            .value;
+        assert_eq!(pctsf.len(), 8);
+        assert!(pctsf.as_slice().iter().all(|v| v.is_finite()));
         let rst = Rstsf::new()
             .fit(&x, &y, &Session::new("ts", "rstsf"))
             .unwrap();

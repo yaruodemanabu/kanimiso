@@ -31161,6 +31161,837 @@ impl Predict for AdaBoundRegressor {
     }
 }
 
+/// Yogi linear regressor (river `optim.Yogi`).
+///
+/// Second-moment updates subtract a signed increment so \(v\) can decrease.
+#[derive(Clone, Debug)]
+pub struct YogiRegressor {
+    /// Step \(\eta\).
+    pub learning_rate: f64,
+    /// First-moment decay.
+    pub beta1: f64,
+    /// Second-moment decay.
+    pub beta2: f64,
+    /// Diagonal floor.
+    pub eps: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    m: Vector,
+    v: Vector,
+    t: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for YogiRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            m: Vector::zeros(0),
+            v: Vector::zeros(0),
+            t: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl YogiRegressor {
+    /// Default Yogi regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for YogiRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.m = Vector::zeros(dim);
+            self.v = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self.coef.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let b1 = self.beta1.clamp(0.0, 0.999);
+        let b2 = self.beta2.clamp(0.0, 0.999);
+        let eps = if self.eps.is_finite() && self.eps > 0.0 {
+            self.eps
+        } else {
+            1e-8
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            self.t += 1.0;
+            let corr1 = 1.0 - b1.powf(self.t);
+            let corr2 = 1.0 - b2.powf(self.t);
+            for j in 0..dim {
+                let g = err * z[j];
+                self.m[j] = b1 * self.m[j] + (1.0 - b1) * g;
+                let g2 = g * g;
+                self.v[j] -= (1.0 - b2) * (self.v[j] - g2).signum() * g2;
+                let mhat = self.m[j] / corr1.max(1e-18);
+                let vhat = self.v[j].abs() / corr2.max(1e-18);
+                self.coef[j] -= eta * mhat / (vhat.sqrt() + eps);
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "Yogi linear weights",
+            "Adam first moment with a signed second-moment correction",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+/// Lion linear regressor (river `optim.Lion`).
+///
+/// Sign of an interpolated momentum; no second-moment state.
+#[derive(Clone, Debug)]
+pub struct LionRegressor {
+    /// Step \(\eta\).
+    pub learning_rate: f64,
+    /// Momentum mix.
+    pub beta1: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    m: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for LionRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            beta1: 0.9,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            m: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl LionRegressor {
+    /// Default Lion regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for LionRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.m = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self.coef.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let b1 = self.beta1.clamp(0.0, 0.999);
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            for j in 0..dim {
+                let g = err * z[j];
+                let update = b1 * self.m[j] + (1.0 - b1) * g;
+                self.coef[j] -= eta * update.signum();
+                self.m[j] = b1 * self.m[j] + (1.0 - b1) * g;
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "Lion linear weights",
+            "sign of interpolated momentum; no second-moment state",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+/// Adafactor linear regressor (river `optim.Adafactor`).
+///
+/// For a 1-d parameter the factored second moment reduces to RMSProp with a
+/// relative step \(\max(1,\mathrm{rms}(w))\).
+#[derive(Clone, Debug)]
+pub struct AdafactorRegressor {
+    /// Step \(\eta\).
+    pub learning_rate: f64,
+    /// Second-moment decay.
+    pub beta2: f64,
+    /// Diagonal floor.
+    pub eps: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    v: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for AdafactorRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            beta2: 0.999,
+            eps: 1e-8,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            v: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl AdafactorRegressor {
+    /// Default Adafactor regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for AdafactorRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.v = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self.coef.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let b2 = self.beta2.clamp(0.0, 0.999);
+        let eps = if self.eps.is_finite() && self.eps > 0.0 {
+            self.eps
+        } else {
+            1e-8
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        let rms_w = {
+            let s: f64 = self.coef.as_slice().iter().map(|w| w * w).sum();
+            (s / dim.max(1) as f64).sqrt().max(1.0)
+        };
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            for j in 0..dim {
+                let g = err * z[j];
+                self.v[j] = b2 * self.v[j] + (1.0 - b2) * g * g;
+                self.coef[j] -= eta * rms_w * g / (self.v[j].sqrt() + eps);
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "Adafactor linear weights",
+            "RMSProp second moment with a relative rms(w) step; factor count is not p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+/// AdaBelief linear regressor (river `optim.AdaBelief`).
+///
+/// Second moment tracks \((g-m)^2\) rather than \(g^2\).
+#[derive(Clone, Debug)]
+pub struct AdaBeliefRegressor {
+    /// Step \(\eta\).
+    pub learning_rate: f64,
+    /// First-moment decay.
+    pub beta1: f64,
+    /// Second-moment decay.
+    pub beta2: f64,
+    /// Diagonal floor.
+    pub eps: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    m: Vector,
+    v: Vector,
+    t: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for AdaBeliefRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            m: Vector::zeros(0),
+            v: Vector::zeros(0),
+            t: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl AdaBeliefRegressor {
+    /// Default AdaBelief regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for AdaBeliefRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.m = Vector::zeros(dim);
+            self.v = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self.coef.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let b1 = self.beta1.clamp(0.0, 0.999);
+        let b2 = self.beta2.clamp(0.0, 0.999);
+        let eps = if self.eps.is_finite() && self.eps > 0.0 {
+            self.eps
+        } else {
+            1e-8
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            self.t += 1.0;
+            let corr1 = 1.0 - b1.powf(self.t);
+            let corr2 = 1.0 - b2.powf(self.t);
+            for j in 0..dim {
+                let g = err * z[j];
+                self.m[j] = b1 * self.m[j] + (1.0 - b1) * g;
+                let belief = g - self.m[j];
+                self.v[j] = b2 * self.v[j] + (1.0 - b2) * belief * belief;
+                let mhat = self.m[j] / corr1.max(1e-18);
+                let vhat = self.v[j] / corr2.max(1e-18);
+                self.coef[j] -= eta * mhat / (vhat.sqrt() + eps);
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "AdaBelief linear weights",
+            "Adam step with a second moment on (g − m)",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+/// Fast Hoeffding Drift Detection (river `drift.FHDDM`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Fhddm {
+    /// Confidence \(\delta\).
+    pub delta: f64,
+    /// Sliding window of 0/1 errors.
+    pub window: usize,
+    buf: Vec<f64>,
+    p_max: f64,
+    n: u64,
+    updates: u64,
+}
+
+impl Default for Fhddm {
+    fn default() -> Self {
+        Self {
+            delta: 1e-6,
+            window: 32,
+            buf: Vec::new(),
+            p_max: 0.0,
+            n: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl Fhddm {
+    /// Fresh FHDDM detector.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn bound(n: usize, delta: f64) -> f64 {
+        if n == 0 {
+            return f64::INFINITY;
+        }
+        (0.5 / n as f64 * (1.0 / delta.max(1e-16)).ln()).sqrt()
+    }
+
+    /// Update with a 0/1 error indicator.
+    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+        let mut ctx = FitCtx::with_session(session.child("update"));
+        let e = if x > 0.5 { 1.0 } else { 0.0 };
+        let w = self.window.max(2);
+        self.buf.push(e);
+        if self.buf.len() > w {
+            self.buf.remove(0);
+        }
+        self.n += 1;
+        let p = self.buf.iter().sum::<f64>() / self.buf.len() as f64;
+        if p > self.p_max {
+            self.p_max = p;
+        }
+        let eps = Self::bound(self.buf.len(), self.delta);
+        let stat = self.p_max - p;
+        let decision = if self.buf.len() >= w && stat > eps {
+            ctx.push(
+                Issue::builder(IssueCode::ConceptDriftDetected)
+                    .message(format!("FHDDM drift: p_max-p={stat:.4} > ε={eps:.4}"))
+                    .metric("drift_statistic", stat)
+                    .build(),
+            );
+            self.buf.clear();
+            self.p_max = 0.0;
+            DriftDecision::Drift { statistic: stat }
+        } else {
+            DriftDecision::Stable
+        };
+        ctx.finish(decision)
+    }
+}
+
+impl PartialFit for Fhddm {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let before = self.p_max;
+        let mut fired = 0.0;
+        for i in 0..x.nrows() {
+            match self.update(x.get(i, 0), &session.child("fhddm")) {
+                Ok(q) => {
+                    if matches!(q.value, DriftDecision::Drift { .. }) {
+                        fired += 1.0;
+                    }
+                }
+                Err(e) => {
+                    if e.primary().code == IssueCode::ConceptDriftDetected {
+                        fired += 1.0;
+                    }
+                }
+            }
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n);
+        q.effective_sample_size = self.n as f64;
+        q.information_gain = Some(fired);
+        q.drift_statistic = Some(self.p_max);
+        q.still_identified = self.buf.len() >= self.window.max(2);
+        q.warmup = self.buf.len() < self.window.max(2);
+        q.explanation = format!(
+            "FHDDM p_max {before:.4}→{:.4}, n={}, drift_cuts={fired}",
+            self.p_max, self.n
+        );
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed error rate and Hoeffding bound",
+                "FHDDM comparison of p_max to the current window mean",
+                format!("p_max={before:.4}"),
+                format!("p_max={:.4} n={}", self.p_max, self.n),
+            ),
+        )
+    }
+}
+
+/// Expanding-window mean (river `stats.Mean` / `utils.Rolling` with infinite window).
+#[derive(Clone, Debug, Default)]
+pub struct ExpandingMean {
+    n: f64,
+    mean: f64,
+    updates: u64,
+}
+
+impl ExpandingMean {
+    /// Empty accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current mean, or NaN when empty.
+    pub fn mean(&self) -> f64 {
+        if self.n <= 0.0 {
+            f64::NAN
+        } else {
+            self.mean
+        }
+    }
+}
+
+impl PartialFit for ExpandingMean {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.mean();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            self.n += 1.0;
+            self.mean += (v - self.mean) / self.n;
+        }
+        self.updates += 1;
+        let after = self.mean();
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 1.0;
+        q.warmup = self.n < 1.0;
+        q.explanation = format!("ExpandingMean μ={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "expanding arithmetic mean",
+                "Welford update on column 0; count is not p",
+                format!("mean={before:.6e}"),
+                format!("mean={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Running absolute maximum (river `stats.AbsMax`).
+#[derive(Clone, Debug)]
+pub struct AbsMax {
+    max: f64,
+    n: u64,
+    updates: u64,
+}
+
+impl Default for AbsMax {
+    fn default() -> Self {
+        Self {
+            max: 0.0,
+            n: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl AbsMax {
+    /// Empty accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current \(|x|_{\max}\).
+    pub fn value(&self) -> f64 {
+        if self.n == 0 {
+            f64::NAN
+        } else {
+            self.max
+        }
+    }
+}
+
+impl PartialFit for AbsMax {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.value();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0).abs();
+            if !v.is_finite() {
+                continue;
+            }
+            if self.n == 0 || v > self.max {
+                self.max = v;
+            }
+            self.n += 1;
+        }
+        self.updates += 1;
+        let after = self.value();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n);
+        q.effective_sample_size = self.n as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            after.abs()
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 1;
+        q.warmup = self.n < 1;
+        q.explanation = format!("AbsMax={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "running absolute maximum",
+                "column-0 |x| fold; the extremum is not p",
+                format!("absmax={before:.6e}"),
+                format!("absmax={after:.6e}"),
+            ),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -31629,6 +32460,27 @@ mod tests {
         FtrlClassifier::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("ftrlc");
+        YogiRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("yogi");
+        LionRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("lion");
+        AdafactorRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("adafactor");
+        AdaBeliefRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("adabelief");
+        Fhddm::new()
+            .partial_fit(&x, None, &session)
+            .expect("fhddm");
+        ExpandingMean::new()
+            .partial_fit(&x, None, &session)
+            .expect("exmean");
+        AbsMax::new()
+            .partial_fit(&x, None, &session)
+            .expect("absmax");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

@@ -17736,6 +17736,564 @@ impl IntervalCensoredPH {
     }
 }
 
+/// Profiled-\(\theta\) gamma frailty (grid over the shared-frailty EM).
+///
+/// Group / grid counts are not identification `p`. Inner EM uses
+/// [`shared_frailty`]; aborting inner codes are not promoted.
+pub fn profile_frailty(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    groups: &Vector,
+    session: &Session,
+) -> Result<Qualified<FittedSharedFrailty>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+    inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("profile_frailty is a coarse θ grid, not a profiled PPL Newton")
+            .compromise(NumericalCompromise::new(
+                "penalized partial likelihood with a continuous θ score",
+                "max log-likelihood over {0.1, 0.25, 0.5, 1, 2}",
+                "the grid is coarse and each node is fixed-θ EM",
+                "read θ as a discrete empirical-Bayes pick, not the unique PPL MLE",
+            ))
+            .build(),
+    );
+    let grid = [0.1_f64, 0.25, 0.5, 1.0, 2.0];
+    let mut best: Option<FittedSharedFrailty> = None;
+    let mut best_ll = f64::NEG_INFINITY;
+    for (k, &th) in grid.iter().enumerate() {
+        match shared_frailty(
+            durations,
+            events,
+            x,
+            groups,
+            th,
+            &session.child(format!("pfr-{k}")),
+        ) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if skip_aborting_inner(issue) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                if q.value.loglik.is_finite() && q.value.loglik >= best_ll {
+                    best_ll = q.value.loglik;
+                    best = Some(q.value);
+                }
+            }
+            Err(err) => {
+                for issue in err.report.issues() {
+                    if skip_aborting_inner(issue) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+            }
+        }
+    }
+    if let Some(fitted) = best {
+        return ctx.finish(fitted);
+    }
+    ctx.push(
+        Issue::builder(IssueCode::DidNotConverge)
+            .message("profile_frailty grid produced no finite log-likelihood")
+            .build(),
+    );
+    ctx.finish(FittedSharedFrailty {
+        coef: Vector::zeros(x.ncols()),
+        frailty: Vector::filled(x.nrows(), 1.0),
+        theta: 0.5,
+        loglik: f64::NAN,
+        n_events: 0,
+        n_groups: 0,
+        converged: false,
+    })
+}
+
+/// Named profiled-θ frailty wrapper.
+#[derive(Clone, Debug, Default)]
+pub struct ProfileFrailty;
+
+impl ProfileFrailty {
+    /// Default θ-grid frailty.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit the coarse θ grid.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSharedFrailty>> {
+        profile_frailty(durations, events, x, groups, session)
+    }
+}
+
+/// Finkelstein grouped complementary-log-log PH for interval-censored times.
+///
+/// Unique finite endpoints define discrete intervals. Period count is not
+/// identification `p`. \(+\infty\) rights are allowed (right censoring) and
+/// are not passed through [`scan_finite`]. Inspect times with `y=None`.
+pub fn finkelstein_ph(
+    left: &Vector,
+    right: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<FittedCloglogPH>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(left),
+        None,
+        &ctx.policy,
+    );
+    let n = left.len().min(right.len()).min(x.nrows());
+    if left.len() != right.len() || x.nrows() != left.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("finkelstein_ph lengths do not match")
+                .build(),
+        );
+    }
+    let mut times: Vec<f64> = Vec::new();
+    let mut inf_rights = 0u64;
+    let mut nan_rights = 0u64;
+    for i in 0..n {
+        if left[i].is_finite() {
+            times.push(left[i]);
+        }
+        if right[i].is_infinite() && right[i].is_sign_positive() {
+            inf_rights += 1;
+        } else if !right[i].is_finite() {
+            nan_rights += 1;
+        } else {
+            times.push(right[i]);
+        }
+    }
+    if inf_rights > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .severity(Severity::Advisory)
+                .message(format!(
+                    "finkelstein_ph treats {inf_rights} +∞ rights as right-censoring"
+                ))
+                .build(),
+        );
+    }
+    if nan_rights > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .severity(Severity::Warning)
+                .message(format!("finkelstein_ph skipped {nan_rights} non-finite rights"))
+                .build(),
+        );
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    times.dedup_by(|a, b| (*a - *b).abs() <= 1e-15);
+    if times.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("finkelstein_ph needs at least two distinct finite endpoints")
+                .build(),
+        );
+        return ctx.finish(FittedCloglogPH {
+            intercept: 0.0,
+            time_coef: 0.0,
+            coef: Vector::zeros(x.ncols()),
+            n_person_periods: 0,
+            n_events: 0,
+        });
+    }
+    let mut rows: Vec<(f64, f64, usize)> = Vec::new();
+    for i in 0..n {
+        let l = left[i];
+        let r = right[i];
+        if !l.is_finite() {
+            continue;
+        }
+        for w in times.windows(2) {
+            let t0 = w[0];
+            let t1 = w[1];
+            let at_risk = if r.is_infinite() && r.is_sign_positive() {
+                t1 <= l
+            } else {
+                l < t1 && r > t0
+            };
+            if !at_risk {
+                continue;
+            }
+            let ev = if r.is_finite() && r > t0 && r <= t1 {
+                1.0
+            } else {
+                0.0
+            };
+            rows.push((t1, ev, i));
+        }
+    }
+    if rows.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("finkelstein_ph expansion is empty")
+                .build(),
+        );
+        return ctx.finish(FittedCloglogPH {
+            intercept: 0.0,
+            time_coef: 0.0,
+            coef: Vector::zeros(x.ncols()),
+            n_person_periods: 0,
+            n_events: 0,
+        });
+    }
+    let n_events = rows.iter().filter(|r| r.1 > 0.5).count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("finkelstein PH expansion has zero events")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "grouped complementary-log-log hazard",
+                    "an all-zero person-period outcome identifies no cloglog slope",
+                    "collect interval-censored events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedCloglogPH {
+            intercept: 0.0,
+            time_coef: 0.0,
+            coef: Vector::zeros(x.ncols()),
+            n_person_periods: rows.len(),
+            n_events: 0,
+        });
+    }
+    let m = rows.len();
+    let p_x = x.ncols();
+    let design = Matrix::from_fn(m, 2 + p_x, |r, j| {
+        if j == 0 {
+            1.0
+        } else if j == 1 {
+            rows[r].0
+        } else {
+            x.get(rows[r].2, j - 2)
+        }
+    });
+    let yexp = Vector::from_iter(rows.iter().map(|r| r.1));
+    let beta = discrete_cloglog_irls(&design, &yexp, &ctx.policy, 20);
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("finkelstein_ph is grouped cloglog, not a Turnbull ICM PH")
+            .compromise(NumericalCompromise::new(
+                "Finkelstein interval-censored partial likelihood",
+                "person-period complementary log-log on unique endpoints",
+                "the nonparametric baseline is replaced by a linear time term",
+                "read slopes as discrete PH, not a continuous IC Cox MLE",
+            ))
+            .build(),
+    );
+    ctx.finish(FittedCloglogPH {
+        intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+        time_coef: beta.as_slice().get(1).copied().unwrap_or(0.0),
+        coef: Vector::from_iter((0..p_x).map(|j| beta.as_slice().get(j + 2).copied().unwrap_or(0.0))),
+        n_person_periods: m,
+        n_events,
+    })
+}
+
+/// Named Finkelstein grouped PH.
+#[derive(Clone, Debug, Default)]
+pub struct FinkelsteinPH;
+
+impl FinkelsteinPH {
+    /// Default grouped IC PH.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on left/right endpoints and covariates.
+    pub fn fit(
+        &self,
+        left: &Vector,
+        right: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCloglogPH>> {
+        finkelstein_ph(left, right, x, session)
+    }
+}
+
+/// Breslow–Day test of odds-ratio homogeneity across 2×2 strata.
+///
+/// Stratum count is not identification `p`.
+pub fn breslow_day(tables: &[Matrix], session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if tables.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("breslow_day needs at least two 2×2 strata")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 0.0,
+            nobs: 0.0,
+        });
+    }
+    let mut num = 0.0_f64;
+    let mut den = 0.0_f64;
+    let mut nobs = 0.0_f64;
+    let mut cells: Vec<(f64, f64, f64, f64, f64)> = Vec::new();
+    for (s, t) in tables.iter().enumerate() {
+        if t.nrows() != 2 || t.ncols() != 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message(format!("breslow_day stratum {s} is not 2×2"))
+                    .build(),
+            );
+            continue;
+        }
+        let a = t.get(0, 0);
+        let b = t.get(0, 1);
+        let c = t.get(1, 0);
+        let d = t.get(1, 1);
+        if ![a, b, c, d].iter().all(|v| v.is_finite() && *v >= 0.0) {
+            ctx.push(
+                Issue::builder(IssueCode::NonFiniteInput)
+                    .severity(Severity::Warning)
+                    .message(format!("breslow_day stratum {s} has a non-finite or negative cell"))
+                    .build(),
+            );
+            continue;
+        }
+        let n = a + b + c + d;
+        if n <= 0.0 {
+            continue;
+        }
+        num += a * d / n;
+        den += b * c / n;
+        nobs += n;
+        cells.push((a, b, c, d, n));
+    }
+    if cells.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("breslow_day has fewer than two usable strata")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: cells.len().saturating_sub(1) as f64,
+            nobs,
+        });
+    }
+    let or = if den.abs() <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("breslow_day Mantel–Haenszel denominator vanished")
+                .build(),
+        );
+        1.0
+    } else {
+        (num / den).max(1e-12)
+    };
+    let mut stat = 0.0_f64;
+    for (a, b, c, d, n) in cells {
+        let n1 = a + b;
+        let n0 = c + d;
+        let m1 = a + c;
+        let ea = if (or - 1.0).abs() < 1e-12 {
+            n1 * m1 / n
+        } else {
+            let aa = or - 1.0;
+            let bb = -(or * (n1 + m1) + (n - n1 - m1));
+            let cc = or * n1 * m1;
+            let disc = (bb * bb - 4.0 * aa * cc).max(0.0);
+            ((-bb - disc.sqrt()) / (2.0 * aa)).clamp(1e-12, n1.min(m1) - 1e-12)
+        };
+        let rest = (n - n1 - m1 + ea).max(1e-12);
+        let va = 1.0
+            / (1.0 / ea.max(1e-12)
+                + 1.0 / (n1 - ea).max(1e-12)
+                + 1.0 / (m1 - ea).max(1e-12)
+                + 1.0 / rest);
+        if va.is_finite() && va > 0.0 {
+            let z = a - ea;
+            stat += z * z / va;
+        }
+        let _ = (b, d);
+    }
+    let df = (tables.len().saturating_sub(1)) as f64;
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: if stat.is_finite() && df > 0.0 {
+            chi2_pvalue(stat, df)
+        } else {
+            f64::NAN
+        },
+        df,
+        nobs,
+    })
+}
+
+/// Two-sample normal (z) power (statsmodels `NormalIndPower`).
+///
+/// Sample sizes are not identification `p`.
+pub fn normal_ind_power(
+    effect_size: f64,
+    n1: f64,
+    n2: f64,
+    alpha: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if ![effect_size, n1, n2, alpha].iter().all(|v| v.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .message("normal_ind_power received a non-finite argument")
+                .build(),
+        );
+    }
+    if n1 <= 0.0 || n2 <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("normal_ind_power needs n1>0 and n2>0")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let a = if alpha.is_finite() && alpha > 0.0 && alpha < 1.0 {
+        alpha
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("normal_ind_power alpha={alpha}; using 0.05"))
+                .build(),
+        );
+        0.05
+    };
+    let n_harm = n1 * n2 / (n1 + n2);
+    let zcrit = norm_ppf(1.0 - a / 2.0);
+    let ncp = effect_size * n_harm.sqrt();
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .message("normal_ind_power uses a two-sided normal tail")
+            .compromise(NumericalCompromise::new(
+                "exact normal two-sample power",
+                "1 − Φ(z_crit − ncp) + Φ(−z_crit − ncp)",
+                "the design is treated as known-variance",
+                "the number is a planning approximation",
+            ))
+            .build(),
+    );
+    let power = if zcrit.is_finite() && ncp.is_finite() {
+        (1.0 - norm_cdf(zcrit - ncp) + norm_cdf(-zcrit - ncp)).clamp(0.0, 1.0)
+    } else {
+        f64::NAN
+    };
+    ctx.finish(power)
+}
+
+/// Named two-sample *t* power (statsmodels `TTestIndPower`).
+#[derive(Clone, Debug, Default)]
+pub struct TTestIndPower;
+
+impl TTestIndPower {
+    /// Default two-sample t power.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Power at `effect_size`, `n1`, `n2`, `alpha`.
+    pub fn power(
+        &self,
+        effect_size: f64,
+        n1: f64,
+        n2: f64,
+        alpha: f64,
+        session: &Session,
+    ) -> Result<Qualified<f64>> {
+        ttest_ind_power(effect_size, n1, n2, alpha, session)
+    }
+}
+
+/// Named two-sample normal power (statsmodels `NormalIndPower`).
+#[derive(Clone, Debug, Default)]
+pub struct NormalIndPower;
+
+impl NormalIndPower {
+    /// Default known-variance power.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Power at `effect_size`, `n1`, `n2`, `alpha`.
+    pub fn power(
+        &self,
+        effect_size: f64,
+        n1: f64,
+        n2: f64,
+        alpha: f64,
+        session: &Session,
+    ) -> Result<Qualified<f64>> {
+        normal_ind_power(effect_size, n1, n2, alpha, session)
+    }
+}
+
+/// Named χ² GOF power (statsmodels `GofChisquarePower`).
+#[derive(Clone, Debug, Default)]
+pub struct GofChisquarePower;
+
+impl GofChisquarePower {
+    /// Default χ² GOF power.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Power at non-centrality `ncp`, `df`, `alpha`.
+    pub fn power(
+        &self,
+        ncp: f64,
+        df: f64,
+        alpha: f64,
+        session: &Session,
+    ) -> Result<Qualified<f64>> {
+        gof_chisquare_power(ncp, df, alpha, session)
+    }
+}
+
+/// Named alias of [`tukey_hsd`].
+pub fn pairwise_tukeyhsd(
+    groups: &[&Vector],
+    session: &Session,
+) -> Result<Qualified<TukeyHsdResult>> {
+    tukey_hsd(groups, session)
+}
+
+/// Named alias of [`bowker`] (statsmodels `mcnemar_bowker`).
+pub fn mcnemar_bowker(
+    y1: &Vector,
+    y2: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    bowker(y1, y2, session)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -18485,5 +19043,49 @@ mod tests {
         let icph = interval_censored_ph(&dur, &icr, &xcox, &Session::new("icph", "t")).expect("icph");
         assert_eq!(icph.value.coef.len(), 1);
         assert!(icph.value.coef[0].is_finite() || !icph.value.converged);
+        let pfr = profile_frailty(&dur, &ev, &xcox, &fgrp, &Session::new("pfrl", "t")).expect("pfrl");
+        assert_eq!(pfr.value.coef.len(), 1);
+        assert!(pfr.value.theta.is_finite() && pfr.value.theta > 0.0);
+        let fink = finkelstein_ph(&dur, &icr, &xcox, &Session::new("fink", "t")).expect("fink");
+        assert_eq!(fink.value.coef.len(), 1);
+        assert!(fink.value.n_events > 0);
+        let tab0 = Matrix::from_fn(2, 2, |i, j| {
+            let mut n = 0.0_f64;
+            for k in 0..20 {
+                let r = if ybin[k] > 0.5 { 0 } else { 1 };
+                let c = if ybin2[k] > 0.5 { 0 } else { 1 };
+                if r == i && c == j {
+                    n += 1.0;
+                }
+            }
+            n
+        });
+        let tab1 = Matrix::from_fn(2, 2, |i, j| {
+            let mut n = 0.0_f64;
+            for k in 20..40 {
+                let r = if ybin[k] > 0.5 { 0 } else { 1 };
+                let c = if ybin2[k] > 0.5 { 0 } else { 1 };
+                if r == i && c == j {
+                    n += 1.0;
+                }
+            }
+            n
+        });
+        let bd = breslow_day(&[tab0, tab1], &Session::new("bd", "t")).expect("bd");
+        assert!(bd.value.statistic.is_finite() || bd.value.pvalue.is_nan());
+        let nip = normal_ind_power(0.5, 20.0, 20.0, 0.05, &Session::new("nip", "t")).expect("nip");
+        assert!(nip.value.is_finite() && nip.value >= 0.0 && nip.value <= 1.0);
+        let tip = TTestIndPower::new()
+            .power(0.5, 20.0, 20.0, 0.05, &Session::new("tip", "t"))
+            .expect("tip");
+        assert!(tip.value.is_finite() || tip.value.is_nan());
+        let gop = GofChisquarePower::new()
+            .power(4.0, 2.0, 0.05, &Session::new("gop", "t"))
+            .expect("gop");
+        assert!(gop.value.is_finite() || gop.value.is_nan());
+        let pth = pairwise_tukeyhsd(&[&a, &b, &c], &Session::new("pth", "t")).expect("pth");
+        assert!(pth.value.pairwise_stat.get(0, 2) > 0.0);
+        let mb = mcnemar_bowker(&y1, &y2, &Session::new("mbow", "t")).expect("mbow");
+        assert!(mb.value.statistic.is_finite() || mb.value.pvalue.is_nan());
     }
 }

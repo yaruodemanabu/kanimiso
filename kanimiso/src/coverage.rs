@@ -5495,6 +5495,64 @@ const INVENTORY: &[Algorithm] = &[
         "sktime.regression.interval_based.CanonicalIntervalForest",
         "estimator",
     ),
+    a(
+        "stats.profile_frailty",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "stats",
+    ),
+    a(
+        "stats.ProfileFrailty",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "estimator",
+    ),
+    a(
+        "stats.finkelstein_ph",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "stats",
+    ),
+    a(
+        "stats.FinkelsteinPH",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "estimator",
+    ),
+    a("stats.breslow_day", "statsmodels.stats.contingency_tables", "function"),
+    a("stats.normal_ind_power", "statsmodels.stats.power.NormalIndPower", "function"),
+    a("stats.TTestIndPower", "statsmodels.stats.power.TTestIndPower", "estimator"),
+    a("stats.NormalIndPower", "statsmodels.stats.power.NormalIndPower", "estimator"),
+    a(
+        "stats.GofChisquarePower",
+        "statsmodels.stats.power.GofChisquarePower",
+        "estimator",
+    ),
+    a(
+        "stats.pairwise_tukeyhsd",
+        "statsmodels.stats.multicomp.pairwise_tukeyhsd",
+        "function",
+    ),
+    a("stats.mcnemar_bowker", "statsmodels.stats.contingency_tables.mcnemar", "function"),
+    a(
+        "panel.FamaMacBeth",
+        "linearmodels.panel.model.FamaMacBeth",
+        "estimator",
+    ),
+    a(
+        "panel.AbsorbingLs",
+        "linearmodels.iv.absorbing.AbsorbingLS",
+        "estimator",
+    ),
+    a("online.YogiRegressor", "river.optim.Yogi", "online"),
+    a("online.LionRegressor", "river.optim.Lion", "online"),
+    a("online.AdafactorRegressor", "river.optim.Adafactor", "online"),
+    a("online.AdaBeliefRegressor", "river.optim.AdaBelief", "online"),
+    a("online.Fhddm", "river.drift.FHDDM", "online"),
+    a("online.ExpandingMean", "river.stats.Mean", "online"),
+    a("online.AbsMax", "river.stats.AbsMax", "online"),
+    a("tslearn.TimeSeriesPca", "tslearn.decomposition.TimeSeriesPCA", "estimator"),
+    a(
+        "tslearn.ComposableTimeSeriesForest",
+        "sktime.classification.compose.ComposableTimeSeriesForestClassifier",
+        "estimator",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5899,6 +5957,12 @@ mod tests {
             "panel.SystemGmm",
             "online.FtrlClassifier",
             "tslearn.CanonicalIntervalForestRegressor",
+            "stats.profile_frailty",
+            "stats.breslow_day",
+            "panel.FamaMacBeth",
+            "online.YogiRegressor",
+            "online.LionRegressor",
+            "tslearn.TimeSeriesPca",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
