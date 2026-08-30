@@ -17925,20 +17925,18 @@ pub fn finkelstein_ph(
         for w in times.windows(2) {
             let t0 = w[0];
             let t1 = w[1];
-            let at_risk = if r.is_infinite() && r.is_sign_positive() {
+            let ev = r.is_finite() && r > t0 && r <= t1;
+            let at_risk = if ev {
+                true
+            } else if r.is_infinite() && r.is_sign_positive() {
                 t1 <= l
             } else {
-                l < t1 && r > t0
+                l < t1 && r > t1
             };
             if !at_risk {
                 continue;
             }
-            let ev = if r.is_finite() && r > t0 && r <= t1 {
-                1.0
-            } else {
-                0.0
-            };
-            rows.push((t1, ev, i));
+            rows.push((t1, if ev { 1.0 } else { 0.0 }, i));
         }
     }
     if rows.is_empty() {
