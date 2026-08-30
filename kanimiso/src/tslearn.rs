@@ -10843,6 +10843,125 @@ impl Predict for FittedHiveCoteV2 {
     }
 }
 
+/// Three-member HIVE-COTE v1 lite (shapelet + TSF + BOSS).
+///
+/// Member / shapelet / tree / word counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct HiveCoteV1 {
+    /// Shapelets.
+    pub n_shapelets: usize,
+    /// Forest trees.
+    pub n_estimators: usize,
+    /// BOSS window (must be ≤ series length).
+    pub window: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for HiveCoteV1 {
+    fn default() -> Self {
+        Self {
+            n_shapelets: 3,
+            n_estimators: 6,
+            window: 4,
+            seed: 3,
+        }
+    }
+}
+
+impl HiveCoteV1 {
+    /// Default HIVE-COTE v1 lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted three-member HIVE-COTE v1 vote.
+#[derive(Clone, Debug)]
+pub struct FittedHiveCoteV1 {
+    shapelet: FittedShapeletTransformClassifier,
+    forest: FittedTimeSeriesForest,
+    boss: FittedBoss,
+}
+
+impl Fit for HiveCoteV1 {
+    type Fitted = FittedHiveCoteV1;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedHiveCoteV1>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("HIVE-COTE v1 lite is an unweighted vote of STC, TSF, and BOSS")
+                .compromise(NumericalCompromise::new(
+                    "HIVE-COTE v1 weighted ensemble",
+                    "unweighted vote of ShapeletTransformClassifier, TimeSeriesForest, and BOSS",
+                    "published HC1 weights and the full STC/cBOSS members are omitted",
+                    "do not read the vote as a published HIVE-COTE v1 accuracy",
+                ))
+                .build(),
+        );
+        let shapelet = ShapeletTransformClassifier {
+            n_shapelets: self.n_shapelets,
+            length: 3,
+            alpha: 0.1,
+            seed: self.seed,
+        }
+        .fit(x, y, &session.child("hcv1-stc"))?
+        .value;
+        let forest = TimeSeriesForestClassifier {
+            n_estimators: self.n_estimators,
+            n_intervals: 3,
+            max_depth: 4,
+            seed: self.seed,
+        }
+        .fit(x, y, &session.child("hcv1-tsf"))?
+        .value;
+        let boss = BossEnsemble {
+            window: self.window.max(2).min(x.ncols().max(2)),
+            word_len: 4,
+            alphabet: 4,
+        }
+        .fit(x, y, &session.child("hcv1-boss"))?
+        .value;
+        ctx.finish(FittedHiveCoteV1 {
+            shapelet,
+            forest,
+            boss,
+        })
+    }
+}
+
+impl Predict for FittedHiveCoteV1 {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("predict"));
+        let a = self.shapelet.predict(x, &session.child("s"))?;
+        let b = self.forest.predict(x, &session.child("f"))?;
+        let c = self.boss.predict(x, &session.child("b"))?;
+        let y = Vector::from_iter((0..x.nrows()).map(|i| {
+            let va = if i < a.value.len() { a.value[i] } else { 0.0 };
+            let vb = if i < b.value.len() { b.value[i] } else { 0.0 };
+            let vc = if i < c.value.len() { c.value[i] } else { 0.0 };
+            let mut votes: BTreeMap<i64, usize> = BTreeMap::new();
+            *votes.entry(va.round() as i64).or_insert(0) += 1;
+            *votes.entry(vb.round() as i64).or_insert(0) += 1;
+            *votes.entry(vc.round() as i64).or_insert(0) += 1;
+            votes
+                .iter()
+                .max_by(|u, v| u.1.cmp(v.1).then(v.0.cmp(u.0)))
+                .map(|(k, _)| *k as f64)
+                .unwrap_or(va)
+        }));
+        ctx.finish(y)
+    }
+}
+
 /// Random supervised time-series forest (sktime `RSTSF` lite).
 ///
 /// Interval / tree counts are not identification `p`.
@@ -12793,6 +12912,15 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(ph2.len(), 8);
+        let h1 = HiveCoteV1::new()
+            .fit(&x, &y, &Session::new("ts", "hcv1"))
+            .unwrap();
+        let ph1 = h1
+            .value
+            .predict(&x, &Session::new("ts", "hcv1p"))
+            .unwrap()
+            .value;
+        assert_eq!(ph1.len(), 8);
         let rst = Rstsf::new()
             .fit(&x, &y, &Session::new("ts", "rstsf"))
             .unwrap();

@@ -5257,6 +5257,47 @@ const INVENTORY: &[Algorithm] = &[
     ),
     a("tslearn.Stamp", "stumpy.stump", "estimator"),
     a("tslearn.Stray", "sktime.annotation.stray.STRAY", "estimator"),
+    a(
+        "stats.wald_test",
+        "statsmodels.regression.linear_model.OLSResults.wald_test",
+        "function",
+    ),
+    a(
+        "stats.StratifiedCox",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "estimator",
+    ),
+    a(
+        "stats.exponential_ph",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "stats",
+    ),
+    a(
+        "stats.ExponentialPH",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "estimator",
+    ),
+    a(
+        "stats.time_varying_cox",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "function",
+    ),
+    a(
+        "stats.TimeVaryingCox",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "estimator",
+    ),
+    a("online.SlopeOne", "river.reco.SlopeOne", "online"),
+    a(
+        "online.SrpClassifier",
+        "river.ensemble.SRPClassifier",
+        "online",
+    ),
+    a(
+        "tslearn.HiveCoteV1",
+        "sktime.classification.hybrid.HIVECOTEV1",
+        "estimator",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5633,6 +5674,12 @@ mod tests {
             "online.ItemKnn",
             "online.SvdPp",
             "tslearn.Ggs",
+            "stats.wald_test",
+            "stats.StratifiedCox",
+            "stats.exponential_ph",
+            "stats.TimeVaryingCox",
+            "online.SlopeOne",
+            "tslearn.HiveCoteV1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

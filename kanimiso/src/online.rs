@@ -5728,6 +5728,171 @@ impl Predict for SrpRegressor {
     }
 }
 
+/// Streaming random patches classifier (river `ensemble.SRPClassifier`).
+///
+/// Tree / mask counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SrpClassifier {
+    /// Number of patch trees.
+    pub n_estimators: usize,
+    trees: Vec<HoeffdingTree>,
+    masks: Vec<Vec<usize>>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+    rng: Rng,
+}
+
+impl Default for SrpClassifier {
+    fn default() -> Self {
+        Self {
+            n_estimators: 3,
+            trees: Vec::new(),
+            masks: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+            rng: Rng::new(29),
+        }
+    }
+}
+
+impl SrpClassifier {
+    /// Forest with `n_estimators` patch classifiers.
+    pub fn new(n_estimators: usize) -> Self {
+        Self {
+            n_estimators: n_estimators.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn ensure(&mut self, p: usize) {
+        if self.initialized {
+            return;
+        }
+        let k = ((p as f64).sqrt().ceil() as usize).clamp(1, p.max(1));
+        self.masks = (0..self.n_estimators)
+            .map(|_| {
+                let mut idx: Vec<usize> = (0..p).collect();
+                self.rng.shuffle(&mut idx);
+                idx.truncate(k);
+                if idx.is_empty() {
+                    idx.push(0);
+                }
+                idx
+            })
+            .collect();
+        self.trees = (0..self.n_estimators)
+            .map(|_| HoeffdingTree::new())
+            .collect();
+        self.initialized = true;
+    }
+}
+
+impl PartialFit for SrpClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        inspect_online_xy(&mut ctx, x, Some(y));
+        self.ensure(x.ncols());
+        let mut n_up = 0u64;
+        for t in 0..self.trees.len() {
+            let mask = &self.masks[t];
+            let xs = Matrix::from_fn(x.nrows(), mask.len(), |i, j| {
+                let c = mask[j];
+                if c < x.ncols() {
+                    x.get(i, c)
+                } else {
+                    0.0
+                }
+            });
+            let _ = self.trees[t].partial_fit(&xs, Some(y), &session.child("srpc"));
+            n_up += 1;
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(n_up as f64);
+        q.information_gain = Some(n_up as f64);
+        q.still_identified = self.n_seen >= 15;
+        q.warmup = self.n_seen < 15;
+        q.explanation = format!(
+            "SRPClassifier: {} patch trees, each on {} random features",
+            self.trees.len(),
+            self.masks.first().map(|m| m.len()).unwrap_or(0)
+        );
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("SRPClassifier is still warming up")
+                    .build(),
+            );
+        }
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("{n_up} patch-classifier updates"),
+                "each Hoeffding tree sees a random feature subspace; tree count is not p",
+                "pre-batch SRPClassifier",
+                "post-batch SRPClassifier",
+            ),
+        )
+    }
+}
+
+impl Predict for SrpClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let n_t = self.trees.len().max(1) as f64;
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = 0.0_f64;
+            for (t, mask) in self.masks.iter().enumerate() {
+                let xs = Matrix::from_fn(1, mask.len(), |_, j| {
+                    let c = mask[j];
+                    if c < x.ncols() {
+                        x.get(i, c)
+                    } else {
+                        0.0
+                    }
+                });
+                s += self.trees[t].predict_one(&xs, 0);
+            }
+            if s / n_t >= 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        }));
+        ctx.finish(out)
+    }
+}
+
 /// Funk / biased SVD matrix factorization (river `reco.FunkMF`).
 ///
 /// `X` has two columns: user id and item id (rounded). `y` is the rating.
@@ -27751,6 +27916,156 @@ impl Predict for SvdPp {
     }
 }
 
+/// Slope One item-item recommender (river `reco.SlopeOne`).
+///
+/// `X` is `[user, item]`, `y` is the rating. Deviation tables are not
+/// identification `p`.
+#[derive(Clone, Debug)]
+pub struct SlopeOne {
+    ratings: HashMap<(u64, u64), f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for SlopeOne {
+    fn default() -> Self {
+        Self {
+            ratings: HashMap::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl SlopeOne {
+    /// Empty Slope One table.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn pred(&self, user: u64, item: u64) -> f64 {
+        let user_rs: Vec<(u64, f64)> = self
+            .ratings
+            .iter()
+            .filter_map(|(&(u, i), &r)| if u == user && i != item { Some((i, r)) } else { None })
+            .collect();
+        if user_rs.is_empty() {
+            return self.ratings.values().copied().sum::<f64>()
+                / (self.ratings.len().max(1) as f64);
+        }
+        let mut num = 0.0_f64;
+        let mut den = 0.0_f64;
+        for (j, rj) in user_rs {
+            let mut dsum = 0.0_f64;
+            let mut dn = 0.0_f64;
+            for (&(v, i), &rvi) in &self.ratings {
+                if i != item {
+                    continue;
+                }
+                if let Some(&rvj) = self.ratings.get(&(v, j)) {
+                    dsum += rvi - rvj;
+                    dn += 1.0;
+                }
+            }
+            if dn > 0.0 {
+                num += rj + dsum / dn;
+                den += 1.0;
+            }
+        }
+        if den > 0.0 {
+            num / den
+        } else {
+            self.ratings.values().copied().sum::<f64>() / (self.ratings.len().max(1) as f64)
+        }
+    }
+}
+
+impl PartialFit for SlopeOne {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing ratings"),
+            );
+        };
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("SlopeOne needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let mut stored = 0u64;
+        for r in 0..x.nrows().min(y.len()) {
+            let u = x.get(r, 0).max(0.0).round() as u64;
+            let i = x.get(r, 1).max(0.0).round() as u64;
+            self.ratings.insert((u, i), y[r]);
+            stored += 1;
+        }
+        self.n_seen += stored;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(stored as f64);
+        q.information_gain = Some(stored as f64);
+        q.still_identified = self.ratings.len() >= 2;
+        q.warmup = self.ratings.len() < 2;
+        q.explanation = format!("SlopeOne stored={stored} cells={}", self.ratings.len());
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("SlopeOne has fewer than two ratings")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Slope One rating-table update",
+                "pairwise item deviations; item count is not identification p",
+                "previous cells",
+                format!("cells={}", self.ratings.len()),
+            ),
+        )
+    }
+}
+
+impl Predict for SlopeOne {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("SlopeOne predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as u64;
+            let i = x.get(r, 1).max(0.0).round() as u64;
+            self.pred(u, i)
+        }));
+        ctx.finish(out)
+    }
+}
+
 /// AdaMax linear regressor (river `optim.AdaMax`).
 ///
 /// Infinity-norm second moment: \(u \leftarrow \max(\beta_2 u, |g|)\).
@@ -30176,6 +30491,12 @@ mod tests {
         SvdPp::new(2)
             .partial_fit(&xui, Some(&y), &session)
             .expect("svdpp");
+        SlopeOne::new()
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("slopeone");
+        SrpClassifier::new(2)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("srpc");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

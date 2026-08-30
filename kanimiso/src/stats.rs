@@ -5991,6 +5991,11 @@ pub fn wald_ols(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<H
     })
 }
 
+/// Named OLS Wald test (statsmodels `OLSResults.wald_test` for all slopes).
+pub fn wald_test(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    wald_ols(x, y, session)
+}
+
 /// Box–Pierce portmanteau (statsmodels `acorr_ljungbox` `boxpierce=True`).
 ///
 /// Lag count is not identification `p`.
@@ -14667,6 +14672,595 @@ fn efron_cox_fit(
     })
 }
 
+/// Stratified Cox (statsmodels `PHReg` with `strata`).
+///
+/// Shared \(\beta\), Breslow risk sets *within* each stratum. Stratum count is
+/// not identification `p`. Newton uses a scratch Cholesky.
+#[derive(Clone, Debug)]
+pub struct StratifiedCox {
+    /// Newton iteration cap.
+    pub max_iter: usize,
+    /// Gradient-norm convergence tolerance.
+    pub tol: f64,
+}
+
+impl Default for StratifiedCox {
+    fn default() -> Self {
+        Self {
+            max_iter: 40,
+            tol: 1e-8,
+        }
+    }
+}
+
+impl StratifiedCox {
+    /// Default stratified Breslow Cox.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit \(h_s(t\mid x)=h_{0s}(t)\exp(x\beta)\) on durations, events, covariates, and strata.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        strata: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCoxPH>> {
+        stratified_cox_fit(self, durations, events, x, strata, session)
+    }
+}
+
+fn stratified_cox_fit(
+    spec: &StratifiedCox,
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    strata: &Vector,
+    session: &Session,
+) -> Result<Qualified<FittedCoxPH>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+    if events.len() != x.nrows() || durations.len() != x.nrows() || strata.len() != x.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("StratifiedCox lengths ≠ X rows")
+                .build(),
+        );
+    }
+    let n = x.nrows();
+    let p = x.ncols();
+    inspect_identification(&mut ctx.report, n, p, &ctx.policy);
+    let n_events = (0..n)
+        .filter(|&i| i < events.len() && events[i] > 0.5)
+        .count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("StratifiedCox has no events")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "stratified partial-likelihood coefficients",
+                    "zero events ⇒ every β gives the same empty product",
+                    "do not interpret hazard ratios",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedCoxPH {
+            coef: Vector::zeros(p),
+            loglik: 0.0,
+            n_events: 0,
+            n,
+            converged: false,
+        });
+    }
+    let mut groups: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+    for i in 0..n.min(strata.len()) {
+        if !strata[i].is_finite() {
+            continue;
+        }
+        groups
+            .entry(strata[i].round() as i64)
+            .or_default()
+            .push(i);
+    }
+    let mut empty_strata = 0usize;
+    for idx in groups.values() {
+        let evs = idx.iter().filter(|&&i| i < events.len() && events[i] > 0.5).count();
+        if evs == 0 {
+            empty_strata += 1;
+        }
+    }
+    if empty_strata > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message(format!("{empty_strata} strata have zero events and drop out of the PL"))
+                .build(),
+        );
+    }
+    let mut beta = Vector::zeros(p);
+    let mut loglik = f64::NEG_INFINITY;
+    let mut converged = false;
+    for it in 0..spec.max_iter {
+        let mut ll = 0.0_f64;
+        let mut grad = Vector::zeros(p);
+        let mut hess = Matrix::zeros(p, p);
+        for idx in groups.values() {
+            if idx.len() < 2 {
+                continue;
+            }
+            let mut sidx = idx.clone();
+            sidx.sort_by(|&a, &b| {
+                durations[a]
+                    .partial_cmp(&durations[b])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let (sll, sg, sh) = cox_grad_hess(&sidx, durations, events, x, &beta);
+            ll += sll;
+            for j in 0..p {
+                grad[j] += sg[j];
+            }
+            for a in 0..p {
+                for b in 0..p {
+                    hess.set(a, b, hess.get(a, b) + sh.get(a, b));
+                }
+            }
+        }
+        loglik = ll;
+        if !grad.as_slice().iter().all(|v| v.is_finite()) {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("StratifiedCox gradient became non-finite")
+                    .build(),
+            );
+            break;
+        }
+        let gnorm = grad.norm();
+        ctx.session.step(it as u64, -ll, Some(gnorm));
+        if gnorm < spec.tol {
+            ctx.session.converged("StratifiedCox Newton", it as u64);
+            converged = true;
+            break;
+        }
+        let mut hneg = Matrix::zeros(p, p);
+        for i in 0..p {
+            for j in 0..p {
+                hneg.set(i, j, -hess.get(i, j));
+            }
+        }
+        let mut scratch = Report::new("strat_cox", "newton");
+        match chol_solve(&mut scratch, hneg.inner(), &grad, &ctx.policy) {
+            Some(delta) => {
+                for j in 0..p {
+                    beta[j] -= delta[j];
+                }
+            }
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("StratifiedCox information is not SPD; Newton step dropped")
+                        .build(),
+                );
+                break;
+            }
+        }
+        if it + 1 == spec.max_iter {
+            ctx.push(
+                Issue::builder(IssueCode::MaxIterReached)
+                    .message("StratifiedCox Newton hit the iteration cap")
+                    .build(),
+            );
+        }
+    }
+    if !beta.as_slice().iter().all(|v| v.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .message("StratifiedCox coefficients are non-finite")
+                .build(),
+        );
+        beta = Vector::zeros(p);
+    }
+    ctx.finish(FittedCoxPH {
+        coef: beta,
+        loglik,
+        n_events,
+        n,
+        converged,
+    })
+}
+
+/// Fitted exponential proportional hazards.
+#[derive(Clone, Debug)]
+pub struct FittedExponentialPH {
+    /// Log-hazard slopes (no intercept).
+    pub coef: Vector,
+    /// Log-baseline \(\log\lambda_0\).
+    pub intercept: f64,
+    /// Log-likelihood.
+    pub loglik: f64,
+    /// Uncensored events.
+    pub n_events: usize,
+}
+
+/// Exponential PH MLE (statsmodels `PHReg` with exponential baseline).
+///
+/// \(\ell=\sum\delta_i\eta_i-\sum t_i e^{\eta_i}\), \(\eta=x\beta\) with intercept.
+/// Covariate count is identification `p`. Scratch Cholesky on Newton.
+pub fn exponential_ph(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<FittedExponentialPH>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+    if events.len() != x.nrows() || durations.len() != x.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("exponential_ph durations/events length ≠ X rows")
+                .build(),
+        );
+    }
+    let n = x.nrows();
+    let design = x.with_intercept();
+    let p = design.ncols();
+    inspect_identification(&mut ctx.report, n, p, &ctx.policy);
+    let n_events = (0..n)
+        .filter(|&i| i < events.len() && events[i] > 0.5)
+        .count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("exponential PH has no events")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "exponential PH coefficients",
+                    "without events the likelihood is decreasing in every λ",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedExponentialPH {
+            coef: Vector::zeros(x.ncols()),
+            intercept: 0.0,
+            loglik: 0.0,
+            n_events: 0,
+        });
+    }
+    let mut skipped = 0usize;
+    let mut beta = Vector::zeros(p);
+    if n_events > 0 {
+        let mut tsum = 0.0_f64;
+        for i in 0..n.min(durations.len()) {
+            if durations[i].is_finite() && durations[i] > 0.0 {
+                tsum += durations[i];
+            }
+        }
+        if tsum > 1e-15 {
+            beta[0] = (n_events as f64 / tsum).ln();
+        }
+    }
+    let mut loglik = f64::NEG_INFINITY;
+    for it in 0..30 {
+        let mut ll = 0.0_f64;
+        let mut grad = Vector::zeros(p);
+        let mut hess = Matrix::zeros(p, p);
+        skipped = 0;
+        for i in 0..n {
+            if i >= durations.len() || !durations[i].is_finite() || durations[i] <= 0.0 {
+                skipped += 1;
+                continue;
+            }
+            let mut eta = 0.0_f64;
+            for j in 0..p {
+                eta += design.get(i, j) * beta[j];
+            }
+            let lam = eta.exp().max(1e-300);
+            let t = durations[i];
+            let d = if i < events.len() && events[i] > 0.5 {
+                1.0
+            } else {
+                0.0
+            };
+            ll += d * eta - t * lam;
+            for j in 0..p {
+                grad[j] += (d - t * lam) * design.get(i, j);
+                for k in 0..p {
+                    hess.set(j, k, hess.get(j, k) - t * lam * design.get(i, j) * design.get(i, k));
+                }
+            }
+        }
+        loglik = ll;
+        let gnorm = grad.norm();
+        if gnorm < 1e-8 {
+            ctx.session.converged("exponential PH", it as u64);
+            break;
+        }
+        let mut hneg = Matrix::zeros(p, p);
+        for i in 0..p {
+            for j in 0..p {
+                hneg.set(i, j, -hess.get(i, j));
+            }
+        }
+        let mut scratch = Report::new("exp_ph", "newton");
+        match chol_solve(&mut scratch, hneg.inner(), &grad, &ctx.policy) {
+            Some(delta) => {
+                for j in 0..p {
+                    beta[j] += delta[j];
+                }
+            }
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("exponential PH information is not SPD")
+                        .build(),
+                );
+                break;
+            }
+        }
+    }
+    if skipped > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::NonPositiveSeries)
+                .severity(Severity::Warning)
+                .message(format!("exponential_ph skipped {skipped} non-positive times"))
+                .build(),
+        );
+    }
+    if !beta.as_slice().iter().all(|v| v.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .message("exponential PH coefficients are non-finite")
+                .build(),
+        );
+        beta = Vector::zeros(p);
+    }
+    ctx.finish(FittedExponentialPH {
+        coef: Vector::from_iter((1..p).map(|j| beta[j])),
+        intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+        loglik,
+        n_events,
+    })
+}
+
+/// Named exponential PH (statsmodels `PHReg` exponential).
+#[derive(Clone, Debug, Default)]
+pub struct ExponentialPH;
+
+impl ExponentialPH {
+    /// Default exponential PH.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit \(h(t\mid x)=\exp(\alpha+x\beta)\).
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentialPH>> {
+        exponential_ph(durations, events, x, session)
+    }
+}
+
+fn cox_tv_grad_hess(
+    start: &Vector,
+    stop: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    beta: &Vector,
+) -> (f64, Vector, Matrix) {
+    let n = x.nrows();
+    let p = x.ncols();
+    let mut ll = 0.0_f64;
+    let mut grad = Vector::zeros(p);
+    let mut hess = Matrix::zeros(p, p);
+    let mut times: Vec<f64> = (0..n.min(stop.len()))
+        .filter(|&i| i < events.len() && events[i] > 0.5 && stop[i].is_finite())
+        .map(|i| stop[i])
+        .collect();
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    times.dedup_by(|a, b| (*a - *b).abs() <= 0.0);
+    for &t in &times {
+        let mut s0 = 0.0_f64;
+        let mut s1 = vec![0.0_f64; p];
+        let mut s2 = vec![0.0_f64; p * p];
+        let mut deaths: Vec<usize> = Vec::new();
+        for i in 0..n {
+            let lo = if i < start.len() { start[i] } else { 0.0 };
+            let hi = if i < stop.len() { stop[i] } else { f64::NAN };
+            if !lo.is_finite() || !hi.is_finite() {
+                continue;
+            }
+            if lo < t && hi >= t {
+                let mut xb = 0.0_f64;
+                for j in 0..p {
+                    xb += x.get(i, j) * beta[j];
+                }
+                let w = xb.exp().max(1e-300);
+                s0 += w;
+                for j in 0..p {
+                    s1[j] += w * x.get(i, j);
+                }
+                for a in 0..p {
+                    for b in 0..p {
+                        s2[a * p + b] += w * x.get(i, a) * x.get(i, b);
+                    }
+                }
+                if i < events.len() && events[i] > 0.5 && (hi - t).abs() <= 0.0 {
+                    deaths.push(i);
+                }
+            }
+        }
+        if s0 <= 0.0 {
+            continue;
+        }
+        for &i in &deaths {
+            let mut xb = 0.0_f64;
+            for j in 0..p {
+                xb += x.get(i, j) * beta[j];
+            }
+            ll += xb - s0.ln();
+            for j in 0..p {
+                grad[j] += x.get(i, j) - s1[j] / s0;
+            }
+            for a in 0..p {
+                for b in 0..p {
+                    let v = s2[a * p + b] / s0 - (s1[a] / s0) * (s1[b] / s0);
+                    hess.set(a, b, hess.get(a, b) - v);
+                }
+            }
+        }
+    }
+    (ll, grad, hess)
+}
+
+/// Counting-process / time-varying Cox (statsmodels `PHReg` start/stop).
+///
+/// At risk at \(t\) are rows with `start < t ≤ stop`. Interval count is not
+/// identification `p`. Scratch Cholesky on Newton.
+pub fn time_varying_cox(
+    start: &Vector,
+    stop: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<FittedCoxPH>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(stop), &ctx.policy);
+    if start.len() != x.nrows() || stop.len() != x.nrows() || events.len() != x.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("time_varying_cox lengths ≠ X rows")
+                .build(),
+        );
+    }
+    let n = x.nrows();
+    let p = x.ncols();
+    inspect_identification(&mut ctx.report, n, p, &ctx.policy);
+    let mut inverted = 0usize;
+    for i in 0..n.min(start.len()).min(stop.len()) {
+        if start[i].is_finite() && stop[i].is_finite() && start[i] > stop[i] {
+            inverted += 1;
+        }
+    }
+    if inverted > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!("{inverted} intervals have start > stop"))
+                .build(),
+        );
+    }
+    let n_events = (0..n)
+        .filter(|&i| i < events.len() && events[i] > 0.5)
+        .count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("time-varying Cox has no events")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "counting-process Cox coefficients",
+                    "zero events ⇒ empty partial likelihood",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedCoxPH {
+            coef: Vector::zeros(p),
+            loglik: 0.0,
+            n_events: 0,
+            n,
+            converged: false,
+        });
+    }
+    let mut beta = Vector::zeros(p);
+    let mut loglik = f64::NEG_INFINITY;
+    let mut converged = false;
+    for it in 0..40 {
+        let (ll, grad, hess) = cox_tv_grad_hess(start, stop, events, x, &beta);
+        loglik = ll;
+        if !grad.as_slice().iter().all(|v| v.is_finite()) {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("time-varying Cox gradient became non-finite")
+                    .build(),
+            );
+            break;
+        }
+        let gnorm = grad.norm();
+        if gnorm < 1e-8 {
+            ctx.session.converged("TV Cox", it as u64);
+            converged = true;
+            break;
+        }
+        let mut hneg = Matrix::zeros(p, p);
+        for i in 0..p {
+            for j in 0..p {
+                hneg.set(i, j, -hess.get(i, j));
+            }
+        }
+        let mut scratch = Report::new("tv_cox", "newton");
+        match chol_solve(&mut scratch, hneg.inner(), &grad, &ctx.policy) {
+            Some(delta) => {
+                for j in 0..p {
+                    beta[j] -= delta[j];
+                }
+            }
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("time-varying Cox information is not SPD")
+                        .build(),
+                );
+                break;
+            }
+        }
+    }
+    if !beta.as_slice().iter().all(|v| v.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .message("time-varying Cox coefficients are non-finite")
+                .build(),
+        );
+        beta = Vector::zeros(p);
+    }
+    ctx.finish(FittedCoxPH {
+        coef: beta,
+        loglik,
+        n_events,
+        n,
+        converged,
+    })
+}
+
+/// Named counting-process Cox (statsmodels `PHReg` start/stop).
+#[derive(Clone, Debug, Default)]
+pub struct TimeVaryingCox;
+
+impl TimeVaryingCox {
+    /// Default start/stop Cox.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on interval starts, stops, events, and covariates.
+    pub fn fit(
+        &self,
+        start: &Vector,
+        stop: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCoxPH>> {
+        time_varying_cox(start, stop, events, x, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -15314,5 +15908,20 @@ mod tests {
             .expect("efron");
         assert_eq!(efr.value.coef.len(), 1);
         assert!(efr.value.coef[0].is_finite() || !efr.value.converged);
+        let strata = Vector::from_iter((0..20).map(|i| (i % 2) as f64));
+        let scx = StratifiedCox::new()
+            .fit(&dur, &ev, &xcox, &strata, &Session::new("scox", "t"))
+            .expect("scox");
+        assert_eq!(scx.value.coef.len(), 1);
+        assert!(scx.value.coef[0].is_finite() || !scx.value.converged);
+        let eph = exponential_ph(&dur, &ev, &xcox, &Session::new("eph", "t")).expect("eph");
+        assert_eq!(eph.value.coef.len(), 1);
+        assert!(eph.value.intercept.is_finite() || eph.value.loglik.is_finite());
+        let entry0 = Vector::from_iter((0..20).map(|_| 0.0));
+        let tvc = time_varying_cox(&entry0, &dur, &ev, &xcox, &Session::new("tvc", "t")).expect("tvc");
+        assert_eq!(tvc.value.coef.len(), 1);
+        assert!(tvc.value.coef[0].is_finite() || !tvc.value.converged);
+        let wald = wald_test(&x, &y, &Session::new("waldt", "t")).expect("waldt");
+        assert!(wald.value.statistic.is_finite() || wald.value.pvalue.is_nan());
     }
 }
