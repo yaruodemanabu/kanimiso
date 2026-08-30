@@ -1271,13 +1271,29 @@ impl Fit for OrderedProbit {
             yidx[i] = classes.iter().position(|&c| c == lab).unwrap_or(0);
         }
         let p = x.ncols();
+        let n = x.nrows().max(1) as f64;
+        let mut scales = vec![1.0; p];
+        for j in 0..p {
+            let mut mean = 0.0;
+            for i in 0..x.nrows() {
+                mean += x.get(i, j);
+            }
+            mean /= n;
+            let mut var = 0.0;
+            for i in 0..x.nrows() {
+                let d = x.get(i, j) - mean;
+                var += d * d;
+            }
+            scales[j] = (var / n).sqrt().max(1.0);
+        }
         let mut coef = Vector::zeros(p);
         let mut thr = Vector::zeros(k - 1);
         for t in 0..k - 1 {
             let cum = counts.iter().take(t + 1).map(|(_, c)| *c).sum::<usize>() as f64
                 / y.len().max(1) as f64;
             let q = cum.clamp(1e-3, 1.0 - 1e-3);
-            thr[t] = (q / (1.0 - q)).ln();
+            // Φ^{-1} via a logistic start; the latent is later Φ-scaled.
+            thr[t] = 0.6 * (q / (1.0 - q)).ln();
             if t > 0 && thr[t] <= thr[t - 1] {
                 thr[t] = thr[t - 1] + 0.2;
             }
@@ -1291,14 +1307,15 @@ impl Fit for OrderedProbit {
             for i in 0..x.nrows().min(yidx.len()) {
                 let mut xb = 0.0;
                 for j in 0..p {
-                    xb += coef[j] * x.get(i, j);
+                    xb += coef[j] * (x.get(i, j) / scales[j]);
                 }
+                xb = xb.clamp(-8.0, 8.0);
                 let c = yidx[i];
                 let (p_c, d_beta, d_thr) = ordered_probit_grad(c, k, xb, &thr);
                 ll += (p_c.max(1e-15)).ln();
                 let inv = 1.0 / p_c.max(1e-15);
                 for j in 0..p {
-                    g_b[j] += inv * d_beta * x.get(i, j);
+                    g_b[j] += inv * d_beta * (x.get(i, j) / scales[j]);
                 }
                 for t in 0..k - 1 {
                     g_t[t] += inv * d_thr[t];
@@ -1309,14 +1326,17 @@ impl Fit for OrderedProbit {
                 coef[j] += eta * g_b[j] / x.nrows().max(1) as f64;
             }
             for t in 0..k - 1 {
-                thr[t] += eta * g_t[t] / x.nrows().max(1) as f64;
+                thr[t] = (thr[t] + eta * g_t[t] / x.nrows().max(1) as f64).clamp(-8.0, 8.0);
             }
             for t in 1..k - 1 {
                 if thr[t] <= thr[t - 1] + 1e-4 {
-                    thr[t] = thr[t - 1] + 1e-4;
+                    thr[t] = (thr[t - 1] + 1e-4).min(8.0);
                 }
             }
             ctx.session.step(it as u64, -ll, None);
+        }
+        for j in 0..p {
+            coef[j] /= scales[j];
         }
         ctx.push(
             Issue::builder(IssueCode::PValueUnreliable)
@@ -1326,7 +1346,7 @@ impl Fit for OrderedProbit {
                 )
                 .compromise(NumericalCompromise::new(
                     "IRLS / Newton ordered probit",
-                    "gradient ascent on the cumulative-Gaussian likelihood",
+                    "column-scaled gradient ascent on the cumulative-Gaussian likelihood",
                     "the information matrix is not inverted",
                     "thresholds are ordered by projection, not by a constrained Hessian",
                 ))
