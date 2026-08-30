@@ -715,10 +715,11 @@ impl Fit for InverseGaussianRegressor {
                     xs.set(i, j, design.get(i, j) * w);
                 }
             }
+            let mut scratch = signlred::Report::new("inverse_gaussian", "irls");
             let next_opt = if self.alpha > 0.0 {
-                ridge_solve(&mut ctx.report, &xs, &z, self.alpha, &ctx.policy)
+                ridge_solve(&mut scratch, &xs, &z, self.alpha, &ctx.policy)
             } else {
-                least_squares(&mut ctx.report, &xs, &z, &ctx.policy)
+                least_squares(&mut scratch, &xs, &z, &ctx.policy)
             };
             let Some(next) = next_opt else {
                 break;
@@ -731,20 +732,52 @@ impl Fit for InverseGaussianRegressor {
                 break;
             }
         }
-        drop(ctx);
-        LinearRegression {
-            fit_intercept: self.fit_intercept,
-        }
-        .fit(x, y, session)
-        .map(|mut q| {
-            if self.fit_intercept {
-                q.value.intercept = beta[0];
-                q.value.coef = Vector::from_iter((1..beta.len()).map(|i| beta[i]));
-            } else {
-                q.value.coef = beta.clone();
+        let intercept = if self.fit_intercept {
+            beta.as_slice().first().copied().unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        let coef = if self.fit_intercept && beta.len() > 1 {
+            Vector::from_iter((1..beta.len()).map(|i| beta[i]))
+        } else if self.fit_intercept {
+            Vector::zeros(0)
+        } else {
+            beta.clone()
+        };
+        let fitted = Vector::from_iter((0..y.len()).map(|i| {
+            let mut eta = 0.0;
+            for j in 0..design.ncols() {
+                eta += design.get(i, j) * beta.as_slice().get(j).copied().unwrap_or(0.0);
             }
-            q.value.beta = beta;
-            q
+            eta.exp().max(1e-12)
+        }));
+        let resid = Vector::from_iter((0..y.len()).map(|i| y[i] - fitted[i]));
+        let n = y.len();
+        let p = beta.len();
+        ctx.finish(FittedLinear {
+            coef,
+            intercept,
+            beta,
+            n,
+            p,
+            df_resid: (n as f64 - p as f64).max(1.0),
+            r2: f64::NAN,
+            adj_r2: f64::NAN,
+            sigma2: f64::NAN,
+            se: Vector::zeros(p),
+            t_values: Vector::zeros(p),
+            p_values: Vector::filled(p, f64::NAN),
+            aic: f64::NAN,
+            bic: f64::NAN,
+            f_stat: f64::NAN,
+            f_pvalue: f64::NAN,
+            durbin_watson: f64::NAN,
+            loglik: f64::NAN,
+            fitted,
+            resid,
+            leverage: Vector::zeros(n),
+            cooks: Vector::zeros(n),
+            used_intercept: self.fit_intercept,
         })
     }
 }
