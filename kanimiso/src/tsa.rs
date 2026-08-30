@@ -18870,6 +18870,190 @@ impl FitSeries for DisjointCnnForecaster {
     }
 }
 
+/// WLS hierarchical reconciliation (sktime `Reconciler` `wls`).
+///
+/// Node residual variances from the training columns are mapped through
+/// \(S\) and used as diagonal WLS weights. Distinct from
+/// [`reconcile_mint`] (column-sum weights) and [`reconcile_ols`]
+/// (identity weights). Variance count is not identification `p`.
+pub fn reconcile_wls(
+    yhat: &Matrix,
+    summing: &Matrix,
+    node_var: &Vector,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, yhat, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, summing, None, &ctx.policy);
+    if yhat.ncols() != summing.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "reconcile_wls yhat.ncols()={} summing.nrows()={}",
+                    yhat.ncols(),
+                    summing.nrows()
+                ))
+                .build(),
+        );
+        return ctx.finish(yhat.clone());
+    }
+    let m = summing.nrows();
+    let b = summing.ncols();
+    if m == 0 || b == 0 {
+        return ctx.finish(yhat.clone());
+    }
+    let mut w = vec![1.0; m];
+    for i in 0..m {
+        let v = node_var.as_slice().get(i).copied().unwrap_or(1.0);
+        w[i] = if v.is_finite() && v > 1e-12 {
+            1.0 / v
+        } else {
+            1.0
+        };
+    }
+    let mut gram = summing.gram();
+    for i in 0..b {
+        for j in 0..b {
+            let mut g = 0.0;
+            for k in 0..m {
+                g += summing.get(k, i) * w[k] * summing.get(k, j);
+            }
+            gram[(i, j)] = g;
+        }
+        gram[(i, i)] += 1e-10;
+    }
+    let mut out = Matrix::zeros(yhat.nrows(), m);
+    for h in 0..yhat.nrows() {
+        let mut z = Vector::zeros(b);
+        for j in 0..b {
+            let mut s = 0.0;
+            for i in 0..m {
+                s += summing.get(i, j) * w[i] * yhat.get(h, i);
+            }
+            z[j] = s;
+        }
+        let mut scratch = Report::new("wls-rec", "chol");
+        let beta = match chol_solve(&mut scratch, &gram, &z, &ctx.policy) {
+            Some(v) => v,
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::CholeskyFailed)
+                        .severity(Severity::Warning)
+                        .message("WLS reconcile Cholesky failed; leaving the base forecast")
+                        .build(),
+                );
+                for i in 0..m {
+                    out.set(h, i, yhat.get(h, i));
+                }
+                continue;
+            }
+        };
+        for i in 0..m {
+            let mut s = 0.0;
+            for j in 0..b.min(beta.len()) {
+                s += summing.get(i, j) * beta[j];
+            }
+            out.set(h, i, s);
+        }
+    }
+    ctx.finish(out)
+}
+
+/// Last-value hierarchy plus WLS reconcile (sktime `WLSReconciler`).
+///
+/// Column-variance count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct WlsReconcilerForecaster;
+
+/// Fitted WLS hierarchy.
+#[derive(Clone, Debug)]
+pub struct FittedWlsReconciler {
+    last: Vector,
+    node_var: Vector,
+}
+
+impl WlsReconcilerForecaster {
+    /// Empty WLS reconciler.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Store last values and column variances.
+    pub fn fit(
+        &self,
+        y: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedWlsReconciler>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let last = Vector::from_iter((0..y.ncols()).map(|j| {
+            y.column(j)
+                .as_slice()
+                .last()
+                .copied()
+                .unwrap_or(0.0)
+        }));
+        let node_var = Vector::from_iter((0..y.ncols()).map(|j| {
+            let col = y.column(j);
+            let v = col.std();
+            if v.is_finite() && v > 0.0 {
+                v * v
+            } else {
+                1.0
+            }
+        }));
+        ctx.finish(FittedWlsReconciler { last, node_var })
+    }
+}
+
+impl FittedWlsReconciler {
+    /// Repeat last values (expanding bottoms through `S` if needed), then WLS.
+    pub fn forecast(
+        &self,
+        h: usize,
+        summing: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<Matrix>> {
+        let n_nodes = summing.nrows();
+        let n_bot = summing.ncols();
+        let yhat = if self.last.len() == n_nodes {
+            Matrix::from_fn(h, n_nodes, |_, j| self.last[j])
+        } else if self.last.len() == n_bot {
+            Matrix::from_fn(h, n_nodes, |_, i| {
+                let mut s = 0.0;
+                for j in 0..n_bot {
+                    s += summing.get(i, j) * self.last[j];
+                }
+                s
+            })
+        } else {
+            Matrix::from_fn(h, n_nodes.max(1), |_, j| {
+                self.last.as_slice().get(j).copied().unwrap_or(0.0)
+            })
+        };
+        let vars = if self.node_var.len() == n_nodes {
+            self.node_var.clone()
+        } else if self.node_var.len() == n_bot {
+            Vector::from_iter((0..n_nodes).map(|i| {
+                let mut s = 0.0;
+                for j in 0..n_bot {
+                    let a = summing.get(i, j);
+                    let v = self.node_var.as_slice().get(j).copied().unwrap_or(1.0);
+                    s += a * a * v;
+                }
+                if s > 1e-12 {
+                    s
+                } else {
+                    1.0
+                }
+            }))
+        } else {
+            Vector::filled(n_nodes.max(1), 1.0)
+        };
+        reconcile_wls(&yhat, summing, &vars, session)
+    }
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -19721,6 +19905,16 @@ impl FitSeries for DisjointCnnForecaster {
             .value;
         assert_eq!(recff.shape(), (2, 3));
         assert!((recff.get(0, 0) + recff.get(0, 1) - recff.get(0, 2)).abs() < 1e-8);
+        let wlsf = WlsReconcilerForecaster::new()
+            .fit(&y2, &Session::new("wlsf", "fit"))
+            .expect("wlsf");
+        let wlsff = wlsf
+            .value
+            .forecast(2, &s, &Session::new("wlsf", "fc"))
+            .expect("wlsff")
+            .value;
+        assert_eq!(wlsff.shape(), (2, 3));
+        assert!((wlsff.get(0, 0) + wlsff.get(0, 1) - wlsff.get(0, 2)).abs() < 1e-6);
         let dtab = DirectTabularForecaster::new(3, 3)
             .fit_series(&y, &Session::new("dtab", "fit"))
             .expect("dtab");

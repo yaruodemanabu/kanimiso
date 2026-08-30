@@ -38021,6 +38021,175 @@ impl Predict for AMRulesClassifier {
     }
 }
 
+/// Online pinball / quantile regressor (river `optim` + linear quantile).
+///
+/// SGD on \(\rho_\tau(y-x^\top\theta)\). Distinct from [`PaRegressor`]
+/// (ε-insensitive) and [`OnlineQuantile`] (univariate tracker, no \(X\)).
+/// \(\tau\) is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct OnlineQuantileRegressor {
+    /// Quantile level in \((0,1)\).
+    pub tau: f64,
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineQuantileRegressor {
+    fn default() -> Self {
+        Self {
+            tau: 0.5,
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineQuantileRegressor {
+    /// Pinball regressor at quantile `tau`.
+    pub fn new(tau: f64) -> Self {
+        Self {
+            tau,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineQuantileRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            if self.n_seen == 0 {
+                ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            }
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        if !self.initialized {
+            if x.ncols() == 0 {
+                ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+                return finish_explain(
+                    ctx,
+                    reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+                );
+            }
+            self.coef = Vector::zeros(x.ncols());
+            self.initialized = true;
+        } else if self.coef.len() != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let tau = if self.tau.is_finite() && self.tau > 0.0 && self.tau < 1.0 {
+            self.tau
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("OnlineQuantileRegressor tau is not in (0,1); using 0.5")
+                    .build(),
+            );
+            0.5
+        };
+        let lr = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("OnlineQuantileRegressor learning_rate is not a positive finite; using 0.05")
+                    .build(),
+            );
+            0.05
+        };
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let mut s = self.intercept;
+            for j in 0..x.ncols() {
+                s += self.coef[j] * x.get(i, j);
+            }
+            let r = y[i] - s;
+            loss_before += if r >= 0.0 { tau * r } else { (tau - 1.0) * r };
+            let g = if r >= 0.0 { -tau } else { 1.0 - tau };
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut sa = self.intercept;
+            for j in 0..x.ncols() {
+                sa += self.coef[j] * x.get(i, j);
+            }
+            let ra = y[i] - sa;
+            loss_after += if ra >= 0.0 {
+                tau * ra
+            } else {
+                (tau - 1.0) * ra
+            };
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online pinball regressor",
+            "SGD on ρ_τ(y − xθ); τ is a quantile, not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineQuantileRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38681,6 +38850,9 @@ mod tests {
         AMRulesClassifier::new(0.1)
             .partial_fit(&x, Some(&yb), &session)
             .expect("amrc");
+        OnlineQuantileRegressor::new(0.5)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("oqr");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

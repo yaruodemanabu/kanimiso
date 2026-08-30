@@ -3877,6 +3877,118 @@ impl GardnerTwoStage {
     }
 }
 
+/// AIPW 2×2 difference-in-differences.
+///
+/// Cell-mean DiD plus the saturated influence
+/// \(D T(Y-\mu_{11})/e-D(1-T)(Y-\mu_{10})/e-(1-D)T(Y-\mu_{01})/(1-e)+(1-D)(1-T)(Y-\mu_{00})/(1-e)\).
+/// Distinct from [`DiffInDiff`] (OLS interaction only).
+#[derive(Clone, Debug, Default)]
+pub struct AipwDid;
+
+/// Fitted AIPW 2×2 ATT.
+#[derive(Clone, Debug)]
+pub struct FittedAipwDid {
+    /// Outcome-regression DiD.
+    pub att_or: f64,
+    /// AIPW-adjusted ATT.
+    pub att: f64,
+}
+
+impl AipwDid {
+    /// Default AIPW 2×2 DiD.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Cell means plus saturated AIPW influence.
+    pub fn fit(
+        &self,
+        y: &Vector,
+        treat: &Vector,
+        post: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedAipwDid>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let n = y.len().min(treat.len()).min(post.len());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_fn(n, 1, |i, _| treat[i]),
+            Some(y),
+            &ctx.policy,
+        );
+        let mut cells = [[(0.0_f64, 0.0_f64); 2]; 2];
+        let mut n_d = 0.0_f64;
+        let mut n_ok = 0.0_f64;
+        for i in 0..n {
+            if !y[i].is_finite() || !treat[i].is_finite() || !post[i].is_finite() {
+                continue;
+            }
+            let d = if treat[i] >= 0.5 { 1 } else { 0 };
+            let t = if post[i] >= 0.5 { 1 } else { 0 };
+            cells[d][t].0 += y[i];
+            cells[d][t].1 += 1.0;
+            n_d += d as f64;
+            n_ok += 1.0;
+        }
+        if cells[0][0].1 < 1.0
+            || cells[0][1].1 < 1.0
+            || cells[1][0].1 < 1.0
+            || cells[1][1].1 < 1.0
+        {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("AipwDid needs all four treat×post cells")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "AIPW 2×2 DiD",
+                        "an empty cell leaves μ_dt unidentified",
+                        "collect a complete 2×2",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedAipwDid {
+                att_or: f64::NAN,
+                att: f64::NAN,
+            });
+        }
+        let mu00 = cells[0][0].0 / cells[0][0].1;
+        let mu01 = cells[0][1].0 / cells[0][1].1;
+        let mu10 = cells[1][0].0 / cells[1][0].1;
+        let mu11 = cells[1][1].0 / cells[1][1].1;
+        let att_or = (mu11 - mu10) - (mu01 - mu00);
+        let e = (n_d / n_ok.max(1.0)).clamp(1e-3, 1.0 - 1e-3);
+        let mut inf = 0.0_f64;
+        let mut c = 0.0_f64;
+        for i in 0..n {
+            if !y[i].is_finite() || !treat[i].is_finite() || !post[i].is_finite() {
+                continue;
+            }
+            let d = if treat[i] >= 0.5 { 1.0 } else { 0.0 };
+            let t = if post[i] >= 0.5 { 1.0 } else { 0.0 };
+            inf += d * t * (y[i] - mu11) / e
+                - d * (1.0 - t) * (y[i] - mu10) / e
+                - (1.0 - d) * t * (y[i] - mu01) / (1.0 - e)
+                + (1.0 - d) * (1.0 - t) * (y[i] - mu00) / (1.0 - e);
+            c += 1.0;
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("AipwDid is saturated cell AIPW, not a published DR DiD")
+                .compromise(NumericalCompromise::new(
+                    "AIPW 2×2 DiD",
+                    "cell-mean DiD plus saturated influence / e",
+                    "covariate-adjusted propensity and cluster SE are omitted",
+                    "read ATT as a 2×2 AIPW sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedAipwDid {
+            att_or,
+            att: att_or + if c > 0.0 { inf / c } else { 0.0 },
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4086,5 +4198,9 @@ mod tests {
             .fit(&y, &time, &first, &g, &Session::new("g2s", "fit"))
             .expect("g2s");
         assert!(g2s.value.att.is_finite() || g2s.value.att.is_nan());
+        let adid = AipwDid::new()
+            .fit(&y, &treat, &post, &Session::new("adid", "fit"))
+            .expect("adid");
+        assert!(adid.value.att.is_finite() || adid.value.att.is_nan());
     }
 }

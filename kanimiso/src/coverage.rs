@@ -6421,6 +6421,31 @@ const INVENTORY: &[Algorithm] = &[
         "sktime.forecasting.disjoint_cnn.DisjointCNNForecaster",
         "forecast",
     ),
+    a("stats.SieveCate", "econml.dml.SieveCATE", "estimator"),
+    a(
+        "stats.IntentToTreat",
+        "econml.iv.dr.IntentToTreatDRIV",
+        "estimator",
+    ),
+    a("stats.Driv", "econml.iv.dr.LinearDRIV", "estimator"),
+    a("panel.AipwDid", "statsmodels.treatment.api", "estimator"),
+    a(
+        "tsa.WlsReconcilerForecaster",
+        "sktime.forecasting.reconcile.Reconciler",
+        "forecast",
+    ),
+    a("tsa.reconcile_wls", "sktime.forecasting.reconcile.wls", "function"),
+    a("hmm.GammaHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.AutoregressiveHmm",
+        "hmmlearn.hmm.GMMHMM",
+        "hmm",
+    ),
+    a(
+        "online.OnlineQuantileRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6953,6 +6978,13 @@ mod tests {
             "stats.DeepIv",
             "tsa.PatchTstForecaster",
             "tsa.LstmFcnForecaster",
+            "stats.SieveCate",
+            "stats.Driv",
+            "panel.AipwDid",
+            "tsa.WlsReconcilerForecaster",
+            "hmm.GammaHmm",
+            "hmm.AutoregressiveHmm",
+            "online.OnlineQuantileRegressor",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

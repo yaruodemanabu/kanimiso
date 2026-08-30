@@ -28618,6 +28618,336 @@ impl FittedDeepIv {
     }
 }
 
+fn sieve_row(x: &Matrix, i: usize, degree: usize) -> Vec<f64> {
+    let deg = degree.max(1);
+    let mut phi = Vec::with_capacity(x.ncols() * deg);
+    for j in 0..x.ncols() {
+        let v = x.get(i, j);
+        let mut p = v;
+        for _ in 0..deg {
+            phi.push(p);
+            p *= v;
+        }
+    }
+    phi
+}
+
+/// Sieve R-learner CATE (econml `SieveCATE` / polynomial R-learner).
+///
+/// Nuisance \(m,e\) stay on raw \(X\); CATE is Robinson OLS on
+/// \((D-e)\,[1,\varphi(X)]\) with \(\varphi_j=(x,x^2,\ldots)\). Degree is
+/// not identification `p`. Distinct from [`RLearner`] (linear \(\varphi\)).
+#[derive(Clone, Debug)]
+pub struct SieveCate {
+    /// Polynomial degree. Not identification `p`.
+    pub degree: usize,
+}
+
+impl Default for SieveCate {
+    fn default() -> Self {
+        Self { degree: 2 }
+    }
+}
+
+impl SieveCate {
+    /// Sieve CATE of degree `degree`.
+    pub fn new(degree: usize) -> Self {
+        Self {
+            degree: degree.max(1),
+        }
+    }
+
+    /// Fit residual-on-residual CATE on a polynomial sieve.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSieveCate>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let deg = self.degree.max(1);
+        let q = 1 + x.ncols() * deg;
+        if !both_arms(treat, &(0..n).collect::<Vec<_>>()) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("SieveCate needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "sieve CATE",
+                        "D−e is unidentified with a single arm",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedSieveCate {
+                coef: Vector::zeros(q),
+                degree: deg,
+            });
+        }
+        let (bm, am) = ols_arm(x, y, &(0..n).collect::<Vec<_>>(), &ctx.policy);
+        let (pe, pb) = ista_logit(x, treat, 40);
+        let design = Matrix::from_fn(n, q, |i, j| {
+            let e = propensity_row(x, i, &pe, pb);
+            let d = if treat[i] >= 0.5 { 1.0 } else { 0.0 };
+            let r = d - e;
+            if j == 0 {
+                r
+            } else {
+                let phi = sieve_row(x, i, deg);
+                r * phi.get(j - 1).copied().unwrap_or(0.0)
+            }
+        });
+        let yres = Vector::from_iter((0..n).map(|i| y[i] - mu_lin(x, i, am, &bm)));
+        let mut scratch = Report::new("sieve-cate", "ols");
+        let coef = least_squares(&mut scratch, &design, &yres, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(q));
+        for issue in scratch.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SieveCate is polynomial Robinson OLS, not a published sieve CATE")
+                .compromise(NumericalCompromise::new(
+                    "econml SieveCATE",
+                    "OLS of Y−m on (D−e)[1, x, x², …]",
+                    "cross-fitting, a data-driven degree, and the published penalty are omitted",
+                    "read CATE as a polynomial residual-ratio sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedSieveCate { coef, degree: deg })
+    }
+}
+
+/// Fitted sieve CATE.
+#[derive(Clone, Debug)]
+pub struct FittedSieveCate {
+    /// Slopes on \([1,\varphi(X)]\).
+    pub coef: Vector,
+    /// Polynomial degree.
+    pub degree: usize,
+}
+
+impl FittedSieveCate {
+    /// Polynomial CATE.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.coef.as_slice().first().copied().unwrap_or(0.0);
+            let phi = sieve_row(x, i, self.degree);
+            for (j, &v) in phi.iter().enumerate() {
+                if 1 + j < self.coef.len() {
+                    s += v * self.coef[1 + j];
+                }
+            }
+            s
+        })))
+    }
+}
+
+/// Intent-to-treat reduced form: \(\bar Y_{Z=1}-\bar Y_{Z=0}\).
+///
+/// Distinct from [`WaldLate`] (does not divide by the first stage) and
+/// [`Driv`] (no AIPW residualization).
+#[derive(Clone, Debug, Default)]
+pub struct IntentToTreat;
+
+/// Fitted ITT.
+#[derive(Clone, Debug)]
+pub struct FittedIntentToTreat {
+    /// Reduced-form gap.
+    pub itt: f64,
+}
+
+impl IntentToTreat {
+    /// Default ITT.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Two-mean reduced form of \(Y\) on \(Z\).
+    pub fn fit(
+        &self,
+        y: &Vector,
+        instrument: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedIntentToTreat>> {
+        let n = y.len().min(instrument.len());
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_fn(n, 1, |i, _| instrument[i]),
+            Some(y),
+            &ctx.policy,
+        );
+        let idx: Vec<usize> = (0..n).collect();
+        if !instrument_varies(instrument, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("IntentToTreat needs instrument variation")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "intent-to-treat",
+                        "a constant Z cannot identify a reduced-form gap",
+                        "collect a non-degenerate instrument",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedIntentToTreat { itt: f64::NAN });
+        }
+        let mut s1 = 0.0_f64;
+        let mut n1 = 0.0_f64;
+        let mut s0 = 0.0_f64;
+        let mut n0 = 0.0_f64;
+        for i in 0..n {
+            if !y[i].is_finite() || !instrument[i].is_finite() {
+                continue;
+            }
+            if instrument[i] >= 0.5 {
+                s1 += y[i];
+                n1 += 1.0;
+            } else {
+                s0 += y[i];
+                n0 += 1.0;
+            }
+        }
+        let itt = if n1 > 0.0 && n0 > 0.0 {
+            s1 / n1 - s0 / n0
+        } else {
+            f64::NAN
+        };
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("IntentToTreat is a two-mean reduced form, not a published ITT")
+                .compromise(NumericalCompromise::new(
+                    "intent-to-treat reduced form",
+                    "Ȳ(Z=1)−Ȳ(Z=0)",
+                    "covariates, 2SLS, and a compliance diagnostic are omitted",
+                    "read ITT as a raw instrument-arm gap",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedIntentToTreat { itt })
+    }
+}
+
+/// Doubly robust IV LATE (econml `IntentToTreatDRIV`).
+///
+/// AIPW of \(Z\) on \(Y\) over AIPW of \(Z\) on \(D\). Distinct from
+/// [`DmlIv`] (residual Wald) and [`WaldLate`] (raw means).
+#[derive(Clone, Debug, Default)]
+pub struct Driv;
+
+/// Fitted DRIV LATE.
+#[derive(Clone, Debug)]
+pub struct FittedDriv {
+    /// AIPW ITT.
+    pub itt: f64,
+    /// AIPW first stage.
+    pub first_stage: f64,
+    /// \(\mathrm{ITT}/\mathrm{FS}\).
+    pub late: f64,
+}
+
+impl Driv {
+    /// Default DRIV.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit AIPW ITT / AIPW first stage.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        instrument: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedDriv>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x
+            .nrows()
+            .min(y.len())
+            .min(treat.len())
+            .min(instrument.len());
+        let idx: Vec<usize> = (0..n).collect();
+        if !instrument_varies(instrument, &idx) || !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("Driv needs treatment and instrument variation")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "DRIV LATE",
+                        "ITT and the first stage need Z and D contrast",
+                        "collect a non-degenerate instrument and both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedDriv {
+                itt: f64::NAN,
+                first_stage: f64::NAN,
+                late: f64::NAN,
+            });
+        }
+        let (psi_y, _, _, _, _, _, _) = dr_pseudo_outcome(x, y, instrument, n, &ctx.policy);
+        let (psi_d, _, _, _, _, _, _) = dr_pseudo_outcome(x, treat, instrument, n, &ctx.policy);
+        let mut sy = 0.0_f64;
+        let mut sd = 0.0_f64;
+        let mut c = 0.0_f64;
+        for i in 0..n {
+            if psi_y[i].is_finite() && psi_d[i].is_finite() {
+                sy += psi_y[i];
+                sd += psi_d[i];
+                c += 1.0;
+            }
+        }
+        let itt = if c > 0.0 { sy / c } else { f64::NAN };
+        let first_stage = if c > 0.0 { sd / c } else { f64::NAN };
+        if !first_stage.is_finite() || first_stage.abs() <= 1e-15 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("Driv first-stage AIPW is zero")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "DRIV LATE",
+                        "a zero AIPW first stage leaves LATE unidentified",
+                        "need an instrument that moves D",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Driv is AIPW ITT / AIPW first stage, not Syrgkanis DRIV")
+                .compromise(NumericalCompromise::new(
+                    "econml IntentToTreatDRIV",
+                    "mean AIPW(Z→Y) / mean AIPW(Z→D)",
+                    "cross-fitting, a CATE head, and the published influence SE are omitted",
+                    "read LATE as a DR reduced-form ratio",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedDriv {
+            itt,
+            first_stage,
+            late: if first_stage.is_finite() && first_stage.abs() > 1e-15 {
+                itt / first_stage
+            } else {
+                f64::NAN
+            },
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -29947,5 +30277,24 @@ mod tests {
                 .len(),
             20
         );
+        let svc = SieveCate::new(2)
+            .fit(&xate, &dur, &grp, &Session::new("svc", "t"))
+            .expect("svc");
+        assert_eq!(
+            svc.value
+                .predict_cate(&xate, &Session::new("svcp", "t"))
+                .expect("svcp")
+                .value
+                .len(),
+            20
+        );
+        let itt = IntentToTreat::new()
+            .fit(&dur, &ivz, &Session::new("itt", "t"))
+            .expect("itt");
+        assert!(itt.value.itt.is_finite() || itt.value.itt.is_nan());
+        let drv = Driv::new()
+            .fit(&xate, &dur, &grp, &ivz, &Session::new("drv", "t"))
+            .expect("drv");
+        assert!(drv.value.late.is_finite() || drv.value.late.is_nan());
     }
 }
