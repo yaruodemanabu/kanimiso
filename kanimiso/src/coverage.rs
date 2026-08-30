@@ -5689,6 +5689,60 @@ const INVENTORY: &[Algorithm] = &[
         "estimator",
     ),
     a("model_selection.KernelRidgeCV", "sklearn.kernel_ridge.KernelRidge", "estimator"),
+    a(
+        "stats.PiecewiseExponentialFitter",
+        "lifelines.PiecewiseExponentialFitter",
+        "estimator",
+    ),
+    a("stats.KernelReg", "statsmodels.nonparametric.kernel_regression.KernelReg", "estimator"),
+    a("stats.Lowess", "statsmodels.nonparametric.smoothers_lowess.lowess", "estimator"),
+    a(
+        "stats.EmpiricalLikelihood",
+        "statsmodels.emplike.eldescriptive",
+        "estimator",
+    ),
+    a("stats.SplinePH", "lifelines.CoxTimeVaryingFitter", "estimator"),
+    a("stats.RoystonParmar", "lifelines.CRCSplineFitter", "estimator"),
+    a("stats.CrcSpline", "lifelines.CRCSplineFitter", "estimator"),
+    a("panel.BetweenIv", "linearmodels.iv.model.IV2SLS", "estimator"),
+    a("panel.Absorbing2Sls", "linearmodels.iv.absorbing.AbsorbingLS", "estimator"),
+    a("panel.RandomEffectsIv", "linearmodels.iv.model.IV2SLS", "estimator"),
+    a("panel.Chamberlain", "linearmodels.panel.model.RandomEffects", "estimator"),
+    a("panel.TwoWayMundlak", "linearmodels.panel.model.RandomEffects", "estimator"),
+    a("panel.MeanGroup", "linearmodels.panel.model.PooledOLS", "estimator"),
+    a(
+        "online.PolynomialDecayRegressor",
+        "river.optim.schedulers.PolynomialDecay",
+        "online",
+    ),
+    a(
+        "online.WarmRestartsRegressor",
+        "river.optim.schedulers.CosineAnnealingWarmRestarts",
+        "online",
+    ),
+    a("online.OneCycleLrRegressor", "river.optim.schedulers.OneCycleLR", "online"),
+    a(
+        "tslearn.MiniRocketClassifier",
+        "sktime.classification.kernel_based.MiniRocketClassifier",
+        "estimator",
+    ),
+    a(
+        "tslearn.Catch22ForestRegressor",
+        "sktime.regression.feature_based.Catch22Regressor",
+        "estimator",
+    ),
+    a(
+        "tslearn.WeaselD",
+        "sktime.classification.dictionary_based.WEASEL_V2",
+        "estimator",
+    ),
+    a("tsa.ThetaForecaster", "sktime.forecasting.theta.ThetaForecaster", "forecast"),
+    a("tsa.MstlForecaster", "sktime.forecasting.mstl.MSTLForecaster", "forecast"),
+    a(
+        "tsa.ThresholdAr",
+        "statsmodels.tsa.regime_switching.markov_regression.MarkovRegression",
+        "forecast",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6123,6 +6177,19 @@ mod tests {
             "tslearn.RiseRegressor",
             "tsa.KimSmoother",
             "model_selection.KernelRidgeCV",
+            "stats.SplinePH",
+            "stats.RoystonParmar",
+            "panel.Absorbing2Sls",
+            "panel.Chamberlain",
+            "panel.MeanGroup",
+            "online.OneCycleLrRegressor",
+            "tslearn.MiniRocketClassifier",
+            "tslearn.WeaselD",
+            "tslearn.Catch22ForestRegressor",
+            "tsa.ThetaForecaster",
+            "tsa.MstlForecaster",
+            "stats.PiecewiseExponentialFitter",
+            "stats.KernelReg",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

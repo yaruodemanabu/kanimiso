@@ -2156,6 +2156,540 @@ impl Pooled2Sls {
     }
 }
 
+fn skip_panel_inner(issue: &signlred::Issue) -> bool {
+    matches!(
+        issue.code,
+        IssueCode::ResidualTooLarge
+            | IssueCode::NearSingular
+            | IssueCode::R2IsOne
+            | IssueCode::RankZero
+            | IssueCode::CholeskyFailed
+            | IssueCode::PerfectCollinearity
+    )
+}
+
+fn twosls_stages(
+    x: &Matrix,
+    y: &Vector,
+    z: &Matrix,
+    intercept: bool,
+    policy: &signlred::Policy,
+    tag: &str,
+    ctx: &mut FitCtx,
+) -> Option<Vector> {
+    let n = y.len().min(x.nrows()).min(z.nrows());
+    let p = x.ncols();
+    let z1 = if intercept {
+        Matrix::from_fn(n, z.ncols(), |i, j| z.get(i, j)).with_intercept()
+    } else {
+        Matrix::from_fn(n, z.ncols(), |i, j| z.get(i, j))
+    };
+    let mut xhat = Matrix::zeros(n, p);
+    for j in 0..p {
+        let xj = Vector::from_iter((0..n).map(|i| x.get(i, j)));
+        let mut scratch = signlred::Report::new(tag, "fs");
+        if let Some(pi) = least_squares(&mut scratch, &z1, &xj, policy) {
+            for i in 0..n {
+                let mut s = 0.0_f64;
+                for k in 0..pi.len().min(z1.ncols()) {
+                    s += z1.get(i, k) * pi[k];
+                }
+                xhat.set(i, j, s);
+            }
+        }
+        for issue in scratch.issues() {
+            if skip_panel_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+    }
+    let design = if intercept { xhat.with_intercept() } else { xhat };
+    let y_use = Vector::from_iter((0..n).map(|i| y[i]));
+    let mut scratch = signlred::Report::new(tag, "ss");
+    let beta = least_squares(&mut scratch, &design, &y_use, policy);
+    for issue in scratch.issues() {
+        if skip_panel_inner(issue) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    beta
+}
+
+/// Named between IV (linearmodels `BetweenIV`).
+#[derive(Clone, Debug, Default)]
+pub struct BetweenIv {
+    inner: Between2Sls,
+}
+
+impl BetweenIv {
+    /// Default between IV.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit group-mean 2SLS.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        z: &Matrix,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPanel>> {
+        self.inner.fit(x, y, z, groups, session)
+    }
+}
+
+/// Absorbing / within 2SLS (linearmodels `AbsorbingLS` + IV).
+///
+/// Group count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct Absorbing2Sls;
+
+impl Absorbing2Sls {
+    /// Default within IV.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit 2SLS after group demeaning (no intercept).
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        z: &Matrix,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPanel>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if groups.len() != y.len() || z.nrows() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("Absorbing2Sls groups/Z length ≠ n")
+                    .build(),
+            );
+        }
+        let sizes = group_sizes(groups);
+        warn_panel_groups(&mut ctx, &sizes, "Absorbing2Sls");
+        if ctx.report.contains(IssueCode::UnidentifiedModel)
+            || ctx.report.contains(IssueCode::IncrementalUnidentifiable)
+        {
+            return ctx.finish(empty_panel(x.ncols()));
+        }
+        let n = y.len().min(x.nrows()).min(groups.len()).min(z.nrows());
+        let p = x.ncols();
+        let q = z.ncols();
+        let z_dummy = Vector::zeros(n);
+        let x_n = Matrix::from_fn(n, p, |i, j| x.get(i, j));
+        let z_n = Matrix::from_fn(n, q, |i, j| z.get(i, j));
+        let y_n = Vector::from_iter((0..n).map(|i| y[i]));
+        let g_n = Vector::from_iter((0..n).map(|i| groups[i]));
+        let (mx, my) = group_means(&x_n, &y_n, &g_n, &sizes);
+        let (mz, _) = group_means(&z_n, &z_dummy, &g_n, &sizes);
+        let mut xw = Matrix::zeros(n, p);
+        let mut zw = Matrix::zeros(n, q);
+        let mut yw = Vector::zeros(n);
+        for i in 0..n {
+            if !g_n[i].is_finite() {
+                continue;
+            }
+            let g = g_n[i].round() as i64;
+            yw[i] = y_n[i] - my.get(&g).copied().unwrap_or(0.0);
+            for j in 0..p {
+                xw.set(i, j, x_n.get(i, j) - mx.get(&g).map(|v| v[j]).unwrap_or(0.0));
+            }
+            for j in 0..q {
+                zw.set(i, j, z_n.get(i, j) - mz.get(&g).map(|v| v[j]).unwrap_or(0.0));
+            }
+        }
+        if yw.std() <= ctx.policy.near_zero_variance {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("Absorbing2Sls within y has ~0 variance")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "within IV slopes",
+                        "after demeaning there is no leftover variation in y",
+                        "need within movement",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(empty_panel(p));
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Absorbing2Sls is within 2SLS, not high-dimensional absorbed LIML")
+                .compromise(NumericalCompromise::new(
+                    "absorbing IV / 2SLS with many FE",
+                    "group-demean then 2SLS without an intercept",
+                    "clustered SE and singleton drops are omitted",
+                    "read the slope as a within-IV sketch",
+                ))
+                .build(),
+        );
+        let policy = ctx.policy.clone();
+        match twosls_stages(&xw, &yw, &zw, false, &policy, "a2s", &mut ctx) {
+            Some(coef) => ctx.finish(FittedPanel {
+                coef,
+                intercept: 0.0,
+                n_groups: sizes.len(),
+                n_eff: n,
+            }),
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::UnidentifiedModel)
+                        .message("Absorbing2Sls second stage failed")
+                        .build(),
+                );
+                ctx.finish(empty_panel(p))
+            }
+        }
+    }
+}
+
+/// Random-effects IV via a fixed quasi-demeaning θ (Baltagi / Hausman–Taylor lite).
+///
+/// Group count is not identification `p`. θ is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RandomEffectsIv {
+    /// Quasi-demeaning weight in \([0,1]\).
+    pub theta: f64,
+}
+
+impl Default for RandomEffectsIv {
+    fn default() -> Self {
+        Self { theta: 0.5 }
+    }
+}
+
+impl RandomEffectsIv {
+    /// RE-IV with quasi-demeaning `theta`.
+    pub fn new(theta: f64) -> Self {
+        Self { theta }
+    }
+
+    /// Fit 2SLS on \(y-\theta\bar y_g\), \(X-\theta\bar X_g\), \(Z-\theta\bar Z_g\).
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        z: &Matrix,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPanel>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if groups.len() != y.len() || z.nrows() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("RandomEffectsIv groups/Z length ≠ n")
+                    .build(),
+            );
+        }
+        let sizes = group_sizes(groups);
+        warn_panel_groups(&mut ctx, &sizes, "RandomEffectsIv");
+        if ctx.report.contains(IssueCode::UnidentifiedModel) {
+            return ctx.finish(empty_panel(x.ncols()));
+        }
+        let mut theta = self.theta;
+        if !theta.is_finite() || !(0.0..=1.0).contains(&theta) {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("RandomEffectsIv theta outside [0,1]; using 0.5")
+                    .build(),
+            );
+            theta = 0.5;
+        }
+        let n = y.len().min(x.nrows()).min(groups.len()).min(z.nrows());
+        let p = x.ncols();
+        let q = z.ncols();
+        let z_dummy = Vector::zeros(n);
+        let x_n = Matrix::from_fn(n, p, |i, j| x.get(i, j));
+        let z_n = Matrix::from_fn(n, q, |i, j| z.get(i, j));
+        let y_n = Vector::from_iter((0..n).map(|i| y[i]));
+        let g_n = Vector::from_iter((0..n).map(|i| groups[i]));
+        let (mx, my) = group_means(&x_n, &y_n, &g_n, &sizes);
+        let (mz, _) = group_means(&z_n, &z_dummy, &g_n, &sizes);
+        let mut xq = Matrix::zeros(n, p);
+        let mut zq = Matrix::zeros(n, q);
+        let mut yq = Vector::zeros(n);
+        for i in 0..n {
+            if !g_n[i].is_finite() {
+                continue;
+            }
+            let g = g_n[i].round() as i64;
+            yq[i] = y_n[i] - theta * my.get(&g).copied().unwrap_or(0.0);
+            for j in 0..p {
+                xq.set(
+                    i,
+                    j,
+                    x_n.get(i, j) - theta * mx.get(&g).map(|v| v[j]).unwrap_or(0.0),
+                );
+            }
+            for j in 0..q {
+                zq.set(
+                    i,
+                    j,
+                    z_n.get(i, j) - theta * mz.get(&g).map(|v| v[j]).unwrap_or(0.0),
+                );
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("RandomEffectsIv uses a fixed θ, not Swamy–Arora GLS")
+                .compromise(NumericalCompromise::new(
+                    "Baltagi EC2SLS / Hausman–Taylor",
+                    "quasi-demeaned 2SLS with a user θ",
+                    "variance-component θ and GLS weights are omitted",
+                    "read the slope as an RE-IV sketch",
+                ))
+                .build(),
+        );
+        let policy = ctx.policy.clone();
+        match twosls_stages(&xq, &yq, &zq, true, &policy, "reiv", &mut ctx) {
+            Some(beta) => ctx.finish(FittedPanel {
+                intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+                coef: Vector::from_iter((0..p).map(|j| {
+                    beta.as_slice().get(j + 1).copied().unwrap_or(0.0)
+                })),
+                n_groups: sizes.len(),
+                n_eff: n,
+            }),
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::UnidentifiedModel)
+                        .message("RandomEffectsIv second stage failed")
+                        .build(),
+                );
+                ctx.finish(empty_panel(p))
+            }
+        }
+    }
+}
+
+/// Chamberlain / two-way Mundlak CRE: \(y\sim 1+X+\bar X_g+\bar X_t\).
+///
+/// Group and time counts are not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct Chamberlain;
+
+impl Chamberlain {
+    /// Default two-way Mundlak device.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit pooled OLS on \((1, X, \bar X_g, \bar X_t)\).
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        time: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPanel>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if groups.len() != y.len() || time.len() != y.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("Chamberlain groups/time length ≠ n")
+                    .build(),
+            );
+        }
+        let gsz = group_sizes(groups);
+        let tsz = group_sizes(time);
+        warn_panel_groups(&mut ctx, &gsz, "Chamberlain");
+        if ctx.report.contains(IssueCode::UnidentifiedModel) {
+            return ctx.finish(empty_panel(x.ncols()));
+        }
+        let n = y.len().min(x.nrows()).min(groups.len()).min(time.len());
+        let p = x.ncols();
+        let x_n = Matrix::from_fn(n, p, |i, j| x.get(i, j));
+        let y_n = Vector::from_iter((0..n).map(|i| y[i]));
+        let g_n = Vector::from_iter((0..n).map(|i| groups[i]));
+        let t_n = Vector::from_iter((0..n).map(|i| time[i]));
+        let (mxg, _) = group_means(&x_n, &y_n, &g_n, &gsz);
+        let (mxt, _) = group_means(&x_n, &y_n, &t_n, &tsz);
+        let design = Matrix::from_fn(n, 1 + 3 * p, |i, j| {
+            if j == 0 {
+                1.0
+            } else if j <= p {
+                x_n.get(i, j - 1)
+            } else if j <= 2 * p {
+                let g = g_n[i].round() as i64;
+                mxg.get(&g).map(|v| v[j - 1 - p]).unwrap_or(0.0)
+            } else {
+                let t = t_n[i].round() as i64;
+                mxt.get(&t).map(|v| v[j - 1 - 2 * p]).unwrap_or(0.0)
+            }
+        });
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Chamberlain is pooled OLS on (X, group means, time means)")
+                .compromise(NumericalCompromise::new(
+                    "Chamberlain CRE / two-way Mundlak GLS",
+                    "pooled OLS with appended group and time means of X",
+                    "random-effect GLS and minimum-distance π are omitted",
+                    "read the X slopes as a two-way CRE sketch",
+                ))
+                .build(),
+        );
+        let mut scratch = signlred::Report::new("chamb", "ols");
+        let Some(beta) = least_squares(&mut scratch, &design, &y_n, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("Chamberlain OLS failed")
+                    .build(),
+            );
+            return ctx.finish(empty_panel(p));
+        };
+        for issue in scratch.issues() {
+            if skip_panel_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedPanel {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            coef: Vector::from_iter((0..p).map(|j| {
+                beta.as_slice().get(j + 1).copied().unwrap_or(0.0)
+            })),
+            n_groups: gsz.len(),
+            n_eff: n,
+        })
+    }
+}
+
+/// Named two-way Mundlak alias of [`Chamberlain`].
+#[derive(Clone, Debug, Default)]
+pub struct TwoWayMundlak {
+    inner: Chamberlain,
+}
+
+impl TwoWayMundlak {
+    /// Default two-way Mundlak.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit \(y\sim 1+X+\bar X_g+\bar X_t\).
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        time: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPanel>> {
+        self.inner.fit(x, y, groups, time, session)
+    }
+}
+
+/// Pesaran–Smith mean-group estimator (linearmodels / entity-wise OLS).
+///
+/// Group count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct MeanGroup;
+
+impl MeanGroup {
+    /// Default mean-group OLS.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Average within-group OLS slopes (with intercept).
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPanel>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if groups.len() != y.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("MeanGroup groups length ≠ n")
+                    .build(),
+            );
+        }
+        let sizes = group_sizes(groups);
+        warn_panel_groups(&mut ctx, &sizes, "MeanGroup");
+        let n = y.len().min(x.nrows()).min(groups.len());
+        let p = x.ncols();
+        let mut acc = Vector::zeros(p);
+        let mut icept = 0.0_f64;
+        let mut used = 0usize;
+        for (&g, &sz) in &sizes {
+            if sz < 2 {
+                continue;
+            }
+            let rows: Vec<usize> = (0..n)
+                .filter(|&i| groups[i].is_finite() && groups[i].round() as i64 == g)
+                .collect();
+            if rows.len() < 2 {
+                continue;
+            }
+            let xd = Matrix::from_fn(rows.len(), p, |r, j| x.get(rows[r], j)).with_intercept();
+            let yd = Vector::from_iter(rows.iter().map(|&i| y[i]));
+            let mut scratch = signlred::Report::new("mg", "ols");
+            let Some(beta) = least_squares(&mut scratch, &xd, &yd, &ctx.policy) else {
+                continue;
+            };
+            for issue in scratch.issues() {
+                if skip_panel_inner(issue) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            icept += beta.as_slice().first().copied().unwrap_or(0.0);
+            for j in 0..p {
+                acc[j] += beta.as_slice().get(j + 1).copied().unwrap_or(0.0);
+            }
+            used += 1;
+        }
+        if used == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("MeanGroup has no group with a usable OLS")
+                    .build(),
+            );
+            return ctx.finish(empty_panel(p));
+        }
+        let u = used as f64;
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("MeanGroup averages entity OLS, not a hierarchical Bayes slope")
+                .compromise(NumericalCompromise::new(
+                    "Pesaran–Smith MG / random-coefficient GLS",
+                    "unweighted average of per-group OLS slopes",
+                    "Swamy weights and cross-section dependence are omitted",
+                    "read the slope as a mean-group sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedPanel {
+            coef: acc.scale(1.0 / u),
+            intercept: icept / u,
+            n_groups: used,
+            n_eff: n,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2287,5 +2821,29 @@ mod tests {
             .fit(&x, &y, &x, &Session::new("p2s", "fit"))
             .expect("p2s");
         assert!(p2.value.coef[0].is_finite());
+        let biv = BetweenIv::new()
+            .fit(&xfm, &y, &xfm, &g, &Session::new("biv", "fit"))
+            .expect("biv");
+        assert!(biv.value.coef[0].is_finite());
+        let a2 = Absorbing2Sls::new()
+            .fit(&x, &y, &x, &g, &Session::new("a2s", "fit"))
+            .expect("a2s");
+        assert!((a2.value.coef[0] - 2.0).abs() < 0.25, "a2s={}", a2.value.coef[0]);
+        let reiv = RandomEffectsIv::new(0.5)
+            .fit(&x, &y, &x, &g, &Session::new("reiv", "fit"))
+            .expect("reiv");
+        assert!(reiv.value.coef[0].is_finite());
+        let ch = Chamberlain::new()
+            .fit(&xtw, &ytw, &g, &time, &Session::new("ch", "fit"))
+            .expect("ch");
+        assert!(ch.value.coef[0].is_finite());
+        let twm = TwoWayMundlak::new()
+            .fit(&xtw, &ytw, &g, &time, &Session::new("twm", "fit"))
+            .expect("twm");
+        assert!(twm.value.coef[0].is_finite());
+        let mg = MeanGroup::new()
+            .fit(&x, &y, &g, &Session::new("mg", "fit"))
+            .expect("mg");
+        assert!((mg.value.coef[0] - 2.0).abs() < 0.25, "mg={}", mg.value.coef[0]);
     }
 }

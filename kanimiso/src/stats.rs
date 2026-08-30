@@ -20084,6 +20084,506 @@ pub struct KnockoffResult {
     pub statistic: Vector,
 }
 
+/// Named piecewise-exponential fitter (lifelines `PiecewiseExponentialFitter`).
+#[derive(Clone, Debug)]
+pub struct PiecewiseExponentialFitter {
+    inner: PiecewiseExponential,
+}
+
+impl Default for PiecewiseExponentialFitter {
+    fn default() -> Self {
+        Self {
+            inner: PiecewiseExponential::default(),
+        }
+    }
+}
+
+impl PiecewiseExponentialFitter {
+    /// Default four-piece PE.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit constant hazards on right-censored times.
+    pub fn fit(
+        &self,
+        time: &Vector,
+        event: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPiecewiseExponential>> {
+        self.inner.fit(time, event, session)
+    }
+}
+
+/// Named Nadaraya–Watson estimator (statsmodels `nonparametric.KernelReg`).
+#[derive(Clone, Debug)]
+pub struct KernelReg {
+    /// Gaussian bandwidth. Not identification `p`.
+    pub bandwidth: f64,
+}
+
+impl Default for KernelReg {
+    fn default() -> Self {
+        Self { bandwidth: 1.0 }
+    }
+}
+
+impl KernelReg {
+    /// Kernel regression with bandwidth `bandwidth`.
+    pub fn new(bandwidth: f64) -> Self {
+        Self { bandwidth }
+    }
+
+    /// Fit \(\hat m(x_i)\) at the observed abscissae.
+    pub fn fit(&self, x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        kernel_reg(x, y, self.bandwidth, session)
+    }
+}
+
+/// Named Cleveland LOWESS (statsmodels `nonparametric.lowess`).
+#[derive(Clone, Debug)]
+pub struct Lowess {
+    /// Neighbourhood fraction in \((0,1]\). Not identification `p`.
+    pub frac: f64,
+}
+
+impl Default for Lowess {
+    fn default() -> Self {
+        Self { frac: 0.3 }
+    }
+}
+
+impl Lowess {
+    /// LOWESS with span `frac`.
+    pub fn new(frac: f64) -> Self {
+        Self { frac }
+    }
+
+    /// Fit locally weighted lines at each \(x_i\).
+    pub fn fit(&self, x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        lowess(x, y, self.frac, session)
+    }
+}
+
+/// Named empirical-likelihood mean test (statsmodels `emplike`).
+#[derive(Clone, Debug)]
+pub struct EmpiricalLikelihood {
+    /// Null mean \(\mu_0\).
+    pub mu0: f64,
+}
+
+impl Default for EmpiricalLikelihood {
+    fn default() -> Self {
+        Self { mu0: 0.0 }
+    }
+}
+
+impl EmpiricalLikelihood {
+    /// EL test of mean `mu0`.
+    pub fn new(mu0: f64) -> Self {
+        Self { mu0 }
+    }
+
+    /// Owen \(W(\mu_0)\) against a \(\chi^2_1\).
+    pub fn test(&self, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+        empirical_likelihood_mean(y, self.mu0, session)
+    }
+}
+
+fn rcs_knots_from(times: &[f64], n_knots: usize) -> Vec<f64> {
+    let mut v: Vec<f64> = times
+        .iter()
+        .copied()
+        .filter(|t| t.is_finite() && *t > 0.0)
+        .map(|t| t.ln())
+        .collect();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
+    if v.is_empty() {
+        return v;
+    }
+    let k = n_knots.max(2).min(v.len().max(2));
+    if v.len() == 1 {
+        return vec![v[0], v[0] + 1.0];
+    }
+    (0..k)
+        .map(|j| {
+            let q = if k <= 1 {
+                0.5
+            } else {
+                j as f64 / (k - 1) as f64
+            };
+            let idx = ((q * (v.len() - 1) as f64).round() as usize).min(v.len() - 1);
+            v[idx]
+        })
+        .collect()
+}
+
+fn rcs_terms(u: f64, knots: &[f64]) -> Vec<f64> {
+    if knots.len() < 3 {
+        return vec![u];
+    }
+    let t1 = knots[0];
+    let tk = knots[knots.len() - 1];
+    let tk1 = knots[knots.len() - 2];
+    let span = (tk - t1).max(1e-12);
+    let den = (tk - tk1).max(1e-12);
+    let plus3 = |x: f64, t: f64| {
+        let z = x - t;
+        if z > 0.0 {
+            z * z * z
+        } else {
+            0.0
+        }
+    };
+    let mut out = vec![u];
+    for &tj in &knots[..knots.len() - 2] {
+        let d = plus3(u, tj) - plus3(u, tk1) * (tk - tj) / den + plus3(u, tk) * (tk1 - tj) / den;
+        out.push(d / (span * span));
+    }
+    out
+}
+
+/// Local Breslow \(H(t_i)\) without [`kaplan_meier_fit`] (zero events would abort).
+fn local_breslow_h(time: &Vector, event: &Vector) -> Vector {
+    let n = time.len().min(event.len());
+    let mut idx: Vec<usize> = (0..n).filter(|&i| time[i].is_finite()).collect();
+    idx.sort_by(|&a, &b| {
+        time[a]
+            .partial_cmp(&time[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut h = Vector::zeros(n);
+    let mut acc = 0.0_f64;
+    let mut i = 0usize;
+    while i < idx.len() {
+        let t = time[idx[i]];
+        let mut j = i;
+        let mut d = 0.0_f64;
+        while j < idx.len() && (time[idx[j]] - t).abs() < 1e-15 {
+            if idx[j] < event.len() && event[idx[j]] > 0.5 {
+                d += 1.0;
+            }
+            j += 1;
+        }
+        let r = (idx.len() - i) as f64;
+        if r > 0.0 {
+            acc += d / r;
+        }
+        for &k in &idx[i..j] {
+            h[k] = acc;
+        }
+        i = j;
+    }
+    h
+}
+
+/// Cox PH with a restricted-cubic-spline of \(\log t\) (lifelines / sksurv spline PH).
+///
+/// Knot count is not identification `p`. Inner Cox `CholeskyFailed` is not promoted.
+#[derive(Clone, Debug)]
+pub struct SplinePH {
+    /// RCS knots on \(\log t\). Not identification `p`.
+    pub n_knots: usize,
+}
+
+impl Default for SplinePH {
+    fn default() -> Self {
+        Self { n_knots: 3 }
+    }
+}
+
+impl SplinePH {
+    /// Default three-knot spline PH.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit \(h(t\mid x)=h_0(t)\exp(x\beta + \mathrm{rcs}(\log t)\gamma)\).
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCoxPH>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_vector(durations),
+            None,
+            &ctx.policy,
+        );
+        if events.len() != x.nrows() || durations.len() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("SplinePH lengths ≠ X rows")
+                    .build(),
+            );
+        }
+        let n = x.nrows().min(durations.len()).min(events.len());
+        let ev_logs: Vec<f64> = (0..n)
+            .filter(|&i| events[i] > 0.5 && durations[i].is_finite() && durations[i] > 0.0)
+            .map(|i| durations[i])
+            .collect();
+        if ev_logs.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("SplinePH has zero events")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "spline PH coefficients",
+                        "without events the partial likelihood is flat",
+                        "collect events",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedCoxPH {
+                coef: Vector::zeros(x.ncols()),
+                loglik: f64::NAN,
+                n_events: 0,
+                n,
+                converged: false,
+            });
+        }
+        let knots = rcs_knots_from(&ev_logs, self.n_knots.max(3));
+        let extra = rcs_terms(0.0, &knots).len();
+        let p = x.ncols();
+        let xe = Matrix::from_fn(n, p + extra, |i, j| {
+            if j < p {
+                x.get(i, j)
+            } else {
+                let u = durations[i].max(1e-12).ln();
+                *rcs_terms(u, &knots).get(j - p).unwrap_or(&0.0)
+            }
+        });
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SplinePH appends RCS(log t) to a Breslow Cox, not a Royston–Parmar MLE")
+                .compromise(NumericalCompromise::new(
+                    "flexible parametric PH / Royston–Parmar",
+                    "Cox partial likelihood on (X, rcs(log t))",
+                    "knots are percentiles of log event times; the baseline is still nonparametric",
+                    "read β as a spline-augmented PH sketch",
+                ))
+                .build(),
+        );
+        let dur_n = Vector::from_iter((0..n).map(|i| durations[i]));
+        let ev_n = Vector::from_iter((0..n).map(|i| events[i]));
+        match CoxPH::new().fit(&dur_n, &ev_n, &xe, &session.child("sph")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if skip_aborting_inner(issue) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                ctx.finish(FittedCoxPH {
+                    coef: Vector::from_iter((0..p).map(|j| {
+                        q.value.coef.as_slice().get(j).copied().unwrap_or(0.0)
+                    })),
+                    loglik: q.value.loglik,
+                    n_events: q.value.n_events,
+                    n: q.value.n,
+                    converged: q.value.converged,
+                })
+            }
+            Err(_) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("SplinePH inner Cox failed")
+                        .build(),
+                );
+                ctx.finish(FittedCoxPH {
+                    coef: Vector::zeros(p),
+                    loglik: f64::NAN,
+                    n_events: ev_logs.len(),
+                    n,
+                    converged: false,
+                })
+            }
+        }
+    }
+}
+
+/// Royston–Parmar flexible parametric PH (lifelines `CRCSplineFitter` lite).
+///
+/// \(\log H(t\mid x)=\mathrm{rcs}(\log t)\gamma + x\beta\) by OLS on event-time
+/// Breslow \(H\). Knot count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RoystonParmar {
+    /// RCS knots on \(\log t\). Not identification `p`.
+    pub n_knots: usize,
+}
+
+impl Default for RoystonParmar {
+    fn default() -> Self {
+        Self { n_knots: 3 }
+    }
+}
+
+impl RoystonParmar {
+    /// Default three-knot RP.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit the log-cumulative-hazard spline plus covariate slopes.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedRoystonParmar>> {
+        royston_parmar_fit(self.n_knots, durations, events, x, session)
+    }
+}
+
+/// Fitted Royston–Parmar / CRC spline.
+#[derive(Clone, Debug)]
+pub struct FittedRoystonParmar {
+    /// Intercept plus RCS coefficients of \(\log t\).
+    pub gamma: Vector,
+    /// Covariate log-hazard slopes.
+    pub coef: Vector,
+    /// Knots on \(\log t\).
+    pub knots: Vector,
+}
+
+fn royston_parmar_fit(
+    n_knots: usize,
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<FittedRoystonParmar>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    if events.len() != x.nrows() || durations.len() != x.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("RoystonParmar lengths ≠ X rows")
+                .build(),
+        );
+    }
+    let n = x.nrows().min(durations.len()).min(events.len());
+    let ev_idx: Vec<usize> = (0..n)
+        .filter(|&i| events[i] > 0.5 && durations[i].is_finite() && durations[i] > 0.0)
+        .collect();
+    let p = x.ncols();
+    if ev_idx.len() < 3 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Royston–Parmar wants ≥3 events")
+                .build(),
+        );
+    }
+    if ev_idx.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("Royston–Parmar has zero events")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "flexible parametric PH",
+                    "without events log H is undefined",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedRoystonParmar {
+            gamma: Vector::zeros(1),
+            coef: Vector::zeros(p),
+            knots: Vector::zeros(0),
+        });
+    }
+    let ev_times: Vec<f64> = ev_idx.iter().map(|&i| durations[i]).collect();
+    let knots = rcs_knots_from(&ev_times, n_knots.max(3));
+    let h = local_breslow_h(durations, events);
+    let extra = rcs_terms(0.0, &knots).len();
+    let m = ev_idx.len();
+    let design = Matrix::from_fn(m, 1 + extra + p, |r, j| {
+        let i = ev_idx[r];
+        if j == 0 {
+            1.0
+        } else if j <= extra {
+            let u = durations[i].max(1e-12).ln();
+            *rcs_terms(u, &knots).get(j - 1).unwrap_or(&0.0)
+        } else {
+            x.get(i, j - 1 - extra)
+        }
+    });
+    let yh = Vector::from_iter(ev_idx.iter().map(|&i| h[i].max(1e-12).ln()));
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("RoystonParmar is OLS of log Breslow H, not the stpm2 MLE")
+            .compromise(NumericalCompromise::new(
+                "Royston–Parmar / stpm2 flexible parametric PH",
+                "OLS of log Breslow H(t) on rcs(log t) and X at events",
+                "the likelihood is not the published RP Poisson/Weibull form",
+                "read γ and β as a planning spline-PH sketch",
+            ))
+            .build(),
+    );
+    let mut scratch = Report::new("rp", "ols");
+    let beta = least_squares(&mut scratch, &design, &yh, &ctx.policy)
+        .unwrap_or_else(|| Vector::zeros(design.ncols()));
+    for issue in scratch.issues() {
+        if skip_aborting_inner(issue) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let gdim = 1 + extra;
+    ctx.finish(FittedRoystonParmar {
+        gamma: Vector::from_iter((0..gdim).map(|j| beta.as_slice().get(j).copied().unwrap_or(0.0))),
+        coef: Vector::from_iter(
+            (0..p).map(|j| beta.as_slice().get(gdim + j).copied().unwrap_or(0.0)),
+        ),
+        knots: Vector::from_iter(knots.iter().copied()),
+    })
+}
+
+/// Named CRC / restricted cubic spline PH (lifelines `CRCSplineFitter`).
+#[derive(Clone, Debug)]
+pub struct CrcSpline {
+    inner: RoystonParmar,
+}
+
+impl Default for CrcSpline {
+    fn default() -> Self {
+        Self {
+            inner: RoystonParmar { n_knots: 4 },
+        }
+    }
+}
+
+impl CrcSpline {
+    /// Four-knot CRC spline.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit the four-knot log-cumulative-hazard spline.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedRoystonParmar>> {
+        self.inner.fit(durations, events, x, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -20951,5 +21451,35 @@ mod tests {
         assert!(ox.value.gap.is_finite() || ox.value.gap.is_nan());
         let kn = knockoff(&x, &y, &Session::new("kn", "t")).expect("kn");
         assert_eq!(kn.value.selected.len(), 1);
+        let pef = PiecewiseExponentialFitter::new()
+            .fit(&dur, &ev, &Session::new("pef", "t"))
+            .expect("pef");
+        assert!(!pef.value.hazard.is_empty());
+        assert!(pef.value.hazard.as_slice().iter().all(|v| v.is_finite()));
+        let kreg = KernelReg::new(1.0)
+            .fit(&y, &y, &Session::new("kreg", "t"))
+            .expect("kreg");
+        assert_eq!(kreg.value.len(), 40);
+        let low = Lowess::new(0.4)
+            .fit(&y, &y, &Session::new("low", "t"))
+            .expect("low");
+        assert_eq!(low.value.len(), 40);
+        let el = EmpiricalLikelihood::new(y.mean())
+            .test(&y, &Session::new("el", "t"))
+            .expect("el");
+        assert!(el.value.statistic.is_finite() || el.value.pvalue.is_nan());
+        let sph = SplinePH::new()
+            .fit(&dur, &ev, &xcox, &Session::new("sph", "t"))
+            .expect("sph");
+        assert_eq!(sph.value.coef.len(), 1);
+        let rp = RoystonParmar::new()
+            .fit(&dur, &ev, &xcox, &Session::new("rp", "t"))
+            .expect("rp");
+        assert_eq!(rp.value.coef.len(), 1);
+        assert!(rp.value.gamma.as_slice().iter().all(|v| v.is_finite()));
+        let crc = CrcSpline::new()
+            .fit(&dur, &ev, &xcox, &Session::new("crc", "t"))
+            .expect("crc");
+        assert_eq!(crc.value.coef.len(), 1);
     }
 }

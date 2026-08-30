@@ -16574,6 +16574,182 @@ impl FitSeries for KimSmoother {
     }
 }
 
+/// Named Theta forecaster (sktime `ThetaForecaster`).
+#[derive(Clone, Debug, Default)]
+pub struct ThetaForecaster {
+    inner: Theta,
+}
+
+impl ThetaForecaster {
+    /// Default Theta method.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted Theta wrapper.
+#[derive(Clone, Debug)]
+pub struct FittedThetaForecaster {
+    inner: FittedTheta,
+}
+
+impl FittedThetaForecaster {
+    /// `level + h · drift`.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.forecast(h, session)
+    }
+}
+
+impl FitSeries for ThetaForecaster {
+    type Fitted = FittedThetaForecaster;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedThetaForecaster>> {
+        self.inner
+            .fit_series(y, session)
+            .map(|q| q.map(|inner| FittedThetaForecaster { inner }))
+    }
+}
+
+/// Named MSTL forecaster (sktime `MSTLForecaster`): MSTL plus SES on the residual.
+///
+/// Seasonal periods are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MstlForecaster {
+    inner: Mstl,
+}
+
+impl Default for MstlForecaster {
+    fn default() -> Self {
+        Self {
+            inner: Mstl {
+                period: 4,
+                period2: 8,
+            },
+        }
+    }
+}
+
+impl MstlForecaster {
+    /// Two-period MSTL forecaster.
+    pub fn new(period: usize, period2: usize) -> Self {
+        Self {
+            inner: Mstl::new(period, period2),
+        }
+    }
+}
+
+/// Fitted MSTL + residual SES.
+#[derive(Clone, Debug)]
+pub struct FittedMstlForecaster {
+    last_trend: f64,
+    seasonal: Vector,
+    seasonal2: Vector,
+    resid_level: f64,
+    period: usize,
+    period2: usize,
+}
+
+impl FittedMstlForecaster {
+    /// Repeat last trend plus seasonal tiles plus SES residual level.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let n = self.seasonal.len().max(1);
+        let n2 = self.seasonal2.len().max(1);
+        let p1 = self.period.max(2).min(n);
+        let p2 = self.period2.max(3).min(n2);
+        let out = Vector::from_iter((1..=h).map(|k| {
+            let s1 = self.seasonal[(n.saturating_sub(p1) + ((k - 1) % p1)) % n];
+            let s2 = if self.seasonal2.is_empty() {
+                0.0
+            } else {
+                self.seasonal2[(n2.saturating_sub(p2) + ((k - 1) % p2)) % n2]
+            };
+            self.last_trend + s1 + s2 + self.resid_level
+        }));
+        ctx.finish(out)
+    }
+}
+
+impl FitSeries for MstlForecaster {
+    type Fitted = FittedMstlForecaster;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMstlForecaster>> {
+        let q = self.inner.fit_series(y, &session.child("mstl-f"))?;
+        let mut ctx = FitCtx::with_session(session.child("finish"));
+        let last_trend = q
+            .value
+            .trend
+            .as_slice()
+            .last()
+            .copied()
+            .unwrap_or(0.0);
+        let resid = q.value.resid.clone();
+        let (_, _, resid_level, _, _) =
+            esm_fit(resid.as_slice(), SmoothingKind::Simple, None, None);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("MstlForecaster is MSTL plus SES on the residual, not the sktime pipeline")
+                .compromise(NumericalCompromise::new(
+                    "sktime MSTLForecaster with a trend model",
+                    "MSTL decomposition then SES on the leftover",
+                    "the published trend/seasonal forecast members are omitted",
+                    "read the path as a two-season sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedMstlForecaster {
+            last_trend,
+            seasonal: q.value.seasonal,
+            seasonal2: q.value.seasonal2,
+            resid_level,
+            period: self.inner.period.max(2),
+            period2: self.inner.period2.max(3),
+        })
+    }
+}
+
+/// Named threshold AR (statsmodels `TAR` / sktime `ThresholdAR`).
+#[derive(Clone, Debug, Default)]
+pub struct ThresholdAr {
+    inner: Setar,
+}
+
+impl ThresholdAr {
+    /// Default two-regime TAR.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted threshold AR.
+#[derive(Clone, Debug)]
+pub struct FittedThresholdAr {
+    inner: FittedSetar,
+}
+
+impl FittedThresholdAr {
+    /// Iterate the threshold recursion.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.forecast(h, session)
+    }
+}
+
+impl FitSeries for ThresholdAr {
+    type Fitted = FittedThresholdAr;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedThresholdAr>> {
+        self.inner
+            .fit_series(y, session)
+            .map(|q| q.map(|inner| FittedThresholdAr { inner }))
+    }
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -17815,5 +17991,32 @@ impl FitSeries for KimSmoother {
             .as_slice()
             .iter()
             .all(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0));
+        let thf = ThetaForecaster::new()
+            .fit_series(&y, &Session::new("thf", "t"))
+            .expect("thf");
+        let thp = thf
+            .value
+            .forecast(3, &Session::new("thfp", "t"))
+            .expect("thfp");
+        assert_eq!(thp.value.len(), 3);
+        assert!(thp.value.as_slice().iter().all(|v| v.is_finite()));
+        let msf = MstlForecaster::new(4, 8)
+            .fit_series(&y, &Session::new("msf", "t"))
+            .expect("msf");
+        let msp = msf
+            .value
+            .forecast(4, &Session::new("msfp", "t"))
+            .expect("msfp");
+        assert_eq!(msp.value.len(), 4);
+        assert!(msp.value.as_slice().iter().all(|v| v.is_finite()));
+        let tar = ThresholdAr::new()
+            .fit_series(&y, &Session::new("tar", "t"))
+            .expect("tar");
+        let tarp = tar
+            .value
+            .forecast(2, &Session::new("tarp", "t"))
+            .expect("tarp");
+        assert_eq!(tarp.value.len(), 2);
+        assert!(tarp.value.as_slice().iter().all(|v| v.is_finite()));
     }
 }

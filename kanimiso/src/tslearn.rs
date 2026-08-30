@@ -14445,6 +14445,401 @@ impl Predict for FittedRiseRegressor {
     }
 }
 
+/// MiniROCKET features + ExtraTrees (sktime `MiniRocketClassifier`).
+///
+/// Kernel count is not identification `p`. ExtraTrees may abort as a vacuous
+/// stump; ridge on the same map is the fallback.
+#[derive(Clone, Debug)]
+pub struct MiniRocketClassifier {
+    /// Random dilated kernels.
+    pub n_kernels: usize,
+    /// ExtraTrees count.
+    pub n_estimators: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// Ridge \(\alpha\) fallback.
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for MiniRocketClassifier {
+    fn default() -> Self {
+        Self {
+            n_kernels: 16,
+            n_estimators: 8,
+            max_depth: 4,
+            alpha: 0.1,
+            seed: 11,
+        }
+    }
+}
+
+impl MiniRocketClassifier {
+    /// Default MiniROCKET classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted MiniROCKET forest or ridge fallback.
+#[derive(Clone, Debug)]
+pub struct FittedMiniRocketClassifier {
+    rocket: MiniRocket,
+    forest: Option<crate::tree::FittedForestClassifier>,
+    ridge: Option<crate::classification::FittedRidgeClassifier>,
+}
+
+impl Fit for MiniRocketClassifier {
+    type Fitted = FittedMiniRocketClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMiniRocketClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let rocket = MiniRocket {
+            n_kernels: self.n_kernels.max(1),
+            seed: self.seed,
+        };
+        let feat = rocket.transform(x, &session.child("mrc"))?;
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("MiniRocketClassifier is PPV features plus ExtraTrees, not the published pipeline")
+                .compromise(NumericalCompromise::new(
+                    "sktime MiniRocketClassifier",
+                    "MiniROCKET transform then ExtraTreesClassifier",
+                    "the official ridge / logistic head and kernel count are omitted",
+                    "do not read as a published MiniROCKET accuracy",
+                ))
+                .build(),
+        );
+        let mut et = crate::tree::ExtraTreesClassifier {
+            n_estimators: self.n_estimators.max(1),
+            max_depth: self.max_depth.max(1),
+            min_samples_split: 2,
+            max_features: Some(4),
+            seed: self.seed,
+        };
+        match et.fit(&feat.value, y, &session.child("mrc-et")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::R2IsOne
+                            | IssueCode::RankZero
+                            | IssueCode::MeaninglessFit
+                            | IssueCode::PredictionsAreConstant
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                ctx.finish(FittedMiniRocketClassifier {
+                    rocket,
+                    forest: Some(q.value),
+                    ridge: None,
+                })
+            }
+            Err(_) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("MiniRocketClassifier ExtraTrees failed; falling back to ridge")
+                        .build(),
+                );
+                let ridge = binary_ridge_from_features(
+                    &feat.value,
+                    y,
+                    self.alpha,
+                    &ctx.policy,
+                    "mrc",
+                );
+                ctx.finish(FittedMiniRocketClassifier {
+                    rocket,
+                    forest: None,
+                    ridge: Some(ridge),
+                })
+            }
+        }
+    }
+}
+
+impl Predict for FittedMiniRocketClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let feat = self.rocket.transform(x, &session.child("mrc"))?;
+        if let Some(f) = &self.forest {
+            return f.predict(&feat.value, session);
+        }
+        if let Some(r) = &self.ridge {
+            return r.predict(&feat.value, session);
+        }
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+        ctx.finish(Vector::zeros(x.nrows()))
+    }
+}
+
+/// Catch22 + ExtraTrees regressor (sktime `Catch22` forest regression).
+///
+/// Catch22 width and tree count are not identification `p`. ExtraTrees may
+/// abort as a vacuous stump; ridge on the same map is the fallback.
+#[derive(Clone, Debug)]
+pub struct Catch22ForestRegressor {
+    /// ExtraTrees count.
+    pub n_estimators: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for Catch22ForestRegressor {
+    fn default() -> Self {
+        Self {
+            n_estimators: 8,
+            max_depth: 4,
+            seed: 13,
+        }
+    }
+}
+
+impl Catch22ForestRegressor {
+    /// Default Catch22 forest regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted Catch22 ExtraTrees or ridge fallback.
+#[derive(Clone, Debug)]
+pub struct FittedCatch22ForestRegressor {
+    forest: Option<crate::tree::FittedForestRegressor>,
+    ridge: Option<FittedPenalized>,
+}
+
+impl Fit for Catch22ForestRegressor {
+    type Fitted = FittedCatch22ForestRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCatch22ForestRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let z = catch22_rows(x, session, &mut ctx);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Catch22ForestRegressor is Catch22 plus ExtraTrees, not a published forest")
+                .compromise(NumericalCompromise::new(
+                    "sktime Catch22 + ExtraTreesRegressor",
+                    "catch22_rows then ExtraTreesRegressor",
+                    "rotation / CIF members are omitted",
+                    "do not read as a published Catch22-forest accuracy",
+                ))
+                .build(),
+        );
+        let mut et = crate::tree::ExtraTreesRegressor {
+            n_estimators: self.n_estimators.max(1),
+            max_depth: self.max_depth.max(1),
+            min_samples_split: 2,
+            max_features: Some(4),
+            seed: self.seed,
+        };
+        match et.fit(&z, y, &session.child("c22fr-et")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::R2IsOne
+                            | IssueCode::RankZero
+                            | IssueCode::MeaninglessFit
+                            | IssueCode::PredictionsAreConstant
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                ctx.finish(FittedCatch22ForestRegressor {
+                    forest: Some(q.value),
+                    ridge: None,
+                })
+            }
+            Err(_) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("Catch22ForestRegressor ExtraTrees failed; falling back to ridge")
+                        .build(),
+                );
+                let ridge = ridge_reg_from_features(&z, y, 0.5, &ctx.policy, "c22fr");
+                ctx.finish(FittedCatch22ForestRegressor {
+                    forest: None,
+                    ridge: Some(ridge),
+                })
+            }
+        }
+    }
+}
+
+impl Predict for FittedCatch22ForestRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = {
+            let mut ctx = FitCtx::with_session(session.child("c22fr-z"));
+            catch22_rows(x, session, &mut ctx)
+        };
+        if let Some(f) = &self.forest {
+            return f.predict(&z, session);
+        }
+        if let Some(r) = &self.ridge {
+            return r.predict(&z, session);
+        }
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+        ctx.finish(Vector::zeros(x.nrows()))
+    }
+}
+
+fn dilated_columns(x: &Matrix, dil: usize) -> Matrix {
+    let d = dil.max(1);
+    let t = x.ncols();
+    let nt = if t == 0 { 1 } else { (t - 1) / d + 1 };
+    Matrix::from_fn(x.nrows(), nt.max(1), |i, j| {
+        let c = j * d;
+        if c < t {
+            x.get(i, c)
+        } else {
+            0.0
+        }
+    })
+}
+
+/// WEASEL+Dilation (sktime `WEASEL-D`): BOSS histograms at two dilations + ridge.
+///
+/// Dilation / vocab counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct WeaselD {
+    /// Base window (clamped to series length).
+    pub window: usize,
+    /// DFT coefficients kept per window.
+    pub word_len: usize,
+    /// SFA alphabet size.
+    pub alphabet: usize,
+    /// Words kept per dilation.
+    pub n_words: usize,
+    /// Second dilation. Not identification `p`.
+    pub dilation: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for WeaselD {
+    fn default() -> Self {
+        Self {
+            window: 4,
+            word_len: 4,
+            alphabet: 4,
+            n_words: 6,
+            dilation: 2,
+            alpha: 0.1,
+        }
+    }
+}
+
+impl WeaselD {
+    /// Default two-dilation WEASEL.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted WEASEL-D ridge.
+#[derive(Clone, Debug)]
+pub struct FittedWeaselD {
+    spec: (usize, usize, usize),
+    dilation: usize,
+    idx_a: Vec<usize>,
+    idx_b: Vec<usize>,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for WeaselD {
+    type Fitted = FittedWeaselD;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedWeaselD>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let w = self.window.max(2);
+        let dil = self.dilation.max(2);
+        let (h1, _) = boss_histograms(x, w, self.word_len, self.alphabet);
+        let xd = dilated_columns(x, dil);
+        let (h2, _) = boss_histograms(&xd, w.min(xd.ncols().max(2)), self.word_len, self.alphabet);
+        let (z1, idx_a) = weasel_keep(&h1, self.n_words);
+        let (z2, idx_b) = weasel_keep(&h2, self.n_words);
+        let z = concat_features(&z1, &z2);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("WeaselD is two dilated BOSS histograms plus ridge, not published WEASEL+")
+                .compromise(NumericalCompromise::new(
+                    "sktime WEASEL-D / WEASEL 2.0 dilated dictionaries",
+                    "BOSS at dilation 1 and a column-subsampled dilation",
+                    "information-gain word selection and ANOVA filter are omitted",
+                    "do not read as a published WEASEL-D accuracy",
+                ))
+                .build(),
+        );
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "weaseld");
+        ctx.finish(FittedWeaselD {
+            spec: (w, self.word_len.max(1), self.alphabet.max(2)),
+            dilation: dil,
+            idx_a,
+            idx_b,
+            inner,
+        })
+    }
+}
+
+impl Predict for FittedWeaselD {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let (h1, _) = boss_histograms(x, self.spec.0, self.spec.1, self.spec.2);
+        let xd = dilated_columns(x, self.dilation);
+        let (h2, _) = boss_histograms(
+            &xd,
+            self.spec.0.min(xd.ncols().max(2)),
+            self.spec.1,
+            self.spec.2,
+        );
+        let z1 = if self.idx_a.is_empty() {
+            Matrix::zeros(h1.nrows(), 0)
+        } else {
+            Matrix::from_fn(h1.nrows(), self.idx_a.len(), |i, t| {
+                h1.get(i, self.idx_a[t].min(h1.ncols().saturating_sub(1)))
+            })
+        };
+        let z2 = if self.idx_b.is_empty() {
+            Matrix::zeros(h2.nrows(), 0)
+        } else {
+            Matrix::from_fn(h2.nrows(), self.idx_b.len(), |i, t| {
+                h2.get(i, self.idx_b[t].min(h2.ncols().saturating_sub(1)))
+            })
+        };
+        let z = concat_features(&z1, &z2);
+        self.inner.predict(&z, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -14863,6 +15258,34 @@ mod tests {
             .value;
         assert_eq!(priser.len(), 8);
         assert!(priser.as_slice().iter().all(|v| v.is_finite()));
+        let mrc = MiniRocketClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "mrc"))
+            .unwrap();
+        let pmrc = mrc
+            .value
+            .predict(&x, &Session::new("ts", "mrcp"))
+            .unwrap()
+            .value;
+        assert_eq!(pmrc.len(), 8);
+        let c22fr = Catch22ForestRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "c22fr"))
+            .unwrap();
+        let pc22fr = c22fr
+            .value
+            .predict(&x, &Session::new("ts", "c22frp"))
+            .unwrap()
+            .value;
+        assert_eq!(pc22fr.len(), 8);
+        assert!(pc22fr.as_slice().iter().all(|v| v.is_finite()));
+        let wd = WeaselD::new()
+            .fit(&x, &y, &Session::new("ts", "wd"))
+            .unwrap();
+        let pwd = wd
+            .value
+            .predict(&x, &Session::new("ts", "wdp"))
+            .unwrap()
+            .value;
+        assert_eq!(pwd.len(), 8);
         let hmrc = HydraMultiRocketClassifier::new()
             .fit(&x, &y, &Session::new("ts", "hmrc"))
             .unwrap();
