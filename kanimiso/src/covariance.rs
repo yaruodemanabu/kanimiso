@@ -95,7 +95,7 @@ fn mat_from_faer(a: &Mat<f64>) -> Matrix {
     Matrix::from_fn(a.nrows(), a.ncols(), |i, j| a[(i, j)])
 }
 
-fn try_precision(ctx: &mut FitCtx, cov: &Mat<f64>) -> Option<Matrix> {
+fn try_precision(_ctx: &mut FitCtx, cov: &Mat<f64>) -> Option<Matrix> {
     let p = cov.nrows();
     if p == 0 {
         return Some(Matrix::zeros(0, 0));
