@@ -14,9 +14,7 @@ use crate::traits::{FitUnsupervised, PartialFit, Predict};
 use crate::validate::{inspect_identification, inspect_xy};
 use faer::Mat;
 use ojizou_san::{IncrementalExplain, Session};
-use signlred::{
-    IncrementalQuality, Issue, IssueCode, Meaninglessness, Qualified, Result,
-};
+use signlred::{IncrementalQuality, Issue, IssueCode, Meaninglessness, Qualified, Result};
 
 const COV_FLOOR: f64 = 1e-6;
 const EMPTY_RESEED_TOL: f64 = 1e-15;
@@ -482,7 +480,11 @@ impl FitUnsupervised for KMeans {
         if k < self.k {
             ctx.push(
                 Issue::builder(IssueCode::Overparameterized)
-                    .message(format!("requested k={} > n={}; clamping", self.k, x.nrows()))
+                    .message(format!(
+                        "requested k={} > n={}; clamping",
+                        self.k,
+                        x.nrows()
+                    ))
                     .metric("k", self.k as f64)
                     .metric("n", x.nrows() as f64)
                     .build(),
@@ -508,8 +510,15 @@ impl FitUnsupervised for KMeans {
                 best = Some((inertia, centers, labels, counts, n_iter));
             }
         }
-        let (inertia, centers, labels, counts, n_iter) =
-            best.unwrap_or_else(|| (f64::NAN, Matrix::zeros(k, x.ncols()), Vector::zeros(x.nrows()), vec![0; k], 0));
+        let (inertia, centers, labels, counts, n_iter) = best.unwrap_or_else(|| {
+            (
+                f64::NAN,
+                Matrix::zeros(k, x.ncols()),
+                Vector::zeros(x.nrows()),
+                vec![0; k],
+                0,
+            )
+        });
         let fitted = finish_centroid_fit(&mut ctx, x, centers, labels, counts, inertia, n_iter);
         ctx.finish(fitted)
     }
@@ -601,7 +610,10 @@ impl MiniBatchKMeans {
             self.counts = vec![0.0; k];
             self.initialized = true;
         }
-        let mut centers = self.centroids.clone().unwrap_or_else(|| Matrix::zeros(k, p));
+        let mut centers = self
+            .centroids
+            .clone()
+            .unwrap_or_else(|| Matrix::zeros(k, p));
         let before = centers.clone();
         let (labels, _, inertia_before) = assign_lloyd(batch, &centers);
         let mut moved = Vec::new();
@@ -658,15 +670,8 @@ impl FitUnsupervised for MiniBatchKMeans {
             .clone()
             .unwrap_or_else(|| Matrix::zeros(self.k, x.ncols()));
         let (labels, counts, inertia) = assign_lloyd(x, &centers);
-        let fitted = finish_centroid_fit(
-            &mut ctx,
-            x,
-            centers,
-            labels,
-            counts,
-            inertia,
-            self.max_iter,
-        );
+        let fitted =
+            finish_centroid_fit(&mut ctx, x, centers, labels, counts, inertia, self.max_iter);
         ctx.finish(fitted)
     }
 }
@@ -724,7 +729,9 @@ impl PartialFit for MiniBatchKMeans {
             if *cnt == 0.0 && counts_before.get(c).copied().unwrap_or(0.0) == 0.0 {
                 ctx.push(
                     Issue::builder(IssueCode::EmptyCluster)
-                        .message(format!("cluster {c} unused in this mini-batch and historically empty"))
+                        .message(format!(
+                            "cluster {c} unused in this mini-batch and historically empty"
+                        ))
                         .metric("cluster", c as f64)
                         .build(),
                 );
@@ -852,7 +859,10 @@ impl PartialFit for StreamKMeans {
             );
             return ctx.finish(dummy_explain(self.updates, x.nrows(), self.n_seen));
         }
-        let mut centers = self.centroids.clone().unwrap_or_else(|| Matrix::zeros(k, p));
+        let mut centers = self
+            .centroids
+            .clone()
+            .unwrap_or_else(|| Matrix::zeros(k, p));
         let before = centers.clone();
         let (labels, assign_counts, loss_b) = assign_lloyd(x, &centers);
         let mut batch_acc = Matrix::zeros(k, p);
@@ -906,7 +916,10 @@ impl PartialFit for StreamKMeans {
         let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
         q.effective_sample_size = n_eff;
         q.parameter_delta_norm = Some(delta_norm);
-        q.parameter_delta_max = moved.iter().map(|(_, d)| *d).fold(None, |a, b| Some(a.unwrap_or(0.0).max(b)));
+        q.parameter_delta_max = moved
+            .iter()
+            .map(|(_, d)| *d)
+            .fold(None, |a, b| Some(a.unwrap_or(0.0).max(b)));
         q.top_moved_parameters = moved.clone();
         q.loss_before = Some(loss_b);
         q.loss_after = Some(loss_a);
@@ -1005,7 +1018,10 @@ impl FitUnsupervised for Dbscan {
         if !(self.eps.is_finite() && self.eps > 0.0) {
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
-                    .message(format!("DBSCAN eps={} is not a positive finite radius", self.eps))
+                    .message(format!(
+                        "DBSCAN eps={} is not a positive finite radius",
+                        self.eps
+                    ))
                     .build(),
             );
             return ctx.finish(FittedDbscan {
@@ -1068,9 +1084,7 @@ impl FitUnsupervised for Dbscan {
             ));
         }
         if all_rows_identical(x, ctx.policy.near_zero_variance) && n > 1 {
-            ctx.push(degenerate_cluster_issue(
-                "DBSCAN input rows are identical",
-            ));
+            ctx.push(degenerate_cluster_issue("DBSCAN input rows are identical"));
         }
         let lab = Vector::from_iter(labels.iter().map(|v| *v as f64));
         push_if_nonfinite_vec(&mut ctx, &lab, "dbscan labels");
@@ -1182,7 +1196,12 @@ impl FitUnsupervised for Agglomerative {
     ) -> Result<Qualified<FittedAgglomerative>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        inspect_identification(&mut ctx.report, x.nrows(), self.n_clusters.max(1), &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_clusters.max(1),
+            &ctx.policy,
+        );
         let n = x.nrows();
         if n == 0 || x.ncols() == 0 {
             return ctx.finish(FittedAgglomerative {
@@ -1604,7 +1623,12 @@ impl FitUnsupervised for SpectralClustering {
     ) -> Result<Qualified<FittedSpectral>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        inspect_identification(&mut ctx.report, x.nrows(), self.n_clusters.max(1), &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_clusters.max(1),
+            &ctx.policy,
+        );
         let n = x.nrows();
         if n == 0 || x.ncols() == 0 {
             return ctx.finish(FittedSpectral {
@@ -1629,7 +1653,10 @@ impl FitUnsupervised for SpectralClustering {
         } else {
             d2s[d2s.len() / 2].max(1e-12)
         };
-        let gamma = self.gamma.filter(|g| g.is_finite() && *g > 0.0).unwrap_or(1.0 / med);
+        let gamma = self
+            .gamma
+            .filter(|g| g.is_finite() && *g > 0.0)
+            .unwrap_or(1.0 / med);
         let w = Matrix::from_fn(n, n, |i, j| {
             if i == j {
                 0.0
@@ -1646,7 +1673,9 @@ impl FitUnsupervised for SpectralClustering {
             if s <= ctx.policy.near_zero_variance {
                 ctx.push(
                     Issue::builder(IssueCode::EmptyCluster)
-                        .message(format!("row {i} has degree {s:.3e}; isolated in the affinity graph"))
+                        .message(format!(
+                            "row {i} has degree {s:.3e}; isolated in the affinity graph"
+                        ))
                         .metric("row", i as f64)
                         .build(),
                 );
@@ -1675,7 +1704,11 @@ impl FitUnsupervised for SpectralClustering {
             });
         };
         let mut order: Vec<usize> = (0..vals.len()).collect();
-        order.sort_by(|&a, &b| vals[a].partial_cmp(&vals[b]).unwrap_or(std::cmp::Ordering::Equal));
+        order.sort_by(|&a, &b| {
+            vals[a]
+                .partial_cmp(&vals[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         for &i in &order {
             if vals[i] < -ctx.policy.rank_tol_relative {
                 ctx.push(
@@ -1718,8 +1751,7 @@ impl FitUnsupervised for SpectralClustering {
         }
         let mut rng = Rng::new(self.seed | 1);
         let init = kmeans_plus_plus(&emb, k, &mut rng);
-        let (centers, labels, counts, _inertia, _) =
-            run_lloyd(&mut ctx, &emb, init, 80, &mut rng);
+        let (centers, labels, counts, _inertia, _) = run_lloyd(&mut ctx, &emb, init, 80, &mut rng);
         let _ = (centers, counts);
         if unique_label_count(&labels) <= 1 && k > 1 {
             ctx.push(degenerate_cluster_issue(

@@ -16,9 +16,7 @@ use crate::rng::Rng;
 use crate::traits::{FitUnsupervised, Predict};
 use crate::validate::{inspect_identification, inspect_xy};
 use ojizou_san::Session;
-use signlred::{
-    Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result,
-};
+use signlred::{Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result};
 
 const COV_FLOOR: f64 = 1e-6;
 const TRANS_FLOOR: f64 = 1e-8;
@@ -160,7 +158,9 @@ fn scaled_forward_backward(
     if scale[0] <= 0.0 || !scale[0].is_finite() {
         ctx.push(
             Issue::builder(IssueCode::ScaleFactorZero)
-                .message("t=0 scale factor is zero; the sequence is impossible under the current HMM")
+                .message(
+                    "t=0 scale factor is zero; the sequence is impossible under the current HMM",
+                )
                 .metric("t", 0.0)
                 .build(),
         );
@@ -274,11 +274,7 @@ fn scaled_forward_backward(
         );
     }
     let _ = (alpha, beta);
-    Some(ScaledFb {
-        loglik,
-        gamma,
-        xi,
-    })
+    Some(ScaledFb { loglik, gamma, xi })
 }
 
 fn viterbi_path(start: &Vector, trans: &Matrix, log_emit: &[Vec<f64>]) -> (Vector, f64) {
@@ -330,10 +326,7 @@ fn viterbi_path(start: &Vector, trans: &Matrix, log_emit: &[Vec<f64>]) -> (Vecto
     for t in (1..t_len).rev() {
         path[t - 1] = psi[t][path[t]];
     }
-    (
-        Vector::from_iter(path.iter().map(|v| *v as f64)),
-        best,
-    )
+    (Vector::from_iter(path.iter().map(|v| *v as f64)), best)
 }
 
 fn diagnose_chain(ctx: &mut FitCtx, start: &Vector, trans: &Matrix, occup: &[f64]) {
@@ -546,12 +539,7 @@ impl FittedGaussianHmm {
     }
 
     /// Draw a sequence of length `n` and its hidden path.
-    pub fn sample(
-        &self,
-        n: usize,
-        seed: u64,
-        session: &Session,
-    ) -> Result<Qualified<HmmSample>> {
+    pub fn sample(&self, n: usize, seed: u64, session: &Session) -> Result<Qualified<HmmSample>> {
         let mut ctx = FitCtx::with_session(session.child("sample"));
         inspect_identification(&mut ctx.report, n, self.n_states.max(1), &ctx.policy);
         let d = self.means.ncols();
@@ -579,8 +567,18 @@ impl FittedGaussianHmm {
         for t in 0..n {
             states[t] = st as f64;
             for j in 0..d {
-                let sd = self.covs.get(st.min(self.covs.nrows().saturating_sub(1)), j).max(COV_FLOOR).sqrt();
-                obs.set(t, j, self.means.get(st.min(self.means.nrows().saturating_sub(1)), j) + sd * rng.standard_normal());
+                let sd = self
+                    .covs
+                    .get(st.min(self.covs.nrows().saturating_sub(1)), j)
+                    .max(COV_FLOOR)
+                    .sqrt();
+                obs.set(
+                    t,
+                    j,
+                    self.means
+                        .get(st.min(self.means.nrows().saturating_sub(1)), j)
+                        + sd * rng.standard_normal(),
+                );
             }
             if t + 1 < n {
                 let row = Vector::from_iter((0..s).map(|k| {
@@ -613,7 +611,12 @@ impl FitUnsupervised for GaussianHmm {
     ) -> Result<Qualified<FittedGaussianHmm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        inspect_identification(&mut ctx.report, x.nrows(), self.n_states.max(1), &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_states.max(1),
+            &ctx.policy,
+        );
         let (t_len, d) = x.shape();
         let k = self.n_states.max(1);
         if t_len == 0 || d == 0 {
@@ -685,7 +688,15 @@ impl FitUnsupervised for GaussianHmm {
                         for t in 0..t_len - 1 {
                             num += fb.xi[t][i][j];
                         }
-                        trans.set(i, j, if den > 0.0 { num / den } else { trans.get(i, j) });
+                        trans.set(
+                            i,
+                            j,
+                            if den > 0.0 {
+                                num / den
+                            } else {
+                                trans.get(i, j)
+                            },
+                        );
                     }
                 }
                 renormalize_rows(&mut trans, TRANS_FLOOR);
@@ -741,7 +752,12 @@ impl FitUnsupervised for GaussianHmm {
             }
         }
         let occup: Vec<f64> = (0..k)
-            .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+            .map(|j| {
+                last_gamma
+                    .iter()
+                    .map(|g| g.get(j).copied().unwrap_or(0.0))
+                    .sum()
+            })
             .collect();
         diagnose_chain(&mut ctx, &start, &trans, &occup);
         ctx.push(
@@ -814,7 +830,11 @@ impl MultinomialHmm {
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedMultinomialHmm>> {
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedMultinomialHmm>> {
         self.fit_unsupervised(x, session)
     }
 }
@@ -885,17 +905,17 @@ impl FittedMultinomialHmm {
         let mut ctx = FitCtx::with_session(session.child("score"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let (codes, _) = codes_from_x(x);
-        let fb = scaled_forward_backward(&mut ctx, &self.start, &self.trans, &self.log_emit_seq(&codes));
+        let fb = scaled_forward_backward(
+            &mut ctx,
+            &self.start,
+            &self.trans,
+            &self.log_emit_seq(&codes),
+        );
         ctx.finish(fb.map(|f| f.loglik).unwrap_or(f64::NEG_INFINITY))
     }
 
     /// Sample integer codes (column 0) and the hidden path.
-    pub fn sample(
-        &self,
-        n: usize,
-        seed: u64,
-        session: &Session,
-    ) -> Result<Qualified<HmmSample>> {
+    pub fn sample(&self, n: usize, seed: u64, session: &Session) -> Result<Qualified<HmmSample>> {
         let ctx = FitCtx::with_session(session.child("sample"));
         let n_sym = self.emission.ncols();
         let s = self.n_states.max(1);
@@ -932,10 +952,21 @@ impl FittedMultinomialHmm {
         let mut st = pick_v(&mut rng, &self.start);
         for t in 0..n {
             states[t] = st as f64;
-            let sym = if n_sym == 0 { 0 } else { pick(&mut rng, st.min(self.emission.nrows().saturating_sub(1)), &self.emission) };
+            let sym = if n_sym == 0 {
+                0
+            } else {
+                pick(
+                    &mut rng,
+                    st.min(self.emission.nrows().saturating_sub(1)),
+                    &self.emission,
+                )
+            };
             obs.set(t, 0, sym as f64);
             if t + 1 < n {
-                let row = Vector::from_iter((0..s).map(|k| self.trans.get(st.min(self.trans.nrows().saturating_sub(1)), k)));
+                let row = Vector::from_iter((0..s).map(|k| {
+                    self.trans
+                        .get(st.min(self.trans.nrows().saturating_sub(1)), k)
+                }));
                 st = pick_v(&mut rng, &row);
             }
         }
@@ -959,7 +990,12 @@ impl FitUnsupervised for MultinomialHmm {
     ) -> Result<Qualified<FittedMultinomialHmm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        inspect_identification(&mut ctx.report, x.nrows(), self.n_states.max(1), &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_states.max(1),
+            &ctx.policy,
+        );
         let t_len = x.nrows();
         let k = self.n_states.max(1);
         if t_len == 0 || x.ncols() == 0 {
@@ -1016,7 +1052,15 @@ impl FitUnsupervised for MultinomialHmm {
                     let den: f64 = (0..t_len - 1).map(|t| fb.gamma[t][i]).sum();
                     for j in 0..k {
                         let num: f64 = (0..t_len - 1).map(|t| fb.xi[t][i][j]).sum();
-                        trans.set(i, j, if den > 0.0 { num / den } else { trans.get(i, j) });
+                        trans.set(
+                            i,
+                            j,
+                            if den > 0.0 {
+                                num / den
+                            } else {
+                                trans.get(i, j)
+                            },
+                        );
                     }
                 }
                 renormalize_rows(&mut trans, TRANS_FLOOR);
@@ -1052,7 +1096,12 @@ impl FitUnsupervised for MultinomialHmm {
             }
         }
         let occup: Vec<f64> = (0..k)
-            .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+            .map(|j| {
+                last_gamma
+                    .iter()
+                    .map(|g| g.get(j).copied().unwrap_or(0.0))
+                    .sum()
+            })
             .collect();
         diagnose_chain(&mut ctx, &start, &trans, &occup);
         let log_emit = FittedMultinomialHmm {
@@ -1188,12 +1237,7 @@ impl FittedGmmHmm {
     }
 
     /// Sample observations and states (mixture component is marginalized in the draw).
-    pub fn sample(
-        &self,
-        n: usize,
-        seed: u64,
-        session: &Session,
-    ) -> Result<Qualified<HmmSample>> {
+    pub fn sample(&self, n: usize, seed: u64, session: &Session) -> Result<Qualified<HmmSample>> {
         let ctx = FitCtx::with_session(session.child("sample"));
         let d = self.means.ncols();
         let s = self.n_states.max(1);
@@ -1220,15 +1264,31 @@ impl FittedGmmHmm {
         let mut st = pick_v(&mut rng, &self.start);
         for t in 0..n {
             states[t] = st as f64;
-            let mw = Vector::from_iter((0..nm).map(|m| self.mix_weights.get(st.min(self.mix_weights.nrows().saturating_sub(1)), m)));
+            let mw = Vector::from_iter((0..nm).map(|m| {
+                self.mix_weights
+                    .get(st.min(self.mix_weights.nrows().saturating_sub(1)), m)
+            }));
             let m = pick_v(&mut rng, &mw);
             let row = Self::mix_row(st, m, nm);
             for j in 0..d {
-                let sd = self.vars.get(row.min(self.vars.nrows().saturating_sub(1)), j).max(COV_FLOOR).sqrt();
-                obs.set(t, j, self.means.get(row.min(self.means.nrows().saturating_sub(1)), j) + sd * rng.standard_normal());
+                let sd = self
+                    .vars
+                    .get(row.min(self.vars.nrows().saturating_sub(1)), j)
+                    .max(COV_FLOOR)
+                    .sqrt();
+                obs.set(
+                    t,
+                    j,
+                    self.means
+                        .get(row.min(self.means.nrows().saturating_sub(1)), j)
+                        + sd * rng.standard_normal(),
+                );
             }
             if t + 1 < n {
-                let rowt = Vector::from_iter((0..s).map(|k| self.trans.get(st.min(self.trans.nrows().saturating_sub(1)), k)));
+                let rowt = Vector::from_iter((0..s).map(|k| {
+                    self.trans
+                        .get(st.min(self.trans.nrows().saturating_sub(1)), k)
+                }));
                 st = pick_v(&mut rng, &rowt);
             }
         }
@@ -1252,7 +1312,12 @@ impl FitUnsupervised for GmmHmm {
     ) -> Result<Qualified<FittedGmmHmm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        inspect_identification(&mut ctx.report, x.nrows(), self.n_states.max(1), &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_states.max(1),
+            &ctx.policy,
+        );
         let (t_len, d) = x.shape();
         let k = self.n_states.max(1);
         let nm = self.n_mix.max(1);
@@ -1336,7 +1401,15 @@ impl FitUnsupervised for GmmHmm {
                     let den: f64 = (0..t_len - 1).map(|t| fb.gamma[t][i]).sum();
                     for j in 0..k {
                         let num: f64 = (0..t_len - 1).map(|t| fb.xi[t][i][j]).sum();
-                        trans.set(i, j, if den > 0.0 { num / den } else { trans.get(i, j) });
+                        trans.set(
+                            i,
+                            j,
+                            if den > 0.0 {
+                                num / den
+                            } else {
+                                trans.get(i, j)
+                            },
+                        );
                     }
                 }
                 renormalize_rows(&mut trans, TRANS_FLOOR);
@@ -1396,7 +1469,12 @@ impl FitUnsupervised for GmmHmm {
             }
         }
         let occup: Vec<f64> = (0..k)
-            .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+            .map(|j| {
+                last_gamma
+                    .iter()
+                    .map(|g| g.get(j).copied().unwrap_or(0.0))
+                    .sum()
+            })
             .collect();
         diagnose_chain(&mut ctx, &start, &trans, &occup);
         let fitted_tmp = FittedGmmHmm {

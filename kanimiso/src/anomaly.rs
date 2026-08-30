@@ -121,13 +121,14 @@ impl FitUnsupervised for IsolationForest {
     ) -> Result<Qualified<FittedAnomalyForest>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        if !self.contamination.is_finite()
-            || self.contamination <= 0.0
-            || self.contamination > 0.5
+        if !self.contamination.is_finite() || self.contamination <= 0.0 || self.contamination > 0.5
         {
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
-                    .message(format!("contamination={} not in (0, 0.5]", self.contamination))
+                    .message(format!(
+                        "contamination={} not in (0, 0.5]",
+                        self.contamination
+                    ))
                     .build(),
             );
         }

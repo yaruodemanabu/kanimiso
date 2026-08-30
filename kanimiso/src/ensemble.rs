@@ -454,7 +454,8 @@ mod tests {
 
     fn line(n: usize) -> (Matrix, Vector) {
         let x = Matrix::from_fn(n, 1, |i, _| i as f64);
-        let y = Vector::from_iter((0..n).map(|i| 1.0 + 2.0 * i as f64 + 0.2 * ((i % 3) as f64 - 1.0)));
+        let y =
+            Vector::from_iter((0..n).map(|i| 1.0 + 2.0 * i as f64 + 0.2 * ((i % 3) as f64 - 1.0)));
         (x, y)
     }
 

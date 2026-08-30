@@ -122,7 +122,10 @@ pub fn softdtw(a: &Vector, b: &Vector, gamma: f64, session: &Session) -> Result<
     for i in 1..=n {
         for j in 1..=m {
             let cost = (a[i - 1] - b[j - 1]).abs();
-            let v = softmin(&[r[idx(i - 1, j)], r[idx(i, j - 1)], r[idx(i - 1, j - 1)]], g);
+            let v = softmin(
+                &[r[idx(i - 1, j)], r[idx(i, j - 1)], r[idx(i - 1, j - 1)]],
+                g,
+            );
             r[idx(i, j)] = cost + v;
         }
     }
@@ -267,7 +270,12 @@ impl Predict for FittedTsKMeans {
 
 impl Fit for TimeSeriesKMeans {
     type Fitted = FittedTsKMeans;
-    fn fit(&mut self, x: &Matrix, _y: &Vector, session: &Session) -> Result<Qualified<FittedTsKMeans>> {
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        _y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedTsKMeans>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let n = x.nrows();
@@ -280,7 +288,8 @@ impl Fit for TimeSeriesKMeans {
         }
         let mut rng = Rng::new(self.seed);
         let seeds = rng.sample_indices(n, k);
-        let mut centers = Matrix::from_fn(k, x.ncols(), |c, j| x.get(seeds[c.min(seeds.len() - 1)], j));
+        let mut centers =
+            Matrix::from_fn(k, x.ncols(), |c, j| x.get(seeds[c.min(seeds.len() - 1)], j));
         let mut labels = Vector::zeros(n);
         for it in 0..self.max_iter.max(1) {
             let mut changed = 0usize;
@@ -421,7 +430,12 @@ impl Predict for FittedKShape {
 
 impl Fit for KShape {
     type Fitted = FittedKShape;
-    fn fit(&mut self, x: &Matrix, _y: &Vector, session: &Session) -> Result<Qualified<FittedKShape>> {
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        _y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedKShape>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let n = x.nrows();
@@ -516,7 +530,12 @@ pub fn paa(y: &Vector, n_pieces: usize, session: &Session) -> Result<Qualified<V
 }
 
 /// Symbolic aggregate approximation: PAA then Gaussian breakpoints.
-pub fn sax(y: &Vector, n_pieces: usize, alphabet: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub fn sax(
+    y: &Vector,
+    n_pieces: usize,
+    alphabet: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     let z = znorm(y);
     let p = match paa(&z, n_pieces, &session.child("paa")) {
@@ -557,7 +576,11 @@ pub fn sax(y: &Vector, n_pieces: usize, alphabet: usize, session: &Session) -> R
 }
 
 /// Minimum Euclidean distance between `shapelet` and any subsequence of `series`.
-pub fn shapelet_distance(series: &Vector, shapelet: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub fn shapelet_distance(
+    series: &Vector,
+    shapelet: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if series.is_empty() || shapelet.is_empty() || shapelet.len() > series.len() {
         ctx.push(
@@ -625,11 +648,9 @@ pub struct FittedTimeSeriesSvm {
 impl FittedTimeSeriesSvm {
     fn paa_matrix(&self, x: &Matrix, session: &Session) -> Matrix {
         let w = self.n_pieces.max(1);
-        Matrix::from_fn(x.nrows(), w, |i, j| {
-            match paa(&x.row(i), w, session) {
-                Ok(q) if j < q.value.len() => q.value[j],
-                _ => 0.0,
-            }
+        Matrix::from_fn(x.nrows(), w, |i, j| match paa(&x.row(i), w, session) {
+            Ok(q) if j < q.value.len() => q.value[j],
+            _ => 0.0,
         })
     }
 
@@ -669,7 +690,11 @@ impl Predict for FittedTimeSeriesSvm {
         };
         let pos = *self.classes.last().unwrap_or(&1) as f64;
         let neg = *self.classes.first().unwrap_or(&0) as f64;
-        let y = Vector::from_iter(raw.as_slice().iter().map(|&s| if s >= 0.0 { pos } else { neg }));
+        let y = Vector::from_iter(
+            raw.as_slice()
+                .iter()
+                .map(|&s| if s >= 0.0 { pos } else { neg }),
+        );
         ctx.finish(y)
     }
 }

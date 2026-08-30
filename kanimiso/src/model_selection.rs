@@ -41,7 +41,10 @@ pub fn take_rows(x: &Matrix, idx: &[usize]) -> Matrix {
 
 /// Copy the listed entries of `y`.
 pub fn take_vec(y: &Vector, idx: &[usize]) -> Vector {
-    Vector::from_iter(idx.iter().map(|&i| if i < y.len() { y[i] } else { f64::NAN }))
+    Vector::from_iter(
+        idx.iter()
+            .map(|&i| if i < y.len() { y[i] } else { f64::NAN }),
+    )
 }
 
 fn labels_of(y: &Vector) -> Vec<i64> {
@@ -625,7 +628,11 @@ mod tests {
         )
         .unwrap()
         .value;
-        assert!(s.as_slice().iter().all(|v| v.is_finite() && *v > 0.9), "{:?}", s.as_slice());
+        assert!(
+            s.as_slice().iter().all(|v| v.is_finite() && *v > 0.9),
+            "{:?}",
+            s.as_slice()
+        );
     }
 
     #[test]

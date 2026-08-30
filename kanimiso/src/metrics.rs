@@ -78,13 +78,7 @@ fn warn_constant_target(ctx: &mut FitCtx, y: &Vector, classification: bool) {
 fn labels_of(y: &Vector) -> Vec<i64> {
     y.as_slice()
         .iter()
-        .map(|&v| {
-            if v.is_finite() {
-                v.round() as i64
-            } else {
-                0
-            }
-        })
+        .map(|&v| if v.is_finite() { v.round() as i64 } else { 0 })
         .collect()
 }
 
@@ -98,16 +92,16 @@ fn unique_sorted(labels: &[i64]) -> Vec<i64> {
 fn prf1_one(tp: f64, fp: f64, fn_: f64) -> (f64, f64, f64) {
     let p = if tp + fp > 0.0 { tp / (tp + fp) } else { 0.0 };
     let r = if tp + fn_ > 0.0 { tp / (tp + fn_) } else { 0.0 };
-    let f = if p + r > 0.0 { 2.0 * p * r / (p + r) } else { 0.0 };
+    let f = if p + r > 0.0 {
+        2.0 * p * r / (p + r)
+    } else {
+        0.0
+    };
     (p, r, f)
 }
 
 /// Fraction of exact (rounded) label matches.
-pub fn accuracy(
-    y_true: &Vector,
-    y_pred: &Vector,
-    session: &Session,
-) -> Result<Qualified<f64>> {
+pub fn accuracy(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if !scan_pair(&mut ctx, y_true, y_pred, "accuracy") {
         return ctx.finish(f64::NAN);
@@ -551,7 +545,11 @@ pub fn silhouette(x: &Matrix, labels: &Vector, session: &Session) -> Result<Qual
             counted += 1.0;
         }
     }
-    ctx.finish(if counted > 0.0 { sil / counted } else { f64::NAN })
+    ctx.finish(if counted > 0.0 {
+        sil / counted
+    } else {
+        f64::NAN
+    })
 }
 
 fn comb2(n: f64) -> f64 {
@@ -563,7 +561,11 @@ fn comb2(n: f64) -> f64 {
 }
 
 /// Adjusted Rand index from pair-counting on the label contingency.
-pub fn adjusted_rand(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub fn adjusted_rand(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if !scan_pair(&mut ctx, y_true, y_pred, "adjusted_rand") {
         return ctx.finish(f64::NAN);
@@ -711,8 +713,7 @@ mod tests {
     fn constant_y_is_meaningless() {
         let y = Vector::filled(6, 3.0);
         let p = Vector::filled(6, 3.0);
-        let err = accuracy(&y, &p, &Session::new("metrics", "const"))
-            .unwrap_err();
+        let err = accuracy(&y, &p, &Session::new("metrics", "const")).unwrap_err();
         assert!(
             err.report.contains(IssueCode::MeaninglessFit)
                 || err.primary().code == IssueCode::MeaninglessFit

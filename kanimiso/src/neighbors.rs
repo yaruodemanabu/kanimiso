@@ -77,7 +77,8 @@ fn logsumexp(xs: &[f64]) -> f64 {
 fn diagnose_constant_predictions(ctx: &mut FitCtx, pred: &Vector, y: &Vector) {
     let pst = signlred::slice_stats(pred.as_slice());
     let yst = signlred::slice_stats(y.as_slice());
-    if pst.is_constant(ctx.policy.near_zero_variance) && !yst.is_constant(ctx.policy.near_zero_variance)
+    if pst.is_constant(ctx.policy.near_zero_variance)
+        && !yst.is_constant(ctx.policy.near_zero_variance)
     {
         ctx.push(
             Issue::builder(IssueCode::PredictionsAreConstant)
@@ -198,7 +199,11 @@ impl Fit for KNeighborsClassifier {
         if self.k > x.nrows() && x.nrows() > 0 {
             ctx.push(
                 Issue::builder(IssueCode::InsufficientSample)
-                    .message(format!("k={} > n={}; predict will clip k to n", self.k, x.nrows()))
+                    .message(format!(
+                        "k={} > n={}; predict will clip k to n",
+                        self.k,
+                        x.nrows()
+                    ))
                     .metric("k", self.k as f64)
                     .metric("n", x.nrows() as f64)
                     .build(),
@@ -269,7 +274,11 @@ impl Predict for FittedKnnRegressor {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         predict_shape_guard(&mut ctx, x, self.x_train.ncols());
         if self.x_train.nrows() == 0 {
-            ctx.push(Issue::builder(IssueCode::EmptyMatrix).message("empty k-NN training set").build());
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .message("empty k-NN training set")
+                    .build(),
+            );
             return ctx.finish(Vector::zeros(x.nrows()));
         }
         let k = self.k.max(1).min(self.x_train.nrows());
@@ -415,7 +424,10 @@ impl Fit for RadiusNeighborsClassifier {
         if !self.radius.is_finite() || self.radius < 0.0 {
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
-                    .message(format!("radius={} is not a finite non-negative number", self.radius))
+                    .message(format!(
+                        "radius={} is not a finite non-negative number",
+                        self.radius
+                    ))
                     .build(),
             );
         }
@@ -680,7 +692,10 @@ impl FitUnsupervised for KernelDensity {
         if !self.bandwidth.is_finite() || self.bandwidth <= 0.0 {
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
-                    .message(format!("KDE bandwidth={} is not a positive finite number", self.bandwidth))
+                    .message(format!(
+                        "KDE bandwidth={} is not a positive finite number",
+                        self.bandwidth
+                    ))
                     .build(),
             );
         }
@@ -872,7 +887,11 @@ mod tests {
         let q = NearestCentroid::new()
             .fit(&x, &y, &Session::new("nc", "fit"))
             .expect("nc");
-        let pred = q.value.predict(&x, &Session::new("nc", "predict")).unwrap().value;
+        let pred = q
+            .value
+            .predict(&x, &Session::new("nc", "predict"))
+            .unwrap()
+            .value;
         assert!(accuracy(&pred, &y) > 0.9);
     }
 
@@ -903,8 +922,16 @@ mod tests {
         at0.set(0, 0, 0.0);
         let mut far = Matrix::zeros(1, 1);
         far.set(0, 0, 20.0);
-        let l0 = q.value.predict(&at0, &Session::new("kde", "predict")).unwrap().value[0];
-        let lf = q.value.predict(&far, &Session::new("kde", "predict")).unwrap().value[0];
+        let l0 = q
+            .value
+            .predict(&at0, &Session::new("kde", "predict"))
+            .unwrap()
+            .value[0];
+        let lf = q
+            .value
+            .predict(&far, &Session::new("kde", "predict"))
+            .unwrap()
+            .value[0];
         assert!(l0 > lf, "log-density at 0 ({l0}) should exceed far ({lf})");
     }
 }

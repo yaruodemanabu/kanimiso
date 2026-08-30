@@ -224,7 +224,8 @@ impl Fit for Perceptron {
             }
             ctx.session.step(it as u64, err as f64, None);
             if err == 0 {
-                ctx.session.converged("perceptron zero training error", it as u64);
+                ctx.session
+                    .converged("perceptron zero training error", it as u64);
                 converged = true;
                 break;
             }

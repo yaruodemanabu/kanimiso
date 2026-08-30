@@ -69,7 +69,12 @@ fn weighted_counts(y: &[i64], classes: &[i64], idx: &[usize], weights: &[f64]) -
     counts
 }
 
-fn split_index(x: &Matrix, idx: &[usize], feature: usize, threshold: f64) -> (Vec<usize>, Vec<usize>) {
+fn split_index(
+    x: &Matrix,
+    idx: &[usize],
+    feature: usize,
+    threshold: f64,
+) -> (Vec<usize>, Vec<usize>) {
     let mut left = Vec::new();
     let mut right = Vec::new();
     for &i in idx {
@@ -82,7 +87,12 @@ fn split_index(x: &Matrix, idx: &[usize], feature: usize, threshold: f64) -> (Ve
     (left, right)
 }
 
-fn feature_subset(p: usize, max_features: Option<usize>, rng: &mut Rng, sqrt_default: bool) -> Vec<usize> {
+fn feature_subset(
+    p: usize,
+    max_features: Option<usize>,
+    rng: &mut Rng,
+    sqrt_default: bool,
+) -> Vec<usize> {
     if p == 0 {
         return Vec::new();
     }
@@ -97,7 +107,8 @@ fn feature_subset(p: usize, max_features: Option<usize>, rng: &mut Rng, sqrt_def
 fn diagnose_constant_predictions(ctx: &mut FitCtx, pred: &Vector, y: &Vector) {
     let pst = signlred::slice_stats(pred.as_slice());
     let yst = signlred::slice_stats(y.as_slice());
-    if pst.is_constant(ctx.policy.near_zero_variance) && !yst.is_constant(ctx.policy.near_zero_variance)
+    if pst.is_constant(ctx.policy.near_zero_variance)
+        && !yst.is_constant(ctx.policy.near_zero_variance)
     {
         ctx.push(
             Issue::builder(IssueCode::PredictionsAreConstant)
@@ -115,13 +126,7 @@ fn diagnose_constant_predictions(ctx: &mut FitCtx, pred: &Vector, y: &Vector) {
 fn labels_of(y: &Vector) -> Vec<i64> {
     y.as_slice()
         .iter()
-        .map(|&v| {
-            if v.is_finite() {
-                v.round() as i64
-            } else {
-                0
-            }
-        })
+        .map(|&v| if v.is_finite() { v.round() as i64 } else { 0 })
         .collect()
 }
 
@@ -253,7 +258,8 @@ fn best_class_split(
                 best = Some((f, thr));
             }
         } else {
-            let mut pts: Vec<(f64, usize)> = idx.iter().copied().map(|i| (x.get(i, f), i)).collect();
+            let mut pts: Vec<(f64, usize)> =
+                idx.iter().copied().map(|i| (x.get(i, f), i)).collect();
             pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
             let k = classes.len();
             let mut left = vec![0.0; k];
@@ -467,7 +473,8 @@ fn best_reg_split(
                 best = Some((f, thr));
             }
         } else {
-            let mut pts: Vec<(f64, usize)> = idx.iter().copied().map(|i| (x.get(i, f), i)).collect();
+            let mut pts: Vec<(f64, usize)> =
+                idx.iter().copied().map(|i| (x.get(i, f), i)).collect();
             pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
             let mut left_w = 0.0;
             let mut left_s = 0.0;
@@ -532,16 +539,25 @@ fn grow_reg(
 ) -> RegNode {
     let (mean, sse, wsum) = mse_of(ys, idx, weights);
     if depth >= max_depth || idx.len() < min_samples_split.max(2) || sse <= eps || wsum <= 0.0 {
-        return RegNode::Leaf { value: mean, n: wsum };
+        return RegNode::Leaf {
+            value: mean,
+            n: wsum,
+        };
     }
     let feats = feature_subset(x.ncols(), max_features, rng, false);
     let Some((feature, threshold)) = best_reg_split(x, ys, idx, weights, &feats, extra, rng, eps)
     else {
-        return RegNode::Leaf { value: mean, n: wsum };
+        return RegNode::Leaf {
+            value: mean,
+            n: wsum,
+        };
     };
     let (left, right) = split_index(x, idx, feature, threshold);
     if left.is_empty() || right.is_empty() {
-        return RegNode::Leaf { value: mean, n: wsum };
+        return RegNode::Leaf {
+            value: mean,
+            n: wsum,
+        };
     }
     RegNode::Split {
         feature,
@@ -1023,7 +1039,8 @@ fn grow_forest_class(
         trees.push(root);
     }
     if !trees.is_empty() {
-        ctx.session.converged(format!("{n_estimators} trees grown"), n_estimators as u64);
+        ctx.session
+            .converged(format!("{n_estimators} trees grown"), n_estimators as u64);
     }
     FittedForestClassifier {
         trees,
@@ -1358,7 +1375,9 @@ impl Fit for GradientBoostingRegressor {
         if nu <= 0.0 || !nu.is_finite() {
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
-                    .message(format!("learning_rate={nu} is not a positive finite number"))
+                    .message(format!(
+                        "learning_rate={nu} is not a positive finite number"
+                    ))
                     .build(),
             );
         }
@@ -1386,7 +1405,8 @@ impl Fit for GradientBoostingRegressor {
             ctx.session.step(m as u64, sse, None);
             trees.push(tree);
             if sse <= ctx.policy.near_zero_variance {
-                ctx.session.converged("boosting residuals vanished", m as u64);
+                ctx.session
+                    .converged("boosting residuals vanished", m as u64);
                 break;
             }
         }
@@ -1506,7 +1526,8 @@ impl FittedGbc {
             }
             if k == 2 {
                 let f = self.scores_row(x, i);
-                let p = sigmoid(f.get(1).copied().unwrap_or(0.0) - f.first().copied().unwrap_or(0.0));
+                let p =
+                    sigmoid(f.get(1).copied().unwrap_or(0.0) - f.first().copied().unwrap_or(0.0));
                 if p >= 0.5 {
                     self.classes[1] as f64
                 } else {
@@ -1874,8 +1895,10 @@ impl Fit for AdaBoostClassifier {
                     .build(),
             );
         } else {
-            ctx.session
-                .converged(format!("{} AdaBoost stages", trees.len()), trees.len() as u64);
+            ctx.session.converged(
+                format!("{} AdaBoost stages", trees.len()),
+                trees.len() as u64,
+            );
         }
         let fitted = FittedAdaBoost {
             trees,
@@ -1914,10 +1937,7 @@ impl Default for IsolationForest {
 impl IsolationForest {
     /// Isolation forest with `n_trees` trees.
     pub fn new(n_trees: usize) -> Self {
-        Self {
-            n_trees,
-            seed: 0,
-        }
+        Self { n_trees, seed: 0 }
     }
 }
 
@@ -1990,7 +2010,9 @@ impl FitUnsupervised for IsolationForest {
         if all_constant {
             ctx.push(
                 Issue::builder(IssueCode::MeaninglessFit)
-                    .message("Isolation Forest on a constant design: every path length is identical")
+                    .message(
+                        "Isolation Forest on a constant design: every path length is identical",
+                    )
                     .meaninglessness(Meaninglessness::vacuous(
                         "isolation path lengths",
                         "no feature has variation, so random splits cannot isolate",
@@ -2169,7 +2191,10 @@ mod tests {
             err.primary().code == IssueCode::ConstantTarget
                 || err.primary().code == IssueCode::SingleClass
         );
-        assert!(err.report.contains(IssueCode::ConstantTarget) || err.report.contains(IssueCode::SingleClass));
+        assert!(
+            err.report.contains(IssueCode::ConstantTarget)
+                || err.report.contains(IssueCode::SingleClass)
+        );
         let err = DecisionTreeRegressor::new()
             .fit(&x, &y, &Session::new("tree_reg", "fit"))
             .unwrap_err();
@@ -2180,9 +2205,12 @@ mod tests {
     fn isolation_scores_far_point() {
         let (x, _) = two_blobs(16, 1);
         let session = Session::new("iforest", "fit");
-        let q = IsolationForest { n_trees: 20, seed: 7 }
-            .fit_unsupervised(&x, &session)
-            .expect("if");
+        let q = IsolationForest {
+            n_trees: 20,
+            seed: 7,
+        }
+        .fit_unsupervised(&x, &session)
+        .expect("if");
         let mut far = Matrix::zeros(1, 2);
         far.set(0, 0, 40.0);
         far.set(0, 1, -40.0);
@@ -2217,7 +2245,11 @@ mod tests {
         }
         .fit(&x, &y, &Session::new("gbr", "fit"))
         .expect("gbr");
-        let pred = q.value.predict(&x, &Session::new("gbr", "predict")).unwrap().value;
+        let pred = q
+            .value
+            .predict(&x, &Session::new("gbr", "predict"))
+            .unwrap()
+            .value;
         let mut sse = 0.0;
         for i in 0..y.len() {
             let e = pred[i] - y[i];

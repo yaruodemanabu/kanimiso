@@ -120,7 +120,8 @@ fn predict_shape_guard(ctx: &mut FitCtx, x: &Matrix, n_features: usize) {
 fn diagnose_constant_predictions(ctx: &mut FitCtx, pred: &Vector, y: &Vector) {
     let pst = signlred::slice_stats(pred.as_slice());
     let yst = signlred::slice_stats(y.as_slice());
-    if pst.is_constant(ctx.policy.near_zero_variance) && !yst.is_constant(ctx.policy.near_zero_variance)
+    if pst.is_constant(ctx.policy.near_zero_variance)
+        && !yst.is_constant(ctx.policy.near_zero_variance)
     {
         ctx.push(
             Issue::builder(IssueCode::PredictionsAreConstant)
@@ -229,7 +230,12 @@ impl Predict for FittedLinearSvc {
 
 impl Fit for LinearSvc {
     type Fitted = FittedLinearSvc;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLinearSvc>> {
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLinearSvc>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -247,7 +253,10 @@ impl Fit for LinearSvc {
         if !self.c.is_finite() || self.c <= 0.0 {
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
-                    .message(format!("LinearSvc.C={0} is not a positive finite number", self.c))
+                    .message(format!(
+                        "LinearSvc.C={0} is not a positive finite number",
+                        self.c
+                    ))
                     .build(),
             );
         }
@@ -287,7 +296,8 @@ impl Fit for LinearSvc {
             }
             ctx.session.step(epoch as u64, loss, Some(w.norm()));
             if loss <= 1e-12 {
-                ctx.session.converged("Pegasos hinge loss vanished", epoch as u64);
+                ctx.session
+                    .converged("Pegasos hinge loss vanished", epoch as u64);
                 converged = true;
                 break;
             }
@@ -308,7 +318,8 @@ impl Fit for LinearSvc {
                     }
                 }
                 if leftover == 0 {
-                    ctx.session.converged("perceptron cleanup: zero training error", 0);
+                    ctx.session
+                        .converged("perceptron cleanup: zero training error", 0);
                     converged = true;
                     break;
                 }
@@ -397,7 +408,12 @@ impl Predict for FittedLinearSvr {
 
 impl Fit for LinearSvr {
     type Fitted = FittedLinearSvr;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLinearSvr>> {
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLinearSvr>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
@@ -411,7 +427,8 @@ impl Fit for LinearSvr {
         let n = x.nrows();
         let p = x.ncols();
         let mut scratch = signlred::Report::new("linear_svr", "lstsq_init");
-        let mut w = least_squares(&mut scratch, x, y, &ctx.policy).unwrap_or_else(|| Vector::zeros(p));
+        let mut w =
+            least_squares(&mut scratch, x, y, &ctx.policy).unwrap_or_else(|| Vector::zeros(p));
         if scratch.has_error() || scratch.has_fatal() {
             w = Vector::zeros(p);
         }
@@ -452,7 +469,8 @@ impl Fit for LinearSvr {
             }
             ctx.session.step(epoch as u64, loss, Some(w.norm()));
             if (last - loss).abs() < 1e-10 && loss < 1e-8 {
-                ctx.session.converged("ε-tube SGD stalled at ~0 loss", epoch as u64);
+                ctx.session
+                    .converged("ε-tube SGD stalled at ~0 loss", epoch as u64);
                 converged = true;
                 break;
             }
@@ -465,7 +483,10 @@ impl Fit for LinearSvr {
                     .build(),
             );
         }
-        ctx.finish(FittedLinearSvr { coef: w, intercept: b })
+        ctx.finish(FittedLinearSvr {
+            coef: w,
+            intercept: b,
+        })
     }
 }
 
@@ -523,7 +544,9 @@ impl FittedSvc {
     fn score_row(&self, x: &Matrix, i: usize) -> f64 {
         let mut s = self.intercept;
         for t in 0..self.x_train.nrows() {
-            s += self.dual[t] * self.y_pm[t] * kernel_val(self.kernel, self.gamma, &self.x_train, t, x, i);
+            s += self.dual[t]
+                * self.y_pm[t]
+                * kernel_val(self.kernel, self.gamma, &self.x_train, t, x, i);
         }
         s
     }
@@ -655,7 +678,8 @@ fn smo_fit(
         }
         ctx.session.step(pass as u64, changed as f64, None);
         if changed == 0 && pass > 0 {
-            ctx.session.converged("SMO found no KKT violators", pass as u64);
+            ctx.session
+                .converged("SMO found no KKT violators", pass as u64);
             return (alpha, b, true);
         }
     }
@@ -861,7 +885,8 @@ impl Fit for Svr {
             }
             ctx.session.step(pass as u64, loss, None);
             if loss < 1e-8 {
-                ctx.session.converged("SVR dual coordinates inside the ε-tube", pass as u64);
+                ctx.session
+                    .converged("SVR dual coordinates inside the ε-tube", pass as u64);
                 converged = true;
                 break;
             }
@@ -870,7 +895,9 @@ impl Fit for Svr {
         if !converged && last > 1e-3 {
             ctx.push(
                 Issue::builder(IssueCode::DidNotConverge)
-                    .message(format!("kernel SVR dual descent finished with ε-loss {last:.4e}"))
+                    .message(format!(
+                        "kernel SVR dual descent finished with ε-loss {last:.4e}"
+                    ))
                     .build(),
             );
         }
@@ -1158,7 +1185,11 @@ mod tests {
         }
         .fit(&x, &y, &Session::new("svc", "fit"))
         .expect("svc");
-        let pred = q.value.predict(&x, &Session::new("svc", "predict")).unwrap().value;
+        let pred = q
+            .value
+            .predict(&x, &Session::new("svc", "predict"))
+            .unwrap()
+            .value;
         assert!(accuracy(&pred, &y) >= 0.9, "acc={}", accuracy(&pred, &y));
     }
 

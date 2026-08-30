@@ -25,13 +25,17 @@ fn sq_dist(x: &Matrix, i: usize, j: usize) -> f64 {
 
 fn euclid_matrix(x: &Matrix) -> Matrix {
     let n = x.nrows();
-    Matrix::from_fn(n, n, |i, j| {
-        if i == j {
-            0.0
-        } else {
-            sq_dist(x, i, j).sqrt()
-        }
-    })
+    Matrix::from_fn(
+        n,
+        n,
+        |i, j| {
+            if i == j {
+                0.0
+            } else {
+                sq_dist(x, i, j).sqrt()
+            }
+        },
+    )
 }
 
 fn double_center_sq(dist: &Matrix) -> Mat<f64> {
@@ -60,21 +64,24 @@ fn double_center_sq(dist: &Matrix) -> Mat<f64> {
         col[i] /= nf;
     }
     grand /= nf * nf;
-    Mat::<f64>::from_fn(n, n, |i, j| -0.5 * (d2[i * n + j] - row[i] - col[j] + grand))
+    Mat::<f64>::from_fn(n, n, |i, j| {
+        -0.5 * (d2[i * n + j] - row[i] - col[j] + grand)
+    })
 }
 
-fn embed_from_gram(
-    ctx: &mut FitCtx,
-    gram: &Mat<f64>,
-    n_components: usize,
-) -> Matrix {
+fn embed_from_gram(ctx: &mut FitCtx, gram: &Mat<f64>, n_components: usize) -> Matrix {
     let n = gram.nrows();
     let k = n_components.min(n);
     let Some((vals, vecs)) = symmetric_eigen(&mut ctx.report, gram, &ctx.policy) else {
         ctx.push(Issue::builder(IssueCode::EigenDidNotConverge).build());
         return Matrix::zeros(n, k);
     };
-    let mut pairs: Vec<(f64, usize)> = vals.iter().copied().enumerate().map(|(i, v)| (v, i)).collect();
+    let mut pairs: Vec<(f64, usize)> = vals
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(i, v)| (v, i))
+        .collect();
     pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     let mut dropped = 0usize;
     for &(v, _) in &pairs {
@@ -85,7 +92,9 @@ fn embed_from_gram(
     if dropped > 0 {
         ctx.push(
             Issue::builder(IssueCode::NegativeEigenvalueDropped)
-                .message(format!("{dropped} negative eigenvalues dropped from the Gram"))
+                .message(format!(
+                    "{dropped} negative eigenvalues dropped from the Gram"
+                ))
                 .metric("n_negative", dropped as f64)
                 .compromise(NumericalCompromise::new(
                     "PSD double-centred Gram",
@@ -434,7 +443,12 @@ impl FitUnsupervised for SpectralEmbedding {
                 stress: f64::NAN,
             });
         };
-        let mut pairs: Vec<(f64, usize)> = vals.iter().copied().enumerate().map(|(i, v)| (v, i)).collect();
+        let mut pairs: Vec<(f64, usize)> = vals
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(i, v)| (v, i))
+            .collect();
         pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         let k = self.n_components.max(1);
         let mut out = Matrix::zeros(n, k);
@@ -524,7 +538,11 @@ impl FitUnsupervised for LocallyLinearEmbedding {
                 Err(_) => Vector::filled(k, 1.0 / k as f64),
             };
             let s: f64 = wt.as_slice().iter().sum();
-            let scale = if s.abs() > 0.0 { 1.0 / s } else { 1.0 / k as f64 };
+            let scale = if s.abs() > 0.0 {
+                1.0 / s
+            } else {
+                1.0 / k as f64
+            };
             for (a, &j) in nbrs.iter().enumerate() {
                 w[i][j] = wt[a] * scale;
             }
@@ -545,7 +563,12 @@ impl FitUnsupervised for LocallyLinearEmbedding {
                 stress: f64::NAN,
             });
         };
-        let mut pairs: Vec<(f64, usize)> = vals.iter().copied().enumerate().map(|(i, v)| (v, i)).collect();
+        let mut pairs: Vec<(f64, usize)> = vals
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(i, v)| (v, i))
+            .collect();
         pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         let k = self.n_components.max(1);
         let mut out = Matrix::zeros(n, k);
@@ -652,7 +675,9 @@ impl FitUnsupervised for TSNE {
         if n > 80 {
             ctx.push(
                 Issue::builder(IssueCode::Overparameterized)
-                    .message(format!("exact t-SNE is O(n²); n={n} is large for this path"))
+                    .message(format!(
+                        "exact t-SNE is O(n²); n={n} is large for this path"
+                    ))
                     .build(),
             );
         }
@@ -675,10 +700,7 @@ impl FitUnsupervised for TSNE {
         }
         let mut pcond = vec![0.0; n * n];
         for i in 0..n {
-            let row: Vec<f64> = (0..n)
-                .filter(|&j| j != i)
-                .map(|j| d2[i * n + j])
-                .collect();
+            let row: Vec<f64> = (0..n).filter(|&j| j != i).map(|j| d2[i * n + j]).collect();
             let sigma = binary_search_sigma(&row, self.perplexity);
             let two_s2 = 2.0 * sigma * sigma;
             let mut z = 0.0;
@@ -730,7 +752,11 @@ impl FitUnsupervised for TSNE {
                 }
             }
             if zq <= 0.0 {
-                ctx.push(Issue::builder(IssueCode::LossIsNan).message("t-SNE Z(q)=0").build());
+                ctx.push(
+                    Issue::builder(IssueCode::LossIsNan)
+                        .message("t-SNE Z(q)=0")
+                        .build(),
+                );
                 break;
             }
             for v in q.iter_mut() {
@@ -758,7 +784,11 @@ impl FitUnsupervised for TSNE {
                 }
             }
             if !kl.is_finite() {
-                ctx.push(Issue::builder(IssueCode::LossIsNan).message("t-SNE KL is NaN").build());
+                ctx.push(
+                    Issue::builder(IssueCode::LossIsNan)
+                        .message("t-SNE KL is NaN")
+                        .build(),
+                );
                 break;
             }
             let gnorm = {
@@ -803,7 +833,9 @@ impl Transform for FittedEmbedding {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         ctx.push(
             Issue::builder(IssueCode::StaleState)
-                .message("manifold embeddings do not out-of-sample transform; returning the fitted map")
+                .message(
+                    "manifold embeddings do not out-of-sample transform; returning the fitted map",
+                )
                 .build(),
         );
         ctx.finish(self.embedding.clone())
@@ -853,7 +885,9 @@ mod tests {
 
     #[test]
     fn lle_and_tsne_run() {
-        let x = Matrix::from_fn(10, 2, |i, j| (i as f64) * 0.3 + (j as f64) * 0.7 + 0.05 * (i * j) as f64);
+        let x = Matrix::from_fn(10, 2, |i, j| {
+            (i as f64) * 0.3 + (j as f64) * 0.7 + 0.05 * (i * j) as f64
+        });
         let lle = LocallyLinearEmbedding::new(3, 2)
             .fit_unsupervised(&x, &Session::new("man", "lle"))
             .unwrap();
@@ -867,6 +901,11 @@ mod tests {
         .fit_unsupervised(&x, &Session::new("man", "tsne"))
         .unwrap();
         assert_eq!(ts.value.embedding.shape(), (10, 2));
-        assert!(ts.value.embedding.to_row_major().iter().all(|v| v.is_finite()));
+        assert!(ts
+            .value
+            .embedding
+            .to_row_major()
+            .iter()
+            .all(|v| v.is_finite()));
     }
 }

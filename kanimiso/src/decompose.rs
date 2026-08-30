@@ -81,13 +81,7 @@ fn copy_svd_components(v: &Mat<f64>, k: usize) -> Matrix {
     let p = v.nrows();
     let r = v.ncols();
     let kk = k.min(r);
-    Matrix::from_fn(kk, p, |c, j| {
-        if j < p && c < r {
-            v[(j, c)]
-        } else {
-            0.0
-        }
-    })
+    Matrix::from_fn(kk, p, |c, j| if j < p && c < r { v[(j, c)] } else { 0.0 })
 }
 
 fn explained_from_singular(s: &[f64], n: usize, k: usize) -> (Vector, Vector) {
@@ -182,7 +176,12 @@ impl FitUnsupervised for Pca {
     fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedPca>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        inspect_identification(&mut ctx.report, x.nrows(), self.n_components.max(1), &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_components.max(1),
+            &ctx.policy,
+        );
         let (n, p) = x.shape();
         if n == 0 || p == 0 {
             return ctx.finish(FittedPca {
@@ -340,7 +339,8 @@ impl IncrementalPca {
             .unwrap_or_else(|| Vector::zeros(0));
         let n = self.n_seen as usize;
         let s: Vec<f64> = singular_values.as_slice().to_vec();
-        let (explained_variance, explained_variance_ratio) = explained_from_singular(&s, n.max(2), s.len());
+        let (explained_variance, explained_variance_ratio) =
+            explained_from_singular(&s, n.max(2), s.len());
         FittedPca {
             components,
             mean,
@@ -357,7 +357,12 @@ impl FitUnsupervised for IncrementalPca {
     fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedPca>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        inspect_identification(&mut ctx.report, x.nrows(), self.n_components.max(1), &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_components.max(1),
+            &ctx.policy,
+        );
         if x.nrows() == 0 || x.ncols() == 0 {
             return ctx.finish(self.to_fitted(x.ncols()));
         }
@@ -382,7 +387,12 @@ impl PartialFit for IncrementalPca {
     ) -> Result<Qualified<IncrementalExplain>> {
         let mut ctx = FitCtx::with_session(session.child("partial_fit"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        inspect_identification(&mut ctx.report, x.nrows(), self.n_components.max(1), &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_components.max(1),
+            &ctx.policy,
+        );
         let (m, p) = x.shape();
         if m == 0 || p == 0 {
             return ctx.finish(dummy_explain(self.updates, 0, self.n_seen));
@@ -492,7 +502,10 @@ impl PartialFit for IncrementalPca {
         let mut q = IncrementalQuality::new(self.updates - 1, m, self.n_seen);
         q.effective_sample_size = self.n_seen as f64;
         q.parameter_delta_norm = Some(delta.sqrt());
-        q.parameter_delta_max = moved.iter().map(|(_, d)| *d).fold(None, |a, b| Some(a.unwrap_or(0.0).max(b)));
+        q.parameter_delta_max = moved
+            .iter()
+            .map(|(_, d)| *d)
+            .fold(None, |a, b| Some(a.unwrap_or(0.0).max(b)));
         q.top_moved_parameters = moved.clone();
         q.information_gain = Some(new_s.as_slice().first().copied().unwrap_or(0.0));
         q.still_identified = rank > 0 && self.n_seen as usize > p;
@@ -522,7 +535,10 @@ impl PartialFit for IncrementalPca {
         }
         let expl = IncrementalExplain::from_quality(
             q,
-            format!("principal axes moved {moved:?}; singular values {:?}", new_s.as_slice()),
+            format!(
+                "principal axes moved {moved:?}; singular values {:?}",
+                new_s.as_slice()
+            ),
             "sequential Karhunen–Loève: SVD of [σV; X_centered; mean-correction]",
             format!("n_old={n_old}"),
             format!("n_seen={}, rank={rank}, n_eff={}", self.n_seen, self.n_seen),
@@ -588,7 +604,12 @@ impl FitUnsupervised for TruncatedSvd {
     ) -> Result<Qualified<FittedTruncatedSvd>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        inspect_identification(&mut ctx.report, x.nrows(), self.n_components.max(1), &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_components.max(1),
+            &ctx.policy,
+        );
         let (n, p) = x.shape();
         if n == 0 || p == 0 {
             return ctx.finish(FittedTruncatedSvd {
@@ -614,7 +635,10 @@ impl FitUnsupervised for TruncatedSvd {
         }
         ctx.push(
             Issue::builder(IssueCode::TruncatedSvdUsed)
-                .message(format!("keeping {k} of {} singular triples", svd.singular_values.len()))
+                .message(format!(
+                    "keeping {k} of {} singular triples",
+                    svd.singular_values.len()
+                ))
                 .compromise(NumericalCompromise::new(
                     "full SVD",
                     format!("truncated SVD at k={k}"),
@@ -710,7 +734,12 @@ impl FitUnsupervised for Nmf {
     fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedNmf>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        inspect_identification(&mut ctx.report, x.nrows(), self.n_components.max(1), &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_components.max(1),
+            &ctx.policy,
+        );
         let (n, p) = x.shape();
         let k = self.n_components.max(1).min(n.max(1)).min(p.max(1));
         if n == 0 || p == 0 {
@@ -861,7 +890,12 @@ impl FitUnsupervised for FastIca {
     ) -> Result<Qualified<FittedFastIca>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        inspect_identification(&mut ctx.report, x.nrows(), self.n_components.max(1), &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_components.max(1),
+            &ctx.policy,
+        );
         let (n, p) = x.shape();
         if n == 0 || p == 0 {
             return ctx.finish(FittedFastIca {
@@ -889,10 +923,15 @@ impl FitUnsupervised for FastIca {
         let mut whitening = Matrix::zeros(k, p);
         for c in 0..k {
             let sig = svd.singular_values[c];
-            if sig <= ctx.policy.rank_tol_relative * svd.singular_values.first().copied().unwrap_or(1.0) {
+            if sig
+                <= ctx.policy.rank_tol_relative
+                    * svd.singular_values.first().copied().unwrap_or(1.0)
+            {
                 ctx.push(
                     Issue::builder(IssueCode::RankDeficient)
-                        .message(format!("FastICA whitening skipped near-zero σ[{c}]={sig:.3e}"))
+                        .message(format!(
+                            "FastICA whitening skipped near-zero σ[{c}]={sig:.3e}"
+                        ))
                         .build(),
                 );
                 continue;
@@ -1026,7 +1065,11 @@ impl FactorAnalysis {
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedFactorAnalysis>> {
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedFactorAnalysis>> {
         self.fit_unsupervised(x, session)
     }
 }
@@ -1094,7 +1137,12 @@ impl FitUnsupervised for FactorAnalysis {
     ) -> Result<Qualified<FittedFactorAnalysis>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        inspect_identification(&mut ctx.report, x.nrows(), self.n_components.max(1), &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_components.max(1),
+            &ctx.policy,
+        );
         let (n, p) = x.shape();
         if n == 0 || p == 0 {
             return ctx.finish(FittedFactorAnalysis {
@@ -1119,8 +1167,15 @@ impl FitUnsupervised for FactorAnalysis {
             });
         };
         let mut order: Vec<usize> = (0..evals.len()).collect();
-        order.sort_by(|&a, &b| evals[b].partial_cmp(&evals[a]).unwrap_or(std::cmp::Ordering::Equal));
-        let rank = evals.iter().filter(|e| **e > ctx.policy.rank_tol_relative).count();
+        order.sort_by(|&a, &b| {
+            evals[b]
+                .partial_cmp(&evals[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let rank = evals
+            .iter()
+            .filter(|e| **e > ctx.policy.rank_tol_relative)
+            .count();
         let k_req = self.n_components.max(1);
         let k = k_req.min(p).min(rank.max(1));
         if k_req > rank {
@@ -1243,7 +1298,12 @@ impl Fit for Cca {
     fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedCca>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        inspect_identification(&mut ctx.report, x.nrows(), self.n_components.max(1), &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_components.max(1),
+            &ctx.policy,
+        );
         let (n, p) = x.shape();
         if n == 0 || p == 0 {
             return ctx.finish(FittedCca {
@@ -1306,7 +1366,7 @@ impl Fit for Cca {
             }
         }
         let xw = matmul(&xc, &kmat); // n × r
-        // Cross-covariance in whitened space: c = Xwᵀ y / (n−1)  (r × 1).
+                                     // Cross-covariance in whitened space: c = Xwᵀ y / (n−1)  (r × 1).
         let df = (n.saturating_sub(1)).max(1) as f64;
         let mut cross = Matrix::zeros(r, 1);
         for c in 0..r {
@@ -1437,7 +1497,12 @@ impl FitUnsupervised for SparsePca {
     ) -> Result<Qualified<FittedSparsePca>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        inspect_identification(&mut ctx.report, x.nrows(), self.n_components.max(1), &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_components.max(1),
+            &ctx.policy,
+        );
         let (n, p) = x.shape();
         if n == 0 || p == 0 {
             return ctx.finish(FittedSparsePca {
@@ -1583,7 +1648,7 @@ fn ista_codes(x: &Matrix, dict: &Matrix, alpha: f64, iters: usize) -> Matrix {
     let eta = 1.0 / lip.max(1.0);
     for _ in 0..iters {
         let recon = matmul_nt(&codes, dict); // n × p
-        // grad = (recon − X) Dᵀ   → n × k
+                                             // grad = (recon − X) Dᵀ   → n × k
         let resid = Matrix::from_fn(n, p, |i, j| recon.get(i, j) - x.get(i, j));
         let grad = matmul_nt(&resid, dict);
         codes = Matrix::from_fn(n, k, |i, c| {
@@ -1602,7 +1667,12 @@ impl FitUnsupervised for DictionaryLearning {
     ) -> Result<Qualified<FittedDictionary>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        inspect_identification(&mut ctx.report, x.nrows(), self.n_components.max(1), &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_components.max(1),
+            &ctx.policy,
+        );
         let (n, p) = x.shape();
         let k = self.n_components.max(1).min(n.max(1)).min(p.max(1) * 4);
         if n == 0 || p == 0 {
@@ -1711,9 +1781,7 @@ mod tests {
     fn pca_rank1_first_component_explains_all() {
         let x = rank1();
         let session = Session::new("pca", "fit");
-        let q = Pca::new(2)
-            .fit(&x, &session)
-            .expect("pca");
+        let q = Pca::new(2).fit(&x, &session).expect("pca");
         let ev = q.value.explained_variance_ratio.as_slice();
         assert!(!ev.is_empty());
         assert!(
@@ -1731,15 +1799,13 @@ mod tests {
     fn pca_components_exceed_rank_warns() {
         let x = rank1();
         let session = Session::new("pca", "fit");
-        let q = Pca::new(6).fit(&x, &session).expect("pca should warn, not abort");
+        let q = Pca::new(6)
+            .fit(&x, &session)
+            .expect("pca should warn, not abort");
         assert!(
             q.report.contains(IssueCode::ComponentsExceedRank),
             "expected ComponentsExceedRank, issues={:?}",
-            q.report
-                .issues()
-                .iter()
-                .map(|i| i.code)
-                .collect::<Vec<_>>()
+            q.report.issues().iter().map(|i| i.code).collect::<Vec<_>>()
         );
         assert!(q.value.rank <= 1, "rank-1 data, got rank {}", q.value.rank);
     }

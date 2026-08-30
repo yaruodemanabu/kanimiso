@@ -163,7 +163,12 @@ impl Predict for FittedPipeline {
 
 impl Fit for Pipeline {
     type Fitted = FittedPipeline;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedPipeline>> {
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPipeline>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let mut z = x.clone();
@@ -397,7 +402,9 @@ mod tests {
     #[test]
     fn pipeline_standardize_ols_line() {
         let x = Matrix::from_fn(12, 1, |i, _| (i as f64) * 10.0);
-        let y = Vector::from_iter((0..12).map(|i| 3.0 + 0.5 * (i as f64) * 10.0 + 0.15 * (i as f64 % 3.0)));
+        let y = Vector::from_iter(
+            (0..12).map(|i| 3.0 + 0.5 * (i as f64) * 10.0 + 0.15 * (i as f64 % 3.0)),
+        );
         let q = Pipeline::new()
             .fit(&x, &y, &Session::new("pipe", "fit"))
             .unwrap();

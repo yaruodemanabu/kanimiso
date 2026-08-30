@@ -367,10 +367,7 @@ impl Default for MinCovDet {
 impl MinCovDet {
     /// MCD with the given trial count.
     pub fn new(n_trials: usize) -> Self {
-        Self {
-            n_trials,
-            seed: 0,
-        }
+        Self { n_trials, seed: 0 }
     }
 }
 
@@ -451,7 +448,8 @@ impl FitUnsupervised for MinCovDet {
         order.sort_by(|&a, &b| d[a].partial_cmp(&d[b]).unwrap_or(std::cmp::Ordering::Equal));
         order.truncate(h);
         let (loc, cov) = subset_cov(x, &order);
-        ctx.session.converged("MCD subset + reweight", trials as u64);
+        ctx.session
+            .converged("MCD subset + reweight", trials as u64);
         let fitted = finish_cov(&mut ctx, loc, cov, 0.0);
         ctx.finish(fitted)
     }
@@ -652,13 +650,16 @@ impl Predict for FittedEllipticEnvelope {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let d = self.cov.mahalanobis(x);
-        let y = Vector::from_iter((0..x.nrows()).map(|i| {
-            if d[i] > self.threshold {
-                -1.0
-            } else {
-                1.0
-            }
-        }));
+        let y =
+            Vector::from_iter((0..x.nrows()).map(
+                |i| {
+                    if d[i] > self.threshold {
+                        -1.0
+                    } else {
+                        1.0
+                    }
+                },
+            ));
         ctx.finish(y)
     }
 }
@@ -688,13 +689,14 @@ impl FitUnsupervised for EllipticEnvelope {
     ) -> Result<Qualified<FittedEllipticEnvelope>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        if !self.contamination.is_finite()
-            || self.contamination <= 0.0
-            || self.contamination > 0.5
+        if !self.contamination.is_finite() || self.contamination <= 0.0 || self.contamination > 0.5
         {
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
-                    .message(format!("contamination={} not in (0, 0.5]", self.contamination))
+                    .message(format!(
+                        "contamination={} not in (0, 0.5]",
+                        self.contamination
+                    ))
                     .build(),
             );
         }
@@ -742,7 +744,11 @@ mod tests {
     fn blob() -> Matrix {
         Matrix::from_fn(30, 2, |i, j| {
             let v = (i as f64) * 0.05;
-            if j == 0 { v } else { 0.3 * v + 0.01 * (i as f64) }
+            if j == 0 {
+                v
+            } else {
+                0.3 * v + 0.01 * (i as f64)
+            }
         })
     }
 

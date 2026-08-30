@@ -17,8 +17,8 @@ use crate::traits::FitSeries;
 use crate::validate::{inspect_identification, inspect_xy};
 use ojizou_san::Session;
 use signlred::{
-    Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Report, Result, Severity,
-    scan_finite, slice_stats,
+    scan_finite, slice_stats, Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified,
+    Report, Result, Severity,
 };
 
 /// Sample autocorrelation `ρ_0, …, ρ_{nlags}` (biased, mean-corrected).
@@ -75,7 +75,9 @@ pub fn pacf(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vec
                 out[k] = durbin_levinson_kk(&rho, k);
                 ctx.push(
                     Issue::builder(IssueCode::RidgeFallbackUsed)
-                        .message(format!("PACF lag {k}: Yule–Walker OLS failed; Durbin–Levinson used"))
+                        .message(format!(
+                            "PACF lag {k}: Yule–Walker OLS failed; Durbin–Levinson used"
+                        ))
                         .compromise(NumericalCompromise::new(
                             "Yule–Walker Rφ = r via OLS",
                             "Durbin–Levinson φ_{kk}",
@@ -233,10 +235,7 @@ impl FitSeries for HoltWinters {
             ctx.push(
                 Issue::builder(IssueCode::InsufficientSeasonalCycles)
                     .severity(Severity::Error)
-                    .message(format!(
-                        "Holt–Winters n={} < 2·period={period}",
-                        y.len()
-                    ))
+                    .message(format!("Holt–Winters n={} < 2·period={period}", y.len()))
                     .meaninglessness(Meaninglessness::vacuous(
                         "seasonal exponential smoothing",
                         "fewer than two complete cycles cannot identify a seasonal pattern",
@@ -249,8 +248,14 @@ impl FitSeries for HoltWinters {
             reject_nonpositive(&mut ctx, y, "multiplicative Holt–Winters");
         }
         warn_unit_root(&mut ctx, y);
-        let (alpha, beta, gamma, fitted, level, trend, seas) =
-            hw_fit(y.as_slice(), period, self.alpha, self.beta, self.gamma, self.multiplicative);
+        let (alpha, beta, gamma, fitted, level, trend, seas) = hw_fit(
+            y.as_slice(),
+            period,
+            self.alpha,
+            self.beta,
+            self.gamma,
+            self.multiplicative,
+        );
         if ![alpha, beta, gamma].iter().all(|v| v.is_finite()) {
             ctx.push(
                 Issue::builder(IssueCode::NonFiniteOutput)
@@ -337,7 +342,9 @@ impl FittedArima {
         if h > 4 * self.last_diff.len().max(8) {
             ctx.push(
                 Issue::builder(IssueCode::ForecastHorizonExceedsIdentifiability)
-                    .message(format!("ARIMA horizon {h} exceeds a short identified window"))
+                    .message(format!(
+                        "ARIMA horizon {h} exceeds a short identified window"
+                    ))
                     .build(),
             );
         }
@@ -376,7 +383,11 @@ impl Default for Sarima {
 
 impl Sarima {
     /// Construct a seasonal ARIMA specification.
-    pub fn new(order: (usize, usize, usize), seasonal_order: (usize, usize, usize), period: usize) -> Self {
+    pub fn new(
+        order: (usize, usize, usize),
+        seasonal_order: (usize, usize, usize),
+        period: usize,
+    ) -> Self {
         Self {
             order,
             seasonal_order,
@@ -455,7 +466,10 @@ impl FitSeries for Sarima {
                 return ctx.finish(FittedSarima {
                     spec: self.clone(),
                     inner: empty_arima(&arima),
-                    seasonal_levels: stages.iter().map(|s| Vector::from_iter(s.iter().copied())).collect(),
+                    seasonal_levels: stages
+                        .iter()
+                        .map(|s| Vector::from_iter(s.iter().copied()))
+                        .collect(),
                 });
             }
         };
@@ -924,8 +938,7 @@ impl FitSeries for Theta {
             });
         }
         warn_unit_root(&mut ctx, y);
-        let (alpha, _b, level, _tr, _f) =
-            esm_fit(y.as_slice(), SmoothingKind::Simple, None, None);
+        let (alpha, _b, level, _tr, _f) = esm_fit(y.as_slice(), SmoothingKind::Simple, None, None);
         let drift = 0.5 * (y[y.len() - 1] - y[0]) / (y.len() - 1) as f64;
         ctx.finish(FittedTheta {
             level,
@@ -971,12 +984,21 @@ pub fn kalman_level(y: &Vector, session: &Session) -> Result<Qualified<KalmanLev
         }
     }
     // Method-of-moments: Var(Δy) = q + 2r. Split the mass.
-    let vdiff = if nd > 1.0 { q / (nd - 1.0) } else { st.variance };
+    let vdiff = if nd > 1.0 {
+        q / (nd - 1.0)
+    } else {
+        st.variance
+    };
     let r = (0.5 * vdiff).max(1e-12);
     let q = (0.5 * vdiff).max(1e-12);
     let mut level = Vector::zeros(n);
     let mut pred = Vector::zeros(n);
-    let mut mu = y.as_slice().iter().copied().find(|v| v.is_finite()).unwrap_or(0.0);
+    let mut mu = y
+        .as_slice()
+        .iter()
+        .copied()
+        .find(|v| v.is_finite())
+        .unwrap_or(0.0);
     let mut p = 1e6;
     for t in 0..n {
         let mu_pred = mu;
@@ -1003,11 +1025,7 @@ pub fn kalman_level(y: &Vector, session: &Session) -> Result<Qualified<KalmanLev
 /// Hodrick–Prescott filter: SPD solve `(I + λ D'D) τ = y`.
 ///
 /// Returns `(trend, cycle)` with `cycle = y − trend`.
-pub fn hp_filter(
-    y: &Vector,
-    lamb: f64,
-    session: &Session,
-) -> Result<Qualified<(Vector, Vector)>> {
+pub fn hp_filter(y: &Vector, lamb: f64, session: &Session) -> Result<Qualified<(Vector, Vector)>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     if !lamb.is_finite() || lamb < 0.0 {
@@ -1110,13 +1128,7 @@ impl FittedGarch11 {
     pub fn forecast_variance(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let last = self.sigma2.as_slice().last().copied().unwrap_or(self.omega);
-        let last_e2 = self
-            .resid
-            .as_slice()
-            .last()
-            .copied()
-            .unwrap_or(0.0)
-            .powi(2);
+        let last_e2 = self.resid.as_slice().last().copied().unwrap_or(0.0).powi(2);
         let mut s = self.omega + self.alpha * last_e2 + self.beta * last;
         let mut out = Vector::zeros(h);
         for i in 0..h {
@@ -1179,7 +1191,10 @@ impl FitSeries for Garch11 {
         if alpha + beta >= 0.999 {
             ctx.push(
                 Issue::builder(IssueCode::NonStationary)
-                    .message(format!("GARCH α+β={:.4} ≥ 1; persistence is a unit root", alpha + beta))
+                    .message(format!(
+                        "GARCH α+β={:.4} ≥ 1; persistence is a unit root",
+                        alpha + beta
+                    ))
                     .metric("alpha_plus_beta", alpha + beta)
                     .build(),
             );
@@ -1304,9 +1319,7 @@ fn fit_arima(spec: &Arima, y: &Vector, session: &Session) -> Result<Qualified<Fi
     if n < min_n {
         ctx.push(
             Issue::builder(IssueCode::ShortSeriesForArima)
-                .message(format!(
-                    "ARIMA({p},{d},{q}) needs n≥{min_n}; got {n}"
-                ))
+                .message(format!("ARIMA({p},{d},{q}) needs n≥{min_n}; got {n}"))
                 .build(),
         );
     }
@@ -1416,7 +1429,11 @@ fn fit_arima(spec: &Arima, y: &Vector, session: &Session) -> Result<Qualified<Fi
     let last_k = p.max(1).min(z.len());
     let last_diff = Vector::from_iter(z[z.len().saturating_sub(last_k)..].iter().copied());
     let last_r = q.max(1).min(resid_v.len());
-    let last_resid = Vector::from_iter(resid_v.as_slice()[resid_v.len().saturating_sub(last_r)..].iter().copied());
+    let last_resid = Vector::from_iter(
+        resid_v.as_slice()[resid_v.len().saturating_sub(last_r)..]
+            .iter()
+            .copied(),
+    );
     ctx.finish(FittedArima {
         spec: spec.clone(),
         ar,
@@ -1534,7 +1551,10 @@ fn check_poly_radius(ctx: &mut FitCtx, coef: &[f64], ar: bool) {
     if ar && coef.len() == 1 && coef[0].abs() > 0.98 {
         ctx.push(
             Issue::builder(IssueCode::NonStationary)
-                .message(format!("AR(1) φ={:.4} is on the unit-root boundary", coef[0]))
+                .message(format!(
+                    "AR(1) φ={:.4} is on the unit-root boundary",
+                    coef[0]
+                ))
                 .metric("phi", coef[0])
                 .build(),
         );
@@ -1553,7 +1573,9 @@ fn warn_var_unit_root(ctx: &mut FitCtx, coef: &Matrix, k: usize, p: usize) {
     if tr >= k as f64 * 0.98 {
         ctx.push(
             Issue::builder(IssueCode::NonStationary)
-                .message(format!("VAR(1) own-lag |trace|≈{tr:.3}; persistence looks unit-root"))
+                .message(format!(
+                    "VAR(1) own-lag |trace|≈{tr:.3}; persistence looks unit-root"
+                ))
                 .metric("abs_trace", tr)
                 .build(),
         );
@@ -1683,7 +1705,16 @@ fn hw_fit(
     multiplicative: bool,
 ) -> (f64, f64, f64, Vector, f64, f64, Vector) {
     let grid = [0.1, 0.3, 0.5, 0.7, 0.9];
-    let mut best = (f64::INFINITY, 0.3, 0.1, 0.1, Vector::zeros(y.len()), 0.0, 0.0, Vector::zeros(period));
+    let mut best = (
+        f64::INFINITY,
+        0.3,
+        0.1,
+        0.1,
+        Vector::zeros(y.len()),
+        0.0,
+        0.0,
+        Vector::zeros(period),
+    );
     let alphas: Vec<f64> = match a0 {
         Some(a) => vec![a.clamp(1e-4, 0.999)],
         None => grid.to_vec(),
@@ -1724,8 +1755,20 @@ fn hw_run(
     let mut level = y.iter().take(p).filter(|v| v.is_finite()).sum::<f64>() / first as f64;
     let mut trend = if n >= 2 * p {
         let s1 = y.iter().take(p).filter(|v| v.is_finite()).sum::<f64>() / first as f64;
-        let s2c = y.iter().skip(p).take(p).filter(|v| v.is_finite()).count().max(1);
-        let s2 = y.iter().skip(p).take(p).filter(|v| v.is_finite()).sum::<f64>() / s2c as f64;
+        let s2c = y
+            .iter()
+            .skip(p)
+            .take(p)
+            .filter(|v| v.is_finite())
+            .count()
+            .max(1);
+        let s2 = y
+            .iter()
+            .skip(p)
+            .take(p)
+            .filter(|v| v.is_finite())
+            .sum::<f64>()
+            / s2c as f64;
         (s2 - s1) / p as f64
     } else {
         0.0
@@ -1785,7 +1828,11 @@ fn hw_run(
             let prev_l = level;
             let prev_s = season[sidx];
             if multiplicative {
-                let adj = if prev_s.abs() > 1e-15 { y[t] / prev_s } else { y[t] };
+                let adj = if prev_s.abs() > 1e-15 {
+                    y[t] / prev_s
+                } else {
+                    y[t]
+                };
                 level = alpha * adj + (1.0 - alpha) * (prev_l + trend);
                 trend = beta * (level - prev_l) + (1.0 - beta) * trend;
                 season[sidx] = if level.abs() > 1e-15 {
@@ -1927,7 +1974,9 @@ fn warn_unit_root_slice(ctx: &mut FitCtx, y: &[f64]) {
         if rho.abs() > 0.98 {
             ctx.push(
                 Issue::builder(IssueCode::NonStationary)
-                    .message(format!("lag-1 coefficient ρ̂={rho:.4} is on the unit circle"))
+                    .message(format!(
+                        "lag-1 coefficient ρ̂={rho:.4} is on the unit circle"
+                    ))
                     .metric("rho", rho)
                     .build(),
             );

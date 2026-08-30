@@ -1,0 +1,16 @@
+[package]
+name = "ojizou-san"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Quality-responsible logging for machine learning and linear algebra. Records numerical compromises, meaningless fits, and incremental-learning explainability — not generic application logs."
+readme = "README.md"
+keywords = ["logging", "machine-learning", "diagnostics", "quality", "online-learning"]
+categories = ["development-tools::debugging", "science"]
+
+[lib]
+name = "ojizou_san"
+
+[dependencies]
+signlred = { workspace = true }

@@ -295,7 +295,12 @@ fn target_reg(y: &Vector) -> Matrix {
 
 impl Fit for MLPRegressor {
     type Fitted = FittedMlpRegressor;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedMlpRegressor>> {
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMlpRegressor>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let mut core = MlpCore::new(x.ncols(), self.hidden, 1, self.seed);
@@ -520,7 +525,8 @@ impl Fit for MLPClassifier {
                 break;
             }
             if (last - loss).abs() < 1e-10 && it > 4 {
-                ctx.session.converged("MLP classifier loss stall", it as u64);
+                ctx.session
+                    .converged("MLP classifier loss stall", it as u64);
                 converged = true;
                 break;
             }
@@ -563,7 +569,12 @@ impl PartialFit for MLPClassifier {
             self.classes.len()
         };
         if self.core.is_none() {
-            self.core = Some(MlpCore::new(x.ncols(), self.hidden, n_out.max(1), self.seed));
+            self.core = Some(MlpCore::new(
+                x.ncols(),
+                self.hidden,
+                n_out.max(1),
+                self.seed,
+            ));
         }
         let Some(core) = self.core.as_mut() else {
             return ctx.finish(dummy_explain(0, x.nrows(), 0));
@@ -666,7 +677,11 @@ impl FittedRbm {
 }
 
 fn sample_bernoulli(p: &Vector, rng: &mut Rng) -> Vector {
-    Vector::from_iter(p.as_slice().iter().map(|&q| if rng.uniform() < q { 1.0 } else { 0.0 }))
+    Vector::from_iter(
+        p.as_slice()
+            .iter()
+            .map(|&q| if rng.uniform() < q { 1.0 } else { 0.0 }),
+    )
 }
 
 fn row_as_vec(x: &Matrix, i: usize) -> Vector {
@@ -738,7 +753,11 @@ impl FitUnsupervised for BernoulliRBM {
             recon /= (x.nrows() * p).max(1) as f64;
             ctx.session.step(it as u64, recon, None);
             if !recon.is_finite() {
-                ctx.push(Issue::builder(IssueCode::LossIsNan).message("RBM reconstruction is NaN").build());
+                ctx.push(
+                    Issue::builder(IssueCode::LossIsNan)
+                        .message("RBM reconstruction is NaN")
+                        .build(),
+                );
                 break;
             }
         }
@@ -825,7 +844,11 @@ mod tests {
             let e = pred[i] - y[i];
             sse += e * e;
         }
-        assert!(sse / (y.len() as f64) < 0.05, "mse={}", sse / (y.len() as f64));
+        assert!(
+            sse / (y.len() as f64) < 0.05,
+            "mse={}",
+            sse / (y.len() as f64)
+        );
     }
 
     #[test]

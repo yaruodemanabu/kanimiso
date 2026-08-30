@@ -9,14 +9,12 @@ use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linalg::chol_solve;
 use crate::rng::Rng;
-use crate::special::{
-    chi2_pvalue, f_pvalue, ln_gamma, norm_cdf, student_t_cdf, student_t_pvalue,
-};
+use crate::special::{chi2_pvalue, f_pvalue, ln_gamma, norm_cdf, student_t_cdf, student_t_pvalue};
 use crate::validate::{inspect_identification, inspect_xy};
 use ojizou_san::Session;
 use signlred::{
-    Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Report, Result,
-    scan_finite, slice_stats,
+    scan_finite, slice_stats, Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified,
+    Report, Result,
 };
 
 /// Descriptive moments of a numeric sample.
@@ -341,7 +339,9 @@ pub fn corrcoef(x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
             if !r.is_finite() {
                 ctx.push(
                     Issue::builder(IssueCode::DegenerateDistribution)
-                        .message(format!("corrcoef[{i},{j}] undefined (zero-variance column)"))
+                        .message(format!(
+                            "corrcoef[{i},{j}] undefined (zero-variance column)"
+                        ))
                         .metric("i", i as f64)
                         .metric("j", j as f64)
                         .build(),
@@ -470,7 +470,9 @@ pub fn vif(x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
                 } else if r2.is_finite() {
                     ctx.push(
                         Issue::builder(IssueCode::PerfectCollinearity)
-                            .message(format!("column {j} is an exact linear combination of the others"))
+                            .message(format!(
+                                "column {j} is an exact linear combination of the others"
+                            ))
                             .metric("feature_index", j as f64)
                             .metric("r2", r2)
                             .meaninglessness(Meaninglessness::vacuous(
@@ -889,8 +891,18 @@ pub fn ks_2samp(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<H
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     inspect_series_as_target(&mut ctx, y);
-    let mut xs: Vec<f64> = x.as_slice().iter().copied().filter(|v| v.is_finite()).collect();
-    let mut ys: Vec<f64> = y.as_slice().iter().copied().filter(|v| v.is_finite()).collect();
+    let mut xs: Vec<f64> = x
+        .as_slice()
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
+    let mut ys: Vec<f64> = y
+        .as_slice()
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
     xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n1 = xs.len();
@@ -938,7 +950,12 @@ pub fn ks_2samp(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<H
 pub fn shapiro_francia(x: &Vector, session: &Session) -> Result<Qualified<ShapiroFranciaResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
-    let mut xs: Vec<f64> = x.as_slice().iter().copied().filter(|v| v.is_finite()).collect();
+    let mut xs: Vec<f64> = x
+        .as_slice()
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
     let n = xs.len();
     if n < 5 {
         ctx.push(
@@ -1060,7 +1077,11 @@ pub fn levene(groups: &[&Vector], session: &Session) -> Result<Qualified<Hypothe
 }
 
 /// Mann–Whitney U (two-sided normal approximation with tie correction).
-pub fn mannwhitneyu(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub fn mannwhitneyu(
+    x: &Vector,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     inspect_series_as_target(&mut ctx, y);
@@ -1354,14 +1375,13 @@ pub fn breusch_pagan(
 ) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, design, Some(resid), &ctx.policy);
-    inspect_identification(
-        &mut ctx.report,
-        design.nrows(),
-        design.ncols(),
-        &ctx.policy,
-    );
+    inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
     let e2 = Vector::from_iter(resid.as_slice().iter().map(|e| e * e));
-    if e2.as_slice().iter().all(|v| *v <= ctx.policy.near_zero_variance) {
+    if e2
+        .as_slice()
+        .iter()
+        .all(|v| *v <= ctx.policy.near_zero_variance)
+    {
         push_meaningless(
             &mut ctx,
             "Breusch–Pagan LM",
@@ -1521,12 +1541,12 @@ pub fn adfuller(
         if j == 0 {
             1.0
         } else if j == 1 {
-            y[t] // y_{t} is the lag of the level for Δy_{t+1}? 
-            // Δy_{t+1} = y[t+1]-y[t] is dy[t].
-            // regressor y_{t} for observation Δy_{t+1} is y[t].
+            y[t] // y_{t} is the lag of the level for Δy_{t+1}?
+                 // Δy_{t+1} = y[t+1]-y[t] is dy[t].
+                 // regressor y_{t} for observation Δy_{t+1} is y[t].
         } else {
             let lag = j - 1; // 1..used
-            // Δy_{t+1 - lag} = dy[t - lag]
+                             // Δy_{t+1 - lag} = dy[t - lag]
             dy[t - lag]
         }
     });
@@ -1566,7 +1586,9 @@ pub fn adfuller(
     if rho.is_finite() && ((rho - 1.0).abs() < 0.02 || rho.abs() > 0.98) {
         ctx.push(
             Issue::builder(IssueCode::NonStationary)
-                .message(format!("ADF implied ρ≈{rho:.4}; unit-root behaviour is plausible"))
+                .message(format!(
+                    "ADF implied ρ≈{rho:.4}; unit-root behaviour is plausible"
+                ))
                 .metric("rho", rho)
                 .metric("adf_stat", stat)
                 .build(),
@@ -1621,7 +1643,9 @@ pub fn kpss(y: &Vector, lags: Option<usize>, session: &Session) -> Result<Qualif
     if stat.is_finite() && stat > 0.463 {
         ctx.push(
             Issue::builder(IssueCode::NonStationary)
-                .message(format!("KPSS η={stat:.4} exceeds the 5% level critical value 0.463"))
+                .message(format!(
+                    "KPSS η={stat:.4} exceeds the 5% level critical value 0.463"
+                ))
                 .metric("kpss", stat)
                 .build(),
         );
@@ -1790,7 +1814,9 @@ pub fn bootstrap_mean(
     if n_boot < 20 {
         ctx.push(
             Issue::builder(IssueCode::InsufficientSample)
-                .message(format!("bootstrap n_boot={n_boot} is too small for a 95% percentile interval"))
+                .message(format!(
+                    "bootstrap n_boot={n_boot} is too small for a 95% percentile interval"
+                ))
                 .metric("n_boot", n_boot as f64)
                 .build(),
         );
@@ -1881,7 +1907,9 @@ pub fn lowess(x: &Vector, y: &Vector, frac: f64, session: &Session) -> Result<Qu
         );
     }
     let n = x.len().min(y.len());
-    let span = ((frac.clamp(1e-6, 1.0) * n as f64).ceil() as usize).max(2).min(n.max(2));
+    let span = ((frac.clamp(1e-6, 1.0) * n as f64).ceil() as usize)
+        .max(2)
+        .min(n.max(2));
     if span < 3 && n >= 3 {
         ctx.push(
             Issue::builder(IssueCode::WindowTooShort)
@@ -1962,7 +1990,9 @@ pub fn ttest_power(
     let ncp = effect_size * n.sqrt();
     ctx.push(
         Issue::builder(IssueCode::PValueUnreliable)
-            .message("ttest_power uses a shifted central-t approximation, not the non-central t CDF")
+            .message(
+                "ttest_power uses a shifted central-t approximation, not the non-central t CDF",
+            )
             .compromise(NumericalCompromise::new(
                 "power from the non-central t law",
                 "1 − F_t(t_crit − ncp) + F_t(−t_crit − ncp)",
@@ -2372,7 +2402,11 @@ fn kendall_tau_b(x: &[f64], y: &[f64]) -> f64 {
 
 fn rank_average(xs: &[f64]) -> Vec<f64> {
     let mut idx: Vec<usize> = (0..xs.len()).collect();
-    idx.sort_by(|&i, &j| xs[i].partial_cmp(&xs[j]).unwrap_or(std::cmp::Ordering::Equal));
+    idx.sort_by(|&i, &j| {
+        xs[i]
+            .partial_cmp(&xs[j])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut ranks = vec![0.0; xs.len()];
     let mut i = 0;
     while i < idx.len() {
@@ -2798,11 +2832,7 @@ mod tests {
         let x = Vector::from_iter((0..40).map(|_| rng.standard_normal()));
         let session = Session::new("ttest_1samp", "test");
         let q = ttest_1samp(&x, 0.0, &session).expect("ttest");
-        assert!(
-            q.value.statistic.is_finite(),
-            "stat={}",
-            q.value.statistic
-        );
+        assert!(q.value.statistic.is_finite(), "stat={}", q.value.statistic);
         assert!(
             q.value.pvalue > 1e-6,
             "unexpectedly tiny p-value {} for N(0,1)-like data vs μ=0",

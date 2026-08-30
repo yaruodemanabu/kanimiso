@@ -101,7 +101,8 @@ fn invert_or_pinv(ctx: &mut FitCtx, a: &Mat<f64>) -> Option<Mat<f64>> {
                     Some(out)
                 }
                 Err(_) => {
-                    let Some((vals, vecs)) = symmetric_eigen(&mut ctx.report, &b, &ctx.policy) else {
+                    let Some((vals, vecs)) = symmetric_eigen(&mut ctx.report, &b, &ctx.policy)
+                    else {
                         return None;
                     };
                     let mut out = Mat::<f64>::zeros(p, p);
@@ -222,7 +223,11 @@ impl Predict for FittedLda {
             self.covariance.get(i, j)
         });
         let prec = invert_or_pinv(&mut ctx, &cov).unwrap_or_else(|| {
-            Mat::<f64>::from_fn(cov.nrows(), cov.ncols(), |i, j| if i == j { 1.0 } else { 0.0 })
+            Mat::<f64>::from_fn(
+                cov.nrows(),
+                cov.ncols(),
+                |i, j| if i == j { 1.0 } else { 0.0 },
+            )
         });
         let sc = self.log_scores(x, &prec);
         let y = Vector::from_iter((0..x.nrows()).map(|i| {
@@ -364,8 +369,12 @@ impl Fit for LinearDiscriminantAnalysis {
         let r = (k - 1).min(p);
         let mut scalings = Matrix::zeros(p, r);
         if let Some((vals, vecs)) = symmetric_eigen(&mut ctx.report, &mid, &ctx.policy) {
-            let mut pairs: Vec<(f64, usize)> =
-                vals.iter().copied().enumerate().map(|(i, v)| (v, i)).collect();
+            let mut pairs: Vec<(f64, usize)> = vals
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(i, v)| (v, i))
+                .collect();
             pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             for (c, &(_, idx)) in pairs.iter().take(r).enumerate() {
                 // scaling column = Sw^{-1/2} u
@@ -575,11 +584,9 @@ mod tests {
     #[test]
     fn qda_separates_blobs() {
         let (x, y) = two_blobs();
-        let q = QuadraticDiscriminantAnalysis {
-            reg_param: 1e-3,
-        }
-        .fit(&x, &y, &Session::new("qda", "fit"))
-        .unwrap();
+        let q = QuadraticDiscriminantAnalysis { reg_param: 1e-3 }
+            .fit(&x, &y, &Session::new("qda", "fit"))
+            .unwrap();
         let pred = q
             .value
             .predict(&x, &Session::new("qda", "pred"))

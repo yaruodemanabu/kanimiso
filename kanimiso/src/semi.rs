@@ -64,13 +64,17 @@ fn normalize_rows(m: &mut Matrix) {
 
 fn affinity(x: &Matrix, gamma: f64) -> Matrix {
     let n = x.nrows();
-    Matrix::from_fn(n, n, |i, j| {
-        if i == j {
-            0.0
-        } else {
-            rbf_row(x, i, j, gamma)
-        }
-    })
+    Matrix::from_fn(
+        n,
+        n,
+        |i, j| {
+            if i == j {
+                0.0
+            } else {
+                rbf_row(x, i, j, gamma)
+            }
+        },
+    )
 }
 
 fn row_stochastic(w: &Matrix) -> Matrix {
@@ -237,12 +241,7 @@ fn fit_graph(
                 .build(),
         );
     }
-    let y_lab = Vector::from_iter(
-        y.as_slice()
-            .iter()
-            .copied()
-            .filter(|v| !is_unlabeled(*v)),
-    );
+    let y_lab = Vector::from_iter(y.as_slice().iter().copied().filter(|v| !is_unlabeled(*v)));
     inspect_classes(&mut ctx.report, &y_lab, &ctx.policy);
     let y0 = one_hot(y, &classes);
     let w = affinity(x, gamma.max(0.0));

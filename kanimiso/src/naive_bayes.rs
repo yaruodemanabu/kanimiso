@@ -57,14 +57,15 @@ fn predict_shape_guard(ctx: &mut FitCtx, x: &Matrix, n_features: usize) {
                     n_features
                 ))
                 .build(),
-            );
+        );
     }
 }
 
 fn diagnose_constant_predictions(ctx: &mut FitCtx, pred: &Vector, y: &Vector) {
     let pst = signlred::slice_stats(pred.as_slice());
     let yst = signlred::slice_stats(y.as_slice());
-    if pst.is_constant(ctx.policy.near_zero_variance) && !yst.is_constant(ctx.policy.near_zero_variance)
+    if pst.is_constant(ctx.policy.near_zero_variance)
+        && !yst.is_constant(ctx.policy.near_zero_variance)
     {
         ctx.push(
             Issue::builder(IssueCode::PredictionsAreConstant)
@@ -305,7 +306,12 @@ impl Predict for GaussianNB {
 
 impl Fit for GaussianNB {
     type Fitted = FittedGaussianNB;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGaussianNB>> {
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedGaussianNB>> {
         *self = GaussianNB {
             var_smoothing: self.var_smoothing,
             ..GaussianNB::default()
@@ -501,7 +507,10 @@ impl PartialFit for GaussianNB {
             inspect_classes(&mut ctx.report, y, &ctx.policy);
         }
         let expl = apply_welford(self, x, y, &mut ctx, true);
-        if expl.quality.is_uninformative(ctx.policy.uninformative_info_eps) {
+        if expl
+            .quality
+            .is_uninformative(ctx.policy.uninformative_info_eps)
+        {
             ctx.push(
                 Issue::builder(IssueCode::UpdateWithZeroInformation)
                     .incremental(expl.quality.clone())
@@ -623,7 +632,9 @@ fn fit_count_nb(
     if !alpha.is_finite() || alpha < 0.0 {
         ctx.push(
             Issue::builder(IssueCode::InvalidWeight)
-                .message(format!("smoothing α={alpha} is not a finite non-negative number"))
+                .message(format!(
+                    "smoothing α={alpha} is not a finite non-negative number"
+                ))
                 .build(),
         );
     }
@@ -686,7 +697,12 @@ fn fit_count_nb(
 
 impl Fit for MultinomialNB {
     type Fitted = FittedDiscreteNB;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedDiscreteNB>> {
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteNB>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let fitted = fit_count_nb(&mut ctx, x, y, self.alpha, false);
@@ -745,7 +761,11 @@ impl FittedBernoulliNB {
             for c in 0..self.classes.len() {
                 let mut s = self.log_prior[c];
                 for j in 0..x.ncols().min(self.feature_log_prob.ncols()) {
-                    let bit = if x.get(i, j) > self.binarize { 1.0 } else { 0.0 };
+                    let bit = if x.get(i, j) > self.binarize {
+                        1.0
+                    } else {
+                        0.0
+                    };
                     s += bit * self.feature_log_prob.get(c, j)
                         + (1.0 - bit) * self.feature_log_neg.get(c, j);
                 }
@@ -852,7 +872,12 @@ impl ComplementNB {
 
 impl Fit for ComplementNB {
     type Fitted = FittedDiscreteNB;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedDiscreteNB>> {
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteNB>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let fitted = fit_count_nb(&mut ctx, x, y, self.alpha, true);
@@ -983,19 +1008,31 @@ mod tests {
         let q = MultinomialNB::new(1.0)
             .fit(&x, &y, &Session::new("mnb", "fit"))
             .expect("mnb");
-        let pred = q.value.predict(&x, &Session::new("mnb", "predict")).unwrap().value;
+        let pred = q
+            .value
+            .predict(&x, &Session::new("mnb", "predict"))
+            .unwrap()
+            .value;
         assert!(accuracy(&pred, &y) > 0.8);
 
         let q = BernoulliNB::new()
             .fit(&x, &y, &Session::new("bnb", "fit"))
             .expect("bnb");
-        let pred = q.value.predict(&x, &Session::new("bnb", "predict")).unwrap().value;
+        let pred = q
+            .value
+            .predict(&x, &Session::new("bnb", "predict"))
+            .unwrap()
+            .value;
         assert!(accuracy(&pred, &y) > 0.8);
 
         let q = ComplementNB::new(1.0)
             .fit(&x, &y, &Session::new("cnb", "fit"))
             .expect("cnb");
-        let pred = q.value.predict(&x, &Session::new("cnb", "predict")).unwrap().value;
+        let pred = q
+            .value
+            .predict(&x, &Session::new("cnb", "predict"))
+            .unwrap()
+            .value;
         assert!(accuracy(&pred, &y) > 0.8);
     }
 }
