@@ -11,7 +11,7 @@ use crate::rng::Rng;
 use crate::traits::{Fit, Predict};
 use crate::validate::{inspect_classes, inspect_xy};
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Qualified, Result};
+use signlred::{Issue, IssueCode, NumericalCompromise, Qualified, Result};
 
 pub use crate::tree::{AdaBoostAlgorithm, AdaBoostClassifier, FittedAdaBoost};
 
@@ -649,6 +649,187 @@ impl Fit for StackingClassifier {
     }
 }
 
+fn rotation_matrix(p: usize, seed: u64) -> Matrix {
+    if p < 2 {
+        return Matrix::from_fn(p.max(1), p.max(1), |i, j| if i == j { 1.0 } else { 0.0 });
+    }
+    let mut rng = Rng::new(seed);
+    let mut q = Matrix::from_fn(p, p, |_, _| rng.standard_normal());
+    for j in 0..p {
+        for k in 0..j {
+            let mut dot = 0.0;
+            for i in 0..p {
+                dot += q.get(i, j) * q.get(i, k);
+            }
+            for i in 0..p {
+                q.set(i, j, q.get(i, j) - dot * q.get(i, k));
+            }
+        }
+        let mut nrm = 0.0;
+        for i in 0..p {
+            nrm += q.get(i, j) * q.get(i, j);
+        }
+        let nrm = nrm.sqrt().max(1e-12);
+        for i in 0..p {
+            q.set(i, j, q.get(i, j) / nrm);
+        }
+    }
+    q
+}
+
+fn apply_feature_rotation(x: &Matrix, q: &Matrix) -> Matrix {
+    let p = x.ncols().min(q.nrows());
+    Matrix::from_fn(x.nrows(), q.ncols().max(1), |i, j| {
+        let mut s = 0.0;
+        for k in 0..p.min(q.nrows()) {
+            s += x.get(i, k) * q.get(k, j.min(q.ncols().saturating_sub(1)));
+        }
+        s
+    })
+}
+
+/// Rotation forest (sktime / sklearn-contrib `RotationForest` lite).
+///
+/// Feature-group count is not identification `p`. When `p < 2` the rotation
+/// is the identity and is recorded as a compromise.
+#[derive(Clone, Debug)]
+pub struct RotationForest {
+    /// Trees.
+    pub n_estimators: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for RotationForest {
+    fn default() -> Self {
+        Self {
+            n_estimators: 4,
+            max_depth: 4,
+            seed: 19,
+        }
+    }
+}
+
+impl RotationForest {
+    /// Default rotation forest.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted rotation forest.
+#[derive(Clone, Debug)]
+pub struct FittedRotationForest {
+    trees: Vec<crate::tree::FittedTreeClassifier>,
+    rots: Vec<Matrix>,
+    /// Fallback label.
+    pub default_label: f64,
+}
+
+impl Fit for RotationForest {
+    type Fitted = FittedRotationForest;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRotationForest>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::JitterInjected)
+                    .message("RotationForest p<2; each tree sees the unrotated map")
+                    .compromise(NumericalCompromise::new(
+                        "random feature rotation",
+                        "identity embedding",
+                        "a 1-d design has no subspace to rotate",
+                        "do not treat the ensemble as a published Rotation Forest",
+                    ))
+                    .build(),
+            );
+        }
+        let default_label = y
+            .as_slice()
+            .iter()
+            .copied()
+            .find(|v| v.is_finite())
+            .unwrap_or(0.0);
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        let mut rots = Vec::new();
+        for _ in 0..self.n_estimators.max(1) {
+            let rot = rotation_matrix(x.ncols().max(1), rng.next_u64());
+            let z = apply_feature_rotation(x, &rot);
+            let mut tree = crate::tree::DecisionTreeClassifier {
+                max_depth: self.max_depth,
+                seed: rng.next_u64(),
+                ..crate::tree::DecisionTreeClassifier::default()
+            };
+            match tree.fit(&z, y, &session.child("rot_tree")) {
+                Ok(q) => {
+                    trees.push(q.value);
+                    rots.push(rot);
+                }
+                Err(err) => {
+                    for issue in err.report.issues() {
+                        if !matches!(
+                            issue.code,
+                            IssueCode::ResidualTooLarge
+                                | IssueCode::NearSingular
+                                | IssueCode::RankZero
+                                | IssueCode::R2IsOne
+                        ) {
+                            ctx.push(issue.clone());
+                        }
+                    }
+                }
+            }
+        }
+        if trees.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("RotationForest: every rotated tree failed")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedRotationForest {
+            trees,
+            rots,
+            default_label,
+        })
+    }
+}
+
+impl Predict for FittedRotationForest {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let mut votes = vec![std::collections::BTreeMap::<i64, usize>::new(); x.nrows()];
+        for (tree, rot) in self.trees.iter().zip(&self.rots) {
+            let zr = apply_feature_rotation(x, rot);
+            match tree.predict(&zr, &session.child("rotp")) {
+                Ok(q) => {
+                    for i in 0..x.nrows().min(q.value.len()) {
+                        *votes[i].entry(q.value[i].round() as i64).or_insert(0) += 1;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        let out = Vector::from_iter(votes.iter().map(|m| {
+            m.iter()
+                .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(k, _)| *k as f64)
+                .unwrap_or(self.default_label)
+        }));
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -739,5 +920,26 @@ mod tests {
             .unwrap()
             .value;
         assert!(pred.as_slice().iter().all(|v| v.is_finite()));
+        let x2 = Matrix::from_fn(20, 2, |i, j| {
+            if j == 0 {
+                if i < 10 {
+                    -2.0
+                } else {
+                    2.0
+                }
+            } else {
+                0.05 * i as f64
+            }
+        });
+        let rf = RotationForest::new()
+            .fit(&x2, &y, &Session::new("ens", "rot"))
+            .unwrap();
+        let rp = rf
+            .value
+            .predict(&x2, &Session::new("ens", "rotp"))
+            .unwrap()
+            .value;
+        assert_eq!(rp.len(), 20);
+        assert!(rp.as_slice().iter().all(|v| v.is_finite()));
     }
 }

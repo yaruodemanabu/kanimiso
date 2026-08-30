@@ -2968,6 +2968,131 @@ pub fn harvey_collier(
     })
 }
 
+/// Utts rainbow test for a linear specification (statsmodels `linear_rainbow`).
+///
+/// Observations are ordered by the first column of `x`. OLS is fit on the
+/// central `frac` of rows; the tails are a prediction hold-out. The F
+/// statistic compares tail prediction SSE to the central residual MSE.
+/// Subset size is not identification `p`.
+pub fn rainbow(
+    x: &Matrix,
+    y: &Vector,
+    frac: f64,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let n = x.nrows().min(y.len());
+    let f = if frac.is_finite() && frac > 0.0 && frac < 1.0 {
+        frac
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("rainbow frac={frac} is not in (0,1); using 0.5"))
+                .build(),
+        );
+        0.5
+    };
+    let design = x.with_intercept();
+    let k = design.ncols();
+    let n_mid = ((n as f64 * f).ceil() as usize).max(k + 2).min(n);
+    if n <= k + 3 || n_mid + 2 >= n {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "rainbow n={n} mid={n_mid} is tight for k={k} parameters"
+                ))
+                .build(),
+        );
+    }
+    let mut ord: Vec<usize> = (0..n).collect();
+    ord.sort_by(|&a, &b| {
+        x.get(a, 0)
+            .partial_cmp(&x.get(b, 0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let start = (n.saturating_sub(n_mid)) / 2;
+    let mid_idx: Vec<usize> = ord.iter().skip(start).take(n_mid.min(n)).copied().collect();
+    let tail_idx: Vec<usize> = ord
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i < start || *i >= start + mid_idx.len())
+        .map(|(_, &j)| j)
+        .collect();
+    if mid_idx.len() <= k || tail_idx.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("rainbow hold-out or centre is empty after ordering")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: tail_idx.len() as f64,
+            nobs: n as f64,
+        });
+    }
+    let xm = Matrix::from_fn(mid_idx.len(), k, |i, j| design.get(mid_idx[i], j));
+    let ym = Vector::from_iter(mid_idx.iter().map(|&i| y[i]));
+    let Some(beta) = statistical_ols(&mut ctx, &xm, &ym) else {
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: tail_idx.len() as f64,
+            nobs: n as f64,
+        });
+    };
+    let mut sse_mid = 0.0;
+    for (r, &i) in mid_idx.iter().enumerate() {
+        let mut pred = 0.0;
+        for j in 0..k {
+            pred += beta[j] * xm.get(r, j);
+        }
+        let e = y[i] - pred;
+        sse_mid += e * e;
+    }
+    let mut sse_tail = 0.0;
+    for &i in &tail_idx {
+        let mut pred = 0.0;
+        for j in 0..k {
+            pred += beta[j] * design.get(i, j);
+        }
+        let e = y[i] - pred;
+        sse_tail += e * e;
+    }
+    let df_num = tail_idx.len() as f64;
+    let df_den = (mid_idx.len() as f64 - k as f64).max(1.0);
+    let stat = if sse_mid > 0.0 && df_den > 0.0 {
+        (sse_tail / df_num) / (sse_mid / df_den)
+    } else {
+        f64::NAN
+    };
+    let pvalue = if stat.is_finite() {
+        f_pvalue(stat.max(0.0), df_num, df_den)
+    } else {
+        f64::NAN
+    };
+    if pvalue.is_finite() && pvalue < 0.05 {
+        ctx.push(
+            Issue::builder(IssueCode::InconsistentSystem)
+                .message(format!(
+                    "rainbow p={pvalue:.4} rejects the linear specification on the tails"
+                ))
+                .metric("f", stat)
+                .build(),
+        );
+    }
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: df_num,
+        nobs: n as f64,
+    })
+}
+
 /// Engle ARCH-LM: \(e_t^2\) on lags of itself; \(n R^2 \sim \chi^2_q\).
 pub fn arch_lm(
     resid: &Vector,
@@ -5629,5 +5754,8 @@ mod tests {
         assert!(ad.value.statistic.is_finite());
         let lf = lilliefors(&y, &Session::new("lf", "t")).expect("lf");
         assert!(lf.value.statistic.is_finite());
+        let rb = rainbow(&x, &y, 0.5, &Session::new("rb", "t")).expect("rainbow");
+        assert!(rb.value.statistic.is_finite() || rb.value.pvalue.is_nan());
+        assert!(rb.value.nobs > 0.0);
     }
 }

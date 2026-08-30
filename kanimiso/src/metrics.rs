@@ -2152,6 +2152,276 @@ pub fn top_k_accuracy(
     ctx.finish(if n > 0.0 { hit / n } else { f64::NAN })
 }
 
+fn inspect_indicator_scores(
+    ctx: &mut FitCtx,
+    y_true: &Matrix,
+    scores: &Matrix,
+    what: &str,
+) -> bool {
+    if y_true.nrows() != scores.nrows() || y_true.ncols() != scores.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "{what}: y_true is {}×{} scores are {}×{}",
+                    y_true.nrows(),
+                    y_true.ncols(),
+                    scores.nrows(),
+                    scores.ncols()
+                ))
+                .build(),
+        );
+        return false;
+    }
+    inspect_xy(&mut ctx.report, scores, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, y_true, None, &ctx.policy);
+    true
+}
+
+fn rank_desc(scores_row: impl Fn(usize) -> f64, p: usize) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..p).collect();
+    idx.sort_by(|a, b| {
+        scores_row(*b)
+            .partial_cmp(&scores_row(*a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    idx
+}
+
+/// Label-ranking average precision (sklearn `label_ranking_average_precision_score`).
+///
+/// `y_true` is a 0/1 indicator matrix; column `j` is label `j`. Label count
+/// is not identification `p`.
+pub fn label_ranking_average_precision(
+    y_true: &Matrix,
+    scores: &Matrix,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !inspect_indicator_scores(&mut ctx, y_true, scores, "label_ranking_average_precision") {
+        return ctx.finish(f64::NAN);
+    }
+    let n = y_true.nrows();
+    let p = y_true.ncols();
+    let mut acc = 0.0;
+    let mut used = 0.0;
+    for i in 0..n {
+        let mut rel = Vec::new();
+        for j in 0..p {
+            if y_true.get(i, j) > 0.5 {
+                rel.push(j);
+            }
+        }
+        if rel.is_empty() {
+            continue;
+        }
+        let order = rank_desc(|j| scores.get(i, j), p);
+        let mut rank_of = vec![0usize; p];
+        for (r, &j) in order.iter().enumerate() {
+            rank_of[j] = r + 1;
+        }
+        let mut s = 0.0;
+        for &j in &rel {
+            let rj = rank_of[j];
+            let mut hit = 0.0;
+            for &k in &rel {
+                if rank_of[k] <= rj {
+                    hit += 1.0;
+                }
+            }
+            s += hit / rj as f64;
+        }
+        acc += s / rel.len() as f64;
+        used += 1.0;
+    }
+    if used <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("LRAP: no sample has a relevant label")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(acc / used)
+}
+
+/// Coverage error (sklearn `coverage_error`): mean rank of the last relevant label.
+pub fn coverage_error(
+    y_true: &Matrix,
+    scores: &Matrix,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !inspect_indicator_scores(&mut ctx, y_true, scores, "coverage_error") {
+        return ctx.finish(f64::NAN);
+    }
+    let n = y_true.nrows();
+    let p = y_true.ncols();
+    let mut acc = 0.0;
+    let mut used = 0.0;
+    for i in 0..n {
+        let order = rank_desc(|j| scores.get(i, j), p);
+        let mut rank_of = vec![0usize; p];
+        for (r, &j) in order.iter().enumerate() {
+            rank_of[j] = r + 1;
+        }
+        let mut last = 0usize;
+        let mut any = false;
+        for j in 0..p {
+            if y_true.get(i, j) > 0.5 {
+                any = true;
+                last = last.max(rank_of[j]);
+            }
+        }
+        if !any {
+            continue;
+        }
+        acc += last as f64;
+        used += 1.0;
+    }
+    if used <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("coverage_error: no sample has a relevant label")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(acc / used)
+}
+
+/// Label-ranking loss (sklearn `label_ranking_loss`): inverted relevant/irrelevant pairs.
+pub fn label_ranking_loss(
+    y_true: &Matrix,
+    scores: &Matrix,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !inspect_indicator_scores(&mut ctx, y_true, scores, "label_ranking_loss") {
+        return ctx.finish(f64::NAN);
+    }
+    let n = y_true.nrows();
+    let p = y_true.ncols();
+    let mut acc = 0.0;
+    let mut used = 0.0;
+    for i in 0..n {
+        let mut rel = Vec::new();
+        let mut irr = Vec::new();
+        for j in 0..p {
+            if y_true.get(i, j) > 0.5 {
+                rel.push(j);
+            } else {
+                irr.push(j);
+            }
+        }
+        if rel.is_empty() || irr.is_empty() {
+            continue;
+        }
+        let mut bad = 0.0;
+        for &r in &rel {
+            for &u in &irr {
+                let sr = scores.get(i, r);
+                let su = scores.get(i, u);
+                if sr < su {
+                    bad += 1.0;
+                } else if (sr - su).abs() <= 0.0 {
+                    bad += 0.5;
+                }
+            }
+        }
+        acc += bad / (rel.len() as f64 * irr.len() as f64);
+        used += 1.0;
+    }
+    if used <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("label_ranking_loss: every row is all-relevant or all-irrelevant")
+                .build(),
+        );
+        return ctx.finish(0.0);
+    }
+    ctx.finish(acc / used)
+}
+
+fn empirical_quantile(xs: &[f64], tau: f64) -> f64 {
+    if xs.is_empty() {
+        return f64::NAN;
+    }
+    let mut v = xs.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let t = tau.clamp(0.0, 1.0) * (v.len() - 1) as f64;
+    let lo = t.floor() as usize;
+    let hi = t.ceil() as usize;
+    let w = t - lo as f64;
+    (1.0 - w) * v[lo] + w * v[hi.min(v.len() - 1)]
+}
+
+fn pinball_sum(y_true: &Vector, y_pred: &Vector, tau: f64) -> (f64, f64) {
+    let mut s = 0.0;
+    let mut n = 0.0;
+    for i in 0..y_true.len().min(y_pred.len()) {
+        if !y_true[i].is_finite() || !y_pred[i].is_finite() {
+            continue;
+        }
+        let e = y_true[i] - y_pred[i];
+        s += if e >= 0.0 { tau * e } else { (tau - 1.0) * e };
+        n += 1.0;
+    }
+    (s, n)
+}
+
+/// \(D^2\) pinball score (sklearn `d2_pinball_score`).
+pub fn d2_pinball_score(
+    y_true: &Vector,
+    y_pred: &Vector,
+    tau: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "d2_pinball_score") {
+        return ctx.finish(f64::NAN);
+    }
+    warn_constant_target(&mut ctx, y_true, false);
+    let t = if tau.is_finite() && tau > 0.0 && tau < 1.0 {
+        tau
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("d2_pinball τ={tau} is not in (0,1); using 0.5"))
+                .build(),
+        );
+        0.5
+    };
+    let xs: Vec<f64> = y_true
+        .as_slice()
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
+    let q = empirical_quantile(&xs, t);
+    let null = Vector::filled(y_true.len(), q);
+    let (s_m, n) = pinball_sum(y_true, y_pred, t);
+    let (s_n, _) = pinball_sum(y_true, &null, t);
+    if n <= 0.0 || s_n.abs() <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::R2IsZero)
+                .message("D² pinball null loss is ~0; the score is undefined")
+                .compromise(NumericalCompromise::new(
+                    "positive null pinball to the empirical quantile",
+                    "D² set to NaN",
+                    "the quantile-only pinball vanished",
+                    "do not read a missing D² as a perfect quantile fit",
+                ))
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(1.0 - s_m / s_n)
+}
+
 fn bump<K: PartialEq>(xs: &mut Vec<(K, f64)>, key: K) {
     if let Some(e) = xs.iter_mut().find(|(k, _)| *k == key) {
         e.1 += 1.0;
@@ -2444,5 +2714,23 @@ mod tests {
             .unwrap()
             .value;
         assert!((tk - 1.0).abs() < 1e-12);
+        let yt = Matrix::from_fn(3, 3, |i, j| if i == j { 1.0 } else { 0.0 });
+        let ys = Matrix::from_fn(3, 3, |i, j| if i == j { 0.9 } else { 0.1 });
+        let lrap = label_ranking_average_precision(&yt, &ys, &Session::new("m", "lrap"))
+            .unwrap()
+            .value;
+        assert!((lrap - 1.0).abs() < 1e-12);
+        let cov = coverage_error(&yt, &ys, &Session::new("m", "cov"))
+            .unwrap()
+            .value;
+        assert!((cov - 1.0).abs() < 1e-12);
+        let lrl = label_ranking_loss(&yt, &ys, &Session::new("m", "lrl"))
+            .unwrap()
+            .value;
+        assert!(lrl.abs() < 1e-12);
+        let d2p = d2_pinball_score(&y2, &h2, 0.5, &Session::new("m", "d2p"))
+            .unwrap()
+            .value;
+        assert!(d2p.is_finite());
     }
 }

@@ -6392,6 +6392,91 @@ impl FittedForecastX {
     }
 }
 
+/// OLS hierarchical reconciliation (sktime `reconcile.Reconciler`).
+///
+/// `yhat` is `h × m` base forecasts. `summing` is the `m × b` summing
+/// matrix (`S`) from `b` bottom series to `m` nodes. The projection
+/// \(\hat Y S(S^\top S)^{-1}S^\top\) is applied independently at each
+/// horizon. Node / bottom counts are not identification `p`.
+pub fn reconcile_ols(
+    yhat: &Matrix,
+    summing: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, yhat, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, summing, None, &ctx.policy);
+    if yhat.ncols() != summing.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "reconcile_ols yhat.ncols()={} summing.nrows()={}",
+                    yhat.ncols(),
+                    summing.nrows()
+                ))
+                .build(),
+        );
+        return ctx.finish(yhat.clone());
+    }
+    let m = summing.nrows();
+    let b = summing.ncols();
+    if m == 0 || b == 0 {
+        return ctx.finish(yhat.clone());
+    }
+    let mut gram = summing.gram();
+    for i in 0..b {
+        gram[(i, i)] += 1e-10;
+    }
+    let mut out = Matrix::zeros(yhat.nrows(), m);
+    let mut used_fallback = false;
+    for h in 0..yhat.nrows() {
+        let mut z = Vector::zeros(b);
+        for j in 0..b {
+            let mut s = 0.0;
+            for i in 0..m {
+                s += summing.get(i, j) * yhat.get(h, i);
+            }
+            z[j] = s;
+        }
+        let mut scratch = Report::new("reconcile", "chol");
+        let beta = match chol_solve(&mut scratch, &gram, &z, &ctx.policy) {
+            Some(v) => v,
+            None => {
+                used_fallback = true;
+                Vector::from_iter((0..b).map(|j| {
+                    if j < yhat.ncols() {
+                        yhat.get(h, j)
+                    } else {
+                        0.0
+                    }
+                }))
+            }
+        };
+        for i in 0..m {
+            let mut s = 0.0;
+            for j in 0..b.min(beta.len()) {
+                s += summing.get(i, j) * beta[j];
+            }
+            out.set(h, i, s);
+        }
+    }
+    if used_fallback {
+        ctx.push(
+            Issue::builder(IssueCode::CholeskyFailed)
+                .severity(Severity::Warning)
+                .message("reconcile_ols: S'S was not SPD; a horizon fell back to a truncated map")
+                .compromise(NumericalCompromise::new(
+                    "Cholesky of S'S",
+                    "truncated bottom coefficients for that horizon",
+                    "the summing Gram was indefinite even after jitter",
+                    "do not treat that horizon as a coherent hierarchy",
+                ))
+                .build(),
+        );
+    }
+    ctx.finish(out)
+}
+
 /// Multiple seasonal-trend LOESS (sktime `MSTL`).
 ///
 /// Second-period STL is run on the first residual. Periods are not
@@ -8040,5 +8125,20 @@ mod tests {
             .value;
         assert_eq!(fxf.len(), 3);
         assert!(fxf.as_slice().iter().all(|v| v.is_finite()));
+        let yh = Matrix::from_fn(2, 3, |h, j| match j {
+            0 => 1.0 + h as f64,
+            1 => 2.0 + h as f64,
+            _ => 4.0 + h as f64,
+        });
+        let s = Matrix::from_fn(3, 2, |i, j| match (i, j) {
+            (0, 0) | (1, 1) => 1.0,
+            (2, 0) | (2, 1) => 1.0,
+            _ => 0.0,
+        });
+        let rec = reconcile_ols(&yh, &s, &Session::new("rec", "ols"))
+            .expect("rec")
+            .value;
+        assert_eq!(rec.shape(), (2, 3));
+        assert!((rec.get(0, 0) + rec.get(0, 1) - rec.get(0, 2)).abs() < 1e-8);
     }
 }

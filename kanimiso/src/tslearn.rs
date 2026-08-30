@@ -4593,6 +4593,750 @@ impl Predict for FittedSoftDtwKMeans {
     }
 }
 
+fn interval_feats_drcif(x: &Matrix, intervals: &[Interval]) -> Matrix {
+    let p = intervals.len() * 8;
+    Matrix::from_fn(x.nrows(), p, |i, j| {
+        let spec = &intervals[j / 8];
+        let kind = j % 8;
+        let a = spec.start.min(x.ncols());
+        let b = spec.end.min(x.ncols()).max(a + 1);
+        let mut vals: Vec<f64> = (a..b).map(|t| x.get(i, t)).collect();
+        let len = vals.len();
+        let mean = vals.iter().sum::<f64>() / len as f64;
+        match kind {
+            0 => mean,
+            1 => {
+                if len <= 1 {
+                    0.0
+                } else {
+                    let ss: f64 = vals.iter().map(|v| (v - mean) * (v - mean)).sum();
+                    (ss / (len as f64 - 1.0)).sqrt()
+                }
+            }
+            2 => {
+                let tbar = (len.saturating_sub(1)) as f64 / 2.0;
+                let mut num = 0.0;
+                let mut den = 0.0;
+                for (u, v) in vals.iter().enumerate() {
+                    let dt = u as f64 - tbar;
+                    num += dt * (*v - mean);
+                    den += dt * dt;
+                }
+                if den > 0.0 {
+                    num / den
+                } else {
+                    0.0
+                }
+            }
+            3 => {
+                vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                vals[len / 2]
+            }
+            4 => {
+                vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let q = |p: f64| {
+                    let t = p * (len.saturating_sub(1)) as f64;
+                    let lo = t.floor() as usize;
+                    let hi = t.ceil() as usize;
+                    let w = t - lo as f64;
+                    (1.0 - w) * vals[lo] + w * vals[hi.min(len - 1)]
+                };
+                q(0.75) - q(0.25)
+            }
+            5 => vals.iter().map(|v| v * v).sum::<f64>() / len as f64,
+            6 => vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            _ => vals.iter().copied().fold(f64::INFINITY, f64::min),
+        }
+    })
+}
+
+/// Diverse-representation CIF (sktime `DrCIF` lite).
+///
+/// Interval count is not identification `p`. Catch22 on short intervals is
+/// omitted so a constant window cannot abort the outer fit.
+#[derive(Clone, Debug)]
+pub struct DrCif {
+    /// Trees.
+    pub n_estimators: usize,
+    /// Random intervals per tree.
+    pub n_intervals: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for DrCif {
+    fn default() -> Self {
+        Self {
+            n_estimators: 6,
+            n_intervals: 3,
+            max_depth: 4,
+            seed: 11,
+        }
+    }
+}
+
+impl DrCif {
+    /// Default DrCIF lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted DrCIF vote.
+#[derive(Clone, Debug)]
+pub struct FittedDrCif {
+    trees: Vec<crate::tree::FittedTreeClassifier>,
+    intervals: Vec<Vec<Interval>>,
+    /// Sorted class labels.
+    pub classes: Vec<i64>,
+}
+
+impl Fit for DrCif {
+    type Fitted = FittedDrCif;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedDrCif>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let classes: Vec<i64> = counts.iter().map(|(k, _)| *k).collect();
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .message("DrCIF lite uses eight interval summaries, not the published catch22 set")
+                .compromise(NumericalCompromise::new(
+                    "diverse interval features",
+                    "mean/std/slope/median/IQR/energy/min/max per interval",
+                    "catch22 on short windows can be statistically vacuous",
+                    "do not treat this as the published DrCIF feature map",
+                ))
+                .build(),
+        );
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        let mut intervals = Vec::new();
+        let tlen = x.ncols().max(1);
+        for e in 0..self.n_estimators.max(1) {
+            let mut iv = Vec::new();
+            for _ in 0..self.n_intervals.max(1) {
+                let a = rng.below(tlen);
+                let span = 1 + rng.below(tlen);
+                let b = (a + span).min(tlen);
+                iv.push(Interval {
+                    start: a,
+                    end: b.max(a + 1),
+                });
+            }
+            let feat = interval_feats_drcif(x, &iv);
+            let mut tree = crate::tree::DecisionTreeClassifier {
+                max_depth: self.max_depth,
+                seed: rng.next_u64(),
+                ..crate::tree::DecisionTreeClassifier::default()
+            };
+            match tree.fit(&feat, y, &session.child("drcif_tree")) {
+                Ok(q) => {
+                    trees.push(q.value);
+                    intervals.push(iv);
+                }
+                Err(err) => {
+                    for issue in err.report.issues() {
+                        if !matches!(
+                            issue.code,
+                            IssueCode::ResidualTooLarge
+                                | IssueCode::NearSingular
+                                | IssueCode::RankZero
+                                | IssueCode::R2IsOne
+                        ) {
+                            ctx.push(issue.clone());
+                        }
+                    }
+                }
+            }
+            ctx.session.step(e as u64, 0.0, None);
+        }
+        if trees.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("every DrCIF tree failed to fit")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedDrCif {
+            trees,
+            intervals,
+            classes,
+        })
+    }
+}
+
+impl Predict for FittedDrCif {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let mut votes = vec![BTreeMap::<i64, usize>::new(); x.nrows()];
+        for (tree, iv) in self.trees.iter().zip(&self.intervals) {
+            let feat = interval_feats_drcif(x, iv);
+            match tree.predict(&feat, &session.child("drcif_pred")) {
+                Ok(q) => {
+                    for i in 0..x.nrows() {
+                        let lab = q.value[i].round() as i64;
+                        *votes[i].entry(lab).or_insert(0) += 1;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        let out = Vector::from_iter(votes.iter().map(|m| {
+            m.iter()
+                .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(k, _)| *k as f64)
+                .unwrap_or(self.classes.first().copied().unwrap_or(0) as f64)
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// Proximity-stump forest (sktime `ProximityForest` lite).
+///
+/// Each member splits on DTW proximity to two class exemplars. Tree count is
+/// not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ProximityForest {
+    /// Stumps.
+    pub n_trees: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for ProximityForest {
+    fn default() -> Self {
+        Self {
+            n_trees: 5,
+            seed: 13,
+        }
+    }
+}
+
+impl ProximityForest {
+    /// Default proximity forest lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ProxStump {
+    left: Vector,
+    right: Vector,
+    left_lab: f64,
+    right_lab: f64,
+}
+
+/// Fitted proximity forest.
+#[derive(Clone, Debug)]
+pub struct FittedProximityForest {
+    trees: Vec<ProxStump>,
+    /// Majority class fallback.
+    pub default_label: f64,
+}
+
+impl Fit for ProximityForest {
+    type Fitted = FittedProximityForest;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedProximityForest>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let mut by_class: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+        for i in 0..x.nrows().min(y.len()) {
+            if y[i].is_finite() {
+                by_class.entry(y[i].round() as i64).or_default().push(i);
+            }
+        }
+        let labs: Vec<i64> = by_class.keys().copied().collect();
+        let default_label = labs.first().copied().unwrap_or(0) as f64;
+        if labs.len() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::SingleClass)
+                    .message("ProximityForest needs two classes to pick opposing exemplars")
+                    .build(),
+            );
+        }
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        for _ in 0..self.n_trees.max(1) {
+            if labs.len() < 2 {
+                break;
+            }
+            let a = labs[rng.below(labs.len())];
+            let mut b = a;
+            for _ in 0..8 {
+                b = labs[rng.below(labs.len())];
+                if b != a {
+                    break;
+                }
+            }
+            if b == a {
+                continue;
+            }
+            let ia = &by_class[&a];
+            let ib = &by_class[&b];
+            let i0 = ia[rng.below(ia.len())];
+            let i1 = ib[rng.below(ib.len())];
+            trees.push(ProxStump {
+                left: x.row(i0),
+                right: x.row(i1),
+                left_lab: a as f64,
+                right_lab: b as f64,
+            });
+        }
+        if trees.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("ProximityForest built no proximity stumps")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedProximityForest {
+            trees,
+            default_label,
+        })
+    }
+}
+
+impl Predict for FittedProximityForest {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.trees.is_empty() {
+            return ctx.finish(Vector::filled(x.nrows(), self.default_label));
+        }
+        let mut votes = vec![BTreeMap::<i64, usize>::new(); x.nrows()];
+        for t in &self.trees {
+            for i in 0..x.nrows() {
+                let row = x.row(i);
+                let dl = dtw_raw(row.as_slice(), t.left.as_slice());
+                let dr = dtw_raw(row.as_slice(), t.right.as_slice());
+                let lab = if dl <= dr { t.left_lab } else { t.right_lab };
+                *votes[i].entry(lab.round() as i64).or_insert(0) += 1;
+            }
+        }
+        let out = Vector::from_iter(votes.iter().map(|m| {
+            m.iter()
+                .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(k, _)| *k as f64)
+                .unwrap_or(self.default_label)
+        }));
+        ctx.finish(out)
+    }
+}
+
+fn binary_ridge_from_features(
+    z: &Matrix,
+    y: &Vector,
+    alpha: f64,
+    policy: &signlred::Policy,
+    name: &str,
+) -> crate::classification::FittedRidgeClassifier {
+    let classes: Vec<i64> = {
+        let mut c: Vec<i64> = y
+            .as_slice()
+            .iter()
+            .filter(|v| v.is_finite())
+            .map(|v| v.round() as i64)
+            .collect();
+        c.sort_unstable();
+        c.dedup();
+        if c.len() >= 2 {
+            c
+        } else {
+            vec![0, 1]
+        }
+    };
+    let pm = Vector::from_iter(y.as_slice().iter().map(|&v| {
+        let lab = v.round() as i64;
+        if classes.len() >= 2 && lab == classes[classes.len() - 1] {
+            1.0
+        } else {
+            -1.0
+        }
+    }));
+    let mut scratch = signlred::Report::new(name, "ridge");
+    let design = z.with_intercept();
+    let beta = ridge_solve(&mut scratch, &design, &pm, alpha.max(0.0), policy)
+        .unwrap_or_else(|| Vector::zeros(design.ncols()));
+    crate::classification::FittedRidgeClassifier::from_penalized(
+        FittedPenalized {
+            coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            alpha,
+            l1_ratio: 0.0,
+        },
+        classes,
+    )
+}
+
+/// Prefix-and-commit classifier (tslearn / sktime early classification lite).
+///
+/// Prefix length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct EarlyClassifier {
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// PAA segments on each prefix.
+    pub n_segments: usize,
+}
+
+impl Default for EarlyClassifier {
+    fn default() -> Self {
+        Self {
+            alpha: 0.1,
+            n_segments: 2,
+        }
+    }
+}
+
+impl EarlyClassifier {
+    /// Default early classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted prefix committee.
+#[derive(Clone, Debug)]
+pub struct FittedEarlyClassifier {
+    fracs: Vec<f64>,
+    models: Vec<crate::classification::FittedRidgeClassifier>,
+    segs: usize,
+}
+
+fn prefix_cols(x: &Matrix, frac: f64) -> Matrix {
+    let t = ((x.ncols() as f64 * frac).ceil() as usize)
+        .max(1)
+        .min(x.ncols().max(1));
+    Matrix::from_fn(x.nrows(), t, |i, j| x.get(i, j))
+}
+
+impl Fit for EarlyClassifier {
+    type Fitted = FittedEarlyClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedEarlyClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let segs = self.n_segments.max(1);
+        let fracs = vec![0.5, 1.0];
+        let mut models = Vec::new();
+        for (k, &f) in fracs.iter().enumerate() {
+            let pref = prefix_cols(x, f);
+            match Paa::new(segs).transform(&pref, &session.child(format!("early_paa_{k}"))) {
+                Ok(q) => {
+                    models.push(binary_ridge_from_features(
+                        &q.value,
+                        y,
+                        self.alpha,
+                        &ctx.policy,
+                        "early",
+                    ));
+                }
+                Err(e) => {
+                    if !matches!(
+                        e.primary.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::RankZero
+                            | IssueCode::R2IsOne
+                    ) {
+                        ctx.push(e.primary);
+                    }
+                }
+            }
+        }
+        if models.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("EarlyClassifier: every prefix ridge was rejected")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedEarlyClassifier {
+            fracs,
+            models,
+            segs,
+        })
+    }
+}
+
+impl Predict for FittedEarlyClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.models.is_empty() {
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let mut preds: Vec<Vector> = Vec::new();
+        for (k, (f, m)) in self.fracs.iter().zip(&self.models).enumerate() {
+            let pref = prefix_cols(x, *f);
+            match Paa::new(self.segs).transform(&pref, &session.child(format!("epaa_{k}"))) {
+                Ok(z) => match m.predict(&z.value, &session.child(format!("er_{k}"))) {
+                    Ok(q) => preds.push(q.value),
+                    Err(_) => {}
+                },
+                Err(_) => {}
+            }
+        }
+        if preds.is_empty() {
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let first = preds[0][i];
+            if preds
+                .iter()
+                .all(|p| i < p.len() && (p[i] - first).abs() < 0.5)
+            {
+                first
+            } else {
+                preds.last().map(|p| p[i]).unwrap_or(first)
+            }
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// Time-contracted BOSS vote (sktime `ContractableBOSS` lite).
+///
+/// Member / word counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ContractableBoss {
+    /// Ensemble size.
+    pub n_members: usize,
+    /// Base window.
+    pub window: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for ContractableBoss {
+    fn default() -> Self {
+        Self {
+            n_members: 3,
+            window: 3,
+            seed: 17,
+        }
+    }
+}
+
+impl ContractableBoss {
+    /// Default cBOSS lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted cBOSS vote.
+#[derive(Clone, Debug)]
+pub struct FittedContractableBoss {
+    members: Vec<FittedBoss>,
+}
+
+impl Fit for ContractableBoss {
+    type Fitted = FittedContractableBoss;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedContractableBoss>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let mut members = Vec::new();
+        for i in 0..self.n_members.max(1) {
+            let w = (self.window.max(2) + i).min(x.ncols().max(1));
+            let mut boss = BossEnsemble {
+                window: w,
+                word_len: 3,
+                alphabet: 4,
+            };
+            match boss.fit(x, y, &session.child(format!("cboss_{i}"))) {
+                Ok(q) => members.push(q.value),
+                Err(e) => {
+                    if !matches!(
+                        e.primary.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::RankZero
+                            | IssueCode::R2IsOne
+                            | IssueCode::InsufficientSample
+                    ) {
+                        ctx.push(e.primary);
+                    }
+                }
+            }
+        }
+        if members.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("ContractableBOSS: every member was rejected")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedContractableBoss { members })
+    }
+}
+
+impl Predict for FittedContractableBoss {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.members.is_empty() {
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let mut acc = vec![0.0; x.nrows()];
+        let mut k: f64 = 0.0;
+        for (t, m) in self.members.iter().enumerate() {
+            match m.predict(x, &session.child(format!("cb_{t}"))) {
+                Ok(q) => {
+                    for i in 0..x.nrows().min(q.value.len()) {
+                        acc[i] += q.value[i];
+                    }
+                    k += 1.0;
+                }
+                Err(_) => {}
+            }
+        }
+        let k = k.max(1.0);
+        ctx.finish(Vector::from_iter(acc.iter().map(|v| {
+            if *v / k > 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        })))
+    }
+}
+
+/// One tree per series column (sktime `ColumnEnsembleClassifier` lite).
+///
+/// Column count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ColumnEnsembleClassifier {
+    /// Tree depth.
+    pub max_depth: usize,
+}
+
+impl Default for ColumnEnsembleClassifier {
+    fn default() -> Self {
+        Self { max_depth: 3 }
+    }
+}
+
+impl ColumnEnsembleClassifier {
+    /// Default column ensemble.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted per-column vote.
+#[derive(Clone, Debug)]
+pub struct FittedColumnEnsembleClassifier {
+    trees: Vec<crate::tree::FittedTreeClassifier>,
+    /// Fallback label.
+    pub default_label: f64,
+}
+
+impl Fit for ColumnEnsembleClassifier {
+    type Fitted = FittedColumnEnsembleClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedColumnEnsembleClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let default_label = y
+            .as_slice()
+            .iter()
+            .copied()
+            .find(|v| v.is_finite())
+            .unwrap_or(0.0);
+        let mut trees = Vec::new();
+        for j in 0..x.ncols() {
+            let col = Matrix::from_fn(x.nrows(), 1, |i, _| x.get(i, j));
+            let mut tree = crate::tree::DecisionTreeClassifier {
+                max_depth: self.max_depth,
+                seed: j as u64 + 3,
+                ..crate::tree::DecisionTreeClassifier::default()
+            };
+            match tree.fit(&col, y, &session.child(format!("col_{j}"))) {
+                Ok(q) => trees.push(q.value),
+                Err(e) => {
+                    if !matches!(
+                        e.primary.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::RankZero
+                            | IssueCode::R2IsOne
+                            | IssueCode::ConstantFeature
+                    ) {
+                        ctx.push(e.primary);
+                    }
+                }
+            }
+        }
+        if trees.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("ColumnEnsembleClassifier: every column tree failed")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedColumnEnsembleClassifier {
+            trees,
+            default_label,
+        })
+    }
+}
+
+impl Predict for FittedColumnEnsembleClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let mut votes = vec![BTreeMap::<i64, usize>::new(); x.nrows()];
+        for (j, tree) in self.trees.iter().enumerate() {
+            let col = Matrix::from_fn(x.nrows(), 1, |i, _| {
+                x.get(i, j.min(x.ncols().saturating_sub(1)))
+            });
+            match tree.predict(&col, &session.child(format!("colp_{j}"))) {
+                Ok(q) => {
+                    for i in 0..x.nrows().min(q.value.len()) {
+                        *votes[i].entry(q.value[i].round() as i64).or_insert(0) += 1;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        let out = Vector::from_iter(votes.iter().map(|m| {
+            m.iter()
+                .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(k, _)| *k as f64)
+                .unwrap_or(self.default_label)
+        }));
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5026,5 +5770,50 @@ mod tests {
             .unwrap();
         assert_eq!(sdk.value.labels.len(), 6);
         assert_eq!(sdk.value.centers.nrows(), 2);
+        let dr = DrCif::new()
+            .fit(&x, &yb, &Session::new("ts", "drcif"))
+            .unwrap();
+        let drp = dr
+            .value
+            .predict(&x, &Session::new("ts", "drcifp"))
+            .unwrap()
+            .value;
+        assert_eq!(drp.len(), 6);
+        let pf = ProximityForest::new()
+            .fit(&x, &yb, &Session::new("ts", "pf"))
+            .unwrap();
+        let pfp = pf
+            .value
+            .predict(&x, &Session::new("ts", "pfp"))
+            .unwrap()
+            .value;
+        assert_eq!(pfp.len(), 6);
+        let ec = EarlyClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "ec"))
+            .unwrap();
+        let ecp = ec
+            .value
+            .predict(&x, &Session::new("ts", "ecp"))
+            .unwrap()
+            .value;
+        assert_eq!(ecp.len(), 6);
+        let cb = ContractableBoss::new()
+            .fit(&x, &yb, &Session::new("ts", "cboss"))
+            .unwrap();
+        let cbp = cb
+            .value
+            .predict(&x, &Session::new("ts", "cbossp"))
+            .unwrap()
+            .value;
+        assert_eq!(cbp.len(), 6);
+        let ce = ColumnEnsembleClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "ce"))
+            .unwrap();
+        let cep = ce
+            .value
+            .predict(&x, &Session::new("ts", "cep"))
+            .unwrap()
+            .value;
+        assert_eq!(cep.len(), 6);
     }
 }

@@ -2738,6 +2738,73 @@ const INVENTORY: &[Algorithm] = &[
     ),
     a("online.RollingQuantile", "river.stats.Quantile", "online"),
     a("online.OnlineHamming", "river.metrics.Hamming", "online"),
+    a(
+        "metrics.label_ranking_average_precision",
+        "sklearn.metrics.label_ranking_average_precision_score",
+        "metric",
+    ),
+    a(
+        "metrics.coverage_error",
+        "sklearn.metrics.coverage_error",
+        "metric",
+    ),
+    a(
+        "metrics.label_ranking_loss",
+        "sklearn.metrics.label_ranking_loss",
+        "metric",
+    ),
+    a(
+        "metrics.d2_pinball_score",
+        "sklearn.metrics.d2_pinball_score",
+        "metric",
+    ),
+    a(
+        "stats.rainbow",
+        "statsmodels.stats.diagnostic.linear_rainbow",
+        "stats",
+    ),
+    a(
+        "tsa.reconcile_ols",
+        "sktime.forecasting.reconcile.Reconciler",
+        "forecast",
+    ),
+    a(
+        "tslearn.DrCif",
+        "sktime.classification.interval_based.DrCIF",
+        "timeseries",
+    ),
+    a(
+        "tslearn.ProximityForest",
+        "sktime.classification.distance_based.ProximityForest",
+        "timeseries",
+    ),
+    a(
+        "tslearn.EarlyClassifier",
+        "sktime.classification.early_classification.ProbabilityThresholdEarlyClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.ContractableBoss",
+        "sktime.classification.dictionary_based.ContractableBOSS",
+        "timeseries",
+    ),
+    a(
+        "tslearn.ColumnEnsembleClassifier",
+        "sktime.classification.compose.ColumnEnsembleClassifier",
+        "timeseries",
+    ),
+    a(
+        "ensemble.RotationForest",
+        "sktime.classification.sklearn.RotationForest",
+        "estimator",
+    ),
+    a("online.OnlineJaccard", "river.metrics.Jaccard", "online"),
+    a("online.EwVar", "river.stats.EWVar", "online"),
+    a(
+        "online.SuccessiveHalvingClassifier",
+        "river.model_selection.SuccessiveHalvingClassifier",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -2845,6 +2912,11 @@ mod tests {
             "tslearn.Arsenal",
             "tslearn.FreshPrince",
             "online.OnlineBagging",
+            "metrics.label_ranking_average_precision",
+            "stats.rainbow",
+            "tslearn.DrCif",
+            "tslearn.ProximityForest",
+            "online.SuccessiveHalvingClassifier",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

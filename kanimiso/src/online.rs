@@ -9715,6 +9715,373 @@ impl PartialFit for OnlineHamming {
     }
 }
 
+/// Streaming Jaccard index (river `metrics.Jaccard`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineJaccard {
+    inter: f64,
+    union: f64,
+    n: u64,
+    updates: u64,
+}
+
+impl OnlineJaccard {
+    /// Empty Jaccard.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Intersection over union, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.union <= 0.0 {
+            f64::NAN
+        } else {
+            self.inter / self.union
+        }
+    }
+}
+
+impl PartialFit for OnlineJaccard {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        metric_partial(
+            session,
+            "jaccard",
+            x,
+            y,
+            self.updates,
+            self.n,
+            |pred, truth| {
+                let a = pred.round() != 0.0;
+                let b = truth.round() != 0.0;
+                if a && b {
+                    self.inter += 1.0;
+                }
+                if a || b {
+                    self.union += 1.0;
+                }
+                self.n += 1;
+                self.updates += 1;
+                self.score()
+            },
+        )
+    }
+}
+
+/// Exponentially weighted variance (river `stats.EWVar`).
+#[derive(Clone, Debug)]
+pub struct EwVar {
+    fading: f64,
+    mean: f64,
+    m2: f64,
+    w: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for EwVar {
+    fn default() -> Self {
+        Self {
+            fading: 0.5,
+            mean: 0.0,
+            m2: 0.0,
+            w: 0.0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl EwVar {
+    /// EW variance with fading factor in `(0, 1]`.
+    pub fn new(fading: f64) -> Self {
+        Self {
+            fading,
+            ..Self::default()
+        }
+    }
+
+    /// Current variance, or NaN during warmup.
+    pub fn score(&self) -> f64 {
+        if self.w <= 1e-12 {
+            f64::NAN
+        } else {
+            self.m2 / self.w
+        }
+    }
+}
+
+impl PartialFit for EwVar {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let fade = if self.fading.is_finite() && self.fading > 0.0 && self.fading <= 1.0 {
+            self.fading
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "EwVar fading={} is not in (0,1]; using 0.5",
+                        self.fading
+                    ))
+                    .build(),
+            );
+            0.5
+        };
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            if self.w <= 0.0 {
+                self.mean = v;
+                self.m2 = 0.0;
+                self.w = 1.0;
+            } else {
+                self.w = fade * self.w + 1.0;
+                let d = v - self.mean;
+                self.mean += d / self.w;
+                self.m2 = fade * self.m2 + d * (v - self.mean);
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.w;
+        q.parameter_delta_norm = Some((after - before).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("EwVar fade={fade:.3} var={after:.6e}");
+        q.loss_after = Some(after);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "exponentially weighted second moment",
+                "Welford update with geometric fading of past mass",
+                format!("var={before:.6e}"),
+                format!("var={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Successive-halving perceptron committee (river `model_selection.SuccessiveHalvingClassifier`).
+///
+/// Model count is not identification `p`. The worst half is dropped when
+/// `n_seen` crosses successive powers of two.
+#[derive(Clone, Debug)]
+pub struct SuccessiveHalvingClassifier {
+    /// Initial candidate count.
+    pub n_models: usize,
+    models: Vec<Perceptron>,
+    hits: Vec<f64>,
+    seen: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+    cuts: u64,
+}
+
+impl Default for SuccessiveHalvingClassifier {
+    fn default() -> Self {
+        Self {
+            n_models: 4,
+            models: Vec::new(),
+            hits: Vec::new(),
+            seen: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            cuts: 0,
+        }
+    }
+}
+
+impl SuccessiveHalvingClassifier {
+    /// Committee of `n_models` perceptrons.
+    pub fn new(n_models: usize) -> Self {
+        Self {
+            n_models: n_models.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Models still alive.
+    pub fn n_alive(&self) -> usize {
+        self.models.len()
+    }
+}
+
+impl PartialFit for SuccessiveHalvingClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        if self.n_models < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "SuccessiveHalving n_models={} < 2; using 2",
+                        self.n_models
+                    ))
+                    .build(),
+            );
+            self.n_models = 2;
+        }
+        if self.models.is_empty() {
+            self.models = vec![Perceptron::new(); self.n_models.max(2)];
+            self.hits = vec![0.0; self.models.len()];
+            self.seen = vec![0.0; self.models.len()];
+        }
+        let before = self.n_seen;
+        let n_before = self.models.len();
+        for m in 0..self.models.len() {
+            let pred = self.models[m]
+                .predict(x, &session.child(format!("sh_pre_{m}")))
+                .map(|q| q.value)
+                .unwrap_or_else(|_| Vector::zeros(x.nrows()));
+            for i in 0..x.nrows().min(y.len()).min(pred.len()) {
+                if pred[i].round() == y[i].round() {
+                    self.hits[m] += 1.0;
+                }
+                self.seen[m] += 1.0;
+            }
+            let _ = self.models[m].partial_fit(x, Some(y), &session.child(format!("sh_{m}")));
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut cut = false;
+        if self.models.len() > 1
+            && self.n_seen >= 2
+            && (self.n_seen.is_power_of_two() || before < 2)
+        {
+            let mut order: Vec<usize> = (0..self.models.len()).collect();
+            order.sort_by(|&a, &b| {
+                let aa = if self.seen[a] > 0.0 {
+                    self.hits[a] / self.seen[a]
+                } else {
+                    0.0
+                };
+                let bb = if self.seen[b] > 0.0 {
+                    self.hits[b] / self.seen[b]
+                } else {
+                    0.0
+                };
+                bb.partial_cmp(&aa).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let keep = (self.models.len() / 2).max(1);
+            let keep_idx = &order[..keep];
+            let mut models = Vec::new();
+            let mut hits = Vec::new();
+            let mut seen = Vec::new();
+            for &i in keep_idx {
+                models.push(self.models[i].clone());
+                hits.push(self.hits[i]);
+                seen.push(self.seen[i]);
+            }
+            if models.len() < n_before {
+                cut = true;
+                self.cuts += 1;
+            }
+            self.models = models;
+            self.hits = hits;
+            self.seen = seen;
+        }
+        let best = self
+            .hits
+            .iter()
+            .zip(&self.seen)
+            .map(|(h, s)| if *s > 0.0 { h / s } else { 0.0 })
+            .fold(0.0_f64, f64::max);
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if cut { 1.0 } else { 0.0 });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2 && !self.models.is_empty();
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "SuccessiveHalving alive={} cuts={} best_acc={best:.3}",
+            self.models.len(),
+            self.cuts
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                if cut {
+                    "eliminated the worse half of the committee"
+                } else {
+                    "updated every surviving perceptron"
+                },
+                "rung promotions drop models with the lowest running accuracy",
+                format!("alive={n_before} n={before}"),
+                format!(
+                    "alive={} n={} acc={best:.3}",
+                    self.models.len(),
+                    self.n_seen
+                ),
+            ),
+        )
+    }
+}
+
+impl Predict for SuccessiveHalvingClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.models.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let mut acc = vec![0.0; x.nrows()];
+        let mut k: f64 = 0.0;
+        for (t, m) in self.models.iter().enumerate() {
+            match m.predict(x, &session.child(format!("shp_{t}"))) {
+                Ok(q) => {
+                    for i in 0..x.nrows().min(q.value.len()) {
+                        acc[i] += q.value[i];
+                    }
+                    k += 1.0;
+                }
+                Err(_) => {}
+            }
+        }
+        let k = k.max(1.0);
+        ctx.finish(Vector::from_iter(acc.iter().map(|v| {
+            if *v / k > 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9985,6 +10352,15 @@ mod tests {
         OnlineHamming::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("oham");
+        OnlineJaccard::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("ojac");
+        EwVar::new(0.6)
+            .partial_fit(&x, None, &session)
+            .expect("ewv");
+        SuccessiveHalvingClassifier::new(4)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("sh");
 
         let n_expl = session
             .ledger()
