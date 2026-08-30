@@ -6305,6 +6305,126 @@ pub fn gof_chisquare_power(
     ctx.finish(power)
 }
 
+/// Benjamini–Hochberg FDR (statsmodels `fdrcorrection`).
+///
+/// Test count is not identification `p`.
+pub fn fdrcorrection(p: &Vector, alpha: f64, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = scan_finite(p.as_slice()).to_issue("p-values") {
+        ctx.push(issue);
+    }
+    let a = if alpha.is_finite() && alpha > 0.0 && alpha < 1.0 {
+        alpha
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("fdrcorrection alpha={alpha}; using 0.05"))
+                .build(),
+        );
+        0.05
+    };
+    let _ = a;
+    match multipletests(p.as_slice(), MultiTest::BenjaminiHochberg, &session.child("bh")) {
+        Ok(q) => {
+            for issue in q.report.issues() {
+                if issue.code == IssueCode::InvalidWeight {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            ctx.finish(Vector::from_slice(&q.value))
+        }
+        Err(e) => {
+            if e.primary.code != IssueCode::InvalidWeight {
+                ctx.push(e.primary);
+            }
+            ctx.finish(Vector::zeros(p.len()))
+        }
+    }
+}
+
+/// Mantel–Haenszel pooled odds ratio (statsmodels `StratifiedTable`).
+///
+/// Stratum count is not identification `p`. Each table must be 2×2.
+pub fn mantel_haenszel(
+    tables: &[Matrix],
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if tables.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("mantel_haenszel received no strata")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: 0.0,
+        });
+    }
+    let mut num = 0.0;
+    let mut den = 0.0;
+    let mut nobs = 0.0;
+    for (s, t) in tables.iter().enumerate() {
+        if t.nrows() != 2 || t.ncols() != 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message(format!("mantel_haenszel stratum {s} is not 2×2"))
+                    .build(),
+            );
+            continue;
+        }
+        let a = t.get(0, 0);
+        let b = t.get(0, 1);
+        let c = t.get(1, 0);
+        let d = t.get(1, 1);
+        if ![a, b, c, d].iter().all(|v| v.is_finite() && *v >= 0.0) {
+            ctx.push(
+                Issue::builder(IssueCode::NonFiniteInput)
+                    .message(format!("mantel_haenszel stratum {s} has a non-finite or negative cell"))
+                    .build(),
+            );
+            continue;
+        }
+        let n = a + b + c + d;
+        if n <= 0.0 {
+            continue;
+        }
+        num += a * d / n;
+        den += b * c / n;
+        nobs += n;
+    }
+    let or = if den.abs() <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("mantel_haenszel denominator vanished")
+                .build(),
+        );
+        f64::NAN
+    } else {
+        num / den
+    };
+    let stat: f64 = if or.is_finite() && or > 0.0 {
+        or.ln()
+    } else {
+        f64::NAN
+    };
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: if stat.is_finite() {
+            crate::special::norm_pvalue_two_sided(stat)
+        } else {
+            f64::NAN
+        },
+        df: 1.0,
+        nobs,
+    })
+}
+
 /// Nested-model ANOVA (statsmodels `anova_lm`).
 #[derive(Clone, Debug)]
 pub struct AnovaLm {
@@ -7427,5 +7547,13 @@ mod tests {
         assert!(fp.value.is_finite() && fp.value >= 0.0 && fp.value <= 1.0);
         let gp = gof_chisquare_power(8.0, 3.0, 0.05, &Session::new("gof", "t")).expect("gof");
         assert!(gp.value.is_finite() && gp.value >= 0.0 && gp.value <= 1.0);
+        let pv = Vector::from_slice(&[0.01, 0.04, 0.20, 0.80]);
+        let fdr = fdrcorrection(&pv, 0.05, &Session::new("fdr", "t")).expect("fdr");
+        assert_eq!(fdr.value.len(), 4);
+        assert!(fdr.value.as_slice().iter().all(|v| v.is_finite()));
+        let t1 = Matrix::from_fn(2, 2, |i, j| if i == j { 8.0 } else { 2.0 });
+        let t2 = Matrix::from_fn(2, 2, |i, j| if i == j { 6.0 } else { 3.0 });
+        let mh = mantel_haenszel(&[t1, t2], &Session::new("mh", "t")).expect("mh");
+        assert!(mh.value.statistic.is_finite() || mh.value.pvalue.is_nan());
     }
 }

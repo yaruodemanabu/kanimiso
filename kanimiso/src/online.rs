@@ -14618,6 +14618,547 @@ impl Transform for ColumnDiscard {
     }
 }
 
+/// FTRL-Proximal linear regressor (river `optim.FTRLProximal`).
+#[derive(Clone, Debug)]
+pub struct FtrlRegressor {
+    /// Learning-rate scale \(\alpha > 0\).
+    pub alpha: f64,
+    /// Learning-rate offset \(\beta > 0\).
+    pub beta: f64,
+    /// ℓ1.
+    pub l1: f64,
+    /// ℓ2.
+    pub l2: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    z: Vector,
+    n: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for FtrlRegressor {
+    fn default() -> Self {
+        Self {
+            alpha: 0.5,
+            beta: 1.0,
+            l1: 0.0,
+            l2: 0.0,
+            fit_intercept: true,
+            z: Vector::zeros(0),
+            n: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl FtrlRegressor {
+    /// Default FTRL regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn weights(&self) -> Vector {
+        let dim = self.z.len();
+        let mut w = Vector::zeros(dim);
+        let alpha = if self.alpha.is_finite() && self.alpha > 0.0 {
+            self.alpha
+        } else {
+            0.5
+        };
+        let beta = if self.beta.is_finite() && self.beta > 0.0 {
+            self.beta
+        } else {
+            1.0
+        };
+        for j in 0..dim {
+            if self.z[j].abs() <= self.l1 {
+                w[j] = 0.0;
+            } else {
+                let sign = if self.z[j] < 0.0 { -1.0 } else { 1.0 };
+                w[j] = -(self.z[j] - sign * self.l1)
+                    / ((beta + self.n[j].sqrt()) / alpha + self.l2);
+            }
+        }
+        w
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let w = self.weights();
+        let n = z.len().min(w.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += w[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for FtrlRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.z = Vector::zeros(dim);
+            self.n = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.z.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.weights();
+        let alpha = if self.alpha.is_finite() && self.alpha > 0.0 {
+            self.alpha
+        } else {
+            0.5
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let xa = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            let w = self.weights();
+            for j in 0..dim {
+                let g = err * xa[j];
+                let sigma = (self.n[j] + g * g).sqrt() / alpha - self.n[j].sqrt() / alpha;
+                self.z[j] += g - sigma * w[j];
+                self.n[j] += g * g;
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after_w = self.weights();
+        let delta = after_w.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "FTRL-Proximal weights",
+            "accumulated z and n define a proximal closed form at each row",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for FtrlRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
+/// AdaDelta linear regressor (river `optim.AdaDelta`).
+#[derive(Clone, Debug)]
+pub struct AdaDeltaRegressor {
+    /// Second-moment decay \(\rho\).
+    pub rho: f64,
+    /// Diagonal floor.
+    pub eps: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    eg2: Vector,
+    edx2: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for AdaDeltaRegressor {
+    fn default() -> Self {
+        Self {
+            rho: 0.95,
+            eps: 1e-6,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            eg2: Vector::zeros(0),
+            edx2: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl AdaDeltaRegressor {
+    /// Default AdaDelta regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for AdaDeltaRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.eg2 = Vector::zeros(dim);
+            self.edx2 = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.coef.clone();
+        let rho = self.rho.clamp(0.0, 0.999);
+        let eps = if self.eps.is_finite() && self.eps > 0.0 {
+            self.eps
+        } else {
+            1e-6
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            for j in 0..dim {
+                let g = err * z[j];
+                self.eg2[j] = rho * self.eg2[j] + (1.0 - rho) * g * g;
+                let dx = -((self.edx2[j] + eps).sqrt() / (self.eg2[j] + eps).sqrt()) * g;
+                self.coef[j] += dx;
+                self.edx2[j] = rho * self.edx2[j] + (1.0 - rho) * dx * dx;
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "AdaDelta linear weights",
+            "RMS of updates over RMS of gradients removes a global learning rate",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for AdaDeltaRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
+/// Heavy-ball momentum linear regressor (river `optim.Momentum`).
+#[derive(Clone, Debug)]
+pub struct MomentumRegressor {
+    /// Step \(\eta\).
+    pub learning_rate: f64,
+    /// Momentum \(\mu \in [0, 1)\).
+    pub mu: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    vel: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for MomentumRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            mu: 0.9,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            vel: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl MomentumRegressor {
+    /// Default momentum regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for MomentumRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.vel = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.coef.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let mu = self.mu.clamp(0.0, 0.999);
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            for j in 0..dim {
+                let g = err * z[j];
+                self.vel[j] = mu * self.vel[j] - eta * g;
+                self.coef[j] += self.vel[j];
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "momentum linear weights",
+            "velocity carries a fraction of the previous residual step",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for MomentumRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
+/// Streaming Poisson rate (river `proba.Poisson`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlinePoisson {
+    n: f64,
+    mean: f64,
+    updates: u64,
+}
+
+impl OnlinePoisson {
+    /// Empty Poisson accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current rate \(\lambda\), or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.n <= 0.0 {
+            f64::NAN
+        } else {
+            self.mean
+        }
+    }
+}
+
+impl PartialFit for OnlinePoisson {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        let mut neg = 0u64;
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            if v < 0.0 {
+                neg += 1;
+                continue;
+            }
+            self.n += 1.0;
+            self.mean += (v - self.mean) / self.n;
+        }
+        if neg > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message(format!("OnlinePoisson skipped {neg} negative counts"))
+                    .build(),
+            );
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 1.0;
+        q.warmup = self.n < 1.0;
+        q.explanation = format!("OnlinePoisson λ={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Poisson rate",
+                "running mean of non-negative column-0 counts",
+                format!("lambda={before:.6e}"),
+                format!("lambda={after:.6e}"),
+            ),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -15020,6 +15561,18 @@ mod tests {
         ColumnDiscard::new(vec![])
             .partial_fit(&x, None, &session)
             .expect("cdis");
+        FtrlRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("ftrl");
+        AdaDeltaRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("adadelta");
+        MomentumRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("mom");
+        OnlinePoisson::new()
+            .partial_fit(&x, None, &session)
+            .expect("opoiss");
 
         let n_expl = session
             .ledger()

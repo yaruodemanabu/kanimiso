@@ -8066,6 +8066,217 @@ impl Transform for Catch22Transformer {
     }
 }
 
+/// Residual convolutional classifier (sktime `ResNetClassifier` lite).
+///
+/// Kernel count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ResNetClassifier {
+    /// Kernels per residual block.
+    pub n_kernels: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for ResNetClassifier {
+    fn default() -> Self {
+        Self {
+            n_kernels: 4,
+            alpha: 0.1,
+            seed: 23,
+        }
+    }
+}
+
+impl ResNetClassifier {
+    /// Default ResNet-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted ResNet-lite ridge.
+#[derive(Clone, Debug)]
+pub struct FittedResNetClassifier {
+    kernels: Vec<Vec<f64>>,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+fn residual_conv_pool(x: &Matrix, kernels: &[Vec<f64>]) -> Matrix {
+    let raw = conv_maxpool(x, kernels);
+    Matrix::from_fn(raw.nrows(), raw.ncols(), |i, j| {
+        let skip = if j < x.ncols() {
+            x.get(i, j)
+        } else {
+            x.get(i, j % x.ncols().max(1))
+        };
+        raw.get(i, j) + skip
+    })
+}
+
+impl Fit for ResNetClassifier {
+    type Fitted = FittedResNetClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedResNetClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let w = 3usize.min(x.ncols().max(1));
+        if x.ncols() < 3 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!("ResNetClassifier width=3 > T={}", x.ncols()))
+                    .build(),
+            );
+        }
+        let mut rng = Rng::new(self.seed);
+        let kernels: Vec<Vec<f64>> = (0..self.n_kernels.max(1))
+            .map(|_| (0..w).map(|_| rng.standard_normal()).collect())
+            .collect();
+        let z = residual_conv_pool(x, &kernels);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "resnet");
+        ctx.finish(FittedResNetClassifier { kernels, inner })
+    }
+}
+
+impl Predict for FittedResNetClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = residual_conv_pool(x, &self.kernels);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Elman recurrent + conv classifier (sktime `LSTMFCNClassifier` lite).
+///
+/// Hidden width is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct LstmFcnClassifier {
+    /// Recurrent hidden size.
+    pub hidden: usize,
+    /// Conv kernels.
+    pub n_kernels: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for LstmFcnClassifier {
+    fn default() -> Self {
+        Self {
+            hidden: 4,
+            n_kernels: 4,
+            alpha: 0.1,
+            seed: 29,
+        }
+    }
+}
+
+impl LstmFcnClassifier {
+    /// Default LSTM-FCN-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted LSTM-FCN-lite ridge.
+#[derive(Clone, Debug)]
+pub struct FittedLstmFcnClassifier {
+    wx: Vector,
+    uh: Vector,
+    kernels: Vec<Vec<f64>>,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+fn elman_pool(x: &Matrix, wx: &Vector, uh: &Vector) -> Matrix {
+    let hdim = wx.len().max(1);
+    Matrix::from_fn(x.nrows(), hdim, |i, h| {
+        let mut state = 0.0;
+        let mut acc_max: f64 = f64::NEG_INFINITY;
+        for t in 0..x.ncols() {
+            let xt = x.get(i, t);
+            let w = if h < wx.len() { wx[h] } else { 0.0 };
+            let u = if h < uh.len() { uh[h] } else { 0.0 };
+            state = (w * xt + u * state).tanh();
+            if state > acc_max {
+                acc_max = state;
+            }
+        }
+        if acc_max.is_finite() {
+            acc_max
+        } else {
+            0.0
+        }
+    })
+}
+
+impl Fit for LstmFcnClassifier {
+    type Fitted = FittedLstmFcnClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLstmFcnClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let h = self.hidden.max(1);
+        let mut rng = Rng::new(self.seed);
+        let wx = Vector::from_iter((0..h).map(|_| rng.standard_normal()));
+        let uh = Vector::from_iter((0..h).map(|_| 0.2 * rng.standard_normal()));
+        let w = 3usize.min(x.ncols().max(1));
+        let kernels: Vec<Vec<f64>> = (0..self.n_kernels.max(1))
+            .map(|_| (0..w).map(|_| rng.standard_normal()).collect())
+            .collect();
+        let rec = elman_pool(x, &wx, &uh);
+        let conv = conv_maxpool(x, &kernels);
+        let z = Matrix::from_fn(x.nrows(), rec.ncols() + conv.ncols(), |i, j| {
+            if j < rec.ncols() {
+                rec.get(i, j)
+            } else {
+                conv.get(i, j - rec.ncols())
+            }
+        });
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "lstmfcn");
+        ctx.finish(FittedLstmFcnClassifier {
+            wx,
+            uh,
+            kernels,
+            inner,
+        })
+    }
+}
+
+impl Predict for FittedLstmFcnClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let rec = elman_pool(x, &self.wx, &self.uh);
+        let conv = conv_maxpool(x, &self.kernels);
+        let z = Matrix::from_fn(x.nrows(), rec.ncols() + conv.ncols(), |i, j| {
+            if j < rec.ncols() {
+                rec.get(i, j)
+            } else {
+                conv.get(i, j - rec.ncols())
+            }
+        });
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Binary segmentation change-point (sktime `BinarySegmentation`).
+///
+/// Split count is not identification `p`.
+pub fn binary_segmentation(y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    clasp_change_point(y, session)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8785,5 +8996,27 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(zc.nrows(), 6);
+        let rn = ResNetClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "res"))
+            .unwrap();
+        let rnp = rn
+            .value
+            .predict(&x, &Session::new("ts", "resp"))
+            .unwrap()
+            .value;
+        assert_eq!(rnp.len(), 6);
+        let lstm = LstmFcnClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "lstm"))
+            .unwrap();
+        let lstmp = lstm
+            .value
+            .predict(&x, &Session::new("ts", "lstmp"))
+            .unwrap()
+            .value;
+        assert_eq!(lstmp.len(), 6);
+        let bs = binary_segmentation(&yramp, &Session::new("ts", "binseg"))
+            .unwrap()
+            .value;
+        assert!(bs.is_finite());
     }
 }

@@ -3341,6 +3341,35 @@ const INVENTORY: &[Algorithm] = &[
     a("online.OnlineGamma", "river.proba.Gamma", "online"),
     a("online.ColumnSelect", "river.compose.Select", "online"),
     a("online.ColumnDiscard", "river.compose.Discard", "online"),
+    a(
+        "stats.fdrcorrection",
+        "statsmodels.stats.multitest.fdrcorrection",
+        "stats",
+    ),
+    a(
+        "stats.mantel_haenszel",
+        "statsmodels.stats.contingency_tables.StratifiedTable",
+        "stats",
+    ),
+    a(
+        "tslearn.ResNetClassifier",
+        "sktime.classification.deep_learning.resnet.ResNetClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.LstmFcnClassifier",
+        "sktime.classification.deep_learning.lstmfcn.LSTMFCNClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.binary_segmentation",
+        "sktime.annotation.bs.BinarySegmentation",
+        "timeseries",
+    ),
+    a("online.FtrlRegressor", "river.optim.FTRLProximal", "online"),
+    a("online.AdaDeltaRegressor", "river.optim.AdaDelta", "online"),
+    a("online.MomentumRegressor", "river.optim.Momentum", "online"),
+    a("online.OnlinePoisson", "river.proba.Poisson", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -3489,6 +3518,9 @@ mod tests {
             "stats.ftest_power",
             "tslearn.InceptionTimeClassifier",
             "online.AdaGradRegressor",
+            "tslearn.ResNetClassifier",
+            "online.FtrlRegressor",
+            "stats.fdrcorrection",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
