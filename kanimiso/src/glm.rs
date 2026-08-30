@@ -4554,6 +4554,249 @@ pub struct FittedConditionalPoisson {
     pub n_groups: usize,
 }
 
+/// Truncated / fractional logit (statsmodels `Logit` on a truncated unit interval).
+///
+/// Outcomes outside \([0,1]\) are dropped with a warning. Remaining \(y\) may
+/// be fractional; IRLS is the Papke–Wooldridge quasi-likelihood. Do not treat
+/// dropped rows as a `MeaninglessFit`.
+#[derive(Clone, Debug)]
+pub struct TruncatedLogit {
+    /// Max IRLS iterations.
+    pub max_iter: usize,
+    /// Prepend an intercept.
+    pub fit_intercept: bool,
+}
+
+impl Default for TruncatedLogit {
+    fn default() -> Self {
+        Self {
+            max_iter: 40,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl TruncatedLogit {
+    /// Default truncated / fractional logit.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for TruncatedLogit {
+    type Fitted = FittedGlm;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let mut n_drop = 0usize;
+        let keep: Vec<usize> = (0..y.len().min(x.nrows()))
+            .filter(|&i| {
+                let v = y[i];
+                if v.is_finite() && (0.0..=1.0).contains(&v) {
+                    true
+                } else {
+                    n_drop += 1;
+                    false
+                }
+            })
+            .collect();
+        if n_drop > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateDistribution)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "TruncatedLogit dropped {n_drop} outcomes outside [0,1]"
+                    ))
+                    .build(),
+            );
+        }
+        if keep.len() < 4 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .message("TruncatedLogit needs at least 4 outcomes in [0,1]")
+                    .build(),
+            );
+            return ctx.finish(FittedGlm {
+                coef: Vector::zeros(x.ncols()),
+                intercept: 0.0,
+                dispersion: 1.0,
+            });
+        }
+        let xs = Matrix::from_fn(keep.len(), x.ncols(), |i, j| x.get(keep[i], j));
+        let ys = Vector::from_iter(keep.iter().map(|&i| y[i].clamp(0.0, 1.0)));
+        let design = if self.fit_intercept {
+            xs.with_intercept()
+        } else {
+            xs
+        };
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let beta = binary_irls(&design, &ys, &ctx.policy, self.max_iter);
+        let (intercept, coef) = if self.fit_intercept {
+            (
+                beta.as_slice().first().copied().unwrap_or(0.0),
+                Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            )
+        } else {
+            (0.0, beta)
+        };
+        ctx.finish(FittedGlm {
+            coef,
+            intercept,
+            dispersion: 1.0,
+        })
+    }
+}
+
+/// Group-conditional multinomial logit (statsmodels `ConditionalMNLogit`).
+///
+/// The chosen alternative in each group is \(\arg\max y_i\). Group count is
+/// not identification `p`. Inner Cholesky stays on a scratch report.
+#[derive(Clone, Debug)]
+pub struct ConditionalMNLogit {
+    /// Newton iterations.
+    pub max_iter: usize,
+}
+
+impl Default for ConditionalMNLogit {
+    fn default() -> Self {
+        Self { max_iter: 25 }
+    }
+}
+
+impl ConditionalMNLogit {
+    /// Default conditional MNLogit.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit a chosen-alternative index `y` within `groups`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedConditionalMNLogit>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if y.len() != x.nrows() || groups.len() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ConditionalMNLogit y/groups length ≠ n")
+                    .build(),
+            );
+            return ctx.finish(FittedConditionalMNLogit {
+                coef: Vector::zeros(x.ncols()),
+                n_groups: 0,
+            });
+        }
+        let n = x.nrows();
+        let mut members: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+        for i in 0..n {
+            if groups[i].is_finite() {
+                members.entry(groups[i].round() as i64).or_default().push(i);
+            }
+        }
+        let n_g = members.len();
+        if n_g <= 1 {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("conditional MNLogit needs at least two groups")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "conditional-MNLogit slopes",
+                        "a single choice set cannot identify β after the group intercept is swept",
+                        "collect more choice sets",
+                    ))
+                    .build(),
+            );
+        }
+        let p = x.ncols();
+        let mut beta = Vector::zeros(p);
+        for it in 0..self.max_iter.max(1) {
+            let mut xtwx = vec![0.0; p * p];
+            let mut xtwz = Vector::zeros(p);
+            for idx in members.values() {
+                if idx.len() < 2 {
+                    continue;
+                }
+                let mut best = idx[0];
+                let mut best_y = f64::NEG_INFINITY;
+                for &i in idx {
+                    if y[i].is_finite() && y[i] >= best_y {
+                        best_y = y[i];
+                        best = i;
+                    }
+                }
+                let mut eta = vec![0.0; idx.len()];
+                let mut m = f64::NEG_INFINITY;
+                for (a, &i) in idx.iter().enumerate() {
+                    let mut e = 0.0;
+                    for j in 0..p {
+                        e += x.get(i, j) * beta[j];
+                    }
+                    eta[a] = e;
+                    if e > m {
+                        m = e;
+                    }
+                }
+                let mut den = 0.0;
+                let mut pr = vec![0.0; idx.len()];
+                for a in 0..idx.len() {
+                    pr[a] = (eta[a] - m).exp();
+                    den += pr[a];
+                }
+                if den <= 0.0 {
+                    continue;
+                }
+                for a in 0..idx.len() {
+                    pr[a] /= den;
+                }
+                for (a, &i) in idx.iter().enumerate() {
+                    let w = (pr[a] * (1.0 - pr[a])).max(1e-8);
+                    let resid = (if i == best { 1.0 } else { 0.0 }) - pr[a];
+                    for j in 0..p {
+                        xtwz[j] += x.get(i, j) * resid;
+                        for k in 0..p {
+                            xtwx[j * p + k] += w * x.get(i, j) * x.get(i, k);
+                        }
+                    }
+                }
+            }
+            let mut a = Mat::<f64>::zeros(p, p);
+            for j in 0..p {
+                for k in 0..p {
+                    a[(j, k)] = xtwx[j * p + k];
+                }
+                a[(j, j)] += 1e-10;
+            }
+            let mut scratch = signlred::Report::new("cmnlogit", "newton");
+            let Some(step) = chol_solve(&mut scratch, &a, &xtwz, &ctx.policy) else {
+                break;
+            };
+            for j in 0..p {
+                beta[j] += step[j];
+            }
+            ctx.session.step(it as u64, step.norm(), None);
+            if step.norm() < 1e-8 {
+                break;
+            }
+        }
+        ctx.finish(FittedConditionalMNLogit {
+            coef: beta,
+            n_groups: n_g,
+        })
+    }
+}
+
+/// Fitted conditional MNLogit.
+#[derive(Clone, Debug)]
+pub struct FittedConditionalMNLogit {
+    /// Slopes (no intercept; it is swept by the group softmax).
+    pub coef: Vector,
+    /// Number of choice sets.
+    pub n_groups: usize,
+}
+
 /// Scobit (skewed logit) binary GLM (statsmodels `Scobit`).
 ///
 /// \(P=\sigma(\eta)^\alpha\). The shape \(\alpha\) is not identification `p`.
@@ -4972,5 +5215,15 @@ mod tests {
             .expect("cpois");
         assert_eq!(cp.value.n_groups, 10);
         assert!(cp.value.coef[0].is_finite());
+        let tl = TruncatedLogit::new()
+            .fit(&x, &yb, &Session::new("tlog", "fit"))
+            .expect("tlog");
+        assert!(tl.value.coef[0].is_finite());
+        assert!(tl.value.intercept.is_finite());
+        let cmn = ConditionalMNLogit::new()
+            .fit(&x, &ych, &g, &Session::new("cmnl", "fit"))
+            .expect("cmnl");
+        assert_eq!(cmn.value.n_groups, 10);
+        assert!(cmn.value.coef[0].is_finite());
     }
 }

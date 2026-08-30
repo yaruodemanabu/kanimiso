@@ -15412,6 +15412,226 @@ pub fn coherence(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<
     ctx.finish(out)
 }
 
+/// Gaussian innovations MLE of a white residual scale (statsmodels
+/// `innovations.arma_innovations` / `innovations_mle` lite).
+///
+/// Lag count is not identification `p`.
+pub fn innovations_mle(
+    y: &Vector,
+    nlags: usize,
+    session: &Session,
+) -> Result<Qualified<(f64, Vector)>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let e = match innovations_filter(y, nlags, &session.child("inn_mle")) {
+        Ok(q) => q.value,
+        Err(err) => {
+            if !matches!(
+                err.primary.code,
+                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+            ) {
+                ctx.push(err.primary);
+            }
+            Vector::from_iter(y.as_slice().iter().copied())
+        }
+    };
+    let n = e
+        .as_slice()
+        .iter()
+        .filter(|v| v.is_finite())
+        .count()
+        .max(1) as f64;
+    let sse = e
+        .as_slice()
+        .iter()
+        .filter(|v| v.is_finite())
+        .map(|v| v * v)
+        .sum::<f64>();
+    let sigma2 = (sse / n).max(1e-18);
+    let nll = 0.5 * n * (sigma2.ln() + 1.0 + (2.0 * std::f64::consts::PI).ln());
+    if !nll.is_finite() {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("innovations_mle nll was non-finite; scale is a fallback")
+                .build(),
+        );
+    }
+    ctx.finish((nll, e))
+}
+
+/// ARMA innovations residuals and scale (statsmodels `arma_innovations`).
+///
+/// Lag count is not identification `p`.
+pub fn arma_innovations(
+    y: &Vector,
+    nlags: usize,
+    session: &Session,
+) -> Result<Qualified<(Vector, f64)>> {
+    let q = innovations_mle(y, nlags, session)?;
+    let (_nll, e) = q.value;
+    let n = e
+        .as_slice()
+        .iter()
+        .filter(|v| v.is_finite())
+        .count()
+        .max(1) as f64;
+    let sse = e
+        .as_slice()
+        .iter()
+        .filter(|v| v.is_finite())
+        .map(|v| v * v)
+        .sum::<f64>();
+    let mut ctx = FitCtx::with_session(session.child("arma_inn"));
+    for issue in q.report.issues() {
+        ctx.push(issue.clone());
+    }
+    ctx.finish((e, sse / n))
+}
+
+/// Cross-correlation from the two sample ACFs (statsmodels `ccf` via ACF).
+///
+/// \(\rho_{xy}(k)=\gamma_{xy}(k)/\sqrt{\gamma_{xx}(0)\gamma_{yy}(0)}\). Lag
+/// count is not identification `p`.
+pub fn ccf_from_acf(
+    x: &Vector,
+    y: &Vector,
+    nlags: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let g = match ccovf(x, y, nlags, &session.child("ccf_acov")) {
+        Ok(q) => {
+            for issue in q.report.issues() {
+                ctx.push(issue.clone());
+            }
+            q.value
+        }
+        Err(e) => {
+            ctx.push(e.primary);
+            return ctx.finish(Vector::zeros(nlags + 1));
+        }
+    };
+    let sx = x.std().max(1e-18);
+    let sy = y.std().max(1e-18);
+    let out = Vector::from_iter((0..g.len()).map(|k| g[k] / (sx * sy)));
+    ctx.finish(out)
+}
+
+/// Burg PACF (statsmodels `pacf_burg` lite).
+///
+/// Reflection coefficients of [`crate::stats::burg_ar`]. Order is not
+/// identification `p`.
+pub fn pacf_burg(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let h = nlags.max(1).min(y.len().saturating_sub(1).max(1));
+    match crate::stats::burg_ar(y, h, &session.child("pacf_burg")) {
+        Ok(q) => {
+            for issue in q.report.issues() {
+                if !matches!(
+                    issue.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::R2IsOne
+                        | IssueCode::RankZero
+                ) {
+                    ctx.push(issue.clone());
+                }
+            }
+            let mut out = Vector::zeros(h + 1);
+            out[0] = 1.0;
+            for i in 0..q.value.reflection.len().min(h) {
+                out[i + 1] = q.value.reflection[i];
+            }
+            ctx.finish(out)
+        }
+        Err(e) => {
+            if !matches!(
+                e.primary.code,
+                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+            ) {
+                ctx.push(e.primary);
+            }
+            let mut out = Vector::zeros(h + 1);
+            out[0] = 1.0;
+            ctx.finish(out)
+        }
+    }
+}
+
+/// Prepend a column of ones (statsmodels `add_constant`).
+pub fn add_constant(x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    ctx.finish(x.with_intercept())
+}
+
+/// Subtract a linear time trend (statsmodels `detrend`).
+pub fn detrend(y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let n = y.len();
+    if n < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("detrend needs n≥2")
+                .build(),
+        );
+        return ctx.finish(y.clone());
+    }
+    let design = Matrix::from_fn(n, 2, |i, j| if j == 0 { 1.0 } else { i as f64 });
+    let beta = statistical_ols(&mut ctx, &design, y).unwrap_or_else(|| Vector::from_slice(&[y.mean(), 0.0]));
+    let out = Vector::from_iter((0..n).map(|i| {
+        let fit = beta.as_slice().first().copied().unwrap_or(0.0)
+            + beta.as_slice().get(1).copied().unwrap_or(0.0) * i as f64;
+        y[i] - fit
+    }));
+    ctx.finish(out)
+}
+
+/// Linear convolution (SciPy `fftconvolve` lite; direct sum, not an FFT).
+///
+/// Lengths are not identification `p`.
+pub fn fftconvolve(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, a);
+    inspect_univariate(&mut ctx, b);
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .severity(Severity::Warning)
+                .message("fftconvolve on an empty operand")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(0));
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("fftconvolve uses a direct O(nm) sum, not an FFT")
+            .compromise(NumericalCompromise::new(
+                "FFT convolution",
+                "direct discrete convolution",
+                "no FFT backend is linked",
+                "do not read this as a spectral implementation",
+            ))
+            .build(),
+    );
+    let n = a.len() + b.len() - 1;
+    let out = Vector::from_iter((0..n).map(|k| {
+        let mut s = 0.0;
+        for i in 0..a.len() {
+            if k >= i && k - i < b.len() {
+                s += a[i] * b[k - i];
+            }
+        }
+        s
+    }));
+    ctx.finish(out)
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -16549,5 +16769,25 @@ pub fn coherence(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<
             .as_slice()
             .iter()
             .all(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0));
+        let imle = innovations_mle(&y, 4, &Session::new("imle", "t")).expect("imle");
+        assert!(imle.value.0.is_finite());
+        assert_eq!(imle.value.1.len(), 40);
+        let ainn = arma_innovations(&y, 4, &Session::new("ainn", "t")).expect("ainn");
+        assert_eq!(ainn.value.0.len(), 40);
+        assert!(ainn.value.1.is_finite() && ainn.value.1 >= 0.0);
+        let cfa = ccf_from_acf(&a, &b, 5, &Session::new("cfa", "t")).expect("cfa");
+        assert_eq!(cfa.value.len(), 6);
+        let pbg = pacf_burg(&y, 4, &Session::new("pbg", "t")).expect("pbg");
+        assert_eq!(pbg.value.len(), 5);
+        assert!((pbg.value[0] - 1.0).abs() < 1e-12);
+        let ac = add_constant(&x, &Session::new("ac", "t")).expect("ac");
+        assert_eq!(ac.value.shape(), (40, 2));
+        let dt = detrend(&y, &Session::new("dtr", "t")).expect("dtr");
+        assert_eq!(dt.value.len(), 40);
+        assert!(dt.value.std() < y.std() + 1e-9);
+        let conv = fftconvolve(&y, &Vector::from_slice(&[1.0, 0.0, -1.0]), &Session::new("fft", "t"))
+            .expect("fft");
+        assert_eq!(conv.value.len(), 42);
+        assert!(conv.value.as_slice().iter().all(|v| v.is_finite()));
     }
 }

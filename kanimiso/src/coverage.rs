@@ -4652,6 +4652,46 @@ const INVENTORY: &[Algorithm] = &[
     a("online.RollingSum", "river.stats.RollingSum", "online"),
     a("online.RollingIqr", "river.stats.RollingIQR", "online"),
     a("online.OnlinePeakToPeak", "river.stats.PeakToPeak", "online"),
+    a(
+        "glm.TruncatedLogit",
+        "statsmodels.discrete.discrete_model.Logit",
+        "estimator",
+    ),
+    a(
+        "glm.ConditionalMNLogit",
+        "statsmodels.discrete.conditional_models.ConditionalMNLogit",
+        "estimator",
+    ),
+    a(
+        "tsa.innovations_mle",
+        "statsmodels.tsa.innovations.arma_innovations",
+        "forecast",
+    ),
+    a(
+        "tsa.arma_innovations",
+        "statsmodels.tsa.innovations.arma_innovations",
+        "forecast",
+    ),
+    a(
+        "tsa.ccf_from_acf",
+        "statsmodels.tsa.stattools.ccf",
+        "forecast",
+    ),
+    a("tsa.pacf_burg", "statsmodels.tsa.stattools.pacf_burg", "forecast"),
+    a(
+        "tsa.add_constant",
+        "statsmodels.tools.tools.add_constant",
+        "forecast",
+    ),
+    a("tsa.detrend", "statsmodels.tsa.tsatools.detrend", "forecast"),
+    a("tsa.fftconvolve", "scipy.signal.fftconvolve", "forecast"),
+    a(
+        "online.RollingPeakToPeak",
+        "river.stats.RollingPeakToPeak",
+        "online",
+    ),
+    a("online.RollingSem", "river.stats.RollingSEM", "online"),
+    a("online.OnlineMsle", "river.metrics.MSLE", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4966,6 +5006,9 @@ mod tests {
             "tslearn.CnnRegressor",
             "tsa.coherence",
             "online.OnlineMedian",
+            "glm.TruncatedLogit",
+            "tsa.pacf_burg",
+            "online.OnlineMsle",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
