@@ -3958,6 +3958,62 @@ const INVENTORY: &[Algorithm] = &[
         "river.compose.Pipeline",
         "online",
     ),
+    a("hmm.GmmHmmFull", "hmmlearn.hmm.GMMHMM", "hmm"),
+    a("hmm.GmmHmmTied", "hmmlearn.hmm.GMMHMM", "hmm"),
+    a(
+        "hmm.VariationalPoissonHmm",
+        "hmmlearn.hmm.PoissonHMM",
+        "hmm",
+    ),
+    a("tsa.ArchP", "arch.univariate.ARCH", "forecast"),
+    a(
+        "tsa.RealizedVariance",
+        "arch.univariate.RealizedVariance",
+        "forecast",
+    ),
+    a("tsa.parkinson", "arch.univariate.Parkinson", "forecast"),
+    a(
+        "tsa.garman_klass",
+        "arch.univariate.GarmanKlass",
+        "forecast",
+    ),
+    a(
+        "tsa.SbaCroston",
+        "sktime.forecasting.croston.Croston",
+        "forecast",
+    ),
+    a(
+        "tsa.AutoTheta",
+        "sktime.forecasting.theta.ThetaForecaster",
+        "forecast",
+    ),
+    a(
+        "tsa.YtoX",
+        "sktime.transformations.compose.YtoX",
+        "forecast",
+    ),
+    a(
+        "tsa.SquaringResiduals",
+        "sktime.forecasting.squaring_residuals.SquaringResiduals",
+        "forecast",
+    ),
+    a("online.OnlinePinball", "river.metrics.Pinball", "online"),
+    a(
+        "online.AdwinBoosting",
+        "river.ensemble.ADWINBoostingClassifier",
+        "online",
+    ),
+    a(
+        "online.BoleClassifier",
+        "river.ensemble.BOLEClassifier",
+        "online",
+    ),
+    a("online.TextClust", "river.cluster.TextClust", "online"),
+    a(
+        "online.SfmRegressor",
+        "river.facto.SFMRegressor",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4204,6 +4260,17 @@ mod tests {
             "online.OnlineHuber",
             "online.RandomNormalReco",
             "online.ComposePipeline",
+            "hmm.GmmHmmFull",
+            "hmm.GmmHmmTied",
+            "hmm.VariationalPoissonHmm",
+            "tsa.ArchP",
+            "tsa.RealizedVariance",
+            "tsa.SbaCroston",
+            "tsa.AutoTheta",
+            "online.OnlinePinball",
+            "online.AdwinBoosting",
+            "online.BoleClassifier",
+            "online.SfmRegressor",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

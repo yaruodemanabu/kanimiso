@@ -8169,6 +8169,76 @@ impl PartialFit for OnlineHuber {
     }
 }
 
+/// Rolling pinball / quantile loss (river `metrics.Pinball`).
+#[derive(Clone, Debug)]
+pub struct OnlinePinball {
+    /// Quantile \(\tau\in(0,1)\).
+    pub tau: f64,
+    acc: f64,
+    n: u64,
+    updates: u64,
+}
+
+impl Default for OnlinePinball {
+    fn default() -> Self {
+        Self {
+            tau: 0.5,
+            acc: 0.0,
+            n: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlinePinball {
+    /// Pinball metric at quantile `tau`.
+    pub fn new(tau: f64) -> Self {
+        Self {
+            tau,
+            ..Self::default()
+        }
+    }
+
+    /// Current mean pinball loss, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.n == 0 {
+            f64::NAN
+        } else {
+            self.acc / self.n as f64
+        }
+    }
+}
+
+impl PartialFit for OnlinePinball {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let tau = if self.tau.is_finite() && self.tau > 0.0 && self.tau < 1.0 {
+            self.tau
+        } else {
+            0.5
+        };
+        metric_partial(
+            session,
+            "pinball",
+            x,
+            y,
+            self.updates,
+            self.n,
+            |pred, truth| {
+                self.n += 1;
+                let e = truth - pred;
+                self.acc += if e >= 0.0 { tau * e } else { (tau - 1.0) * e };
+                self.updates += 1;
+                self.score()
+            },
+        )
+    }
+}
+
 /// Rolling log-loss (river `metrics.LogLoss`).
 ///
 /// `x` is treated as a probability and clipped to \((\varepsilon,1-\varepsilon)\).
@@ -13756,6 +13826,292 @@ impl Predict for OnlineAdaBoost {
     }
 }
 
+/// ADWIN-resetting AdaBoost of perceptrons (river `ensemble.ADWINBoostingClassifier`).
+///
+/// Member count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct AdwinBoosting {
+    /// Members.
+    pub n_models: usize,
+    models: Vec<Perceptron>,
+    weights: Vec<f64>,
+    detectors: Vec<Adwin>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for AdwinBoosting {
+    fn default() -> Self {
+        Self {
+            n_models: 3,
+            models: Vec::new(),
+            weights: Vec::new(),
+            detectors: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl AdwinBoosting {
+    /// Boosted committee of `n_models` perceptrons with per-member ADWIN.
+    pub fn new(n_models: usize) -> Self {
+        Self {
+            n_models: n_models.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for AdwinBoosting {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        if self.models.is_empty() {
+            self.models = vec![Perceptron::new(); self.n_models.max(1)];
+            self.weights = vec![1.0; self.models.len()];
+            self.detectors = (0..self.models.len()).map(|_| Adwin::new(0.002)).collect();
+        }
+        let before = self.n_seen;
+        let mut resets = 0u64;
+        for m in 0..self.models.len() {
+            let _ = self.models[m].partial_fit(x, Some(y), &session.child(format!("adwb_{m}")));
+            if let Ok(q) = self.models[m].predict(x, &session.child(format!("adwbp_{m}"))) {
+                let mut wrong = 0.0;
+                for i in 0..y.len().min(q.value.len()) {
+                    if (q.value[i] - y[i]).abs() >= 0.5 {
+                        wrong += 1.0;
+                    }
+                }
+                if wrong > 0.0 {
+                    self.weights[m] *= 1.25;
+                } else {
+                    self.weights[m] *= 0.8;
+                }
+                let err = wrong / y.len().max(1) as f64;
+                if let Ok(d) = self.detectors[m].update(err, &session.child(format!("adwinb_{m}"))) {
+                    if matches!(d.value, DriftDecision::Drift { .. }) {
+                        self.models[m] = Perceptron::new();
+                        self.weights[m] = 1.0;
+                        self.detectors[m].reset();
+                        resets += 1;
+                    }
+                }
+            }
+        }
+        let wsum: f64 = self.weights.iter().sum();
+        if wsum > 0.0 {
+            for w in &mut self.weights {
+                *w /= wsum;
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(resets as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "AdwinBoosting {} members, resets={resets}",
+            self.models.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "ADWIN boosting update",
+                "AdaBoost weights plus per-member ADWIN reset",
+                format!("n={before}"),
+                format!("n={} resets={resets}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for AdwinBoosting {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.models.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let mut acc = vec![0.0; x.nrows()];
+        for (m, model) in self.models.iter().enumerate() {
+            let w = self.weights.get(m).copied().unwrap_or(1.0);
+            if let Ok(q) = model.predict(x, &session.child(format!("adwbp_{m}"))) {
+                for i in 0..x.nrows().min(q.value.len()) {
+                    acc[i] += w * if q.value[i] >= 0.5 { 1.0 } else { -1.0 };
+                }
+            }
+        }
+        ctx.finish(Vector::from_iter(acc.iter().map(|v| {
+            if *v >= 0.0 {
+                1.0
+            } else {
+                0.0
+            }
+        })))
+    }
+}
+
+/// Boosting Online Learning Ensemble (river `ensemble.BOLEClassifier`).
+///
+/// A member is updated only when the current committee is wrong on that row.
+/// Member count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct BoleClassifier {
+    /// Members.
+    pub n_models: usize,
+    models: Vec<Perceptron>,
+    weights: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for BoleClassifier {
+    fn default() -> Self {
+        Self {
+            n_models: 3,
+            models: Vec::new(),
+            weights: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl BoleClassifier {
+    /// BOLE of `n_models` perceptrons.
+    pub fn new(n_models: usize) -> Self {
+        Self {
+            n_models: n_models.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn vote_row(&self, x: &Matrix, i: usize, session: &Session) -> f64 {
+        let mut acc = 0.0;
+        let mut wsum = 0.0;
+        for (m, model) in self.models.iter().enumerate() {
+            let w = self.weights.get(m).copied().unwrap_or(1.0);
+            if let Ok(q) = model.predict(x, &session.child(format!("bolep_{m}"))) {
+                if i < q.value.len() {
+                    acc += w * if q.value[i] >= 0.5 { 1.0 } else { -1.0 };
+                    wsum += w;
+                }
+            }
+        }
+        if wsum <= 0.0 {
+            0.0
+        } else if acc >= 0.0 {
+            1.0
+        } else {
+            0.0
+        }
+    }
+}
+
+impl PartialFit for BoleClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        if self.models.is_empty() {
+            self.models = vec![Perceptron::new(); self.n_models.max(1)];
+            self.weights = vec![1.0; self.models.len()];
+        }
+        let before = self.n_seen;
+        let mut trained = 0u64;
+        for i in 0..x.nrows().min(y.len()) {
+            let ens = if self.n_seen == 0 {
+                y[i]
+            } else {
+                self.vote_row(x, i, session)
+            };
+            let wrong = (ens - y[i]).abs() >= 0.5;
+            if !wrong && self.n_seen > 0 {
+                continue;
+            }
+            let xb = Matrix::from_fn(1, x.ncols(), |_, c| x.get(i, c));
+            let yb = Vector::from_slice(&[y[i]]);
+            for m in 0..self.models.len() {
+                let _ = self.models[m].partial_fit(
+                    &xb,
+                    Some(&yb),
+                    &session.child(format!("bole_{m}")),
+                );
+            }
+            trained += 1;
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(trained as f64);
+        q.information_gain = Some(trained as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "BOLE trained on {trained}/{} rows where the committee was wrong",
+            x.nrows()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "BOLE update",
+                "weak learners train only on committee mistakes",
+                format!("n={before}"),
+                format!("n={} trained={trained}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for BoleClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.models.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.vote_row(x, i, session)),
+        ))
+    }
+}
+
 /// Streaming random oversampler (river `imblearn.RandomOverSampler`).
 #[derive(Clone, Debug, Default)]
 pub struct RandomOverSampler {
@@ -15750,6 +16106,349 @@ impl Predict for FfmRegressor {
         ctx.finish(Vector::from_iter(
             (0..x.nrows()).map(|i| self.predict_row(x, i)),
         ))
+    }
+}
+
+/// Sampled factorization machine (river `facto.SFMRegressor`).
+///
+/// Each SGD step updates a random subset of factors. Factor / sample counts
+/// are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SfmRegressor {
+    /// Latent width \(k\).
+    pub n_factors: usize,
+    /// Factors updated per row (not identification `p`).
+    pub sample_factors: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    w0: f64,
+    w: Vector,
+    v: Matrix,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+    rng: Rng,
+}
+
+impl Default for SfmRegressor {
+    fn default() -> Self {
+        Self {
+            n_factors: 2,
+            sample_factors: 1,
+            learning_rate: 0.05,
+            w0: 0.0,
+            w: Vector::zeros(0),
+            v: Matrix::zeros(0, 0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+            rng: Rng::new(29),
+        }
+    }
+}
+
+impl SfmRegressor {
+    /// SFM with `k` factors, updating `sample_factors` of them each row.
+    pub fn new(n_factors: usize, sample_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            sample_factors: sample_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let p = x.ncols().min(self.w.len());
+        let mut s = self.w0;
+        for j in 0..p {
+            s += self.w[j] * x.get(i, j);
+        }
+        let k = self.v.ncols();
+        if k == 0 || self.v.nrows() == 0 {
+            return s;
+        }
+        for f in 0..k {
+            let mut sum_vx = 0.0;
+            let mut sum_v2x2 = 0.0;
+            for j in 0..p.min(self.v.nrows()) {
+                let vjf = self.v.get(j, f);
+                let xj = x.get(i, j);
+                sum_vx += vjf * xj;
+                sum_v2x2 += vjf * vjf * xj * xj;
+            }
+            s += 0.5 * (sum_vx * sum_vx - sum_v2x2);
+        }
+        s
+    }
+}
+
+impl PartialFit for SfmRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let k = self.n_factors.max(1);
+        if !self.initialized {
+            self.w = Vector::zeros(x.ncols());
+            self.v = Matrix::from_fn(x.ncols(), k, |_, _| 0.01);
+            self.initialized = true;
+        } else if self.w.len() != x.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message("SfmRegressor feature dim changed")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let take = self.sample_factors.max(1).min(k);
+        let mut sse = 0.0;
+        let mut moved = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            sse += err * err;
+            self.w0 -= eta * err;
+            moved += err.abs();
+            for j in 0..x.ncols().min(self.w.len()) {
+                self.w[j] -= eta * err * x.get(i, j);
+            }
+            let p = x.ncols().min(self.v.nrows());
+            let mut chosen = Vec::with_capacity(take);
+            while chosen.len() < take {
+                let f = self.rng.below(k);
+                if !chosen.contains(&f) {
+                    chosen.push(f);
+                }
+                if chosen.len() >= k {
+                    break;
+                }
+            }
+            for &f in &chosen {
+                if f >= self.v.ncols() {
+                    continue;
+                }
+                let mut sum_vx = 0.0;
+                for j in 0..p {
+                    sum_vx += self.v.get(j, f) * x.get(i, j);
+                }
+                for j in 0..p {
+                    let xj = x.get(i, j);
+                    let vjf = self.v.get(j, f);
+                    let g = err * (xj * (sum_vx - vjf * xj));
+                    self.v.set(j, f, vjf - eta * g);
+                }
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(moved);
+        q.information_gain = Some(x.nrows() as f64);
+        q.loss_after = Some(if x.nrows() > 0 {
+            sse / x.nrows() as f64
+        } else {
+            f64::NAN
+        });
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!("SFM k={k} sampled={take} sse={sse:.4e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "sampled factor update",
+                "SGD on a random subset of latent factors each row",
+                "pre-batch SFM",
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for SfmRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.predict_row(x, i)),
+        ))
+    }
+}
+
+/// Online text micro-clustering (river `cluster.TextClust`).
+///
+/// Rows are treated as bag-of-words. Merge radius is cosine distance.
+/// Cluster count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct TextClust {
+    /// Cosine-distance merge radius.
+    pub radius: f64,
+    micros: Vec<(Vector, f64)>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for TextClust {
+    fn default() -> Self {
+        Self {
+            radius: 0.5,
+            micros: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl TextClust {
+    /// TextClust with cosine merge radius `radius`.
+    pub fn new(radius: f64) -> Self {
+        Self {
+            radius,
+            ..Self::default()
+        }
+    }
+
+    fn cosine(a: &Vector, b: &Vector) -> f64 {
+        let n = a.len().min(b.len());
+        let mut dot = 0.0;
+        let mut na = 0.0;
+        let mut nb = 0.0;
+        for i in 0..n {
+            dot += a[i] * b[i];
+            na += a[i] * a[i];
+            nb += b[i] * b[i];
+        }
+        if na <= 1e-18 || nb <= 1e-18 {
+            return 0.0;
+        }
+        (dot / (na.sqrt() * nb.sqrt())).clamp(-1.0, 1.0)
+    }
+
+    fn row_vec(x: &Matrix, i: usize) -> Vector {
+        Vector::from_iter((0..x.ncols()).map(|j| x.get(i, j).max(0.0)))
+    }
+
+    fn assign(&self, v: &Vector) -> Option<(usize, f64)> {
+        let mut best: Option<(usize, f64)> = None;
+        for (i, (c, _)) in self.micros.iter().enumerate() {
+            let sim = Self::cosine(c, v);
+            if best.map(|(_, s)| sim > s).unwrap_or(true) {
+                best = Some((i, sim));
+            }
+        }
+        best
+    }
+}
+
+impl PartialFit for TextClust {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let rad = if self.radius.is_finite() && self.radius > 0.0 {
+            self.radius
+        } else {
+            0.5
+        };
+        let before = self.n_seen;
+        let mut spawned = 0u64;
+        let mut merged = 0u64;
+        for i in 0..x.nrows() {
+            let v = Self::row_vec(x, i);
+            if v.as_slice().iter().all(|z| *z <= 0.0) {
+                continue;
+            }
+            match self.assign(&v) {
+                Some((idx, sim)) if 1.0 - sim <= rad => {
+                    let w = self.micros[idx].1;
+                    let nw = w + 1.0;
+                    for j in 0..v.len().min(self.micros[idx].0.len()) {
+                        self.micros[idx].0[j] =
+                            (w * self.micros[idx].0[j] + v[j]) / nw;
+                    }
+                    self.micros[idx].1 = nw;
+                    merged += 1;
+                }
+                _ => {
+                    self.micros.push((v, 1.0));
+                    spawned += 1;
+                }
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(spawned as f64);
+        q.information_gain = Some((spawned + merged) as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "TextClust micros={} spawned={spawned} merged={merged}",
+            self.micros.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "text micro-cluster update",
+                "cosine merge of bag-of-words rows into TF centroids",
+                format!("n={before} micros"),
+                format!("n={} micros={}", self.n_seen, self.micros.len()),
+            ),
+        )
+    }
+}
+
+impl Predict for TextClust {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.micros.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let v = Self::row_vec(x, i);
+            self.assign(&v).map(|(j, _)| j as f64).unwrap_or(0.0)
+        }));
+        ctx.finish(out)
     }
 }
 
@@ -20121,6 +20820,21 @@ mod tests {
         ComposePipeline::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("cpipe");
+        OnlinePinball::new(0.5)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("pinball");
+        AdwinBoosting::new(2)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("adwb");
+        BoleClassifier::new(2)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("bole");
+        SfmRegressor::new(2, 1)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("sfm");
+        TextClust::new(0.5)
+            .partial_fit(&x, None, &session)
+            .expect("textclust");
 
         let n_expl = session
             .ledger()

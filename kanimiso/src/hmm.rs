@@ -2622,6 +2622,706 @@ impl FitUnsupervised for GmmHmm {
 /// Spherical-covariance GMM-HMM (hmmlearn `GMMHMM` with `covariance_type="spherical"`).
 pub type GmmHmmSpherical = GmmHmm;
 
+fn mix_index(state: usize, mix: usize, n_mix: usize) -> usize {
+    state * n_mix.max(1) + mix
+}
+
+/// GMM-HMM with a full covariance per mixture component (hmmlearn `GMMHMM`, `full`).
+///
+/// Covariance free-parameter count and `n_mix` are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct GmmHmmFull {
+    /// Number of hidden states.
+    pub n_states: usize,
+    /// Mixture components per state.
+    pub n_mix: usize,
+    /// Baum–Welch iteration cap.
+    pub max_iter: usize,
+    /// Seed.
+    pub seed: u64,
+    /// If true, transitions to earlier states are zeroed (hmmlearn `left_right`).
+    pub left_right: bool,
+}
+
+impl Default for GmmHmmFull {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            n_mix: 1,
+            max_iter: 40,
+            seed: 0,
+            left_right: false,
+        }
+    }
+}
+
+impl GmmHmmFull {
+    /// `n_states` states with `n_mix` full-covariance Gaussians each.
+    pub fn new(n_states: usize, n_mix: usize) -> Self {
+        Self {
+            n_states,
+            n_mix,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmmHmmFull>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted full-covariance GMM-HMM.
+#[derive(Clone, Debug)]
+pub struct FittedGmmHmmFull {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Number of states.
+    pub n_states: usize,
+    /// Mixture size per state.
+    pub n_mix: usize,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Mixture weights (`n_states` × `n_mix`).
+    pub mix_weights: Matrix,
+    /// Means (`n_states * n_mix` × `d`), row `s * n_mix + m`.
+    pub means: Matrix,
+    /// Per-component dense covariances, same row layout as `means`.
+    pub covs: Vec<Matrix>,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedGmmHmmFull {
+    fn log_state_emit(&self, x: &Matrix, t: usize, state: usize) -> f64 {
+        let nm = self.n_mix.max(1);
+        let mut parts = vec![0.0; nm];
+        for m in 0..nm {
+            let w = self.mix_weights.get(state, m).max(1e-300).ln();
+            let r = mix_index(state, m, nm);
+            let cov = self
+                .covs
+                .get(r)
+                .cloned()
+                .unwrap_or_else(|| Matrix::zeros(0, 0));
+            parts[m] = w + log_full_gauss(x, t, &self.means, r, &cov);
+        }
+        logsumexp(&parts)
+    }
+
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        (0..x.nrows())
+            .map(|t| {
+                (0..self.n_states)
+                    .map(|s| self.log_state_emit(x, t, s))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("decode"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+
+    /// Scaled-forward log-likelihood.
+    pub fn score(&self, x: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+        let mut ctx = FitCtx::with_session(session.child("score"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let fb = scaled_forward_backward(&mut ctx, &self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(fb.map(|f| f.loglik).unwrap_or(f64::NEG_INFINITY))
+    }
+}
+
+impl Predict for FittedGmmHmmFull {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for GmmHmmFull {
+    type Fitted = FittedGmmHmmFull;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedGmmHmmFull>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_states.max(1),
+            &ctx.policy,
+        );
+        let (t_len, d) = x.shape();
+        let k = self.n_states.max(1);
+        let nm = self.n_mix.max(1);
+        if t_len == 0 || d == 0 {
+            let mut start = init_start(k);
+            let mut trans = init_trans(k);
+            if self.left_right {
+                enforce_left_right(&mut start, &mut trans);
+            }
+            return ctx.finish(FittedGmmHmmFull {
+                labels: empty_labels(0),
+                n_states: k,
+                n_mix: nm,
+                start,
+                trans,
+                mix_weights: Matrix::zeros(k, nm),
+                means: Matrix::zeros(k * nm, d),
+                covs: vec![Matrix::zeros(d, d); k * nm],
+                loglik: f64::NAN,
+            });
+        }
+        if series_zero_variance(x, ctx.policy.near_zero_variance) {
+            ctx.push(emission_degenerate_issue(
+                "full-covariance GMM-HMM observation series has zero variance",
+            ));
+        }
+        let mut rng = Rng::new(self.seed | 5);
+        let seeds = kmeans_pp_rows(x, (k * nm).min(t_len), &mut rng);
+        let mut means = Matrix::zeros(k * nm, d);
+        for r in 0..(k * nm).min(seeds.nrows()) {
+            for j in 0..d {
+                means.set(r, j, seeds.get(r, j));
+            }
+        }
+        let gcov = global_full_cov(x);
+        let mut covs = vec![gcov.clone(); k * nm];
+        let mut mix_weights = Matrix::from_fn(k, nm, |_, _| 1.0 / nm as f64);
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        if self.left_right {
+            enforce_left_right(&mut start, &mut trans);
+        }
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let mut log_emit = vec![vec![0.0; k]; t_len];
+            let mut log_comp = vec![vec![vec![0.0; nm]; k]; t_len];
+            for t in 0..t_len {
+                for j in 0..k {
+                    let mut parts = vec![0.0; nm];
+                    for m in 0..nm {
+                        let r = mix_index(j, m, nm);
+                        let lp = mix_weights.get(j, m).max(1e-300).ln()
+                            + log_full_gauss(x, t, &means, r, &covs[r]);
+                        log_comp[t][j][m] = lp;
+                        parts[m] = lp;
+                    }
+                    log_emit[t][j] = logsumexp(&parts);
+                }
+            }
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &log_emit) else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            let mut gtm = vec![vec![vec![0.0; nm]; k]; t_len];
+            for t in 0..t_len {
+                for j in 0..k {
+                    let lse = logsumexp(&log_comp[t][j]);
+                    for m in 0..nm {
+                        let p = if lse.is_finite() {
+                            (log_comp[t][j][m] - lse).exp()
+                        } else {
+                            1.0 / nm as f64
+                        };
+                        gtm[t][j][m] = fb.gamma[t][j] * p;
+                    }
+                }
+            }
+            for j in 0..k {
+                start[j] = fb.gamma[0][j];
+            }
+            renormalize_vec(&mut start, TRANS_FLOOR);
+            if t_len > 1 {
+                for i in 0..k {
+                    let den: f64 = (0..t_len - 1).map(|t| fb.gamma[t][i]).sum();
+                    for j in 0..k {
+                        let num: f64 = (0..t_len - 1).map(|t| fb.xi[t][i][j]).sum();
+                        trans.set(
+                            i,
+                            j,
+                            if den > 0.0 {
+                                num / den
+                            } else {
+                                trans.get(i, j)
+                            },
+                        );
+                    }
+                }
+                if self.left_right {
+                    enforce_left_right(&mut start, &mut trans);
+                } else {
+                    renormalize_rows(&mut trans, TRANS_FLOOR);
+                }
+            }
+            if self.left_right && k > 1 {
+                enforce_left_right(&mut start, &mut trans);
+            }
+            for j in 0..k {
+                let mut wsum = 0.0;
+                for m in 0..nm {
+                    let mut nj = 0.0;
+                    for t in 0..t_len {
+                        nj += gtm[t][j][m];
+                    }
+                    mix_weights.set(j, m, nj);
+                    wsum += nj;
+                    if nj <= TRANS_FLOOR {
+                        ctx.push(
+                            Issue::builder(IssueCode::MixtureWeightCollapsed)
+                                .message(format!("full GMM-HMM state {j} mix {m} collapsed"))
+                                .metric("state", j as f64)
+                                .metric("mix", m as f64)
+                                .build(),
+                        );
+                        continue;
+                    }
+                    let r = mix_index(j, m, nm);
+                    for dim in 0..d {
+                        let mut mu = 0.0;
+                        for t in 0..t_len {
+                            mu += gtm[t][j][m] * x.get(t, dim);
+                        }
+                        means.set(r, dim, mu / nj);
+                    }
+                    let mut cmat = Matrix::zeros(d, d);
+                    for t in 0..t_len {
+                        let g = gtm[t][j][m];
+                        for a in 0..d {
+                            let da = x.get(t, a) - means.get(r, a);
+                            for b in 0..d {
+                                cmat.set(
+                                    a,
+                                    b,
+                                    cmat.get(a, b) + g * da * (x.get(t, b) - means.get(r, b)),
+                                );
+                            }
+                        }
+                    }
+                    for a in 0..d {
+                        for b in 0..d {
+                            cmat.set(a, b, cmat.get(a, b) / nj);
+                        }
+                        cmat.set(a, a, cmat.get(a, a).max(COV_FLOOR));
+                    }
+                    covs[r] = cmat;
+                }
+                if wsum > 0.0 {
+                    for m in 0..nm {
+                        mix_weights.set(j, m, mix_weights.get(j, m) / wsum);
+                    }
+                } else {
+                    for m in 0..nm {
+                        mix_weights.set(j, m, 1.0 / nm as f64);
+                    }
+                }
+            }
+            if it + 1 == self.max_iter {
+                ctx.push(
+                    Issue::builder(IssueCode::MaxIterReached)
+                        .message("GmmHmmFull Baum–Welch hit max_iter")
+                        .build(),
+                );
+            }
+        }
+        let occup: Vec<f64> = (0..k)
+            .map(|j| {
+                last_gamma
+                    .iter()
+                    .map(|g| g.get(j).copied().unwrap_or(0.0))
+                    .sum()
+            })
+            .collect();
+        diagnose_chain(&mut ctx, &start, &trans, &occup);
+        if self.left_right {
+            enforce_left_right(&mut start, &mut trans);
+        }
+        let fitted_tmp = FittedGmmHmmFull {
+            labels: Vector::zeros(0),
+            n_states: k,
+            n_mix: nm,
+            start: start.clone(),
+            trans: trans.clone(),
+            mix_weights: mix_weights.clone(),
+            means: means.clone(),
+            covs: covs.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &fitted_tmp.log_emit_seq(x));
+        ctx.finish(FittedGmmHmmFull {
+            labels,
+            n_states: k,
+            n_mix: nm,
+            start,
+            trans,
+            mix_weights,
+            means,
+            covs,
+            loglik,
+        })
+    }
+}
+
+/// GMM-HMM with one full covariance shared by every mixture in a state (`tied`).
+///
+/// Covariance free-parameter count and `n_mix` are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct GmmHmmTied {
+    /// Number of hidden states.
+    pub n_states: usize,
+    /// Mixture components per state.
+    pub n_mix: usize,
+    /// Baum–Welch iteration cap.
+    pub max_iter: usize,
+    /// Seed.
+    pub seed: u64,
+    /// If true, transitions to earlier states are zeroed (hmmlearn `left_right`).
+    pub left_right: bool,
+}
+
+impl Default for GmmHmmTied {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            n_mix: 1,
+            max_iter: 40,
+            seed: 0,
+            left_right: false,
+        }
+    }
+}
+
+impl GmmHmmTied {
+    /// `n_states` states with `n_mix` Gaussians sharing one covariance per state.
+    pub fn new(n_states: usize, n_mix: usize) -> Self {
+        Self {
+            n_states,
+            n_mix,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmmHmmTied>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted tied-covariance GMM-HMM.
+#[derive(Clone, Debug)]
+pub struct FittedGmmHmmTied {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Number of states.
+    pub n_states: usize,
+    /// Mixture size per state.
+    pub n_mix: usize,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Mixture weights (`n_states` × `n_mix`).
+    pub mix_weights: Matrix,
+    /// Means (`n_states * n_mix` × `d`).
+    pub means: Matrix,
+    /// One dense covariance per state.
+    pub covs: Vec<Matrix>,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedGmmHmmTied {
+    fn log_state_emit(&self, x: &Matrix, t: usize, state: usize) -> f64 {
+        let nm = self.n_mix.max(1);
+        let cov = self
+            .covs
+            .get(state)
+            .cloned()
+            .unwrap_or_else(|| Matrix::zeros(0, 0));
+        let mut parts = vec![0.0; nm];
+        for m in 0..nm {
+            let w = self.mix_weights.get(state, m).max(1e-300).ln();
+            let r = mix_index(state, m, nm);
+            parts[m] = w + log_full_gauss(x, t, &self.means, r, &cov);
+        }
+        logsumexp(&parts)
+    }
+
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        (0..x.nrows())
+            .map(|t| {
+                (0..self.n_states)
+                    .map(|s| self.log_state_emit(x, t, s))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("decode"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+
+    /// Scaled-forward log-likelihood.
+    pub fn score(&self, x: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+        let mut ctx = FitCtx::with_session(session.child("score"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let fb = scaled_forward_backward(&mut ctx, &self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(fb.map(|f| f.loglik).unwrap_or(f64::NEG_INFINITY))
+    }
+}
+
+impl Predict for FittedGmmHmmTied {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for GmmHmmTied {
+    type Fitted = FittedGmmHmmTied;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedGmmHmmTied>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_states.max(1),
+            &ctx.policy,
+        );
+        let (t_len, d) = x.shape();
+        let k = self.n_states.max(1);
+        let nm = self.n_mix.max(1);
+        if t_len == 0 || d == 0 {
+            let mut start = init_start(k);
+            let mut trans = init_trans(k);
+            if self.left_right {
+                enforce_left_right(&mut start, &mut trans);
+            }
+            return ctx.finish(FittedGmmHmmTied {
+                labels: empty_labels(0),
+                n_states: k,
+                n_mix: nm,
+                start,
+                trans,
+                mix_weights: Matrix::zeros(k, nm),
+                means: Matrix::zeros(k * nm, d),
+                covs: vec![Matrix::zeros(d, d); k],
+                loglik: f64::NAN,
+            });
+        }
+        if series_zero_variance(x, ctx.policy.near_zero_variance) {
+            ctx.push(emission_degenerate_issue(
+                "tied GMM-HMM observation series has zero variance",
+            ));
+        }
+        let mut rng = Rng::new(self.seed | 7);
+        let seeds = kmeans_pp_rows(x, (k * nm).min(t_len), &mut rng);
+        let mut means = Matrix::zeros(k * nm, d);
+        for r in 0..(k * nm).min(seeds.nrows()) {
+            for j in 0..d {
+                means.set(r, j, seeds.get(r, j));
+            }
+        }
+        let gcov = global_full_cov(x);
+        let mut covs = vec![gcov.clone(); k];
+        let mut mix_weights = Matrix::from_fn(k, nm, |_, _| 1.0 / nm as f64);
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        if self.left_right {
+            enforce_left_right(&mut start, &mut trans);
+        }
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let mut log_emit = vec![vec![0.0; k]; t_len];
+            let mut log_comp = vec![vec![vec![0.0; nm]; k]; t_len];
+            for t in 0..t_len {
+                for j in 0..k {
+                    let mut parts = vec![0.0; nm];
+                    for m in 0..nm {
+                        let r = mix_index(j, m, nm);
+                        let lp = mix_weights.get(j, m).max(1e-300).ln()
+                            + log_full_gauss(x, t, &means, r, &covs[j]);
+                        log_comp[t][j][m] = lp;
+                        parts[m] = lp;
+                    }
+                    log_emit[t][j] = logsumexp(&parts);
+                }
+            }
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &log_emit) else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            let mut gtm = vec![vec![vec![0.0; nm]; k]; t_len];
+            for t in 0..t_len {
+                for j in 0..k {
+                    let lse = logsumexp(&log_comp[t][j]);
+                    for m in 0..nm {
+                        let p = if lse.is_finite() {
+                            (log_comp[t][j][m] - lse).exp()
+                        } else {
+                            1.0 / nm as f64
+                        };
+                        gtm[t][j][m] = fb.gamma[t][j] * p;
+                    }
+                }
+            }
+            for j in 0..k {
+                start[j] = fb.gamma[0][j];
+            }
+            renormalize_vec(&mut start, TRANS_FLOOR);
+            if t_len > 1 {
+                for i in 0..k {
+                    let den: f64 = (0..t_len - 1).map(|t| fb.gamma[t][i]).sum();
+                    for j in 0..k {
+                        let num: f64 = (0..t_len - 1).map(|t| fb.xi[t][i][j]).sum();
+                        trans.set(
+                            i,
+                            j,
+                            if den > 0.0 {
+                                num / den
+                            } else {
+                                trans.get(i, j)
+                            },
+                        );
+                    }
+                }
+                if self.left_right {
+                    enforce_left_right(&mut start, &mut trans);
+                } else {
+                    renormalize_rows(&mut trans, TRANS_FLOOR);
+                }
+            }
+            if self.left_right && k > 1 {
+                enforce_left_right(&mut start, &mut trans);
+            }
+            for j in 0..k {
+                let mut wsum = 0.0;
+                let mut cmat = Matrix::zeros(d, d);
+                for m in 0..nm {
+                    let mut nj = 0.0;
+                    for t in 0..t_len {
+                        nj += gtm[t][j][m];
+                    }
+                    mix_weights.set(j, m, nj);
+                    wsum += nj;
+                    if nj <= TRANS_FLOOR {
+                        ctx.push(
+                            Issue::builder(IssueCode::MixtureWeightCollapsed)
+                                .message(format!("tied GMM-HMM state {j} mix {m} collapsed"))
+                                .metric("state", j as f64)
+                                .metric("mix", m as f64)
+                                .build(),
+                        );
+                        continue;
+                    }
+                    let r = mix_index(j, m, nm);
+                    for dim in 0..d {
+                        let mut mu = 0.0;
+                        for t in 0..t_len {
+                            mu += gtm[t][j][m] * x.get(t, dim);
+                        }
+                        means.set(r, dim, mu / nj);
+                    }
+                    for t in 0..t_len {
+                        let g = gtm[t][j][m];
+                        for a in 0..d {
+                            let da = x.get(t, a) - means.get(r, a);
+                            for b in 0..d {
+                                cmat.set(
+                                    a,
+                                    b,
+                                    cmat.get(a, b) + g * da * (x.get(t, b) - means.get(r, b)),
+                                );
+                            }
+                        }
+                    }
+                }
+                if wsum > TRANS_FLOOR {
+                    for a in 0..d {
+                        for b in 0..d {
+                            cmat.set(a, b, cmat.get(a, b) / wsum);
+                        }
+                        cmat.set(a, a, cmat.get(a, a).max(COV_FLOOR));
+                    }
+                    covs[j] = cmat;
+                    for m in 0..nm {
+                        mix_weights.set(j, m, mix_weights.get(j, m) / wsum);
+                    }
+                } else {
+                    for m in 0..nm {
+                        mix_weights.set(j, m, 1.0 / nm as f64);
+                    }
+                }
+            }
+            if it + 1 == self.max_iter {
+                ctx.push(
+                    Issue::builder(IssueCode::MaxIterReached)
+                        .message("GmmHmmTied Baum–Welch hit max_iter")
+                        .build(),
+                );
+            }
+        }
+        let occup: Vec<f64> = (0..k)
+            .map(|j| {
+                last_gamma
+                    .iter()
+                    .map(|g| g.get(j).copied().unwrap_or(0.0))
+                    .sum()
+            })
+            .collect();
+        diagnose_chain(&mut ctx, &start, &trans, &occup);
+        if self.left_right {
+            enforce_left_right(&mut start, &mut trans);
+        }
+        let fitted_tmp = FittedGmmHmmTied {
+            labels: Vector::zeros(0),
+            n_states: k,
+            n_mix: nm,
+            start: start.clone(),
+            trans: trans.clone(),
+            mix_weights: mix_weights.clone(),
+            means: means.clone(),
+            covs: covs.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &fitted_tmp.log_emit_seq(x));
+        ctx.finish(FittedGmmHmmTied {
+            labels,
+            n_states: k,
+            n_mix: nm,
+            start,
+            trans,
+            mix_weights,
+            means,
+            covs,
+            loglik,
+        })
+    }
+}
+
 /// Poisson HMM (hmmlearn `PoissonHMM`): integer counts in column 0.
 ///
 /// Negative observations are not in the support and abort. A constant zero
@@ -3389,6 +4089,254 @@ impl FitUnsupervised for VariationalCategoricalHmm {
     }
 }
 
+/// Mean-field variational Poisson HMM (Dirichlet on \(\pi\), \(A\); Gamma on rates).
+#[derive(Clone, Debug)]
+pub struct VariationalPoissonHmm {
+    /// Number of hidden states.
+    pub n_states: usize,
+    /// Variational EM iteration cap.
+    pub max_iter: usize,
+}
+
+impl Default for VariationalPoissonHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl VariationalPoissonHmm {
+    /// `n_states` variational Poissons.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedVariationalPoissonHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted variational Poisson HMM (posterior-mean rates).
+#[derive(Clone, Debug)]
+pub struct FittedVariationalPoissonHmm {
+    /// Viterbi path under the posterior-mean parameters.
+    pub labels: Vector,
+    /// Number of states.
+    pub n_states: usize,
+    /// Posterior-mean start distribution.
+    pub start: Vector,
+    /// Posterior-mean transitions.
+    pub trans: Matrix,
+    /// Posterior-mean Poisson rates.
+    pub rates: Vector,
+    /// Evidence lower bound proxy (expected complete log-likelihood).
+    pub elbo: f64,
+}
+
+impl FittedVariationalPoissonHmm {
+    fn as_poisson(&self) -> FittedPoissonHmm {
+        FittedPoissonHmm {
+            labels: self.labels.clone(),
+            start: self.start.clone(),
+            trans: self.trans.clone(),
+            rates: self.rates.clone(),
+            loglik: self.elbo,
+        }
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.as_poisson().decode(x, session)
+    }
+
+    /// Scaled-forward log-likelihood under posterior-mean rates.
+    pub fn score(&self, x: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+        self.as_poisson().score(x, session)
+    }
+}
+
+impl Predict for FittedVariationalPoissonHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for VariationalPoissonHmm {
+    type Fitted = FittedVariationalPoissonHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedVariationalPoissonHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_states.max(1),
+            &ctx.policy,
+        );
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        if t_len == 0 {
+            return ctx.finish(FittedVariationalPoissonHmm {
+                labels: empty_labels(0),
+                n_states: k,
+                start: init_start(k),
+                trans: init_trans(k),
+                rates: Vector::zeros(k),
+                elbo: f64::NAN,
+            });
+        }
+        for i in 0..t_len {
+            if x.get(i, 0) < 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .message(format!("variational PoissonHMM y[{i}]={} < 0", x.get(i, 0)))
+                        .build(),
+                );
+                break;
+            }
+        }
+        let mean = x.column(0).mean().max(1e-3);
+        if x.column(0).std() <= ctx.policy.near_zero_variance {
+            ctx.push(emission_degenerate_issue(
+                "variational Poisson: count series is constant; rates are not identified",
+            ));
+        }
+        let mut rates = Vector::from_iter((0..k).map(|j| mean * (0.5 + j as f64)));
+        let mut alpha0 = Vector::filled(k, 1.0);
+        let mut alpha_a = Matrix::from_fn(k, k, |_, _| 1.0);
+        let mut elbo = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let mut start = Vector::zeros(k);
+            let sum_a0: f64 = (0..k).map(|j| alpha0[j]).sum();
+            for j in 0..k {
+                start[j] = (digamma(alpha0[j]) - digamma(sum_a0)).exp();
+            }
+            renormalize_vec(&mut start, TRANS_FLOOR);
+            let mut trans = Matrix::zeros(k, k);
+            for i in 0..k {
+                let row_s: f64 = (0..k).map(|j| alpha_a.get(i, j)).sum();
+                for j in 0..k {
+                    trans.set(i, j, (digamma(alpha_a.get(i, j)) - digamma(row_s)).exp());
+                }
+            }
+            renormalize_rows(&mut trans, TRANS_FLOOR);
+            let log_emit: Vec<Vec<f64>> = (0..t_len)
+                .map(|t| {
+                    let obs = x.get(t, 0).round();
+                    (0..k).map(|j| log_poisson(obs, rates[j])).collect()
+                })
+                .collect();
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &log_emit) else {
+                break;
+            };
+            elbo = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -elbo, None);
+            for j in 0..k {
+                alpha0[j] = 1.0 + fb.gamma[0][j];
+            }
+            if t_len > 1 {
+                for i in 0..k {
+                    for j in 0..k {
+                        let mut num = 1.0;
+                        for t in 0..t_len - 1 {
+                            num += fb.xi[t][i][j];
+                        }
+                        alpha_a.set(i, j, num);
+                    }
+                }
+            }
+            let n0 = 1e-3;
+            for j in 0..k {
+                let mut nj = 0.0;
+                let mut wr = 0.0;
+                for t in 0..t_len {
+                    nj += fb.gamma[t][j];
+                    wr += fb.gamma[t][j] * x.get(t, 0).max(0.0);
+                }
+                if nj <= TRANS_FLOOR {
+                    ctx.push(
+                        Issue::builder(IssueCode::UnreachableState)
+                            .message(format!("variational Poisson state {j} mass {nj:.3e}"))
+                            .build(),
+                    );
+                    continue;
+                }
+                rates[j] = ((n0 * mean + wr) / (n0 + nj)).max(1e-6);
+            }
+            if it + 1 == self.max_iter {
+                ctx.push(
+                    Issue::builder(IssueCode::MaxIterReached)
+                        .message("variational Poisson HMM hit max_iter")
+                        .build(),
+                );
+            }
+        }
+        let occup: Vec<f64> = (0..k)
+            .map(|j| {
+                last_gamma
+                    .iter()
+                    .map(|g| g.get(j).copied().unwrap_or(0.0))
+                    .sum()
+            })
+            .collect();
+        let mut start = Vector::zeros(k);
+        let sum_a0: f64 = (0..k).map(|j| alpha0[j]).sum();
+        for j in 0..k {
+            start[j] = alpha0[j] / sum_a0.max(1e-12);
+        }
+        let mut trans = Matrix::zeros(k, k);
+        for i in 0..k {
+            let row_s: f64 = (0..k).map(|j| alpha_a.get(i, j)).sum();
+            for j in 0..k {
+                trans.set(i, j, alpha_a.get(i, j) / row_s.max(1e-12));
+            }
+        }
+        diagnose_chain(&mut ctx, &start, &trans, &occup);
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .message("variational Poisson HMM uses Dirichlet(1) and Gamma floors")
+                .compromise(NumericalCompromise::new(
+                    "unconstrained variational Bayes",
+                    "Dirichlet(1) + Gamma rate floor",
+                    "zero cells make the sequence probability vanish",
+                    "posterior means are shrunk; do not treat them as MLEs",
+                ))
+                .build(),
+        );
+        let log_emit: Vec<Vec<f64>> = (0..t_len)
+            .map(|t| {
+                let obs = x.get(t, 0).round();
+                (0..k).map(|j| log_poisson(obs, rates[j])).collect()
+            })
+            .collect();
+        let (labels, _) = viterbi_path(&start, &trans, &log_emit);
+        ctx.finish(FittedVariationalPoissonHmm {
+            labels,
+            n_states: k,
+            start,
+            trans,
+            rates,
+            elbo,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3507,6 +4455,38 @@ mod tests {
             "tied expected a mean near -3, got {tm0} and {tm1}"
         );
         assert_eq!(tied.value.cov.shape(), (1, 1));
+        let gfull = GmmHmmFull::new(2, 1)
+            .fit(&x, &Session::new("gfull_hmm", "fit"))
+            .expect("gfull");
+        let mut gfm0 = gfull.value.means.get(0, 0);
+        let mut gfm1 = gfull.value.means.get(1, 0);
+        if gfm0 > gfm1 {
+            std::mem::swap(&mut gfm0, &mut gfm1);
+        }
+        assert!(
+            (gfm0 + 3.0).abs() < 0.75,
+            "GmmHmmFull expected a mean near -3, got {gfm0} and {gfm1}"
+        );
+        assert!(
+            (gfm1 - 3.0).abs() < 0.75,
+            "GmmHmmFull expected a mean near +3, got {gfm0} and {gfm1}"
+        );
+        assert_eq!(gfull.value.covs.len(), 2);
+        assert_eq!(gfull.value.covs[0].shape(), (1, 1));
+        let gtied = GmmHmmTied::new(2, 1)
+            .fit(&x, &Session::new("gtied_hmm", "fit"))
+            .expect("gtied");
+        let mut gtm0 = gtied.value.means.get(0, 0);
+        let mut gtm1 = gtied.value.means.get(1, 0);
+        if gtm0 > gtm1 {
+            std::mem::swap(&mut gtm0, &mut gtm1);
+        }
+        assert!(
+            (gtm0 + 3.0).abs() < 0.75,
+            "GmmHmmTied expected a mean near -3, got {gtm0} and {gtm1}"
+        );
+        assert_eq!(gtied.value.covs.len(), 2);
+        assert_eq!(gtied.value.covs[0].shape(), (1, 1));
     }
 
     #[test]
@@ -3543,6 +4523,13 @@ mod tests {
             .expect("phmm_lr");
         assert!(lr.value.trans.get(1, 0) <= 1e-8);
         assert_eq!(lr.value.rates.len(), 2);
+        let vb = VariationalPoissonHmm::new(2)
+            .fit(&x, &Session::new("vphmm", "fit"))
+            .expect("vphmm");
+        let mut vr = vb.value.rates.as_slice().to_vec();
+        vr.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!(vr[0] < 3.0 && vr[1] > 5.0, "{vr:?}");
+        assert_eq!(vb.value.labels.len(), 40);
     }
 
     #[test]

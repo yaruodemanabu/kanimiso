@@ -5821,6 +5821,594 @@ impl FitSeries for TsbCroston {
     }
 }
 
+/// Syntetos–Boylan Croston approximation (sktime `Croston` SBA).
+///
+/// Forecast is \((z/p)\,(1-\alpha/2)\). Lag / interval counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SbaCroston {
+    /// Smoothing constant for demand size and inter-arrival.
+    pub alpha: f64,
+}
+
+impl Default for SbaCroston {
+    fn default() -> Self {
+        Self { alpha: 0.1 }
+    }
+}
+
+impl SbaCroston {
+    /// SBA Croston with smoothing `alpha`.
+    pub fn new(alpha: f64) -> Self {
+        Self { alpha }
+    }
+}
+
+/// Fitted Syntetos–Boylan state.
+#[derive(Clone, Debug)]
+pub struct FittedSbaCroston {
+    /// Smoothed demand size.
+    pub z: f64,
+    /// Smoothed inter-arrival.
+    pub p: f64,
+    /// Smoothing constant.
+    pub alpha: f64,
+}
+
+impl FittedSbaCroston {
+    /// Constant bias-corrected `z/p` forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let rate = if self.p.abs() > 1e-15 {
+            (self.z / self.p) * (1.0 - 0.5 * self.alpha)
+        } else {
+            f64::NAN
+        };
+        ctx.finish(Vector::filled(h, rate))
+    }
+}
+
+impl FitSeries for SbaCroston {
+    type Fitted = FittedSbaCroston;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedSbaCroston>> {
+        let q = Croston { alpha: self.alpha }.fit_series(y, session)?;
+        Ok(q.map(|c| FittedSbaCroston {
+            z: c.z,
+            p: c.p,
+            alpha: c.alpha,
+        }))
+    }
+}
+
+/// ARCH(`lags`) QMLE (Engle / arch `ARCH`).
+///
+/// \(h_t=\omega+\sum_{i=1}^{L}\alpha_i\varepsilon_{t-i}^2\). Lag order is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ArchP {
+    /// ARCH lag count (not identification `p`).
+    pub lags: usize,
+    /// Coordinate-search iterations.
+    pub max_iter: usize,
+}
+
+impl Default for ArchP {
+    fn default() -> Self {
+        Self {
+            lags: 1,
+            max_iter: 32,
+        }
+    }
+}
+
+impl ArchP {
+    /// ARCH with `lags` squared-residual terms.
+    pub fn new(lags: usize) -> Self {
+        Self {
+            lags: lags.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted ARCH(`lags`) variance recursion.
+#[derive(Clone, Debug)]
+pub struct FittedArchP {
+    /// ω.
+    pub omega: f64,
+    /// ARCH coefficients \(\alpha_1,\ldots,\alpha_L\).
+    pub alphas: Vector,
+    /// In-sample conditional variances.
+    pub sigma2: Vector,
+    /// Demeaned residuals.
+    pub resid: Vector,
+}
+
+fn archp_sigma2(e: &[f64], omega: f64, alphas: &[f64]) -> Vec<f64> {
+    let var0 = e.iter().map(|v| v * v).sum::<f64>() / e.len().max(1) as f64;
+    let mut s2 = vec![var0.max(omega).max(1e-12); e.len()];
+    for t in 1..e.len() {
+        let mut s = omega;
+        for (k, a) in alphas.iter().enumerate() {
+            if t > k {
+                let ek = e[t - 1 - k];
+                s += *a * ek * ek;
+            } else {
+                s += *a * var0;
+            }
+        }
+        s2[t] = if s.is_finite() && s > 0.0 {
+            s
+        } else {
+            omega.max(1e-12)
+        };
+    }
+    s2
+}
+
+fn archp_nll(e: &[f64], omega: f64, alphas: &[f64]) -> f64 {
+    if omega <= 0.0 || alphas.iter().any(|a| *a < 0.0) {
+        return f64::INFINITY;
+    }
+    let s2 = archp_sigma2(e, omega, alphas);
+    let mut nll = 0.0;
+    for t in 0..e.len() {
+        let v = s2[t].max(1e-12);
+        nll += 0.5 * (v.ln() + e[t] * e[t] / v);
+    }
+    nll
+}
+
+impl FittedArchP {
+    /// Iterate the ARCH recursion `h` steps using \(E[\varepsilon^2]=\sigma^2\).
+    pub fn forecast_variance(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let lags = self.alphas.len().max(1);
+        let mut hist: Vec<f64> = self
+            .resid
+            .as_slice()
+            .iter()
+            .rev()
+            .take(lags)
+            .map(|v| v * v)
+            .collect();
+        while hist.len() < lags {
+            hist.push(self.omega);
+        }
+        let mut out = Vector::zeros(h);
+        for i in 0..h {
+            let mut s = self.omega;
+            for (k, a) in self.alphas.as_slice().iter().enumerate() {
+                s += *a * hist.get(k).copied().unwrap_or(self.omega);
+            }
+            if !s.is_finite() || s <= 0.0 {
+                s = self.omega.max(1e-12);
+            }
+            out[i] = s;
+            hist.insert(0, s);
+            if hist.len() > lags {
+                hist.pop();
+            }
+        }
+        ctx.finish(out)
+    }
+}
+
+impl FitSeries for ArchP {
+    type Fitted = FittedArchP;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedArchP>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let lags = self.lags.max(1);
+        if y.len() < lags + 6 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("ARCH(L) QMLE needs a longer series")
+                    .metric("n", y.len() as f64)
+                    .metric("lags", lags as f64)
+                    .build(),
+            );
+        }
+        let mean = y.mean();
+        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
+        let var = e.as_slice().iter().map(|v| v * v).sum::<f64>() / y.len().max(1) as f64;
+        let mut omega = 0.05 * var.max(1e-8);
+        let mut alphas = vec![0.10 / lags as f64; lags];
+        let mut best = archp_nll(e.as_slice(), omega, &alphas);
+        let mut step = 0.05;
+        for it in 0..self.max_iter {
+            let mut improved = false;
+            let mut cand_vals = Vec::with_capacity(1 + lags);
+            cand_vals.push(omega);
+            cand_vals.extend_from_slice(&alphas);
+            for i in 0..cand_vals.len() {
+                let cur = cand_vals[i];
+                for dir in [-step, step] {
+                    let mut trial = cand_vals.clone();
+                    trial[i] = (cur + dir).max(1e-8);
+                    let a_sum: f64 = trial[1..].iter().sum();
+                    if a_sum >= 0.999 {
+                        continue;
+                    }
+                    let nll = archp_nll(e.as_slice(), trial[0], &trial[1..]);
+                    if nll < best {
+                        best = nll;
+                        omega = trial[0];
+                        alphas = trial[1..].to_vec();
+                        cand_vals = trial;
+                        improved = true;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, best, None);
+            if !improved {
+                step *= 0.5;
+                if step < 1e-5 {
+                    ctx.session.converged("ARCH coordinate search", it as u64);
+                    break;
+                }
+            }
+        }
+        let a_sum: f64 = alphas.iter().sum();
+        if a_sum >= 0.999 {
+            ctx.push(
+                Issue::builder(IssueCode::NonStationary)
+                    .message(format!("ARCH Σα={a_sum:.4} ≥ 1; persistence is a unit root"))
+                    .metric("alpha_sum", a_sum)
+                    .build(),
+            );
+        }
+        if !best.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("ARCH QMLE likelihood is non-finite")
+                    .build(),
+            );
+        }
+        let sigma2 = archp_sigma2(e.as_slice(), omega, &alphas);
+        ctx.finish(FittedArchP {
+            omega,
+            alphas: Vector::from_iter(alphas),
+            sigma2: Vector::from_iter(sigma2),
+            resid: e,
+        })
+    }
+}
+
+/// Realized variance of a return series (arch `RealizedVariance`).
+///
+/// \(\mathrm{RV}=\sum_t \varepsilon_t^2\). This is a measurement, not a GARCH recursion.
+#[derive(Clone, Debug, Default)]
+pub struct RealizedVariance;
+
+/// Fitted realized-variance path.
+#[derive(Clone, Debug)]
+pub struct FittedRealizedVariance {
+    /// Per-period squared demeaned returns.
+    pub sigma2: Vector,
+    /// \(\sum\varepsilon_t^2\).
+    pub rv: f64,
+}
+
+impl RealizedVariance {
+    /// Empty realized-variance estimator.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl FitSeries for RealizedVariance {
+    type Fitted = FittedRealizedVariance;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRealizedVariance>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("realized variance on n<2 is a single square")
+                    .build(),
+            );
+        }
+        if y.std() <= ctx.policy.near_zero_variance {
+            ctx.push(
+                Issue::builder(IssueCode::NearZeroVariance)
+                    .severity(Severity::Warning)
+                    .message("realized variance of a near-constant series is ~0")
+                    .build(),
+            );
+        }
+        let mean = y.mean();
+        let sigma2 = Vector::from_iter(y.as_slice().iter().map(|v| {
+            let e = v - mean;
+            e * e
+        }));
+        let rv: f64 = sigma2.as_slice().iter().sum();
+        ctx.finish(FittedRealizedVariance { sigma2, rv })
+    }
+}
+
+/// Parkinson high–low range variance (arch `Parkinson`).
+///
+/// \(\hat\sigma^2_t=(4\ln 2)^{-1}(\ln H_t-\ln L_t)^2\). Column count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct Parkinson;
+
+/// Garman–Klass OHLC variance (arch `GarmanKlass`).
+///
+/// \(\hat\sigma^2_t=\tfrac12(\ln H/L)^2-(2\ln 2-1)(\ln C/O)^2\).
+#[derive(Clone, Debug, Default)]
+pub struct GarmanKlass;
+
+fn ln2() -> f64 {
+    std::f64::consts::LN_2
+}
+
+/// Parkinson estimator on columns `[high, low]`.
+pub fn parkinson(hl: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, hl, None, &ctx.policy);
+    if hl.ncols() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("Parkinson needs columns [high, low]")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(hl.nrows()));
+    }
+    let c = 1.0 / (4.0 * ln2());
+    let mut out = Vector::zeros(hl.nrows());
+    let mut skipped = 0u64;
+    for t in 0..hl.nrows() {
+        let h = hl.get(t, 0);
+        let l = hl.get(t, 1);
+        if h > 0.0 && l > 0.0 && h >= l {
+            out[t] = c * (h / l).ln().powi(2);
+        } else {
+            skipped += 1;
+            out[t] = f64::NAN;
+        }
+    }
+    if skipped > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::NonPositiveSeries)
+                .severity(Severity::Warning)
+                .message(format!("Parkinson skipped {skipped} non-positive or inverted bars"))
+                .build(),
+        );
+    }
+    ctx.finish(out)
+}
+
+/// Garman–Klass estimator on columns `[open, high, low, close]`.
+pub fn garman_klass(ohlc: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, ohlc, None, &ctx.policy);
+    if ohlc.ncols() < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("Garman–Klass needs columns [open, high, low, close]")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(ohlc.nrows()));
+    }
+    let k = 2.0 * ln2() - 1.0;
+    let mut out = Vector::zeros(ohlc.nrows());
+    let mut skipped = 0u64;
+    for t in 0..ohlc.nrows() {
+        let o = ohlc.get(t, 0);
+        let h = ohlc.get(t, 1);
+        let l = ohlc.get(t, 2);
+        let c = ohlc.get(t, 3);
+        if o > 0.0 && c > 0.0 && h > 0.0 && l > 0.0 && h >= l {
+            let hl = (h / l).ln().powi(2);
+            let co = (c / o).ln().powi(2);
+            out[t] = 0.5 * hl - k * co;
+        } else {
+            skipped += 1;
+            out[t] = f64::NAN;
+        }
+    }
+    if skipped > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::NonPositiveSeries)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "Garman–Klass skipped {skipped} non-positive or inverted bars"
+                ))
+                .build(),
+        );
+    }
+    ctx.finish(out)
+}
+
+impl Parkinson {
+    /// Empty Parkinson estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Per-bar Parkinson variance.
+    pub fn estimate(&self, hl: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        parkinson(hl, session)
+    }
+}
+
+impl GarmanKlass {
+    /// Empty Garman–Klass estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Per-bar Garman–Klass variance.
+    pub fn estimate(&self, ohlc: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        garman_klass(ohlc, session)
+    }
+}
+
+/// SES-versus-Theta selector (sktime `ThetaForecaster` / AutoTheta).
+///
+/// Candidate count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct AutoTheta;
+
+/// Fitted AutoTheta winner.
+#[derive(Clone, Debug)]
+pub struct FittedAutoTheta {
+    /// `"ses"` or `"theta"`.
+    pub name: String,
+    /// SES level.
+    pub level: f64,
+    /// SES α.
+    pub alpha: f64,
+    /// Drift (zero when SES wins).
+    pub drift: f64,
+}
+
+impl FittedAutoTheta {
+    /// SES: flat level. Theta: `level + h · drift`.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(Vector::from_iter((1..=h).map(|k| {
+            if self.name == "ses" {
+                self.level
+            } else {
+                self.level + k as f64 * self.drift
+            }
+        })))
+    }
+}
+
+impl FitSeries for AutoTheta {
+    type Fitted = FittedAutoTheta;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedAutoTheta>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .message("AutoTheta needs n≥2")
+                    .build(),
+            );
+            return ctx.finish(FittedAutoTheta {
+                name: "ses".into(),
+                level: y.as_slice().last().copied().unwrap_or(f64::NAN),
+                alpha: 1.0,
+                drift: 0.0,
+            });
+        }
+        warn_unit_root(&mut ctx, y);
+        let (alpha, _b, level, _tr, fitted) =
+            esm_fit(y.as_slice(), SmoothingKind::Simple, None, None);
+        let mut ses_sse = 0.0;
+        for t in 0..y.len() {
+            let e = y[t] - fitted[t];
+            ses_sse += e * e;
+        }
+        let drift = 0.5 * (y[y.len() - 1] - y[0]) / (y.len() - 1) as f64;
+        let mut theta_sse = 0.0;
+        for t in 0..y.len() {
+            let e = y[t] - (fitted[t] + drift * t as f64);
+            theta_sse += e * e;
+        }
+        let (name, use_drift) = if theta_sse < ses_sse {
+            ("theta", drift)
+        } else {
+            ("ses", 0.0)
+        };
+        ctx.finish(FittedAutoTheta {
+            name: name.into(),
+            level,
+            alpha,
+            drift: use_drift,
+        })
+    }
+}
+
+/// Endogenous series as exogenous lags (sktime `YtoX`).
+///
+/// Lag count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct YtoX {
+    /// Number of lags.
+    pub lags: usize,
+}
+
+impl Default for YtoX {
+    fn default() -> Self {
+        Self { lags: 1 }
+    }
+}
+
+impl YtoX {
+    /// Embed with `lags` columns.
+    pub fn new(lags: usize) -> Self {
+        Self { lags: lags.max(1) }
+    }
+
+    /// Map `y` to `[y_{t-1}, …, y_{t-L}]` (`n` rows; leading lags are 0).
+    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_univariate(&mut ctx, y);
+        let p = self.lags.max(1);
+        let out = Matrix::from_fn(y.len(), p, |t, j| {
+            let src = t as isize - (j as isize + 1);
+            if src >= 0 {
+                y[src as usize]
+            } else {
+                0.0
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Forecast of squared residuals of a SES level (sktime `SquaringResiduals`).
+#[derive(Clone, Debug, Default)]
+pub struct SquaringResiduals;
+
+/// Fitted squared-residual smoother.
+#[derive(Clone, Debug)]
+pub struct FittedSquaringResiduals {
+    /// Level SES.
+    pub level: f64,
+    /// Residual-variance SES level.
+    pub vol: f64,
+}
+
+impl FittedSquaringResiduals {
+    /// Flat forecast of residual variance.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(Vector::filled(h, self.vol.max(0.0)))
+    }
+}
+
+impl FitSeries for SquaringResiduals {
+    type Fitted = FittedSquaringResiduals;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSquaringResiduals>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let mut ses = SimpleExpSmoothing::new(Some(0.3));
+        let level_q = ses.fit_series(y, &session.child("level"))?;
+        let r2 = Vector::from_iter(level_q.value.resid.as_slice().iter().map(|e| e * e));
+        let mut vol_ses = SimpleExpSmoothing::new(Some(0.3));
+        let vol_q = vol_ses.fit_series(&r2, &session.child("vol"))?;
+        ctx.finish(FittedSquaringResiduals {
+            level: level_q.value.level,
+            vol: vol_q.value.level,
+        })
+    }
+}
+
 fn fit_arima(spec: &Arima, y: &Vector, session: &Session) -> Result<Qualified<FittedArima>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
@@ -10712,5 +11300,87 @@ mod tests {
         assert_eq!(pi.len(), 4);
         assert!((pi[0] - 1.0).abs() < 1e-12);
         assert!(pi.as_slice().iter().all(|v| v.is_finite()));
+        let arch = ArchP::new(1)
+            .fit_series(&y, &Session::new("archp", "fit"))
+            .expect("archp");
+        assert!(arch
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        assert_eq!(arch.value.alphas.len(), 1);
+        let archf = arch
+            .value
+            .forecast_variance(3, &Session::new("archp", "fc"))
+            .expect("archpf")
+            .value;
+        assert_eq!(archf.len(), 3);
+        let rv = RealizedVariance::new()
+            .fit_series(&y, &Session::new("rv", "fit"))
+            .expect("rv");
+        assert!(rv.value.rv.is_finite() && rv.value.rv > 0.0);
+        assert_eq!(rv.value.sigma2.len(), y.len());
+        let hl = Matrix::from_fn(ypos.len(), 2, |i, j| {
+            if j == 0 {
+                ypos[i] * 1.01
+            } else {
+                ypos[i] * 0.99
+            }
+        });
+        let pk = Parkinson::new()
+            .estimate(&hl, &Session::new("pk", "est"))
+            .expect("pk")
+            .value;
+        assert_eq!(pk.len(), ypos.len());
+        assert!(pk.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let ohlc = Matrix::from_fn(ypos.len(), 4, |i, j| match j {
+            0 => ypos[i],
+            1 => ypos[i] * 1.01,
+            2 => ypos[i] * 0.99,
+            _ => ypos[i],
+        });
+        let gk = GarmanKlass::new()
+            .estimate(&ohlc, &Session::new("gk", "est"))
+            .expect("gk")
+            .value;
+        assert_eq!(gk.len(), ypos.len());
+        assert!(gk.as_slice().iter().all(|v| v.is_finite()));
+        let sba = SbaCroston::new(0.2)
+            .fit_series(&ypos, &Session::new("sba", "fit"))
+            .expect("sba");
+        let sbaf = sba
+            .value
+            .forecast(3, &Session::new("sba", "fc"))
+            .expect("sbaf")
+            .value;
+        assert_eq!(sbaf.len(), 3);
+        assert!(sbaf.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let ath = AutoTheta
+            .fit_series(&y, &Session::new("ath", "fit"))
+            .expect("autotheta");
+        assert!(ath.value.name == "ses" || ath.value.name == "theta");
+        let athf = ath
+            .value
+            .forecast(3, &Session::new("ath", "fc"))
+            .expect("athf")
+            .value;
+        assert_eq!(athf.len(), 3);
+        let yx = YtoX::new(2)
+            .transform(&y, &Session::new("ytox", "t"))
+            .expect("ytox")
+            .value;
+        assert_eq!(yx.shape(), (40, 2));
+        assert!((yx.get(2, 0) - y[1]).abs() < 1e-12);
+        let sq = SquaringResiduals
+            .fit_series(&y, &Session::new("sqres", "fit"))
+            .expect("sqres");
+        let sqf = sq
+            .value
+            .forecast(3, &Session::new("sqres", "fc"))
+            .expect("sqf")
+            .value;
+        assert_eq!(sqf.len(), 3);
+        assert!(sqf.as_slice().iter().all(|v| v.is_finite() && *v >= 0.0));
     }
 }
