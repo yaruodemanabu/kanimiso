@@ -7267,6 +7267,430 @@ pub fn ttost(
     })
 }
 
+/// One-sample Kolmogorov–Smirnov test versus a fitted normal (scipy `kstest`).
+///
+/// The sample is standardized with its own mean and standard deviation before
+/// comparison to \(\Phi\). Sample size is not identification `p`.
+pub fn kstest(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, x);
+    let mut xs: Vec<f64> = x
+        .as_slice()
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = xs.len();
+    if n < 3 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("kstest needs at least three finite observations")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: n as f64,
+        });
+    }
+    let st = slice_stats(&xs);
+    let sd = st.std();
+    if sd <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("kstest standard deviation vanished")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: n as f64,
+        });
+    }
+    let nf = n as f64;
+    let mut d: f64 = 0.0;
+    for (i, &v) in xs.iter().enumerate() {
+        let z = (v - st.mean) / sd;
+        let f = norm_cdf(z);
+        let fn_lo = i as f64 / nf;
+        let fn_hi = (i + 1) as f64 / nf;
+        d = d.max((f - fn_lo).abs()).max((f - fn_hi).abs());
+    }
+    ctx.finish(HypothesisTest {
+        statistic: d,
+        pvalue: ks_pvalue(d, nf),
+        df: f64::NAN,
+        nobs: nf,
+    })
+}
+
+/// Bonferroni FWER adjustment (statsmodels `multipletests` method=`bonferroni`).
+pub fn bonferroni(p: &[f64], session: &Session) -> Result<Qualified<Vec<f64>>> {
+    multipletests(p, MultiTest::Bonferroni, session)
+}
+
+/// Holm step-down FWER adjustment (statsmodels `multipletests` method=`holm`).
+pub fn holm(p: &[f64], session: &Session) -> Result<Qualified<Vec<f64>>> {
+    multipletests(p, MultiTest::Holm, session)
+}
+
+/// Šidák FWER adjustment (statsmodels `multipletests` method=`sidak`).
+///
+/// The comparison count is not identification `p`.
+pub fn sidak(p: &[f64], session: &Session) -> Result<Qualified<Vec<f64>>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if p.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .severity(Severity::Warning)
+                .message("sidak received an empty p-value vector")
+                .build(),
+        );
+        return ctx.finish(Vec::new());
+    }
+    if let Some(issue) = scan_finite(p).to_issue("p-values") {
+        ctx.push(issue);
+    }
+    for (i, &pi) in p.iter().enumerate() {
+        if pi.is_finite() && (pi < 0.0 || pi > 1.0) {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("p[{i}]={pi} is outside [0, 1]"))
+                    .build(),
+            );
+            break;
+        }
+    }
+    let m = p.len() as f64;
+    let adj = p
+        .iter()
+        .map(|&pi| {
+            if pi.is_finite() {
+                (1.0 - (1.0 - pi.clamp(0.0, 1.0)).powf(m)).clamp(0.0, 1.0)
+            } else {
+                f64::NAN
+            }
+        })
+        .collect();
+    ctx.finish(adj)
+}
+
+/// Weighted descriptive statistics and a one-sample *t* interval
+/// (statsmodels `DescrStatsW`).
+///
+/// Weight count is not identification `p`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DescrStatsW {
+    /// Weighted mean.
+    pub mean: f64,
+    /// Weighted sample standard deviation.
+    pub std: f64,
+    /// Weighted sample variance.
+    pub var: f64,
+    /// Sum of finite non-negative weights.
+    pub nobs: f64,
+    /// *t* statistic for \(H_0:\mu=0\).
+    pub tvalue: f64,
+    /// Two-sided Student *t* p-value.
+    pub pvalue: f64,
+    /// Lower 95% Student *t* bound.
+    pub ci_low: f64,
+    /// Upper 95% Student *t* bound.
+    pub ci_high: f64,
+}
+
+/// Weighted mean / variance / *t* interval (statsmodels `DescrStatsW`).
+///
+/// `weights` defaults to ones. Weight count is not identification `p`.
+pub fn descr_stats_w(
+    x: &Vector,
+    weights: Option<&Vector>,
+    session: &Session,
+) -> Result<Qualified<DescrStatsW>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, x);
+    if let Some(w) = weights {
+        if w.len() != x.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "DescrStatsW weights.len()={} ≠ x.len()={}",
+                        w.len(),
+                        x.len()
+                    ))
+                    .build(),
+            );
+        }
+    }
+    let n = x.len();
+    let mut sw = 0.0;
+    let mut swx = 0.0;
+    let mut used = 0usize;
+    for i in 0..n {
+        if !x[i].is_finite() {
+            continue;
+        }
+        let w = weights
+            .and_then(|ww| ww.as_slice().get(i).copied())
+            .unwrap_or(1.0);
+        if !w.is_finite() || w < 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("DescrStatsW weight[{i}]={w} is not a finite ≥0 value"))
+                    .build(),
+            );
+            continue;
+        }
+        sw += w;
+        swx += w * x[i];
+        used += 1;
+    }
+    if used < 2 || sw <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("DescrStatsW needs at least two finite weighted observations")
+                .build(),
+        );
+        return ctx.finish(DescrStatsW {
+            mean: f64::NAN,
+            std: f64::NAN,
+            var: f64::NAN,
+            nobs: sw,
+            tvalue: f64::NAN,
+            pvalue: f64::NAN,
+            ci_low: f64::NAN,
+            ci_high: f64::NAN,
+        });
+    }
+    let mean = swx / sw;
+    let mut sse = 0.0;
+    for i in 0..n {
+        if !x[i].is_finite() {
+            continue;
+        }
+        let w = weights
+            .and_then(|ww| ww.as_slice().get(i).copied())
+            .unwrap_or(1.0);
+        if w.is_finite() && w >= 0.0 {
+            let d = x[i] - mean;
+            sse += w * d * d;
+        }
+    }
+    let df = (sw - 1.0).max(1.0);
+    let var = sse / df;
+    let std = var.max(0.0).sqrt();
+    let se = std / sw.sqrt();
+    if se <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("DescrStatsW standard error vanished")
+                .build(),
+        );
+        return ctx.finish(DescrStatsW {
+            mean,
+            std,
+            var,
+            nobs: sw,
+            tvalue: f64::NAN,
+            pvalue: f64::NAN,
+            ci_low: mean,
+            ci_high: mean,
+        });
+    }
+    let tvalue: f64 = mean / se;
+    let crit = student_t_ppf(0.975, df);
+    ctx.finish(DescrStatsW {
+        mean,
+        std,
+        var,
+        nobs: sw,
+        tvalue,
+        pvalue: student_t_pvalue(tvalue, df),
+        ci_low: mean - crit * se,
+        ci_high: mean + crit * se,
+    })
+}
+
+/// Multiple imputation by chained equations (statsmodels `MICE`).
+///
+/// Imputation count is not identification `p`. The design may contain NaNs;
+/// do not call [`inspect_xy`] on it.
+#[derive(Clone, Debug)]
+pub struct Mice {
+    /// Number of completed data sets.
+    pub n_imputations: usize,
+    /// Inner chained-equation cycles.
+    pub max_iter: usize,
+    /// Ridge penalty on each conditional model.
+    pub alpha: f64,
+    /// Seed for the initial jitter.
+    pub seed: u64,
+}
+
+impl Default for Mice {
+    fn default() -> Self {
+        Self {
+            n_imputations: 2,
+            max_iter: 6,
+            alpha: 1e-3,
+            seed: 3,
+        }
+    }
+}
+
+impl Mice {
+    /// `n_imputations` completed data sets.
+    pub fn new(n_imputations: usize) -> Self {
+        Self {
+            n_imputations,
+            ..Self::default()
+        }
+    }
+
+    /// Draw completed matrices. Missing cells are initialized at the column
+    /// mean plus a small Gaussian jitter, then each column is ridge-regressed
+    /// on the others.
+    pub fn impute(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vec<Matrix>>> {
+        mice_impute(x, self, session)
+    }
+}
+
+/// Draw `n_imputations` MICE completions (statsmodels `MICE`).
+///
+/// Imputation count is not identification `p`.
+pub fn mice(
+    x: &Matrix,
+    n_imputations: usize,
+    session: &Session,
+) -> Result<Qualified<Vec<Matrix>>> {
+    Mice::new(n_imputations).impute(x, session)
+}
+
+fn mice_impute(x: &Matrix, spec: &Mice, session: &Session) -> Result<Qualified<Vec<Matrix>>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let (n, p) = x.shape();
+    ctx.report.set_sample_shape(n, p);
+    if n == 0 || p == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .severity(Severity::Warning)
+                .message(format!("MICE design is {n}×{p}"))
+                .build(),
+        );
+        return ctx.finish(Vec::new());
+    }
+    let n_imp = if spec.n_imputations >= 1 {
+        spec.n_imputations
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "MICE n_imputations={} < 1; using 1",
+                    spec.n_imputations
+                ))
+                .build(),
+        );
+        1
+    };
+    let mut means = vec![0.0; p];
+    for j in 0..p {
+        let col: Vec<f64> = (0..n).map(|i| x.get(i, j)).collect();
+        let st = slice_stats(&col);
+        if st.count == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::ImputationUndefined)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "MICE column {j} is all-missing; fill is 0, not a statistic"
+                    ))
+                    .build(),
+            );
+            means[j] = 0.0;
+        } else {
+            means[j] = st.mean;
+        }
+    }
+    let alpha = if spec.alpha.is_finite() && spec.alpha >= 0.0 {
+        spec.alpha
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("MICE α={} is invalid; using 1e-3", spec.alpha))
+                .build(),
+        );
+        1e-3
+    };
+    let mut rng = Rng::new(spec.seed);
+    let mut out = Vec::with_capacity(n_imp);
+    for _m in 0..n_imp {
+        let mut filled = x.clone();
+        for j in 0..p {
+            for i in 0..n {
+                if !filled.get(i, j).is_finite() {
+                    filled.set(i, j, means[j] + 0.05 * rng.standard_normal());
+                }
+            }
+        }
+        for _it in 0..spec.max_iter.max(1) {
+            for j in 0..p {
+                let miss: Vec<usize> = (0..n).filter(|&i| !x.get(i, j).is_finite()).collect();
+                if miss.is_empty() {
+                    continue;
+                }
+                let others: Vec<usize> = (0..p).filter(|&k| k != j).collect();
+                if others.is_empty() {
+                    continue;
+                }
+                let z = Matrix::from_fn(n, others.len(), |i, t| filled.get(i, others[t]));
+                let yj = filled.column(j);
+                let mut scratch = Report::new("mice", "ridge");
+                let Some(beta) = crate::linalg::ridge_solve(&mut scratch, &z, &yj, alpha, &ctx.policy)
+                else {
+                    continue;
+                };
+                for issue in scratch.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::R2IsOne
+                            | IssueCode::RankZero
+                            | IssueCode::PerfectCollinearity
+                            | IssueCode::InvalidWeight
+                            | IssueCode::CholeskyFailed
+                            | IssueCode::NonFiniteOutput
+                            | IssueCode::DimensionMismatch
+                            | IssueCode::JitterInjected
+                            | IssueCode::UnderdeterminedSystem
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                for &i in &miss {
+                    let mut pred = 0.0;
+                    for t in 0..others.len().min(beta.len()) {
+                        pred += beta[t] * filled.get(i, others[t]);
+                    }
+                    filled.set(i, j, pred);
+                }
+            }
+        }
+        out.push(filled);
+    }
+    ctx.finish(out)
+}
+
 /// Nested-model ANOVA (statsmodels `anova_lm`).
 #[derive(Clone, Debug)]
 pub struct AnovaLm {
@@ -8432,5 +8856,23 @@ mod tests {
         assert!(eh.value.is_finite());
         let ts = ttost(&a, &b, -10.0, 10.0, &Session::new("ttost", "t")).expect("ttost");
         assert!(ts.value.pvalue.is_finite() || ts.value.statistic.is_nan());
+        let ks = kstest(&y, &Session::new("ks1", "t")).expect("ks1");
+        assert!(ks.value.statistic.is_finite() || ks.value.pvalue.is_nan());
+        let hol = holm(pv.as_slice(), &Session::new("holm", "t")).expect("holm");
+        assert_eq!(hol.value.len(), 4);
+        let bon = bonferroni(pv.as_slice(), &Session::new("bon", "t")).expect("bon");
+        assert!(bon.value.as_slice().iter().all(|v| v.is_finite()));
+        let sid = sidak(pv.as_slice(), &Session::new("sid", "t")).expect("sid");
+        assert_eq!(sid.value.len(), 4);
+        let dsw = descr_stats_w(&a, None, &Session::new("dsw", "t")).expect("dsw");
+        assert!(dsw.value.mean.is_finite());
+        assert!(dsw.value.ci_low <= dsw.value.mean && dsw.value.mean <= dsw.value.ci_high);
+        let mut xm = Matrix::from_fn(12, 2, |i, j| if j == 0 { a[i] } else { b[i] });
+        xm.set(2, 1, f64::NAN);
+        xm.set(5, 0, f64::NAN);
+        let mi = mice(&xm, 2, &Session::new("mice", "t")).expect("mice");
+        assert_eq!(mi.value.len(), 2);
+        assert!(mi.value[0].get(2, 1).is_finite());
+        assert!(mi.value[1].get(5, 0).is_finite());
     }
 }

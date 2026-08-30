@@ -791,6 +791,143 @@ pub fn canberra_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Q
     }))
 }
 
+/// Pairwise Bray–Curtis distances (sklearn `pairwise_distances` metric=`braycurtis`).
+///
+/// Row counts are not identification `p`. A vanishing denominator is recorded
+/// as a numerical compromise and contributes 0.
+pub fn braycurtis_distances(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("braycurtis_distances column mismatch")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    let mut saw_zero = false;
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for k in 0..a.ncols() {
+            let u = a.get(i, k);
+            let v = b.get(j, k);
+            num += (u - v).abs();
+            den += (u + v).abs();
+        }
+        if den > 1e-18 {
+            num / den
+        } else {
+            saw_zero = true;
+            0.0
+        }
+    });
+    if saw_zero {
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .message("braycurtis_distances saw a vanishing |u|+|v|; that entry is 0")
+                .compromise(NumericalCompromise::new(
+                    "Bray–Curtis with a positive mass denominator",
+                    "0 when both rows are numerically zero",
+                    "the ℓ1 mass of the pair is below the floor",
+                    "the 0 is a convention, not a well-defined ecological distance",
+                ))
+                .build(),
+        );
+    }
+    ctx.finish(out)
+}
+
+/// Pairwise Hamming distances (sklearn `pairwise_distances` metric=`hamming`).
+///
+/// The value is the fraction of coordinates that differ. Row counts are not
+/// identification `p`.
+pub fn hamming_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("hamming_distances column mismatch")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    let p = a.ncols().max(1) as f64;
+    ctx.finish(Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let mut s = 0.0;
+        for k in 0..a.ncols() {
+            if (a.get(i, k) - b.get(j, k)).abs() > 1e-15 {
+                s += 1.0;
+            }
+        }
+        s / p
+    }))
+}
+
+/// Pairwise Jaccard distances (sklearn `pairwise_distances` metric=`jaccard`).
+///
+/// Support is the set of coordinates with absolute value above `1e-18`. Row
+/// counts are not identification `p`.
+pub fn jaccard_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("jaccard_distances column mismatch")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    let mut saw_empty = false;
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let mut inter = 0.0;
+        let mut union = 0.0;
+        for k in 0..a.ncols() {
+            let ua = a.get(i, k).abs() > 1e-18;
+            let vb = b.get(j, k).abs() > 1e-18;
+            if ua && vb {
+                inter += 1.0;
+            }
+            if ua || vb {
+                union += 1.0;
+            }
+        }
+        if union > 0.0 {
+            1.0 - inter / union
+        } else {
+            saw_empty = true;
+            0.0
+        }
+    });
+    if saw_empty {
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .message("jaccard_distances saw two empty-support rows; that entry is 0")
+                .compromise(NumericalCompromise::new(
+                    "Jaccard on non-empty supports",
+                    "0 when both rows have empty support",
+                    "the union of non-zero coordinates is empty",
+                    "the 0 is a convention, not a set-theoretic Jaccard distance",
+                ))
+                .build(),
+        );
+    }
+    ctx.finish(out)
+}
+
 /// Cosine similarity matrix (sklearn `cosine_similarity`).
 ///
 /// A zero-norm row is recorded as a numerical compromise and contributes 0.
@@ -1260,6 +1397,17 @@ pub fn paired_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qua
         s.sqrt()
     }));
     ctx.finish(out)
+}
+
+/// Paired Euclidean distances of aligned rows (sklearn `paired_euclidean_distances`).
+///
+/// Row count is not identification `p`.
+pub fn paired_euclidean_distances(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    paired_distances(a, b, session)
 }
 
 /// Pairwise kernel dispatcher (sklearn `pairwise_kernels`).
@@ -4578,5 +4726,21 @@ mod tests {
             .unwrap()
             .value;
         assert!(can.get(1, 1).abs() < 1e-12);
+        let bc = braycurtis_distances(&xb, &xb, &Session::new("m", "bc"))
+            .unwrap()
+            .value;
+        assert!(bc.get(1, 1).abs() < 1e-12);
+        let hamd = hamming_distances(&xb, &xb, &Session::new("m", "hamd"))
+            .unwrap()
+            .value;
+        assert!(hamd.get(1, 1).abs() < 1e-12);
+        let jacd = jaccard_distances(&xb, &xb, &Session::new("m", "jacd"))
+            .unwrap()
+            .value;
+        assert!(jacd.get(1, 1).abs() < 1e-12);
+        let peu = paired_euclidean_distances(&xb, &xb, &Session::new("m", "peu"))
+            .unwrap()
+            .value;
+        assert!(peu[1].abs() < 1e-12);
     }
 }

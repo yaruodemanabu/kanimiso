@@ -800,6 +800,8 @@ impl FitUnsupervised for GaussianHmm {
 
 /// Discrete-emission HMM. Observation codes are the rounded entries of `X`
 /// (typically a `T` × 1 matrix of integer symbols).
+///
+/// [`CategoricalHmm`] is the hmmlearn 0.3+ name for the same model.
 #[derive(Clone, Debug)]
 pub struct MultinomialHmm {
     /// Number of hidden states.
@@ -819,6 +821,9 @@ impl Default for MultinomialHmm {
         }
     }
 }
+
+/// hmmlearn 0.3+ name for [`MultinomialHmm`].
+pub type CategoricalHmm = MultinomialHmm;
 
 impl MultinomialHmm {
     /// `n_states` discrete-emission states.

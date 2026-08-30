@@ -1312,6 +1312,59 @@ impl Fit for ExtraTreesClassifier {
     }
 }
 
+/// Single extremely randomized Gini tree (sklearn `ExtraTreeClassifier`).
+///
+/// This is [`ExtraTreesClassifier`] with one tree. Feature subsample size is
+/// not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ExtraTreeClassifier {
+    /// Maximum tree depth.
+    pub max_depth: usize,
+    /// Minimum samples required to attempt a split.
+    pub min_samples_split: usize,
+    /// Feature subsample size (`None` ⇒ \(\sqrt{p}\)).
+    pub max_features: Option<usize>,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for ExtraTreeClassifier {
+    fn default() -> Self {
+        Self {
+            max_depth: 8,
+            min_samples_split: 2,
+            max_features: None,
+            seed: 0,
+        }
+    }
+}
+
+impl ExtraTreeClassifier {
+    /// Default single extra-tree classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for ExtraTreeClassifier {
+    type Fitted = FittedForestClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedForestClassifier>> {
+        ExtraTreesClassifier {
+            n_estimators: 1,
+            max_depth: self.max_depth,
+            min_samples_split: self.min_samples_split,
+            max_features: self.max_features,
+            seed: self.seed,
+        }
+        .fit(x, y, session)
+    }
+}
+
 /// Extremely randomized MSE trees (random thresholds, full sample).
 #[derive(Clone, Debug)]
 pub struct ExtraTreesRegressor {
@@ -2446,6 +2499,19 @@ mod tests {
             .unwrap()
             .value;
         assert!(accuracy(&p, &y) > 0.8);
+
+        let etc = ExtraTreeClassifier {
+            seed: 5,
+            ..ExtraTreeClassifier::default()
+        }
+        .fit(&x, &y, &Session::new("extra_tree", "fit"))
+        .expect("etc");
+        let p1 = etc
+            .value
+            .predict(&x, &Session::new("extra_tree", "predict"))
+            .unwrap()
+            .value;
+        assert_eq!(p1.len(), y.len());
 
         let gbc = GradientBoostingClassifier {
             n_estimators: 20,

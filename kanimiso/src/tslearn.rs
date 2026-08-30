@@ -6011,6 +6011,44 @@ impl Predict for FittedSoftDtwKnn {
     }
 }
 
+/// Soft-DTW 1-NN classifier (tslearn `KNeighborsTimeSeriesClassifier` with Soft-DTW).
+///
+/// Neighbor count is fixed at 1 and is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SoftDtwClassifier {
+    /// Soft-DTW smoothness.
+    pub gamma: f64,
+}
+
+impl Default for SoftDtwClassifier {
+    fn default() -> Self {
+        Self { gamma: 0.5 }
+    }
+}
+
+impl SoftDtwClassifier {
+    /// Soft-DTW 1-NN classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for SoftDtwClassifier {
+    type Fitted = FittedSoftDtwKnn;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSoftDtwKnn>> {
+        SoftDtwKnn {
+            k: 1,
+            gamma: self.gamma,
+        }
+        .fit(x, y, session)
+    }
+}
+
 /// Summary statistics + ridge (sktime `SummaryClassifier` lite).
 #[derive(Clone, Debug)]
 pub struct SummaryClassifier {
@@ -7730,6 +7768,9 @@ impl CnnClassifier {
     }
 }
 
+/// Named CNN-lite classifier (sktime `CNNClassifier`).
+pub type TimeCnnClassifier = CnnClassifier;
+
 /// Fitted CNN-lite ridge.
 #[derive(Clone, Debug)]
 pub struct FittedCnnClassifier {
@@ -8771,6 +8812,82 @@ impl Predict for FittedEncoderClassifier {
     }
 }
 
+/// Flattened random-hidden tanh + ridge (sktime `MLPClassifier` lite).
+///
+/// Hidden width is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MlpTimeClassifier {
+    /// Hidden units.
+    pub hidden: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for MlpTimeClassifier {
+    fn default() -> Self {
+        Self {
+            hidden: 8,
+            alpha: 0.1,
+            seed: 29,
+        }
+    }
+}
+
+impl MlpTimeClassifier {
+    /// Default MLP-lite time classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted MLP-lite ridge.
+#[derive(Clone, Debug)]
+pub struct FittedMlpTimeClassifier {
+    hidden: Matrix,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+fn mlp_hidden(x: &Matrix, w: &Matrix) -> Matrix {
+    Matrix::from_fn(x.nrows(), w.ncols(), |i, j| {
+        let mut s = 0.0;
+        let t = x.ncols().min(w.nrows());
+        for u in 0..t {
+            s += x.get(i, u) * w.get(u, j);
+        }
+        s.tanh()
+    })
+}
+
+impl Fit for MlpTimeClassifier {
+    type Fitted = FittedMlpTimeClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMlpTimeClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let mut rng = Rng::new(self.seed);
+        let h = self.hidden.max(1);
+        let w = Matrix::from_fn(x.ncols().max(1), h, |_, _| rng.standard_normal());
+        let z = mlp_hidden(x, &w);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "mlp-time");
+        ctx.finish(FittedMlpTimeClassifier { hidden: w, inner })
+    }
+}
+
+impl Predict for FittedMlpTimeClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = mlp_hidden(x, &self.hidden);
+        self.inner.predict(&z, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9568,5 +9685,32 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(encp.len(), 6);
+        let mlp = MlpTimeClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "mlp"))
+            .unwrap();
+        let mlpp = mlp
+            .value
+            .predict(&x, &Session::new("ts", "mlpp"))
+            .unwrap()
+            .value;
+        assert_eq!(mlpp.len(), 6);
+        let sdc = SoftDtwClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "sdc"))
+            .unwrap();
+        let sdcp = sdc
+            .value
+            .predict(&x, &Session::new("ts", "sdcp"))
+            .unwrap()
+            .value;
+        assert_eq!(sdcp.len(), 6);
+        let tcn = TimeCnnClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "tcn"))
+            .unwrap();
+        let tcnp = tcn
+            .value
+            .predict(&x, &Session::new("ts", "tcnp"))
+            .unwrap()
+            .value;
+        assert_eq!(tcnp.len(), 6);
     }
 }

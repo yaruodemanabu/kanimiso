@@ -915,6 +915,177 @@ impl PartialFit for LinTs {
     }
 }
 
+/// Exponential-weight algorithm for exploration and exploitation (river `bandit.Exp3`).
+///
+/// Arm count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Exp3 {
+    /// Exploration mixture \(\gamma \in (0,1]\).
+    pub gamma: f64,
+    n_arms: usize,
+    weights: Vec<f64>,
+    counts: Vec<u64>,
+    rng: Rng,
+    updates: u64,
+    n_seen: u64,
+}
+
+impl Exp3 {
+    /// `k` arms, default \(\gamma=0.1\).
+    pub fn new(n_arms: usize) -> Self {
+        let k = n_arms.max(1);
+        Self {
+            gamma: 0.1,
+            n_arms: k,
+            weights: vec![1.0; k],
+            counts: vec![0; k],
+            rng: Rng::new(23),
+            updates: 0,
+            n_seen: 0,
+        }
+    }
+
+    fn probs(&self) -> Vec<f64> {
+        let g = self.gamma.clamp(1e-6, 1.0);
+        let k = self.n_arms.max(1) as f64;
+        let sw: f64 = self.weights.iter().copied().sum::<f64>().max(1e-18);
+        self.weights
+            .iter()
+            .map(|&w| (1.0 - g) * (w / sw) + g / k)
+            .collect()
+    }
+
+    fn choose(&mut self, ctx: &mut FitCtx) -> usize {
+        if let Some(a) = self.counts.iter().position(|&c| c == 0) {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message(format!("Exp3 has never pulled arm {a}"))
+                    .build(),
+            );
+            return a;
+        }
+        let p = self.probs();
+        let u = self.rng.uniform();
+        let mut acc = 0.0;
+        for (i, &pi) in p.iter().enumerate() {
+            acc += pi;
+            if u <= acc {
+                return i;
+            }
+        }
+        self.n_arms.saturating_sub(1)
+    }
+
+    /// Draw an arm from the Exp3 mixture and explain the draw.
+    pub fn pull(&mut self, session: &Session) -> Result<Qualified<(usize, IncrementalExplain)>> {
+        let mut ctx = FitCtx::with_session(session.child("pull"));
+        let arm = self.choose(&mut ctx);
+        let p = self.probs();
+        let mut q = IncrementalQuality::new(self.updates, 1, self.n_seen);
+        q.warmup = self.counts.iter().any(|&c| c == 0);
+        q.still_identified = self.counts.iter().all(|&c| c > 0);
+        q.explanation = format!("Exp3 chose {arm} p={p:?}");
+        let expl = IncrementalExplain::from_quality(
+            q,
+            format!("pull arm {arm}"),
+            "mixture of the exponential weights and the uniform explore mass",
+            format!("weights={:?}", self.weights),
+            format!("p={p:?}"),
+        );
+        ctx.session.record_incremental(expl.clone());
+        ctx.finish((arm, expl))
+    }
+}
+
+impl PartialFit for Exp3 {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish(
+                &ctx,
+                reject(self.updates, 0, self.n_seen, "Exp3 needs rewards"),
+            );
+        };
+        let before = self.weights.clone();
+        let g = self.gamma.clamp(1e-6, 1.0);
+        let k = self.n_arms.max(1) as f64;
+        let mut dsum = 0.0;
+        for i in 0..y.len().min(x.nrows().max(y.len())) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let arm = if x.ncols() == 0 || x.nrows() == 0 {
+                self.choose(&mut ctx)
+            } else {
+                let a = x.get(i.min(x.nrows() - 1), 0).round().abs() as usize;
+                if a >= self.n_arms {
+                    ctx.push(
+                        Issue::builder(IssueCode::DimensionMismatch)
+                            .severity(Severity::Warning)
+                            .message(format!("Exp3 arm {a} is outside 0..{}", self.n_arms))
+                            .build(),
+                    );
+                    continue;
+                }
+                a
+            };
+            let p = self.probs();
+            let pa = p.get(arm).copied().unwrap_or(1.0 / k).max(1e-12);
+            let r = y[i].clamp(0.0, 1.0);
+            let est = r / pa;
+            let before_w = self.weights[arm];
+            self.weights[arm] *= (g * est / k).exp();
+            if !self.weights[arm].is_finite() || self.weights[arm] > 1e12 {
+                ctx.push(
+                    Issue::builder(IssueCode::JitterInjected)
+                        .severity(Severity::Warning)
+                        .message("Exp3 weights overflowed; rescaling")
+                        .compromise(NumericalCompromise::new(
+                            "finite exponential weights",
+                            "weights were rescaled after overflow",
+                            "the importance-weighted update grew without bound",
+                            "relative arm probabilities are kept; the absolute scale is conventional",
+                        ))
+                        .build(),
+                );
+                let mx = self
+                    .weights
+                    .iter()
+                    .copied()
+                    .fold(0.0_f64, |a, b| a.max(b))
+                    .max(1.0);
+                for w in &mut self.weights {
+                    *w /= mx;
+                }
+            }
+            dsum += (self.weights[arm] - before_w).abs();
+            self.counts[arm] += 1;
+            self.n_seen += 1;
+            self.updates += 1;
+        }
+        let expl = pack_bandit(
+            &mut ctx,
+            self.updates,
+            y.len(),
+            self.n_seen,
+            dsum,
+            self.counts.iter().all(|&c| c > 0),
+            self.counts.iter().any(|&c| c == 0),
+            &before,
+            &self.weights,
+            "Exp3 exponential weights",
+            "importance-weighted multiplicative update; arm count is not p",
+        );
+        finish(&ctx, expl)
+    }
+}
+
 fn sample_beta(rng: &mut Rng, alpha: f64, beta: f64) -> f64 {
     // Gamma(k,1) ≈ sum of k exponentials for integer shape; otherwise Jöhnk.
     let x = sample_gamma(rng, alpha.max(1e-6));
@@ -1074,6 +1245,9 @@ mod tests {
         assert!(!q.value.narrative.is_empty());
         let mut lts = LinTs::new(2);
         let q = lts.partial_fit(&x, Some(&y), &session).expect("lints");
+        assert!(!q.value.narrative.is_empty());
+        let mut exp3 = Exp3::new(2);
+        let q = exp3.partial_fit(&x, Some(&y), &session).expect("exp3");
         assert!(!q.value.narrative.is_empty());
     }
 }

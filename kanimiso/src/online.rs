@@ -14,6 +14,7 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
+use crate::linalg::ridge_solve;
 use crate::rng::Rng;
 use crate::special::norm_cdf;
 use crate::traits::{PartialFit, Predict, Transform};
@@ -16236,6 +16237,333 @@ impl PartialFit for AdaBoundRegressor {
     }
 }
 
+/// Batch Newton linear regressor (river `optim.Newton`).
+///
+/// One Newton step on a quadratic loss is the Gram solve of the current
+/// mini-batch. Feature count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct NewtonRegressor {
+    /// Ridge floor on the batch Gram.
+    pub alpha: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for NewtonRegressor {
+    fn default() -> Self {
+        Self {
+            alpha: 1e-6,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl NewtonRegressor {
+    /// Default Newton regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for NewtonRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if self.initialized && self.coef.len() != dim {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message("NewtonRegressor feature dim changed")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.initialized = true;
+        }
+        let n = x.nrows().min(y.len());
+        let mut loss_before = 0.0;
+        for i in 0..n {
+            if y[i].is_finite() {
+                let e = self.predict_row(x, i) - y[i];
+                loss_before += e * e;
+            }
+        }
+        let design = Matrix::from_fn(n, dim, |i, j| {
+            let z = row_aug(x, i, self.fit_intercept);
+            z.as_slice().get(j).copied().unwrap_or(0.0)
+        });
+        let yb = Vector::from_iter((0..n).map(|i| y[i]));
+        let alpha = if self.alpha.is_finite() && self.alpha >= 0.0 {
+            self.alpha
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("Newton α={} is invalid; using 1e-6", self.alpha))
+                    .build(),
+            );
+            1e-6
+        };
+        let mut scratch = signlred::Report::new("newton", "batch");
+        let before = self.coef.clone();
+        if let Some(beta) = ridge_solve(&mut scratch, &design, &yb, alpha, &ctx.policy) {
+            self.coef = beta;
+        }
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::R2IsOne
+                    | IssueCode::RankZero
+                    | IssueCode::PerfectCollinearity
+                    | IssueCode::InvalidWeight
+                    | IssueCode::UnderdeterminedSystem
+                    | IssueCode::CholeskyFailed
+                    | IssueCode::NonFiniteOutput
+                    | IssueCode::DimensionMismatch
+                    | IssueCode::JitterInjected
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let mut loss_after = 0.0;
+        let mut used = 0u64;
+        for i in 0..n {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let e = self.predict_row(x, i) - y[i];
+            loss_after += e * e;
+            used += 1;
+        }
+        self.n_seen += used;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "Newton linear weights",
+            "one Gram solve of the current mini-batch (exact Newton on squared loss)",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for NewtonRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
+/// Normalised rating recommender (river `reco.Norm`).
+///
+/// `X` is `[user, item]`, `y` is the rating. Running mean / std of ratings
+/// are maintained globally and per item. Item count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct NormReco {
+    mean: f64,
+    m2: f64,
+    n_seen: u64,
+    updates: u64,
+    item_mean: HashMap<usize, f64>,
+    item_n: HashMap<usize, u64>,
+}
+
+impl Default for NormReco {
+    fn default() -> Self {
+        Self {
+            mean: 0.0,
+            m2: 0.0,
+            n_seen: 0,
+            updates: 0,
+            item_mean: HashMap::new(),
+            item_n: HashMap::new(),
+        }
+    }
+}
+
+impl NormReco {
+    /// Empty Norm recommender.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn std(&self) -> f64 {
+        if self.n_seen < 2 {
+            return 0.0;
+        }
+        (self.m2 / (self.n_seen as f64 - 1.0)).max(0.0).sqrt()
+    }
+
+    fn pred_item(&self, item: usize) -> f64 {
+        self.item_mean.get(&item).copied().unwrap_or(self.mean)
+    }
+}
+
+impl PartialFit for NormReco {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no ratings"),
+            );
+        };
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("NormReco needs [user, item] columns")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need two columns"),
+            );
+        }
+        let before = self.mean;
+        let mut moved = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let item = x.get(i, 1).round().max(0.0) as usize;
+            self.n_seen += 1;
+            let d = y[i] - self.mean;
+            self.mean += d / self.n_seen as f64;
+            self.m2 += d * (y[i] - self.mean);
+            let n_i = self.item_n.get(&item).copied().unwrap_or(0) + 1;
+            let m_i = self.item_mean.get(&item).copied().unwrap_or(0.0);
+            let nxt = m_i + (y[i] - m_i) / n_i as f64;
+            moved += (nxt - m_i).abs();
+            self.item_n.insert(item, n_i);
+            self.item_mean.insert(item, nxt);
+        }
+        self.updates += 1;
+        let sd = self.std();
+        if self.n_seen >= 2 && sd <= 1e-18 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateDistribution)
+                    .message("NormReco rating std vanished")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.mean - before).abs().max(moved));
+        q.information_gain = Some((self.mean - before).abs().max(moved));
+        q.still_identified = self.n_seen >= 2 && sd > 1e-18;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!(
+            "NormReco μ={:.6e} σ={:.6e} on {} items",
+            self.mean,
+            sd,
+            self.item_mean.len()
+        );
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("NormReco has seen fewer than two ratings")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "normalised rating mean/std",
+                "Welford μ,σ plus per-item means; item count is not p",
+                format!("μ={before:.6e}"),
+                format!("μ={:.6e} items={}", self.mean, self.item_mean.len()),
+            ),
+        )
+    }
+}
+
+impl Predict for NormReco {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.n_seen == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        if x.ncols() < 2 {
+            return ctx.finish(Vector::filled(x.nrows(), self.mean));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let item = x.get(i, 1).round().max(0.0) as usize;
+            self.pred_item(item)
+        })))
+    }
+}
+
 impl Predict for AdaBoundRegressor {
     type Output = Vector;
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
@@ -16687,6 +17015,12 @@ mod tests {
         AdaBoundRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adabound");
+        NewtonRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("newton");
+        NormReco::new()
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("normreco");
 
         let n_expl = session
             .ledger()

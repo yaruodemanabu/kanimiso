@@ -3547,6 +3547,64 @@ const INVENTORY: &[Algorithm] = &[
     ),
     a("online.AdaBoundRegressor", "river.optim.AdaBound", "online"),
     a("bandit.LinTs", "river.bandit.LinTS", "online"),
+    a(
+        "metrics.braycurtis_distances",
+        "sklearn.metrics.pairwise.pairwise_distances",
+        "metric",
+    ),
+    a(
+        "metrics.hamming_distances",
+        "sklearn.metrics.pairwise.pairwise_distances",
+        "metric",
+    ),
+    a(
+        "metrics.jaccard_distances",
+        "sklearn.metrics.pairwise.pairwise_distances",
+        "metric",
+    ),
+    a(
+        "metrics.paired_euclidean_distances",
+        "sklearn.metrics.pairwise.paired_euclidean_distances",
+        "metric",
+    ),
+    a(
+        "tree.ExtraTreeClassifier",
+        "sklearn.tree.ExtraTreeClassifier",
+        "estimator",
+    ),
+    a("stats.kstest", "scipy.stats.kstest", "stats"),
+    a(
+        "stats.bonferroni",
+        "statsmodels.stats.multitest.multipletests",
+        "stats",
+    ),
+    a("stats.holm", "statsmodels.stats.multitest.multipletests", "stats"),
+    a("stats.sidak", "statsmodels.stats.multitest.multipletests", "stats"),
+    a(
+        "stats.DescrStatsW",
+        "statsmodels.stats.weightstats.DescrStatsW",
+        "stats",
+    ),
+    a("stats.mice", "statsmodels.imputation.mice.MICE", "stats"),
+    a(
+        "tslearn.MlpTimeClassifier",
+        "sktime.classification.deep_learning.mlp.MLPClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.SoftDtwClassifier",
+        "tslearn.neighbors.KNeighborsTimeSeriesClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.TimeCnnClassifier",
+        "sktime.classification.deep_learning.cnn.CNNClassifier",
+        "timeseries",
+    ),
+    a("online.NewtonRegressor", "river.optim.Newton", "online"),
+    a("online.NormReco", "river.reco.Norm", "online"),
+    a("bandit.Exp3", "river.bandit.Exp3", "online"),
+    a("hmm.CategoricalHmm", "hmmlearn.hmm.CategoricalHMM", "hmm"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -3711,6 +3769,11 @@ mod tests {
             "tslearn.EncoderClassifier",
             "online.AdaBoundRegressor",
             "bandit.LinTs",
+            "metrics.braycurtis_distances",
+            "stats.kstest",
+            "tslearn.MlpTimeClassifier",
+            "online.NewtonRegressor",
+            "bandit.Exp3",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
