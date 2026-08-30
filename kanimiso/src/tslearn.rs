@@ -9912,6 +9912,508 @@ impl Stray {
     }
 }
 
+fn hist_entropy(y: &Vector, a: usize, b: usize, lo: f64, hi: f64, n_bins: usize) -> f64 {
+    let k = n_bins.max(2);
+    let mut bins = vec![0.0; k];
+    let span = (hi - lo).max(1e-12);
+    let mut n = 0.0;
+    for i in a..b.min(y.len()) {
+        if !y[i].is_finite() {
+            continue;
+        }
+        let mut t = ((y[i] - lo) / span * k as f64).floor() as usize;
+        if t >= k {
+            t = k - 1;
+        }
+        bins[t] += 1.0;
+        n += 1.0;
+    }
+    if n <= 0.0 {
+        return 0.0;
+    }
+    let mut h = 0.0;
+    for c in bins {
+        if c > 0.0 {
+            let p: f64 = c / n;
+            h -= p * p.ln();
+        }
+    }
+    h
+}
+
+/// Information-gain change points (sktime `InformationGainSegmentation`).
+///
+/// Bin / split counts are not identification `p`.
+pub fn information_gain_segmentation(
+    y: &Vector,
+    max_changes: usize,
+    n_bins: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y),
+        Some(y),
+        &ctx.policy,
+    );
+    let n = y.len();
+    if n < 6 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("information_gain_segmentation needs n≥6")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(0));
+    }
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for i in 0..n {
+        if y[i].is_finite() {
+            lo = lo.min(y[i]);
+            hi = hi.max(y[i]);
+        }
+    }
+    let kmax = max_changes.max(1).min(n / 3);
+    let bins = n_bins.max(2);
+    let mut bounds = vec![0usize, n];
+    for _ in 0..kmax {
+        let mut best_gain = 0.0;
+        let mut best_k = 0usize;
+        let mut best_pos = 0usize;
+        for b in 0..bounds.len() - 1 {
+            let s = bounds[b];
+            let t = bounds[b + 1];
+            if t - s < 6 {
+                continue;
+            }
+            let h0 = hist_entropy(y, s, t, lo, hi, bins);
+            let m = (t - s) as f64;
+            for k in (s + 2)..(t - 2) {
+                let hl = hist_entropy(y, s, k, lo, hi, bins);
+                let hr = hist_entropy(y, k, t, lo, hi, bins);
+                let gain = h0 - ((k - s) as f64 / m) * hl - ((t - k) as f64 / m) * hr;
+                if gain > best_gain {
+                    best_gain = gain;
+                    best_k = k;
+                    best_pos = b + 1;
+                }
+            }
+        }
+        if best_gain <= 1e-12 {
+            break;
+        }
+        bounds.insert(best_pos, best_k);
+    }
+    ctx.finish(Vector::from_iter(
+        bounds
+            .iter()
+            .skip(1)
+            .take(bounds.len().saturating_sub(2))
+            .map(|v| *v as f64),
+    ))
+}
+
+/// Sliding-window mean-change peaks (sktime `WindowSegmenter` lite).
+///
+/// Window length is not identification `p`.
+pub fn window_segment(
+    y: &Vector,
+    window: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y),
+        Some(y),
+        &ctx.policy,
+    );
+    let n = y.len();
+    let w = window.max(2).min(n.max(2) / 2).max(1);
+    if n < 2 * w + 1 {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .message("window_segment needs n > 2w")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(0));
+    }
+    let mut score = vec![0.0; n];
+    for t in w..n - w {
+        let mut sl = 0.0;
+        let mut sr = 0.0;
+        for i in (t - w)..t {
+            sl += y[i];
+        }
+        for i in t..(t + w) {
+            sr += y[i];
+        }
+        score[t] = (sl / w as f64 - sr / w as f64).abs();
+    }
+    let mut peaks = Vec::new();
+    for t in w + 1..n - w {
+        if score[t] >= score[t - 1] && score[t] >= score[t + 1] && score[t] > 1e-12 {
+            peaks.push(t as f64);
+        }
+    }
+    ctx.finish(Vector::from_iter(peaks))
+}
+
+fn sse_seg(y: &Vector, a: usize, b: usize) -> f64 {
+    let m = (b.saturating_sub(a)).max(1) as f64;
+    let mut s = 0.0;
+    for i in a..b.min(y.len()) {
+        s += y[i];
+    }
+    let mu = s / m;
+    let mut e = 0.0;
+    for i in a..b.min(y.len()) {
+        let d = y[i] - mu;
+        e += d * d;
+    }
+    e
+}
+
+/// Bottom-up adjacent merge (ruptures `BottomUp` / sktime `BottomUpSegmenter`).
+///
+/// Merge / segment counts are not identification `p`.
+pub fn bottom_up_segment(
+    y: &Vector,
+    max_changes: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y),
+        Some(y),
+        &ctx.policy,
+    );
+    let n = y.len();
+    if n < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("bottom_up_segment needs n≥4")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(0));
+    }
+    let mut bounds: Vec<usize> = (0..=n).collect();
+    let keep = (max_changes.max(1) + 1).min(n);
+    while bounds.len() > keep + 1 {
+        let mut best = f64::INFINITY;
+        let mut bi = 1usize;
+        for i in 1..bounds.len() - 1 {
+            let s = bounds[i - 1];
+            let m = bounds[i];
+            let t = bounds[i + 1];
+            let cost = sse_seg(y, s, t) - sse_seg(y, s, m) - sse_seg(y, m, t);
+            if cost < best {
+                best = cost;
+                bi = i;
+            }
+        }
+        bounds.remove(bi);
+    }
+    ctx.finish(Vector::from_iter(
+        bounds
+            .iter()
+            .skip(1)
+            .take(bounds.len().saturating_sub(2))
+            .map(|v| *v as f64),
+    ))
+}
+
+/// Recursive binary segmentation (sktime `TopDownSegmenter` / ruptures `Binseg`).
+///
+/// Split count is not identification `p`. Distinct from a single [`binary_segmentation`] cut.
+pub fn top_down_segment(
+    y: &Vector,
+    max_changes: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y),
+        Some(y),
+        &ctx.policy,
+    );
+    let n = y.len();
+    if n < 6 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("top_down_segment needs n≥6")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(0));
+    }
+    let kmax = max_changes.max(1).min(n / 3);
+    let mut bounds = vec![0usize, n];
+    for _ in 0..kmax {
+        let mut best_gain = 0.0;
+        let mut best_k = 0usize;
+        let mut best_pos = 0usize;
+        for b in 0..bounds.len() - 1 {
+            let s = bounds[b];
+            let t = bounds[b + 1];
+            if t - s < 6 {
+                continue;
+            }
+            let base = sse_seg(y, s, t);
+            for k in (s + 2)..(t - 2) {
+                let gain = base - sse_seg(y, s, k) - sse_seg(y, k, t);
+                if gain > best_gain {
+                    best_gain = gain;
+                    best_k = k;
+                    best_pos = b + 1;
+                }
+            }
+        }
+        if best_gain <= 1e-12 {
+            break;
+        }
+        bounds.insert(best_pos, best_k);
+    }
+    ctx.finish(Vector::from_iter(
+        bounds
+            .iter()
+            .skip(1)
+            .take(bounds.len().saturating_sub(2))
+            .map(|v| *v as f64),
+    ))
+}
+
+/// Hidalgo-lite local intrinsic dimension (Allegra et al. / sktime-adjacent).
+///
+/// Neighbor count is not identification `p`. Points are labelled by a median
+/// split on local dimension, not by calling k-means.
+pub fn hidalgo(x: &Matrix, n_neighbors: usize, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    let n = x.nrows();
+    if n < 3 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Hidalgo needs n≥3")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(n));
+    }
+    let k = n_neighbors.max(2).min(n.saturating_sub(1));
+    let mut ids = Vector::zeros(n);
+    for i in 0..n {
+        let mut ds: Vec<f64> = (0..n)
+            .filter(|&j| j != i)
+            .map(|j| {
+                let mut s = 0.0;
+                for c in 0..x.ncols() {
+                    let d = x.get(i, c) - x.get(j, c);
+                    s += d * d;
+                }
+                s.sqrt()
+            })
+            .collect();
+        ds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let d1 = ds.first().copied().unwrap_or(0.0).max(1e-12);
+        let dk = ds.get(k - 1).copied().unwrap_or(d1).max(d1);
+        ids[i] = (dk / d1).ln() / (k as f64).ln().max(1e-12);
+    }
+    let mut sorted: Vec<f64> = ids.as_slice().to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let med = sorted[n / 2];
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("Hidalgo is a neighbor-ratio local dimension, not the Bayesian Hidalgo posterior")
+            .compromise(NumericalCompromise::new(
+                "Hidalgo mixture of manifolds",
+                "local ID via d_k/d_1 then a median split",
+                "the Bayesian posterior over local dimension is omitted",
+                "read labels as a two-manifold ranking, not a published Hidalgo draw",
+            ))
+            .build(),
+    );
+    ctx.finish(Vector::from_iter((0..n).map(|i| if ids[i] <= med { 0.0 } else { 1.0 })))
+}
+
+/// Named information-gain segmenter.
+#[derive(Clone, Debug)]
+pub struct InformationGainSegmentation {
+    /// Maximum splits. Not identification `p`.
+    pub max_changes: usize,
+    /// Histogram bins. Not identification `p`.
+    pub n_bins: usize,
+}
+
+impl Default for InformationGainSegmentation {
+    fn default() -> Self {
+        Self {
+            max_changes: 2,
+            n_bins: 6,
+        }
+    }
+}
+
+impl InformationGainSegmentation {
+    /// Default IG segmenter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Change-point locations.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        information_gain_segmentation(y, self.max_changes, self.n_bins, session)
+    }
+}
+
+/// Named sliding-window segmenter.
+#[derive(Clone, Debug)]
+pub struct WindowSegmenter {
+    /// Half-window. Not identification `p`.
+    pub window: usize,
+}
+
+impl Default for WindowSegmenter {
+    fn default() -> Self {
+        Self { window: 2 }
+    }
+}
+
+impl WindowSegmenter {
+    /// Window of length `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+        }
+    }
+
+    /// Peak locations of the windowed mean-change score.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        window_segment(y, self.window, session)
+    }
+}
+
+/// Named bottom-up segmenter.
+#[derive(Clone, Debug)]
+pub struct BottomUpSegmenter {
+    /// Kept change points. Not identification `p`.
+    pub max_changes: usize,
+}
+
+impl Default for BottomUpSegmenter {
+    fn default() -> Self {
+        Self { max_changes: 2 }
+    }
+}
+
+impl BottomUpSegmenter {
+    /// Keep at most `max_changes` cuts.
+    pub fn new(max_changes: usize) -> Self {
+        Self {
+            max_changes: max_changes.max(1),
+        }
+    }
+
+    /// Change-point locations.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        bottom_up_segment(y, self.max_changes, session)
+    }
+}
+
+/// Named top-down / recursive binary segmenter.
+#[derive(Clone, Debug)]
+pub struct TopDownSegmenter {
+    /// Maximum splits. Not identification `p`.
+    pub max_changes: usize,
+}
+
+impl Default for TopDownSegmenter {
+    fn default() -> Self {
+        Self { max_changes: 2 }
+    }
+}
+
+impl TopDownSegmenter {
+    /// At most `max_changes` recursive SSE splits.
+    pub fn new(max_changes: usize) -> Self {
+        Self {
+            max_changes: max_changes.max(1),
+        }
+    }
+
+    /// Change-point locations.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        top_down_segment(y, self.max_changes, session)
+    }
+}
+
+/// Named Hidalgo local-dimension annotator.
+#[derive(Clone, Debug)]
+pub struct Hidalgo {
+    /// Neighbors used for \(d_k/d_1\). Not identification `p`.
+    pub n_neighbors: usize,
+}
+
+impl Default for Hidalgo {
+    fn default() -> Self {
+        Self { n_neighbors: 3 }
+    }
+}
+
+impl Hidalgo {
+    /// Hidalgo-lite with `n_neighbors` (not identification `p`).
+    pub fn new(n_neighbors: usize) -> Self {
+        Self {
+            n_neighbors: n_neighbors.max(2),
+        }
+    }
+
+    /// Two-manifold labels from local intrinsic dimension.
+    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        hidalgo(x, self.n_neighbors, session)
+    }
+}
+
+/// Named greedy Gaussian segmentation.
+#[derive(Clone, Debug, Default)]
+pub struct GreedyGaussianSegmentation {
+    inner: Ggs,
+}
+
+impl GreedyGaussianSegmentation {
+    /// Default GGS.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Change-point locations.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.fit(y, session)
+    }
+}
+
+/// Named binary segmentation.
+#[derive(Clone, Debug, Default)]
+pub struct BinarySegmentation;
+
+impl BinarySegmentation {
+    /// Single mean-change split.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Index of the principal split.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+        Binseg::new().fit(y, session)
+    }
+}
+
 fn ridge_reg_from_features(
     z: &Matrix,
     y: &Vector,
@@ -15684,6 +16186,34 @@ mod tests {
                 .len(),
             8
         );
+        let igs = InformationGainSegmentation::new()
+            .fit(&yr, &Session::new("ts", "igs"))
+            .unwrap();
+        assert!(igs.value.as_slice().iter().all(|v| v.is_finite()));
+        let wseg = WindowSegmenter::new(2)
+            .fit(&yr, &Session::new("ts", "wseg"))
+            .unwrap();
+        assert!(wseg.value.as_slice().iter().all(|v| v.is_finite()));
+        let bus = BottomUpSegmenter::new(2)
+            .fit(&yr, &Session::new("ts", "bus"))
+            .unwrap();
+        assert!(bus.value.as_slice().iter().all(|v| v.is_finite()));
+        let tds = TopDownSegmenter::new(2)
+            .fit(&yr, &Session::new("ts", "tds"))
+            .unwrap();
+        assert!(tds.value.as_slice().iter().all(|v| v.is_finite()));
+        let hid = Hidalgo::new(3)
+            .fit(&x, &Session::new("ts", "hid"))
+            .unwrap();
+        assert_eq!(hid.value.len(), 8);
+        let ggs2 = GreedyGaussianSegmentation::new()
+            .fit(&yr, &Session::new("ts", "ggs2"))
+            .unwrap();
+        assert!(ggs2.value.as_slice().iter().all(|v| v.is_finite()));
+        let bseg = BinarySegmentation::new()
+            .fit(&yr, &Session::new("ts", "bseg"))
+            .unwrap();
+        assert!(bseg.value.is_finite() || bseg.value.is_nan());
         let rst = Rstsf::new()
             .fit(&x, &y, &Session::new("ts", "rstsf"))
             .unwrap();

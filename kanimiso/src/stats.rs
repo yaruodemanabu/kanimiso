@@ -24201,6 +24201,142 @@ impl IpcwRandomSurvivalForest {
     }
 }
 
+/// Survival stacking (sksurv-adjacent): average Cox risk and RSF risk.
+///
+/// Member count is not identification `p`. Inner aborting codes are not
+/// promoted.
+#[derive(Clone, Debug, Default)]
+pub struct SurvivalStacking;
+
+/// Fitted Cox + RSF stack.
+#[derive(Clone, Debug)]
+pub struct FittedSurvivalStacking {
+    cox: Option<Vector>,
+    rsf: Option<FittedRandomSurvivalForest>,
+}
+
+impl SurvivalStacking {
+    /// Default two-member stack.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit Breslow Cox and extra-trees RSF, then average their scores.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedSurvivalStacking>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let cox = match CoxPH::new().fit(durations, events, x, &session.child("stack_cox")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if skip_aborting_inner(issue) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                Some(q.value.coef)
+            }
+            Err(e) => {
+                if !skip_aborting_inner(&e.primary) {
+                    ctx.push(e.primary);
+                } else {
+                    ctx.push(
+                        Issue::builder(IssueCode::DidNotConverge)
+                            .message("SurvivalStacking Cox member failed")
+                            .build(),
+                    );
+                }
+                None
+            }
+        };
+        let rsf = match RandomSurvivalForest::new().fit(
+            durations,
+            events,
+            x,
+            &session.child("stack_rsf"),
+        ) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if skip_aborting_inner(issue) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                Some(q.value)
+            }
+            Err(e) => {
+                if !skip_aborting_inner(&e.primary) {
+                    ctx.push(e.primary);
+                } else {
+                    ctx.push(
+                        Issue::builder(IssueCode::DidNotConverge)
+                            .message("SurvivalStacking RSF member failed")
+                            .build(),
+                    );
+                }
+                None
+            }
+        };
+        if cox.is_none() && rsf.is_none() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("SurvivalStacking: both members failed")
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SurvivalStacking averages Cox and RSF scores, not a published meta-learner")
+                .compromise(NumericalCompromise::new(
+                    "stacked survival ensemble",
+                    "equal-weight average of Breslow risk and extra-trees Nelson–Aalen risk",
+                    "out-of-fold stacking weights and IPCW C-index selection are omitted",
+                    "read the score as a ranking blend, not a calibrated survival probability",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedSurvivalStacking { cox, rsf })
+    }
+}
+
+impl FittedSurvivalStacking {
+    /// Mean of available member scores.
+    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let mut acc = Vector::zeros(x.nrows());
+        let mut k = 0.0_f64;
+        if let Some(b) = &self.cox {
+            let p = x.matvec(b);
+            for i in 0..acc.len().min(p.len()) {
+                acc[i] += p[i];
+            }
+            k += 1.0;
+        }
+        if let Some(r) = &self.rsf {
+            if let Ok(q) = r.predict(x, &session.child("stack_rsfp")) {
+                for i in 0..acc.len().min(q.value.len()) {
+                    acc[i] += q.value[i];
+                }
+                k += 1.0;
+            }
+        }
+        if k > 0.0 {
+            for i in 0..acc.len() {
+                acc[i] /= k;
+            }
+        }
+        ctx.finish(acc)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -25268,5 +25404,13 @@ mod tests {
             .fit(&dur, &ev, &xcox, &Session::new("iprsf", "t"))
             .expect("iprsf");
         assert_eq!(iprsf.value.n_features, 1);
+        let sst = SurvivalStacking::new()
+            .fit(&dur, &ev, &xcox, &Session::new("sst", "t"))
+            .expect("sst");
+        let psst = sst
+            .value
+            .predict(&xcox, &Session::new("sst", "p"))
+            .expect("sstp");
+        assert_eq!(psst.value.len(), 20);
     }
 }

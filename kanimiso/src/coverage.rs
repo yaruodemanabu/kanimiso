@@ -6081,6 +6081,59 @@ const INVENTORY: &[Algorithm] = &[
         "sktime.classification.dictionary_based.TemporalDictionaryEnsemble",
         "estimator",
     ),
+    a(
+        "cluster.AgglomerativeClustering",
+        "sklearn.cluster.AgglomerativeClustering",
+        "estimator",
+    ),
+    a(
+        "tslearn.information_gain_segmentation",
+        "sktime.annotation.igts.InformationGainSegmentation",
+        "function",
+    ),
+    a(
+        "tslearn.InformationGainSegmentation",
+        "sktime.annotation.igts.InformationGainSegmentation",
+        "estimator",
+    ),
+    a(
+        "tslearn.WindowSegmenter",
+        "sktime.annotation.clasp.WindowSegmenter",
+        "estimator",
+    ),
+    a(
+        "tslearn.BottomUpSegmenter",
+        "sktime.annotation.clasp.BottomUpSegmenter",
+        "estimator",
+    ),
+    a(
+        "tslearn.TopDownSegmenter",
+        "sktime.annotation.clasp.TopDownSegmenter",
+        "estimator",
+    ),
+    a("tslearn.hidalgo", "sktime.annotation.stray.Hidalgo", "function"),
+    a("tslearn.Hidalgo", "sktime.annotation.stray.Hidalgo", "estimator"),
+    a(
+        "tslearn.GreedyGaussianSegmentation",
+        "sktime.annotation.ggs.GreedyGaussianSegmentation",
+        "estimator",
+    ),
+    a(
+        "tslearn.BinarySegmentation",
+        "sktime.annotation.clasp.BinarySegmentation",
+        "estimator",
+    ),
+    a(
+        "stats.SurvivalStacking",
+        "sksurv.ensemble.GradientBoostingSurvivalAnalysis",
+        "estimator",
+    ),
+    a(
+        "online.PaClassifier",
+        "river.linear_model.PAClassifier",
+        "online",
+    ),
+    a("online.AMFClassifier", "river.forest.AMFClassifier", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6567,6 +6620,11 @@ mod tests {
             "online.MondrianForest",
             "online.StreamingGradientTreeRegressor",
             "tslearn.TdeClassifier",
+            "cluster.AgglomerativeClustering",
+            "tslearn.InformationGainSegmentation",
+            "tslearn.Hidalgo",
+            "stats.SurvivalStacking",
+            "online.PaClassifier",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

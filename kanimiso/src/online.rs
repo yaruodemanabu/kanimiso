@@ -37215,6 +37215,70 @@ impl Predict for StreamingGradientTreeClassifier {
     }
 }
 
+/// Named passive-aggressive classifier (river `linear_model.PAClassifier`).
+#[derive(Clone, Debug, Default)]
+pub struct PaClassifier {
+    inner: PassiveAggressive,
+}
+
+impl PaClassifier {
+    /// Default PA classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for PaClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for PaClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+/// Named aggregated Mondrian forest classifier (river `forest.AMFClassifier`).
+#[derive(Clone, Debug, Default)]
+pub struct AMFClassifier {
+    inner: AmfClassifier,
+}
+
+impl AMFClassifier {
+    /// AMF with `n_trees` Mondrian stumps.
+    pub fn new(n_trees: usize) -> Self {
+        Self {
+            inner: AmfClassifier::new(n_trees),
+        }
+    }
+}
+
+impl PartialFit for AMFClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for AMFClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -37851,6 +37915,12 @@ mod tests {
         StreamingGradientTreeClassifier::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("sgtc");
+        PaClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("pac");
+        AMFClassifier::new(2)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("amfc");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

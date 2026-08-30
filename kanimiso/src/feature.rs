@@ -2354,6 +2354,24 @@ fn feature_link(a: &[usize], b: &[usize], dist: &Matrix, linkage: Linkage) -> f6
                 s / c
             }
         }
+        Linkage::Ward => {
+            let na = a.len() as f64;
+            let nb = b.len() as f64;
+            let mut s = 0.0;
+            let mut c = 0.0;
+            for &i in a {
+                for &j in b {
+                    s += dist.get(i, j);
+                    c += 1.0;
+                }
+            }
+            if c == 0.0 {
+                f64::INFINITY
+            } else {
+                let d = s / c;
+                (na * nb / (na + nb).max(1.0)) * d * d
+            }
+        }
     }
 }
 

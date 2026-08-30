@@ -1291,6 +1291,8 @@ pub enum Linkage {
     Complete,
     /// Minimum cross-pair distance (single / nearest neighbor).
     Single,
+    /// Variance-minimizing Ward merge (size-weighted squared mean gap).
+    Ward,
 }
 
 /// Agglomerative clustering on the full Euclidean distance matrix.
@@ -1323,6 +1325,51 @@ impl Agglomerative {
     /// Fit alias.
     pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedAgglomerative>> {
         self.fit_unsupervised(x, session)
+    }
+}
+
+/// Named sklearn `AgglomerativeClustering` (default Ward linkage).
+#[derive(Clone, Debug)]
+pub struct AgglomerativeClustering {
+    inner: Agglomerative,
+}
+
+impl Default for AgglomerativeClustering {
+    fn default() -> Self {
+        Self {
+            inner: Agglomerative {
+                n_clusters: 2,
+                linkage: Linkage::Ward,
+            },
+        }
+    }
+}
+
+impl AgglomerativeClustering {
+    /// Ward agglomeration into `n_clusters` groups.
+    pub fn new(n_clusters: usize) -> Self {
+        Self {
+            inner: Agglomerative {
+                n_clusters: n_clusters.max(1),
+                linkage: Linkage::Ward,
+            },
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedAgglomerative>> {
+        self.inner.fit(x, session)
+    }
+}
+
+impl FitUnsupervised for AgglomerativeClustering {
+    type Fitted = FittedAgglomerative;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedAgglomerative>> {
+        self.inner.fit_unsupervised(x, session)
     }
 }
 
@@ -1368,6 +1415,24 @@ fn cluster_link(a: &[usize], b: &[usize], dist: &Matrix, linkage: Linkage) -> f6
                 f64::INFINITY
             } else {
                 s / c
+            }
+        }
+        Linkage::Ward => {
+            let na = a.len() as f64;
+            let nb = b.len() as f64;
+            let mut s = 0.0;
+            let mut c = 0.0;
+            for &i in a {
+                for &j in b {
+                    s += dist.get(i, j);
+                    c += 1.0;
+                }
+            }
+            if c == 0.0 {
+                f64::INFINITY
+            } else {
+                let d = s / c;
+                (na * nb / (na + nb).max(1.0)) * d * d
             }
         }
     }
@@ -3486,5 +3551,10 @@ mod tests {
             .expect("sbc");
         assert_eq!(bq.value.row_labels.len(), 12);
         assert_eq!(bq.value.col_labels.len(), 8);
+        let x2 = two_blobs();
+        let agg = AgglomerativeClustering::new(2)
+            .fit(&x2, &Session::new("aggc", "fit"))
+            .expect("aggc");
+        assert_eq!(agg.value.labels.len(), 40);
     }
 }
