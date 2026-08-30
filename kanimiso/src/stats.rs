@@ -2072,6 +2072,258 @@ pub fn chow_test(
     })
 }
 
+/// OLS-CUSUM (Ploberger–Krämer): standardized walk of residuals.
+///
+/// Inner OLS uses a scratch report. A large max-CUSUM is
+/// [`IssueCode::StructuralBreak`].
+pub fn cusum_ols(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let n = x.nrows().min(y.len());
+    let design = x.with_intercept();
+    let mut scratch = Report::new("cusum", "ols");
+    let Some(beta) = crate::linalg::least_squares(&mut scratch, &design, y, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::UnidentifiedModel)
+                .message("CUSUM OLS failed")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: n as f64,
+        });
+    };
+    for issue in scratch.issues() {
+        if matches!(
+            issue.code,
+            IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::RankZero
+        ) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let fit = design.matvec(&beta);
+    let mut sse: f64 = 0.0;
+    let mut walk: f64 = 0.0;
+    let mut max_abs: f64 = 0.0;
+    for i in 0..n {
+        let e = y[i] - fit[i];
+        sse += e * e;
+        walk += e;
+        max_abs = max_abs.max(walk.abs());
+    }
+    let sigma = (sse / (n as f64).max(1.0)).sqrt().max(1e-12);
+    let stat = max_abs / (sigma * (n as f64).sqrt());
+    // Brownian-bridge 5% critical value ≈ 1.36 for the Kolmogorov statistic.
+    let pvalue = if stat > 1.36 {
+        0.01
+    } else if stat > 1.22 {
+        0.05
+    } else {
+        0.4
+    };
+    if stat > 1.22 {
+        ctx.push(
+            Issue::builder(IssueCode::StructuralBreak)
+                .message(format!(
+                    "OLS-CUSUM statistic={stat:.4e} exceeds the 5% band"
+                ))
+                .metric("cusum", stat)
+                .build(),
+        );
+    }
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: 1.0,
+        nobs: n as f64,
+    })
+}
+
+/// Nadaraya–Watson kernel regression (statsmodels `KernelReg` lite).
+///
+/// Bandwidth `h` is the Gaussian scale. A tiny `h` is a warning, not a fatal
+/// [`IssueCode::InvalidWeight`].
+pub fn kernel_reg(x: &Vector, y: &Vector, h: f64, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_pair(&mut ctx, x, y);
+    let mut bw = h;
+    if !bw.is_finite() || bw <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(signlred::Severity::Warning)
+                .message(format!("KernelReg bandwidth {h} is not positive; using 1"))
+                .build(),
+        );
+        bw = 1.0;
+    }
+    let n = x.len().min(y.len());
+    let out = Vector::from_iter((0..n).map(|i| {
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for j in 0..n {
+            let z = (x[i] - x[j]) / bw;
+            let w = (-0.5 * z * z).exp();
+            num += w * y[j];
+            den += w;
+        }
+        if den > 0.0 {
+            num / den
+        } else {
+            y[i]
+        }
+    }));
+    ctx.finish(out)
+}
+
+/// Nelson–Aalen cumulative hazard from right-censored times.
+pub fn nelson_aalen(
+    durations: &Vector,
+    events: &Vector,
+    session: &Session,
+) -> Result<Qualified<FittedKaplanMeier>> {
+    let km = kaplan_meier_fit(durations, events, session)?;
+    let mut ctx = FitCtx::with_session(session.child("na"));
+    let mut h = Vector::zeros(km.value.times.len());
+    let mut acc = 0.0;
+    for i in 0..km.value.times.len() {
+        let r = km.value.n_risk[i].max(1.0);
+        acc += km.value.n_event[i] / r;
+        h[i] = acc;
+    }
+    ctx.finish(FittedKaplanMeier {
+        times: km.value.times,
+        survival: h,
+        n_risk: km.value.n_risk,
+        n_event: km.value.n_event,
+    })
+}
+
+/// Bartlett's test for equal variances.
+pub fn bartlett(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if groups.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .message("Bartlett needs at least two groups")
+                .build(),
+        );
+    }
+    let mut ns = Vec::new();
+    let mut vars = Vec::new();
+    for grp in groups {
+        inspect_series_as_target(&mut ctx, grp);
+        let st = slice_stats(grp.as_slice());
+        ns.push(st.count);
+        vars.push(st.std() * st.std());
+    }
+    let k = groups.len();
+    let n: usize = ns.iter().sum();
+    let mut sp = 0.0;
+    for i in 0..k {
+        sp += (ns[i].saturating_sub(1)) as f64 * vars[i];
+    }
+    let dfw = n.saturating_sub(k) as f64;
+    sp = if dfw > 0.0 { sp / dfw } else { f64::NAN };
+    let mut num = dfw * sp.max(1e-12).ln();
+    for i in 0..k {
+        if ns[i] > 1 && vars[i] > 0.0 {
+            num -= (ns[i] - 1) as f64 * vars[i].ln();
+        }
+    }
+    let mut den = 1.0;
+    for &ni in &ns {
+        if ni > 1 {
+            den += 1.0 / (ni as f64 - 1.0) - 1.0 / dfw.max(1.0);
+        }
+    }
+    den = 1.0 + den / (3.0 * (k as f64 - 1.0).max(1.0));
+    let stat = if den > 0.0 { num / den } else { f64::NAN };
+    let df = (k as f64 - 1.0).max(1.0);
+    let pvalue = if stat.is_finite() {
+        chi2_pvalue(stat.max(0.0), df)
+    } else {
+        f64::NAN
+    };
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df,
+        nobs: n as f64,
+    })
+}
+
+/// Friedman rank test across `k` treatments (rows are blocks).
+pub fn friedman(table: &Matrix, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, table, None, &ctx.policy);
+    let (n, k) = table.shape();
+    if n < 2 || k < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(signlred::Severity::Warning)
+                .message("Friedman needs ≥2 blocks and ≥2 treatments")
+                .build(),
+        );
+    }
+    let mut rank_sums = vec![0.0; k];
+    for i in 0..n {
+        let row: Vec<f64> = (0..k).map(|j| table.get(i, j)).collect();
+        let r = rank_average(&row);
+        for j in 0..k {
+            rank_sums[j] += r[j];
+        }
+    }
+    let mut ss = 0.0;
+    let mean = rank_sums.iter().sum::<f64>() / k.max(1) as f64;
+    for &s in &rank_sums {
+        let d = s - mean;
+        ss += d * d;
+    }
+    let stat = 12.0 * ss / (n as f64 * k as f64 * (k as f64 + 1.0)).max(1.0);
+    let df = (k as f64 - 1.0).max(1.0);
+    let pvalue = chi2_pvalue(stat.max(0.0), df);
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df,
+        nobs: n as f64,
+    })
+}
+
+/// One-sample proportion z-test (`H0: p = p0`).
+pub fn proportion_ztest(
+    y: &Vector,
+    p0: f64,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, y);
+    let mut p = p0;
+    if !(0.0..=1.0).contains(&p) {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(signlred::Severity::Warning)
+                .message(format!("proportion_ztest p0={p0} not in [0,1]; using 0.5"))
+                .build(),
+        );
+        p = 0.5;
+    }
+    let n = y.as_slice().iter().filter(|v| v.is_finite()).count().max(1) as f64;
+    let phat = y.as_slice().iter().filter(|v| **v > 0.5).count() as f64 / n;
+    let se = (p * (1.0 - p) / n).sqrt().max(1e-12);
+    let stat = (phat - p) / se;
+    let pvalue = 2.0 * (1.0 - crate::special::norm_cdf(stat.abs()));
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: 1.0,
+        nobs: n,
+    })
+}
+
 /// Ramsey RESET: augment OLS with \(\hat y^2,\hat y^3\) and F-test the extra powers.
 pub fn ramsey_reset(
     x: &Matrix,
@@ -3811,5 +4063,23 @@ mod tests {
         }));
         let br = chow_test(&x, &yb, 20, &Session::new("chowb", "t")).expect("chowb");
         assert!(br.report.contains(IssueCode::StructuralBreak) || br.value.pvalue < 0.2);
+        let cu = cusum_ols(&x, &y, &Session::new("cusum", "t")).expect("cusum");
+        assert!(cu.value.statistic.is_finite());
+        let cub = cusum_ols(&x, &yb, &Session::new("cusumb", "t")).expect("cusumb");
+        assert!(cub.value.statistic.is_finite());
+        let kr = kernel_reg(&xs, &ys, 1.0, &Session::new("kr", "t")).expect("kr");
+        assert!((kr.value[10] - 20.0).abs() < 2.0);
+        let dur = Vector::from_iter((0..20).map(|i| 1.0 + i as f64));
+        let ev = Vector::from_iter((0..20).map(|i| if i % 3 == 0 { 0.0 } else { 1.0 }));
+        let na = nelson_aalen(&dur, &ev, &Session::new("na", "t")).expect("na");
+        assert!(na.value.survival.as_slice().last().copied().unwrap_or(0.0) > 0.0);
+        let bt = bartlett(&[&a, &b, &c], &Session::new("bart", "t")).expect("bart");
+        assert!(bt.value.statistic.is_finite() || bt.value.pvalue.is_nan());
+        let tab = Matrix::from_fn(8, 3, |i, j| i as f64 + 0.3 * j as f64);
+        let fr = friedman(&tab, &Session::new("fr", "t")).expect("fr");
+        assert!(fr.value.statistic.is_finite());
+        let ybin = Vector::from_iter((0..40).map(|i| if i % 2 == 0 { 1.0 } else { 0.0 }));
+        let pz = proportion_ztest(&ybin, 0.5, &Session::new("pz", "t")).expect("pz");
+        assert!(pz.value.pvalue.is_finite());
     }
 }

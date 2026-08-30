@@ -5342,6 +5342,769 @@ impl Transform for OnlineMinMaxScaler {
     }
 }
 
+/// Online max-abs scaler (river `preprocessing.MaxAbsScaler`).
+#[derive(Clone, Debug)]
+pub struct OnlineMaxAbsScaler {
+    max_abs: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineMaxAbsScaler {
+    fn default() -> Self {
+        Self {
+            max_abs: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineMaxAbsScaler {
+    /// Empty scaler.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for OnlineMaxAbsScaler {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        if !self.initialized {
+            self.max_abs = Vector::zeros(x.ncols());
+            self.initialized = true;
+        } else if self.max_abs.len() != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.max_abs.clone();
+        for j in 0..x.ncols() {
+            for i in 0..x.nrows() {
+                let v = x.get(i, j).abs();
+                if v.is_finite() && v > self.max_abs[j] {
+                    self.max_abs[j] = v;
+                }
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let delta = self.max_abs.sub(&before);
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta.norm());
+        q.information_gain = Some(delta.norm().max(1.0 / self.n_seen.max(1) as f64));
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("online MaxAbs on {} rows", x.nrows());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "running column max-abs",
+                "stream extrema of |x|",
+                "previous max-abs",
+                "updated max-abs",
+            ),
+        )
+    }
+}
+
+impl Transform for OnlineMaxAbsScaler {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(x.clone());
+        }
+        let p = x.ncols().min(self.max_abs.len());
+        let out = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            if j >= p {
+                return x.get(i, j);
+            }
+            let s = self.max_abs[j];
+            if !s.is_finite() || s <= ctx.policy.near_zero_variance {
+                return 0.0;
+            }
+            x.get(i, j) / s
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Global-mean recommender (river `reco.Baseline` without biases).
+#[derive(Clone, Debug, Default)]
+pub struct Baseline {
+    mean: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Baseline {
+    /// Empty baseline.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for Baseline {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no ratings"),
+            );
+        };
+        let before = self.mean;
+        for i in 0..y.len() {
+            if !y[i].is_finite() {
+                continue;
+            }
+            self.n_seen += 1;
+            self.mean += (y[i] - self.mean) / self.n_seen as f64;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.mean - before).abs());
+        q.information_gain = Some((self.mean - before).abs());
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("baseline μ={:.4e} after {} ratings", self.mean, self.n_seen);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "global rating mean",
+                "Welford update of μ",
+                format!("μ={before:.4e}"),
+                format!("μ={:.4e}", self.mean),
+            ),
+        )
+    }
+}
+
+impl Predict for Baseline {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.n_seen == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+        }
+        ctx.finish(Vector::filled(x.nrows(), self.mean))
+    }
+}
+
+/// Online k-NN regressor (river `neighbors.KNNRegressor`).
+#[derive(Clone, Debug)]
+pub struct KnnRegressor {
+    /// Neighbourhood size.
+    pub k: usize,
+    xs: Vec<Vec<f64>>,
+    ys: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for KnnRegressor {
+    fn default() -> Self {
+        Self {
+            k: 3,
+            xs: Vec::new(),
+            ys: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl KnnRegressor {
+    /// `k`-NN memory.
+    pub fn new(k: usize) -> Self {
+        Self {
+            k: k.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for KnnRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no targets"),
+            );
+        };
+        if self.n_seen > 0 {
+            if let Some(first) = self.xs.first() {
+                if first.len() != x.ncols() {
+                    ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+                    return finish_explain(
+                        ctx,
+                        reject_explain(
+                            self.updates,
+                            x.nrows(),
+                            self.n_seen,
+                            "feature space changed",
+                        ),
+                    );
+                }
+            }
+        }
+        let before = self.xs.len();
+        for i in 0..x.nrows() {
+            self.xs.push((0..x.ncols()).map(|j| x.get(i, j)).collect());
+            self.ys.push(y[i]);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.xs.len() - before) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.xs.len() >= self.k;
+        q.warmup = self.xs.len() < self.k;
+        q.explanation = format!("stored {} rows; memory={}", x.nrows(), self.xs.len());
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "instance memory",
+                "append labelled rows for later neighbour averaging",
+                format!("n={before}"),
+                format!("n={}", self.xs.len()),
+            ),
+        )
+    }
+}
+
+impl Predict for KnnRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.xs.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let k = self.k.max(1).min(self.xs.len());
+        let y = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut dist: Vec<(f64, f64)> = self
+                .xs
+                .iter()
+                .zip(self.ys.iter())
+                .map(|(z, &yi)| {
+                    let mut s = 0.0;
+                    for j in 0..x.ncols().min(z.len()) {
+                        let d = x.get(i, j) - z[j];
+                        s += d * d;
+                    }
+                    (s, yi)
+                })
+                .collect();
+            dist.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let mut num = 0.0;
+            let mut den = 0.0;
+            for (_, yi) in dist.into_iter().take(k) {
+                num += yi;
+                den += 1.0;
+            }
+            if den > 0.0 {
+                num / den
+            } else {
+                0.0
+            }
+        }));
+        ctx.finish(y)
+    }
+}
+
+/// Online robust scaler via stochastic quartiles (river `preprocessing.RobustScaler`).
+#[derive(Clone, Debug)]
+pub struct OnlineRobustScaler {
+    q25: Vector,
+    q75: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineRobustScaler {
+    fn default() -> Self {
+        Self {
+            q25: Vector::zeros(0),
+            q75: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineRobustScaler {
+    /// Empty scaler.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for OnlineRobustScaler {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        if !self.initialized {
+            self.q25 = Vector::zeros(x.ncols());
+            self.q75 = Vector::zeros(x.ncols());
+            self.initialized = true;
+        } else if self.q25.len() != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.q25.clone();
+        let eta = 1.0 / (self.n_seen as f64 + x.nrows() as f64).max(1.0);
+        for j in 0..x.ncols() {
+            for i in 0..x.nrows() {
+                let v = x.get(i, j);
+                if !v.is_finite() {
+                    continue;
+                }
+                self.q25[j] += eta * (if v < self.q25[j] { -0.5 } else { 0.5 } + 2.0 * 0.25 - 1.0);
+                self.q75[j] += eta * (if v < self.q75[j] { -0.5 } else { 0.5 } + 2.0 * 0.75 - 1.0);
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let delta = self.q25.sub(&before);
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta.norm());
+        q.information_gain = Some(delta.norm().max(1.0 / self.n_seen.max(1) as f64));
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 8;
+        q.explanation = format!("online robust quartiles on {} rows", x.nrows());
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "running Q25/Q75",
+                "stochastic quantile updates",
+                "previous quartiles",
+                "updated quartiles",
+            ),
+        )
+    }
+}
+
+impl Transform for OnlineRobustScaler {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(x.clone());
+        }
+        let p = x.ncols().min(self.q25.len());
+        let out = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            if j >= p {
+                return x.get(i, j);
+            }
+            let iqr = self.q75[j] - self.q25[j];
+            if !iqr.is_finite() || iqr.abs() <= ctx.policy.near_zero_variance {
+                return 0.0;
+            }
+            (x.get(i, j) - self.q25[j]) / iqr
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Online softmax / multinomial logistic (river `linear_model.SoftmaxRegression`).
+#[derive(Clone, Debug)]
+pub struct SoftmaxRegression {
+    /// Learning rate.
+    pub eta: f64,
+    coef: Matrix,
+    intercept: Vector,
+    classes: Vec<i64>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for SoftmaxRegression {
+    fn default() -> Self {
+        Self {
+            eta: 0.1,
+            coef: Matrix::zeros(0, 0),
+            intercept: Vector::zeros(0),
+            classes: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl SoftmaxRegression {
+    /// Empty softmax classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for SoftmaxRegression {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        for &yi in y.as_slice() {
+            if !yi.is_finite() {
+                continue;
+            }
+            let lab = yi.round() as i64;
+            if !self.classes.contains(&lab) {
+                self.classes.push(lab);
+                self.classes.sort_unstable();
+            }
+        }
+        let k = self.classes.len().max(1);
+        let p = x.ncols();
+        if !self.initialized {
+            self.coef = Matrix::zeros(k, p);
+            self.intercept = Vector::zeros(k);
+            self.initialized = true;
+        } else if self.coef.ncols() != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        } else if self.coef.nrows() != k {
+            let mut nc = Matrix::zeros(k, p);
+            let mut ni = Vector::zeros(k);
+            for r in 0..self.coef.nrows().min(k) {
+                for c in 0..p {
+                    nc.set(r, c, self.coef.get(r, c));
+                }
+                ni[r] = self.intercept[r];
+            }
+            self.coef = nc;
+            self.intercept = ni;
+        }
+        let before = self.coef.clone();
+        let eta = self.eta.max(1e-6);
+        for i in 0..x.nrows() {
+            let lab = y[i].round() as i64;
+            let Some(ti) = self.classes.iter().position(|&c| c == lab) else {
+                continue;
+            };
+            let mut logits = vec![0.0; k];
+            let mut m = f64::NEG_INFINITY;
+            for c in 0..k {
+                let mut s = self.intercept[c];
+                for j in 0..p {
+                    s += self.coef.get(c, j) * x.get(i, j);
+                }
+                logits[c] = s;
+                m = m.max(s);
+            }
+            let mut z = 0.0;
+            for c in 0..k {
+                logits[c] = (logits[c] - m).exp();
+                z += logits[c];
+            }
+            for c in 0..k {
+                let p_c = logits[c] / z.max(1e-12);
+                let g = (if c == ti { 1.0 } else { 0.0 }) - p_c;
+                self.intercept[c] += eta * g;
+                for j in 0..p {
+                    self.coef
+                        .set(c, j, self.coef.get(c, j) + eta * g * x.get(i, j));
+                }
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut delta: f64 = 0.0;
+        for c in 0..k.min(before.nrows()) {
+            for j in 0..p.min(before.ncols()) {
+                let d = self.coef.get(c, j) - before.get(c, j);
+                delta += d * d;
+            }
+        }
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta.sqrt());
+        q.information_gain = Some(delta.sqrt());
+        q.still_identified = self.n_seen as usize > p && k >= 2;
+        q.warmup = self.n_seen < (p as u64 + 2);
+        q.explanation = format!("softmax SGD on {} rows, K={k}", x.nrows());
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "softmax weights",
+                "one SGD pass on the batch",
+                "previous weights",
+                format!("n_seen={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for SoftmaxRegression {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized || self.classes.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let k = self.classes.len();
+        let y = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut best = 0usize;
+            let mut bv = f64::NEG_INFINITY;
+            for c in 0..k {
+                let mut s = self.intercept[c];
+                for j in 0..x.ncols().min(self.coef.ncols()) {
+                    s += self.coef.get(c, j) * x.get(i, j);
+                }
+                if s > bv {
+                    bv = s;
+                    best = c;
+                }
+            }
+            self.classes[best] as f64
+        }));
+        ctx.finish(y)
+    }
+}
+
+/// Online Gaussian naïve Bayes (river `naive_bayes.GaussianNB`).
+#[derive(Clone, Debug)]
+pub struct OnlineGaussianNb {
+    classes: Vec<i64>,
+    n_per: Vec<f64>,
+    mean: Matrix,
+    m2: Matrix,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineGaussianNb {
+    fn default() -> Self {
+        Self {
+            classes: Vec::new(),
+            n_per: Vec::new(),
+            mean: Matrix::zeros(0, 0),
+            m2: Matrix::zeros(0, 0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineGaussianNb {
+    /// Empty online GNB.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for OnlineGaussianNb {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        let p = x.ncols();
+        if self.initialized && self.mean.ncols() != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let lab = y[i].round() as i64;
+            let idx = if let Some(t) = self.classes.iter().position(|&c| c == lab) {
+                t
+            } else {
+                self.classes.push(lab);
+                self.n_per.push(0.0);
+                let k = self.classes.len();
+                let mut nm = Matrix::zeros(k, p);
+                let mut n2 = Matrix::zeros(k, p);
+                for r in 0..self.mean.nrows() {
+                    for c in 0..p.min(self.mean.ncols()) {
+                        nm.set(r, c, self.mean.get(r, c));
+                        n2.set(r, c, self.m2.get(r, c));
+                    }
+                }
+                self.mean = nm;
+                self.m2 = n2;
+                self.initialized = true;
+                k - 1
+            };
+            self.n_per[idx] += 1.0;
+            let n = self.n_per[idx];
+            for j in 0..p {
+                let v = x.get(i, j);
+                let d = v - self.mean.get(idx, j);
+                self.mean.set(idx, j, self.mean.get(idx, j) + d / n);
+                let d2 = v - self.mean.get(idx, j);
+                self.m2.set(idx, j, self.m2.get(idx, j) + d * d2);
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some((self.n_seen - before_n) as f64);
+        q.still_identified = self.classes.len() >= 2 && self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!("online GNB on {} rows", x.nrows());
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "class-conditional means/variances",
+                "Welford update per class",
+                format!("n={before_n}"),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for OnlineGaussianNb {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized || self.classes.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let k = self.classes.len();
+        let y = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut best = 0usize;
+            let mut bv = f64::NEG_INFINITY;
+            for c in 0..k {
+                let mut ll = (self.n_per[c] / self.n_seen.max(1) as f64).max(1e-12).ln();
+                for j in 0..x.ncols().min(self.mean.ncols()) {
+                    let n = self.n_per[c].max(1.0);
+                    let var = (self.m2.get(c, j) / n).max(1e-6);
+                    let d = x.get(i, j) - self.mean.get(c, j);
+                    ll += -0.5 * (d * d / var + var.ln());
+                }
+                if ll > bv {
+                    bv = ll;
+                    best = c;
+                }
+            }
+            self.classes[best] as f64
+        }));
+        ctx.finish(y)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5507,6 +6270,24 @@ mod tests {
         OnlineMinMaxScaler::new()
             .partial_fit(&x, None, &session)
             .expect("minmax");
+        OnlineMaxAbsScaler::new()
+            .partial_fit(&x, None, &session)
+            .expect("maxabs");
+        Baseline::new()
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("base");
+        KnnRegressor::new(3)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("knnr");
+        OnlineRobustScaler::new()
+            .partial_fit(&x, None, &session)
+            .expect("robust");
+        SoftmaxRegression::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("smx");
+        OnlineGaussianNb::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("ognb");
 
         let n_expl = session
             .ledger()
@@ -5515,7 +6296,7 @@ mod tests {
             .filter(|e| e.kind == EventKind::IncrementalExplanation)
             .count();
         assert!(
-            n_expl >= 33,
+            n_expl >= 39,
             "expected an IncrementalExplanation per partial_fit, got {n_expl}"
         );
     }

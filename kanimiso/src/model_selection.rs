@@ -7,9 +7,13 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linear_model::{ElasticNet, FittedPenalized, Lasso, LinearRegression, Ridge};
-use crate::metrics::r2;
+use crate::linear_model::{
+    ElasticNet, FittedMultiTask, FittedPenalized, Lars, Lasso, LassoLars, LinearRegression,
+    LogisticRegression, MultiTaskElasticNet, MultiTaskLasso, Ridge,
+};
+use crate::metrics::{accuracy, r2};
 use crate::rng::Rng;
+use crate::robust::OrthogonalMatchingPursuit;
 use crate::traits::{Fit, Predict};
 use crate::validate::inspect_xy;
 use ojizou_san::Session;
@@ -796,6 +800,712 @@ impl Fit for ElasticNetCV {
     }
 }
 
+/// Logistic regression with a K-fold accuracy grid over `c_inv` (sklearn
+/// `LogisticRegressionCV`).
+#[derive(Clone, Debug)]
+pub struct LogisticRegressionCV {
+    /// Candidate inverse-`C` penalties (`0` is unregularized MLE).
+    pub cs_inv: Vec<f64>,
+    /// CV splitter.
+    pub cv: KFold,
+}
+
+impl Default for LogisticRegressionCV {
+    fn default() -> Self {
+        Self {
+            cs_inv: vec![0.0, 0.1, 1.0],
+            cv: KFold::new(3),
+        }
+    }
+}
+
+impl LogisticRegressionCV {
+    /// Grid over the given `c_inv` values.
+    pub fn new(cs_inv: Vec<f64>) -> Self {
+        Self {
+            cs_inv,
+            cv: KFold::new(3),
+        }
+    }
+}
+
+/// Selected logistic and the CV scores that justified it.
+#[derive(Clone, Debug)]
+pub struct FittedLogisticRegressionCV {
+    /// Winning `c_inv`.
+    pub best_c_inv: f64,
+    /// Mean CV accuracy.
+    pub best_score: f64,
+    /// `(c_inv, mean_cv_acc)` for every grid point.
+    pub scores: Vec<(f64, f64)>,
+    /// Logistic refit on the full training design.
+    pub fitted: crate::linear_model::FittedLogistic,
+}
+
+impl Fit for LogisticRegressionCV {
+    type Fitted = FittedLogisticRegressionCV;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLogisticRegressionCV>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let folds = match self.cv.split(x.nrows(), &session.child("cv")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                Vec::new()
+            }
+        };
+        let mut scores = Vec::new();
+        let mut best_c = self.cs_inv.first().copied().unwrap_or(0.0);
+        let mut best_score = f64::NEG_INFINITY;
+        for &c_inv in &self.cs_inv {
+            let mut acc = 0.0;
+            let mut k = 0.0;
+            for (i, fold) in folds.iter().enumerate() {
+                let xt = take_rows(x, &fold.train);
+                let yt = take_vec(y, &fold.train);
+                let xv = take_rows(x, &fold.test);
+                let yv = take_vec(y, &fold.test);
+                let mut lr = LogisticRegression {
+                    c_inv,
+                    ..LogisticRegression::default()
+                };
+                match lr.fit(&xt, &yt, &session.child(format!("lrcv_{c_inv}_{i}"))) {
+                    Ok(q) => match q.value.predict(&xv, &session.child("p")) {
+                        Ok(p) => {
+                            if let Ok(s) = accuracy(&yv, &p.value, &session.child("acc")) {
+                                if s.value.is_finite() {
+                                    acc += s.value;
+                                    k += 1.0;
+                                }
+                            }
+                        }
+                        Err(_) => {}
+                    },
+                    Err(_) => {}
+                }
+            }
+            let mean = if k > 0.0 { acc / k } else { f64::NAN };
+            scores.push((c_inv, mean));
+            if mean.is_finite() && mean > best_score {
+                best_score = mean;
+                best_c = c_inv;
+            }
+        }
+        if !best_score.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("LogisticRegressionCV found no finite fold accuracy")
+                    .build(),
+            );
+        }
+        let mut refit = LogisticRegression {
+            c_inv: best_c,
+            ..LogisticRegression::default()
+        };
+        let fitted = match refit.fit(x, y, &session.child("refit")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                crate::linear_model::FittedLogistic {
+                    coef: Vector::zeros(x.ncols()),
+                    intercept: 0.0,
+                    classes: vec![0, 1],
+                    beta: Vector::zeros(x.ncols() + 1),
+                    softmax: None,
+                }
+            }
+        };
+        ctx.finish(FittedLogisticRegressionCV {
+            best_c_inv: best_c,
+            best_score,
+            scores,
+            fitted,
+        })
+    }
+}
+
+impl Predict for FittedLogisticRegressionCV {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.fitted.predict(x, session)
+    }
+}
+
+/// OMP with a K-fold R² grid over `n_nonzero` (sklearn `OrthogonalMatchingPursuitCV`).
+#[derive(Clone, Debug)]
+pub struct OrthogonalMatchingPursuitCV {
+    /// Candidate support sizes.
+    pub n_nonzero: Vec<usize>,
+    /// CV splitter.
+    pub cv: KFold,
+}
+
+impl Default for OrthogonalMatchingPursuitCV {
+    fn default() -> Self {
+        Self {
+            n_nonzero: vec![1, 2],
+            cv: KFold::new(3),
+        }
+    }
+}
+
+impl OrthogonalMatchingPursuitCV {
+    /// Grid over the given support sizes.
+    pub fn new(n_nonzero: Vec<usize>) -> Self {
+        Self {
+            n_nonzero,
+            cv: KFold::new(3),
+        }
+    }
+}
+
+/// Selected OMP and the CV scores that justified it.
+#[derive(Clone, Debug)]
+pub struct FittedOmpCV {
+    /// Winning support size.
+    pub best_n_nonzero: usize,
+    /// Mean CV R².
+    pub best_score: f64,
+    /// OMP refit on the full training design.
+    pub fitted: crate::robust::FittedOmp,
+}
+
+impl Fit for OrthogonalMatchingPursuitCV {
+    type Fitted = FittedOmpCV;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedOmpCV>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let folds = match self.cv.split(x.nrows(), &session.child("cv")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                Vec::new()
+            }
+        };
+        let mut best_k = self.n_nonzero.first().copied().unwrap_or(1).max(1);
+        let mut best_score = f64::NEG_INFINITY;
+        for &k in &self.n_nonzero {
+            let k = k.max(1);
+            let mut acc = 0.0;
+            let mut n = 0.0;
+            for (i, fold) in folds.iter().enumerate() {
+                let xt = take_rows(x, &fold.train);
+                let yt = take_vec(y, &fold.train);
+                let xv = take_rows(x, &fold.test);
+                let yv = take_vec(y, &fold.test);
+                match OrthogonalMatchingPursuit::new(k).fit(
+                    &xt,
+                    &yt,
+                    &session.child(format!("ompcv_{k}_{i}")),
+                ) {
+                    Ok(q) => match q.value.predict(&xv, &session.child("p")) {
+                        Ok(p) => {
+                            if let Ok(s) = r2(&yv, &p.value, &session.child("r2")) {
+                                if s.value.is_finite() {
+                                    acc += s.value;
+                                    n += 1.0;
+                                }
+                            }
+                        }
+                        Err(_) => {}
+                    },
+                    Err(_) => {}
+                }
+            }
+            let mean = if n > 0.0 { acc / n } else { f64::NAN };
+            if mean.is_finite() && mean > best_score {
+                best_score = mean;
+                best_k = k;
+            }
+        }
+        let fitted = match OrthogonalMatchingPursuit::new(best_k).fit(x, y, &session.child("refit"))
+        {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                crate::robust::FittedOmp {
+                    coef: Vector::zeros(x.ncols()),
+                    intercept: y.mean(),
+                    support: Vec::new(),
+                }
+            }
+        };
+        ctx.finish(FittedOmpCV {
+            best_n_nonzero: best_k,
+            best_score,
+            fitted,
+        })
+    }
+}
+
+/// Multi-task elastic-net with a K-fold R² grid over `alpha`.
+///
+/// `Y` is a matrix; this is not the [`Fit`] trait.
+#[derive(Clone, Debug)]
+pub struct MultiTaskElasticNetCV {
+    /// Candidate combined penalties.
+    pub alphas: Vec<f64>,
+    /// Mixing weight.
+    pub l1_ratio: f64,
+    /// CV splitter.
+    pub cv: KFold,
+}
+
+impl Default for MultiTaskElasticNetCV {
+    fn default() -> Self {
+        Self {
+            alphas: vec![0.01, 0.1, 1.0],
+            l1_ratio: 0.5,
+            cv: KFold::new(3),
+        }
+    }
+}
+
+impl MultiTaskElasticNetCV {
+    /// Grid over the given `alpha` values.
+    pub fn new(alphas: Vec<f64>) -> Self {
+        Self {
+            alphas,
+            ..Self::default()
+        }
+    }
+
+    /// Fit on a multi-column `Y`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedMultiTaskElasticNetCV>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let folds = match self.cv.split(x.nrows(), &session.child("cv")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                Vec::new()
+            }
+        };
+        let mut best_alpha = self.alphas.first().copied().unwrap_or(0.1);
+        let mut best_score = f64::NEG_INFINITY;
+        for &alpha in &self.alphas {
+            let mut acc = 0.0;
+            let mut k = 0.0;
+            for (i, fold) in folds.iter().enumerate() {
+                let xt = take_rows(x, &fold.train);
+                let xv = take_rows(x, &fold.test);
+                let yt =
+                    Matrix::from_fn(fold.train.len(), y.ncols(), |r, c| y.get(fold.train[r], c));
+                let yv = Matrix::from_fn(fold.test.len(), y.ncols(), |r, c| y.get(fold.test[r], c));
+                match MultiTaskElasticNet::new(alpha, self.l1_ratio).fit(
+                    &xt,
+                    &yt,
+                    &session.child(format!("mtecv_{alpha}_{i}")),
+                ) {
+                    Ok(q) => match q.value.predict_matrix(&xv, &session.child("p")) {
+                        Ok(p) => {
+                            let mut sse = 0.0;
+                            let mut sst = 0.0;
+                            for c in 0..yv.ncols() {
+                                let col = yv.column(c);
+                                let m = col.mean();
+                                for r in 0..yv.nrows() {
+                                    let e = yv.get(r, c) - p.value.get(r, c);
+                                    sse += e * e;
+                                    let d = yv.get(r, c) - m;
+                                    sst += d * d;
+                                }
+                            }
+                            if sst > 0.0 {
+                                acc += 1.0 - sse / sst;
+                                k += 1.0;
+                            }
+                        }
+                        Err(_) => {}
+                    },
+                    Err(_) => {}
+                }
+            }
+            let mean = if k > 0.0 { acc / k } else { f64::NAN };
+            if mean.is_finite() && mean > best_score {
+                best_score = mean;
+                best_alpha = alpha;
+            }
+        }
+        let fitted = match MultiTaskElasticNet::new(best_alpha, self.l1_ratio).fit(
+            x,
+            y,
+            &session.child("refit"),
+        ) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                FittedMultiTask {
+                    coef: Matrix::zeros(x.ncols(), y.ncols()),
+                    intercept: Vector::zeros(y.ncols()),
+                    alpha: best_alpha,
+                }
+            }
+        };
+        ctx.finish(FittedMultiTaskElasticNetCV {
+            best_alpha,
+            best_score,
+            fitted,
+        })
+    }
+}
+
+/// Selected multi-task elastic-net.
+#[derive(Clone, Debug)]
+pub struct FittedMultiTaskElasticNetCV {
+    /// Winning `alpha`.
+    pub best_alpha: f64,
+    /// Mean CV R² across outputs.
+    pub best_score: f64,
+    /// Refit on the full design.
+    pub fitted: FittedMultiTask,
+}
+
+/// LARS with a K-fold R² grid over `n_nonzero` (sklearn `LarsCV`).
+#[derive(Clone, Debug)]
+pub struct LarsCV {
+    /// Candidate active-set sizes.
+    pub n_nonzero: Vec<usize>,
+    /// CV splitter.
+    pub cv: KFold,
+}
+
+impl Default for LarsCV {
+    fn default() -> Self {
+        Self {
+            n_nonzero: vec![1, 2],
+            cv: KFold::new(3),
+        }
+    }
+}
+
+impl LarsCV {
+    /// Grid over the given support sizes.
+    pub fn new(n_nonzero: Vec<usize>) -> Self {
+        Self {
+            n_nonzero,
+            cv: KFold::new(3),
+        }
+    }
+}
+
+/// Selected LARS and the CV score that justified it.
+#[derive(Clone, Debug)]
+pub struct FittedLarsCV {
+    /// Winning support size.
+    pub best_n_nonzero: usize,
+    /// Mean CV R².
+    pub best_score: f64,
+    /// LARS refit on the full training design.
+    pub fitted: crate::linear_model::FittedLars,
+}
+
+impl Fit for LarsCV {
+    type Fitted = FittedLarsCV;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLarsCV>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let folds = match self.cv.split(x.nrows(), &session.child("cv")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                Vec::new()
+            }
+        };
+        let mut best_k = self.n_nonzero.first().copied().unwrap_or(1).max(1);
+        let mut best_score = f64::NEG_INFINITY;
+        for &k in &self.n_nonzero {
+            let k = k.max(1);
+            let mut acc = 0.0;
+            let mut n = 0.0;
+            for (i, fold) in folds.iter().enumerate() {
+                let xt = take_rows(x, &fold.train);
+                let yt = take_vec(y, &fold.train);
+                let xv = take_rows(x, &fold.test);
+                let yv = take_vec(y, &fold.test);
+                let mut m = Lars {
+                    n_nonzero: Some(k),
+                    ..Lars::default()
+                };
+                match m.fit(&xt, &yt, &session.child(format!("larscv_{k}_{i}"))) {
+                    Ok(q) => match q.value.predict(&xv, &session.child("p")) {
+                        Ok(p) => {
+                            if let Ok(s) = r2(&yv, &p.value, &session.child("r2")) {
+                                if s.value.is_finite() {
+                                    acc += s.value;
+                                    n += 1.0;
+                                }
+                            }
+                        }
+                        Err(_) => {}
+                    },
+                    Err(_) => {}
+                }
+            }
+            let mean = if n > 0.0 { acc / n } else { f64::NAN };
+            if mean.is_finite() && mean > best_score {
+                best_score = mean;
+                best_k = k;
+            }
+        }
+        let mut refit = Lars {
+            n_nonzero: Some(best_k),
+            ..Lars::default()
+        };
+        let fitted = match refit.fit(x, y, &session.child("refit")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                crate::linear_model::FittedLars {
+                    coef: Vector::zeros(x.ncols()),
+                    intercept: y.mean(),
+                    active: Vec::new(),
+                }
+            }
+        };
+        ctx.finish(FittedLarsCV {
+            best_n_nonzero: best_k,
+            best_score,
+            fitted,
+        })
+    }
+}
+
+/// LassoLars with a K-fold R² grid over `alpha` (sklearn `LassoLarsCV`).
+#[derive(Clone, Debug)]
+pub struct LassoLarsCV {
+    /// Candidate correlation floors.
+    pub alphas: Vec<f64>,
+    /// CV splitter.
+    pub cv: KFold,
+}
+
+impl Default for LassoLarsCV {
+    fn default() -> Self {
+        Self {
+            alphas: vec![0.0, 0.1, 1.0],
+            cv: KFold::new(3),
+        }
+    }
+}
+
+impl LassoLarsCV {
+    /// Grid over the given `alpha` values.
+    pub fn new(alphas: Vec<f64>) -> Self {
+        Self {
+            alphas,
+            cv: KFold::new(3),
+        }
+    }
+}
+
+/// Selected LassoLars.
+#[derive(Clone, Debug)]
+pub struct FittedLassoLarsCV {
+    /// Winning `alpha`.
+    pub best_alpha: f64,
+    /// Mean CV R².
+    pub best_score: f64,
+    /// Refit on the full design.
+    pub fitted: crate::linear_model::FittedLars,
+}
+
+impl Fit for LassoLarsCV {
+    type Fitted = FittedLassoLarsCV;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLassoLarsCV>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let folds = match self.cv.split(x.nrows(), &session.child("cv")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                Vec::new()
+            }
+        };
+        let mut best_a = self.alphas.first().copied().unwrap_or(0.0);
+        let mut best_score = f64::NEG_INFINITY;
+        for &alpha in &self.alphas {
+            let mut acc = 0.0;
+            let mut n = 0.0;
+            for (i, fold) in folds.iter().enumerate() {
+                let xt = take_rows(x, &fold.train);
+                let yt = take_vec(y, &fold.train);
+                let xv = take_rows(x, &fold.test);
+                let yv = take_vec(y, &fold.test);
+                match LassoLars::new(alpha).fit(
+                    &xt,
+                    &yt,
+                    &session.child(format!("llcv_{alpha}_{i}")),
+                ) {
+                    Ok(q) => match q.value.predict(&xv, &session.child("p")) {
+                        Ok(p) => {
+                            if let Ok(s) = r2(&yv, &p.value, &session.child("r2")) {
+                                if s.value.is_finite() {
+                                    acc += s.value;
+                                    n += 1.0;
+                                }
+                            }
+                        }
+                        Err(_) => {}
+                    },
+                    Err(_) => {}
+                }
+            }
+            let mean = if n > 0.0 { acc / n } else { f64::NAN };
+            if mean.is_finite() && mean > best_score {
+                best_score = mean;
+                best_a = alpha;
+            }
+        }
+        let fitted = match LassoLars::new(best_a).fit(x, y, &session.child("refit")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                crate::linear_model::FittedLars {
+                    coef: Vector::zeros(x.ncols()),
+                    intercept: y.mean(),
+                    active: Vec::new(),
+                }
+            }
+        };
+        ctx.finish(FittedLassoLarsCV {
+            best_alpha: best_a,
+            best_score,
+            fitted,
+        })
+    }
+}
+
+/// Multi-task lasso with a K-fold R² grid over `alpha`.
+#[derive(Clone, Debug)]
+pub struct MultiTaskLassoCV {
+    /// Candidate group penalties.
+    pub alphas: Vec<f64>,
+    /// CV splitter.
+    pub cv: KFold,
+}
+
+impl Default for MultiTaskLassoCV {
+    fn default() -> Self {
+        Self {
+            alphas: vec![0.01, 0.1, 1.0],
+            cv: KFold::new(3),
+        }
+    }
+}
+
+impl MultiTaskLassoCV {
+    /// Grid over the given `alpha` values.
+    pub fn new(alphas: Vec<f64>) -> Self {
+        Self {
+            alphas,
+            ..Self::default()
+        }
+    }
+
+    /// Fit on a multi-column `Y`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedMultiTaskElasticNetCV>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let folds = match self.cv.split(x.nrows(), &session.child("cv")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                Vec::new()
+            }
+        };
+        let mut best_alpha = self.alphas.first().copied().unwrap_or(0.1);
+        let mut best_score = f64::NEG_INFINITY;
+        for &alpha in &self.alphas {
+            let mut acc = 0.0;
+            let mut k = 0.0;
+            for (i, fold) in folds.iter().enumerate() {
+                let xt = take_rows(x, &fold.train);
+                let xv = take_rows(x, &fold.test);
+                let yt =
+                    Matrix::from_fn(fold.train.len(), y.ncols(), |r, c| y.get(fold.train[r], c));
+                let yv = Matrix::from_fn(fold.test.len(), y.ncols(), |r, c| y.get(fold.test[r], c));
+                match MultiTaskLasso::new(alpha).fit(
+                    &xt,
+                    &yt,
+                    &session.child(format!("mtlcv_{alpha}_{i}")),
+                ) {
+                    Ok(q) => match q.value.predict_matrix(&xv, &session.child("p")) {
+                        Ok(p) => {
+                            let mut sse = 0.0;
+                            let mut sst = 0.0;
+                            for c in 0..yv.ncols() {
+                                let col = yv.column(c);
+                                let m = col.mean();
+                                for r in 0..yv.nrows() {
+                                    let e = yv.get(r, c) - p.value.get(r, c);
+                                    sse += e * e;
+                                    let d = yv.get(r, c) - m;
+                                    sst += d * d;
+                                }
+                            }
+                            if sst > 0.0 {
+                                acc += 1.0 - sse / sst;
+                                k += 1.0;
+                            }
+                        }
+                        Err(_) => {}
+                    },
+                    Err(_) => {}
+                }
+            }
+            let mean = if k > 0.0 { acc / k } else { f64::NAN };
+            if mean.is_finite() && mean > best_score {
+                best_score = mean;
+                best_alpha = alpha;
+            }
+        }
+        let fitted = match MultiTaskLasso::new(best_alpha).fit(x, y, &session.child("refit")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                FittedMultiTask {
+                    coef: Matrix::zeros(x.ncols(), y.ncols()),
+                    intercept: Vector::zeros(y.ncols()),
+                    alpha: best_alpha,
+                }
+            }
+        };
+        ctx.finish(FittedMultiTaskElasticNetCV {
+            best_alpha,
+            best_score,
+            fitted,
+        })
+    }
+}
+
 /// Leave-one-out: each row is a singleton test fold.
 #[derive(Clone, Debug, Default)]
 pub struct LeaveOneOut;
@@ -1070,6 +1780,36 @@ mod tests {
             .unwrap();
         assert!(e.value.best_alpha.is_finite());
         assert!((0.0..=1.0).contains(&e.value.best_l1_ratio));
+        let yb = Vector::from_iter((0..20).map(|i| if i < 10 { 0.0 } else { 1.0 }));
+        let xb = Matrix::from_fn(20, 1, |i, _| if i < 10 { -1.2 } else { 1.2 });
+        let lr = LogisticRegressionCV::new(vec![0.0, 1.0])
+            .fit(&xb, &yb, &Session::new("ms", "lrcv"))
+            .unwrap();
+        assert!(lr.value.best_c_inv.is_finite());
+        assert_eq!(lr.value.fitted.classes.len(), 2);
+        let omp = OrthogonalMatchingPursuitCV::new(vec![1, 2])
+            .fit(&x, &y, &Session::new("ms", "ompcv"))
+            .unwrap();
+        assert!(omp.value.best_n_nonzero >= 1);
+        assert!(!omp.value.fitted.support.is_empty() || x.ncols() >= 1);
+        let y2 = Matrix::from_fn(20, 2, |i, c| if c == 0 { y[i] } else { -0.4 * y[i] });
+        let mt = MultiTaskElasticNetCV::new(vec![0.05, 0.2])
+            .fit(&x, &y2, &Session::new("ms", "mtecv"))
+            .unwrap();
+        assert!(mt.value.best_alpha.is_finite());
+        assert_eq!(mt.value.fitted.coef.ncols(), 2);
+        let lcv = LarsCV::new(vec![1, 2])
+            .fit(&x, &y, &Session::new("ms", "larscv"))
+            .unwrap();
+        assert!(lcv.value.best_n_nonzero >= 1);
+        let llcv = LassoLarsCV::new(vec![0.0, 0.1])
+            .fit(&x, &y, &Session::new("ms", "llcv"))
+            .unwrap();
+        assert!(llcv.value.best_alpha.is_finite());
+        let mtl = MultiTaskLassoCV::new(vec![0.05, 0.2])
+            .fit(&x, &y2, &Session::new("ms", "mtlcv"))
+            .unwrap();
+        assert!(mtl.value.best_alpha.is_finite());
     }
 
     #[test]

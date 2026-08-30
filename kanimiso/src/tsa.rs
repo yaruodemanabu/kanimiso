@@ -12,7 +12,7 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linalg::chol_solve;
+use crate::linalg::{chol_solve, thin_svd};
 
 pub use crate::filters::{bk_filter, cf_filter, FittedLocalLinearTrend, LocalLinearTrend};
 use crate::traits::FitSeries;
@@ -1336,6 +1336,281 @@ impl FittedVar {
     }
 }
 
+/// VARMAX: VAR with contemporaneous exogenous regressors.
+///
+/// Lag count is not passed as identification `p` beyond the VAR design;
+/// exogenous width is included in the equation parameter count only when
+/// `n_eff` is large enough that the usual OLS gate is meaningful.
+#[derive(Clone, Debug)]
+pub struct Varmax {
+    /// VAR order.
+    pub lags: usize,
+}
+
+impl Default for Varmax {
+    fn default() -> Self {
+        Self { lags: 1 }
+    }
+}
+
+impl Varmax {
+    /// VARMAX(`lags`).
+    pub fn new(lags: usize) -> Self {
+        Self { lags: lags.max(1) }
+    }
+
+    /// Fit `Y` on its lags and exogenous `X`.
+    pub fn fit(
+        &self,
+        y: &Matrix,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedVarmax>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if y.nrows() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("VARMAX Y rows ≠ X rows")
+                    .build(),
+            );
+        }
+        let n = y.nrows().min(x.nrows());
+        let k = y.ncols();
+        let kx = x.ncols();
+        let p = self.lags.max(1);
+        let n_eff = n.saturating_sub(p);
+        let npar = 1 + p * k + kx;
+        if n_eff > npar + 8 {
+            inspect_identification(&mut ctx.report, n_eff, npar, &ctx.policy);
+        }
+        let mut coef = Matrix::zeros(npar, k);
+        let mut intercepts = Vector::zeros(k);
+        for eq in 0..k {
+            let target = Vector::from_iter((p..n).map(|t| y.get(t, eq)));
+            let design = Matrix::from_fn(n_eff, npar, |i, j| {
+                let t = p + i;
+                if j == 0 {
+                    1.0
+                } else if j <= p * k {
+                    let jj = j - 1;
+                    let lag = jj / k.max(1) + 1;
+                    let var = jj % k.max(1);
+                    y.get(t - lag, var)
+                } else {
+                    x.get(t, j - 1 - p * k)
+                }
+            });
+            if let Some(b) = statistical_ols(&mut ctx, &design, &target) {
+                intercepts[eq] = b[0];
+                for j in 0..npar.min(b.len()) {
+                    coef.set(j, eq, b[j]);
+                }
+            }
+        }
+        ctx.finish(FittedVarmax {
+            lags: p,
+            k,
+            kx,
+            coef,
+            intercepts,
+            last_y: Matrix::from_fn(p, k, |i, j| y.get(n - p + i, j)),
+            last_x: if n > 0 {
+                Matrix::from_fn(1, kx, |_, j| x.get(n - 1, j))
+            } else {
+                Matrix::zeros(1, kx)
+            },
+        })
+    }
+}
+
+/// Fitted VARMAX.
+#[derive(Clone, Debug)]
+pub struct FittedVarmax {
+    /// VAR order.
+    pub lags: usize,
+    /// Number of series.
+    pub k: usize,
+    /// Number of exogenous columns.
+    pub kx: usize,
+    /// Coefficients including intercept.
+    pub coef: Matrix,
+    /// Intercepts.
+    pub intercepts: Vector,
+    /// Last `lags` rows of `Y`.
+    pub last_y: Matrix,
+    /// Last exogenous row.
+    pub last_x: Matrix,
+}
+
+impl FittedVarmax {
+    /// Forecast with a future exogenous path.
+    pub fn forecast(&self, x_future: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        let h = x_future.nrows();
+        let mut hist = self.last_y.clone();
+        let mut out = Matrix::zeros(h, self.k);
+        for step in 0..h {
+            let mut yhat = Vector::zeros(self.k);
+            for eq in 0..self.k {
+                let mut v = self.intercepts[eq];
+                for lag in 1..=self.lags {
+                    for var in 0..self.k {
+                        let row = 1 + (lag - 1) * self.k + var;
+                        v += self.coef.get(row, eq) * hist.get(self.lags - lag, var);
+                    }
+                }
+                for c in 0..self.kx {
+                    let row = 1 + self.lags * self.k + c;
+                    v += self.coef.get(row, eq) * x_future.get(step, c);
+                }
+                yhat[eq] = v;
+            }
+            for eq in 0..self.k {
+                out.set(step, eq, yhat[eq]);
+            }
+            if self.lags > 0 {
+                let mut nxt = Matrix::zeros(self.lags, self.k);
+                for i in 0..self.lags.saturating_sub(1) {
+                    for j in 0..self.k {
+                        nxt.set(i, j, hist.get(i + 1, j));
+                    }
+                }
+                for j in 0..self.k {
+                    nxt.set(self.lags - 1, j, yhat[j]);
+                }
+                hist = nxt;
+            }
+        }
+        ctx.finish(out)
+    }
+}
+
+/// Dynamic-factor model: PCA factors then VAR(1) on the factors.
+///
+/// Factor count is not passed as identification `p`.
+#[derive(Clone, Debug)]
+pub struct DynamicFactor {
+    /// Number of latent factors.
+    pub n_factors: usize,
+}
+
+impl Default for DynamicFactor {
+    fn default() -> Self {
+        Self { n_factors: 1 }
+    }
+}
+
+impl DynamicFactor {
+    /// `r` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+        }
+    }
+
+    /// Fit on an `n × k` panel of series.
+    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedDynamicFactor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let (n, k) = y.shape();
+        if n == 0 || k == 0 {
+            return ctx.finish(FittedDynamicFactor {
+                loadings: Matrix::zeros(k, self.n_factors.max(1)),
+                var: FittedVar {
+                    lags: 1,
+                    k: 1,
+                    coef: Matrix::zeros(2, 1),
+                    intercepts: Vector::zeros(1),
+                    resid: Matrix::zeros(0, 1),
+                    last: Matrix::zeros(1, 1),
+                },
+                mean: Vector::zeros(k),
+            });
+        }
+        let (yc, mean) = y.centered();
+        let mut scratch = Report::new("dfm", "svd");
+        let Some(svd) = thin_svd(&mut scratch, &yc, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::SvdDidNotConverge)
+                    .message("DynamicFactor SVD failed")
+                    .build(),
+            );
+            return ctx.finish(FittedDynamicFactor {
+                loadings: Matrix::zeros(k, 1),
+                var: FittedVar {
+                    lags: 1,
+                    k: 1,
+                    coef: Matrix::zeros(2, 1),
+                    intercepts: Vector::zeros(1),
+                    resid: Matrix::zeros(0, 1),
+                    last: Matrix::zeros(1, 1),
+                },
+                mean,
+            });
+        };
+        let r = self.n_factors.max(1).min(svd.singular_values.len()).min(k);
+        let loadings = Matrix::from_fn(k, r, |j, c| svd.v[(j, c)]);
+        let factors = Matrix::from_fn(n, r, |i, c| {
+            let mut s = 0.0;
+            for j in 0..k {
+                s += yc.get(i, j) * loadings.get(j, c);
+            }
+            s
+        });
+        let var = match Var::new(1).fit(&factors, &session.child("dfm-var")) {
+            Ok(q) => q.value,
+            Err(_) => FittedVar {
+                lags: 1,
+                k: r,
+                coef: Matrix::zeros(1 + r, r),
+                intercepts: Vector::zeros(r),
+                resid: Matrix::zeros(0, r),
+                last: Matrix::from_fn(1, r, |_, j| factors.get(n.saturating_sub(1), j)),
+            },
+        };
+        ctx.finish(FittedDynamicFactor {
+            loadings,
+            var,
+            mean,
+        })
+    }
+}
+
+/// Fitted dynamic-factor model.
+#[derive(Clone, Debug)]
+pub struct FittedDynamicFactor {
+    /// Series loadings (`k` × `r`).
+    pub loadings: Matrix,
+    /// VAR on the factors.
+    pub var: FittedVar,
+    /// Series means.
+    pub mean: Vector,
+}
+
+impl FittedDynamicFactor {
+    /// `h`-step factor forecast mapped back to the series.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+        let f = self.var.forecast(h, session)?;
+        let mut ctx = FitCtx::with_session(session.child("dfm-map"));
+        let k = self.loadings.nrows();
+        let r = self.loadings.ncols();
+        let y = Matrix::from_fn(h, k, |t, j| {
+            let mut s = if j < self.mean.len() {
+                self.mean[j]
+            } else {
+                0.0
+            };
+            for c in 0..r.min(f.value.ncols()) {
+                s += f.value.get(t, c) * self.loadings.get(j, c);
+            }
+            s
+        });
+        ctx.finish(y)
+    }
+}
+
 /// Simple / Holt (linear trend) exponential smoothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SmoothingKind {
@@ -1917,6 +2192,132 @@ impl FitSeries for Garch11 {
                     .build(),
             );
         }
+        ctx.finish(FittedGarch11 {
+            omega,
+            alpha,
+            beta,
+            sigma2: Vector::from_iter(sigma2),
+            resid: e,
+        })
+    }
+}
+
+/// EGARCH(1,1) on log-variance (statsmodels / arch `EGARCH`).
+///
+/// \(\log h_t = \omega + \alpha(|z_{t-1}|-\sqrt{2/π}) + \gamma z_{t-1} + \beta\log h_{t-1}\).
+#[derive(Clone, Debug)]
+pub struct Egarch {
+    /// Coordinate-search iterations.
+    pub max_iter: usize,
+}
+
+impl Default for Egarch {
+    fn default() -> Self {
+        Self { max_iter: 30 }
+    }
+}
+
+impl Egarch {
+    /// Default EGARCH settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+fn egarch_sigma2(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64) -> Vec<f64> {
+    let n = e.len();
+    let mut s2 = vec![0.0f64; n];
+    let mut logh: f64 = omega;
+    let c = (2.0 / std::f64::consts::PI).sqrt();
+    for t in 0..n {
+        if t > 0 {
+            let prev = s2[t - 1].max(1e-12).sqrt();
+            let z = e[t - 1] / prev;
+            logh = omega + alpha * (z.abs() - c) + gamma * z + beta * logh;
+        }
+        s2[t] = logh.exp().max(1e-12);
+    }
+    s2
+}
+
+fn egarch_nll(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64) -> f64 {
+    if !omega.is_finite() || !beta.is_finite() {
+        return f64::INFINITY;
+    }
+    let s2 = egarch_sigma2(e, omega, alpha, gamma, beta);
+    let mut nll = 0.0;
+    for t in 0..e.len() {
+        let v = s2[t].max(1e-12);
+        nll += 0.5 * (v.ln() + e[t] * e[t] / v);
+    }
+    nll
+}
+
+impl FitSeries for Egarch {
+    type Fitted = FittedGarch11;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedGarch11>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("EGARCH QMLE needs a longer series")
+                    .metric("n", y.len() as f64)
+                    .build(),
+            );
+        }
+        let mean = y.mean();
+        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
+        let var = e.as_slice().iter().map(|v| v * v).sum::<f64>() / y.len().max(1) as f64;
+        let mut omega = var.max(1e-8).ln();
+        let mut alpha = 0.1;
+        let mut gamma = 0.0;
+        let mut beta = 0.8;
+        let mut best = egarch_nll(e.as_slice(), omega, alpha, gamma, beta);
+        let mut step = 0.05;
+        for it in 0..self.max_iter {
+            let mut improved = false;
+            for (i, cur) in [omega, alpha, gamma, beta].into_iter().enumerate() {
+                for dir in [-step, step] {
+                    let mut cand = [omega, alpha, gamma, beta];
+                    cand[i] = cur + dir;
+                    if cand[3].abs() >= 0.999 {
+                        continue;
+                    }
+                    let nll = egarch_nll(e.as_slice(), cand[0], cand[1], cand[2], cand[3]);
+                    if nll < best {
+                        best = nll;
+                        omega = cand[0];
+                        alpha = cand[1];
+                        gamma = cand[2];
+                        beta = cand[3];
+                        improved = true;
+                    }
+                }
+            }
+            if !improved {
+                step *= 0.5;
+                if step < 1e-5 {
+                    ctx.session.converged("EGARCH coordinate search", it as u64);
+                    break;
+                }
+            }
+        }
+        if beta.abs() >= 0.999 {
+            ctx.push(
+                Issue::builder(IssueCode::NonStationary)
+                    .message(format!("EGARCH |β|={beta:.4} ≥ 1"))
+                    .build(),
+            );
+        }
+        let sigma2 = egarch_sigma2(e.as_slice(), omega, alpha, gamma, beta);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("EGARCH stores (ω, α, β); the leverage γ is absorbed into α")
+                .build(),
+        );
         ctx.finish(FittedGarch11 {
             omega,
             alpha,
@@ -3422,6 +3823,576 @@ impl FitSeries for StlForecaster {
     }
 }
 
+/// Box–Cox transformer (sktime `BoxCoxTransformer`).
+///
+/// `λ` is chosen by a coarse Gaussian-likelihood grid. Non-positive `y` is
+/// [`IssueCode::NonPositiveSeries`].
+#[derive(Clone, Debug, Default)]
+pub struct BoxCoxTransformer {
+    /// Selected power. `None` until fit.
+    pub lambda: Option<f64>,
+}
+
+impl BoxCoxTransformer {
+    /// Empty transformer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn apply(v: f64, lam: f64) -> f64 {
+        let x = v.max(1e-12);
+        if lam.abs() < 1e-12 {
+            x.ln()
+        } else {
+            (x.powf(lam) - 1.0) / lam
+        }
+    }
+}
+
+impl FitSeries for BoxCoxTransformer {
+    type Fitted = Self;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.as_slice().iter().any(|&v| v <= 0.0) {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .message("Box–Cox requires a strictly positive series")
+                    .build(),
+            );
+        }
+        let mut best_l = 0.0;
+        let mut best_ll = f64::NEG_INFINITY;
+        for i in 0..=8 {
+            let lam = -1.0 + 0.5 * i as f64;
+            let z: Vec<f64> = y.as_slice().iter().map(|&v| Self::apply(v, lam)).collect();
+            let n = z.len() as f64;
+            let m = z.iter().sum::<f64>() / n.max(1.0);
+            let mut sse = 0.0;
+            for &v in &z {
+                let e = v - m;
+                sse += e * e;
+            }
+            let s2 = (sse / n.max(1.0)).max(1e-12);
+            let ll = -0.5 * n * s2.ln();
+            if ll > best_ll {
+                best_ll = ll;
+                best_l = lam;
+            }
+        }
+        self.lambda = Some(best_l);
+        ctx.finish(self.clone())
+    }
+}
+
+impl BoxCoxTransformer {
+    /// Apply the fitted power map.
+    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        let lam = self.lambda.unwrap_or(0.0);
+        if self.lambda.is_none() {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+        }
+        ctx.finish(Vector::from_iter(
+            y.as_slice().iter().map(|&v| Self::apply(v, lam)),
+        ))
+    }
+}
+
+/// First-difference transformer (sktime `Differencer`).
+#[derive(Clone, Debug, Default)]
+pub struct Differencer {
+    last: f64,
+    fitted: bool,
+}
+
+impl Differencer {
+    /// Empty differencer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `Δy_t = y_t − y_{t−1}` (`y_0` is dropped as 0).
+    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+        }
+        let z = Vector::from_iter((0..y.len()).map(|i| if i == 0 { 0.0 } else { y[i] - y[i - 1] }));
+        ctx.finish(z)
+    }
+}
+
+impl FitSeries for Differencer {
+    type Fitted = Self;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        self.last = y.as_slice().last().copied().unwrap_or(0.0);
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+/// Calendar-like features from an integer time index (sktime `DateTimeFeatures` lite).
+///
+/// Harmonic / period counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct DateTimeFeatures {
+    /// Seasonal period used for `t mod period` and Fourier pair.
+    pub period: usize,
+}
+
+impl Default for DateTimeFeatures {
+    fn default() -> Self {
+        Self { period: 7 }
+    }
+}
+
+impl DateTimeFeatures {
+    /// Features for period `s`.
+    pub fn new(period: usize) -> Self {
+        Self {
+            period: period.max(2),
+        }
+    }
+
+    /// Map `t = 0..n-1` to `[t, t mod s, sin, cos]`.
+    pub fn transform(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        let p = self.period.max(2);
+        let out = Matrix::from_fn(n, 4, |t, j| {
+            let tf = t as f64;
+            match j {
+                0 => tf,
+                1 => (t % p) as f64,
+                2 => (2.0 * std::f64::consts::PI * tf / p as f64).sin(),
+                _ => (2.0 * std::f64::consts::PI * tf / p as f64).cos(),
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
+/// One univariate forecaster per column (sktime `ColumnEnsembleForecaster`).
+#[derive(Clone, Debug)]
+pub struct ColumnEnsembleForecaster {
+    /// AutoReg lag used on each column.
+    pub lags: usize,
+}
+
+impl Default for ColumnEnsembleForecaster {
+    fn default() -> Self {
+        Self { lags: 1 }
+    }
+}
+
+impl ColumnEnsembleForecaster {
+    /// Ensemble with AR(`lags`) per column.
+    pub fn new(lags: usize) -> Self {
+        Self { lags: lags.max(1) }
+    }
+
+    /// Fit an [`AutoReg`] on each column of `y`.
+    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedColumnEnsemble>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let mut models = Vec::with_capacity(y.ncols());
+        for j in 0..y.ncols() {
+            let col = y.column(j);
+            match AutoReg::new(self.lags).fit_series(&col, &session.child(format!("col_{j}"))) {
+                Ok(q) => models.push(q.value),
+                Err(e) => {
+                    ctx.push(e.primary);
+                    models.push(FittedAutoReg {
+                        intercept: col.mean(),
+                        ar: Vector::zeros(self.lags),
+                        last: Vector::from_iter(
+                            col.as_slice()
+                                .iter()
+                                .copied()
+                                .rev()
+                                .take(self.lags)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev(),
+                        ),
+                    });
+                }
+            }
+        }
+        ctx.finish(FittedColumnEnsemble { models })
+    }
+}
+
+/// Fitted per-column AutoReg ensemble.
+#[derive(Clone, Debug)]
+pub struct FittedColumnEnsemble {
+    /// One AutoReg per column.
+    pub models: Vec<FittedAutoReg>,
+}
+
+impl FittedColumnEnsemble {
+    /// Forecast `h` steps for every column.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        let k = self.models.len();
+        let mut out = Matrix::zeros(h, k);
+        for (j, m) in self.models.iter().enumerate() {
+            match m.forecast(h, &session.child(format!("fc_{j}"))) {
+                Ok(q) => {
+                    for t in 0..h.min(q.value.len()) {
+                        out.set(t, j, q.value[t]);
+                    }
+                }
+                Err(e) => ctx.push(e.primary),
+            }
+        }
+        ctx.finish(out)
+    }
+}
+
+/// Cross-correlation `γ_{xy}(k)` for `k = 0..nlags` (statsmodels `ccf`).
+pub fn ccf(x: &Vector, y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, x);
+    inspect_univariate(&mut ctx, y);
+    let n = x.len().min(y.len());
+    if n == 0 {
+        return ctx.finish(Vector::zeros(nlags + 1));
+    }
+    let mx = x.mean();
+    let my = y.mean();
+    let mut sx: f64 = 0.0;
+    let mut sy: f64 = 0.0;
+    for i in 0..n {
+        let dx = x[i] - mx;
+        let dy = y[i] - my;
+        sx += dx * dx;
+        sy += dy * dy;
+    }
+    let den = (sx * sy).sqrt().max(1e-12);
+    let out = Vector::from_iter((0..=nlags).map(|lag| {
+        let mut s = 0.0;
+        for i in lag..n {
+            s += (x[i] - mx) * (y[i - lag] - my);
+        }
+        s / den
+    }));
+    ctx.finish(out)
+}
+
+/// Periodogram `I(ω)` at `n/2` Fourier frequencies (statsmodels `periodogram`).
+pub fn periodogram(y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let n = y.len();
+    if n < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .message("periodogram needs n≥2")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(0));
+    }
+    let m = n / 2;
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let out = Vector::from_iter((1..=m).map(|k| {
+        let mut re: f64 = 0.0;
+        let mut im: f64 = 0.0;
+        for t in 0..n {
+            let ang = two_pi * k as f64 * t as f64 / n as f64;
+            re += y[t] * ang.cos();
+            im += y[t] * ang.sin();
+        }
+        (re * re + im * im) / n as f64
+    }));
+    ctx.finish(out)
+}
+
+/// Multiple seasonal-trend LOESS (sktime `MSTL`).
+///
+/// Second-period STL is run on the first residual. Periods are not
+/// identification `p`.
+#[derive(Clone, Debug)]
+pub struct Mstl {
+    /// Inner seasonal period.
+    pub period: usize,
+    /// Outer seasonal period.
+    pub period2: usize,
+}
+
+impl Default for Mstl {
+    fn default() -> Self {
+        Self {
+            period: 4,
+            period2: 12,
+        }
+    }
+}
+
+impl Mstl {
+    /// Two-period MSTL.
+    pub fn new(period: usize, period2: usize) -> Self {
+        Self {
+            period: period.max(2),
+            period2: period2.max(3),
+        }
+    }
+}
+
+/// Fitted multi-seasonal decomposition.
+#[derive(Clone, Debug)]
+pub struct FittedMstl {
+    /// First seasonal component.
+    pub seasonal: Vector,
+    /// Second seasonal component.
+    pub seasonal2: Vector,
+    /// Trend.
+    pub trend: Vector,
+    /// Residual.
+    pub resid: Vector,
+}
+
+impl FitSeries for Mstl {
+    type Fitted = FittedMstl;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedMstl>> {
+        let q1 = Stl::new(self.period).fit_series(y, &session.child("mstl1"))?;
+        let r1 = q1.value.resid.clone();
+        let q2 = match Stl::new(self.period2).fit_series(&r1, &session.child("mstl2")) {
+            Ok(q) => q.value,
+            Err(_) => SeasonalDecomposition {
+                observed: r1.clone(),
+                trend: Vector::zeros(y.len()),
+                seasonal: Vector::zeros(y.len()),
+                resid: r1.clone(),
+                period: self.period2,
+            },
+        };
+        let mut ctx = FitCtx::with_session(session.child("finish"));
+        ctx.finish(FittedMstl {
+            seasonal: q1.value.seasonal,
+            seasonal2: q2.seasonal,
+            trend: q1.value.trend,
+            resid: q2.resid,
+        })
+    }
+}
+
+/// Lag embedding of a univariate series (sktime `Lag`).
+#[derive(Clone, Debug)]
+pub struct LagTransformer {
+    /// Number of lags.
+    pub lags: usize,
+}
+
+impl Default for LagTransformer {
+    fn default() -> Self {
+        Self { lags: 1 }
+    }
+}
+
+impl LagTransformer {
+    /// Embed with `lags` columns.
+    pub fn new(lags: usize) -> Self {
+        Self { lags: lags.max(1) }
+    }
+
+    /// Map `y` to `[y_{t-1}, …, y_{t-p}]` (`n` rows; leading lags are 0).
+    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_univariate(&mut ctx, y);
+        let p = self.lags.max(1);
+        let out = Matrix::from_fn(y.len(), p, |t, j| {
+            let src = t as isize - (j as isize + 1);
+            if src >= 0 {
+                y[src as usize]
+            } else {
+                0.0
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Rolling window summaries (sktime `WindowSummarizer` lite).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct WindowSummarizer {
+    /// Rolling window.
+    pub window: usize,
+}
+
+impl Default for WindowSummarizer {
+    fn default() -> Self {
+        Self { window: 4 }
+    }
+}
+
+impl WindowSummarizer {
+    /// Summaries over the given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+        }
+    }
+
+    /// Map `y` to `[mean, std, min, max]` per time.
+    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_univariate(&mut ctx, y);
+        let w = self.window.max(2);
+        let out = Matrix::from_fn(y.len(), 4, |t, j| {
+            let lo = t.saturating_sub(w - 1);
+            let mut s: f64 = 0.0;
+            let mut s2: f64 = 0.0;
+            let mut mn = f64::INFINITY;
+            let mut mx = f64::NEG_INFINITY;
+            let mut c = 0.0;
+            for i in lo..=t {
+                let v = y[i];
+                if !v.is_finite() {
+                    continue;
+                }
+                s += v;
+                s2 += v * v;
+                mn = mn.min(v);
+                mx = mx.max(v);
+                c += 1.0;
+            }
+            let mean = if c > 0.0 { s / c } else { 0.0 };
+            let var = if c > 1.0 {
+                (s2 / c - mean * mean).max(0.0)
+            } else {
+                0.0
+            };
+            match j {
+                0 => mean,
+                1 => var.sqrt(),
+                2 => {
+                    if mn.is_finite() {
+                        mn
+                    } else {
+                        0.0
+                    }
+                }
+                _ => {
+                    if mx.is_finite() {
+                        mx
+                    } else {
+                        0.0
+                    }
+                }
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Pick the best of Naive / Drift / AutoReg by in-sample SSE (sktime `MultiplexForecaster`).
+#[derive(Clone, Debug)]
+pub struct MultiplexForecaster {
+    /// AutoReg lag used as one candidate.
+    pub lags: usize,
+}
+
+impl Default for MultiplexForecaster {
+    fn default() -> Self {
+        Self { lags: 1 }
+    }
+}
+
+impl MultiplexForecaster {
+    /// Multiplex with AR(`lags`).
+    pub fn new(lags: usize) -> Self {
+        Self { lags: lags.max(1) }
+    }
+}
+
+/// Fitted multiplex (the winning univariate forecaster's last value / AR).
+#[derive(Clone, Debug)]
+pub struct FittedMultiplex {
+    /// Winning name.
+    pub winner: &'static str,
+    /// In-sample SSE of the winner.
+    pub sse: f64,
+    /// Naive / drift last level.
+    pub last: f64,
+    /// Drift slope (0 for naive).
+    pub drift: f64,
+    /// Optional AutoReg.
+    pub ar: Option<FittedAutoReg>,
+}
+
+impl FittedMultiplex {
+    /// Forecast `h` steps with the winning rule.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        if let Some(ar) = &self.ar {
+            return ar.forecast(h, session);
+        }
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(Vector::from_iter(
+            (0..h).map(|i| self.last + self.drift * (i + 1) as f64),
+        ))
+    }
+}
+
+impl FitSeries for MultiplexForecaster {
+    type Fitted = FittedMultiplex;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedMultiplex>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let last = y.as_slice().last().copied().unwrap_or(0.0);
+        let mut naive_sse: f64 = 0.0;
+        for i in 1..y.len() {
+            let e = y[i] - y[i - 1];
+            naive_sse += e * e;
+        }
+        let drift = if y.len() >= 2 {
+            (last - y[0]) / (y.len() - 1) as f64
+        } else {
+            0.0
+        };
+        let mut drift_sse: f64 = 0.0;
+        for i in 1..y.len() {
+            let e = y[i] - (y[0] + drift * i as f64);
+            drift_sse += e * e;
+        }
+        let ar = AutoReg::new(self.lags).fit_series(y, &session.child("mux-ar"));
+        let (ar_sse, ar_fit) = match ar {
+            Ok(q) => {
+                let mut s: f64 = 0.0;
+                let p = q.value.ar.len();
+                for t in p..y.len() {
+                    let mut yhat = q.value.intercept;
+                    for k in 0..p {
+                        yhat += q.value.ar[k] * y[t - p + k];
+                    }
+                    let e = y[t] - yhat;
+                    s += e * e;
+                }
+                (s, Some(q.value))
+            }
+            Err(_) => (f64::INFINITY, None),
+        };
+        let (winner, sse, drift_used, ar_used) = if ar_sse <= naive_sse && ar_sse <= drift_sse {
+            ("autoreg", ar_sse, 0.0, ar_fit)
+        } else if drift_sse <= naive_sse {
+            ("drift", drift_sse, drift, None)
+        } else {
+            ("naive", naive_sse, 0.0, None)
+        };
+        ctx.finish(FittedMultiplex {
+            winner,
+            sse,
+            last,
+            drift: drift_used,
+            ar: ar_used,
+        })
+    }
+}
+
 /// Two-regime switching regression (statsmodels `MarkovRegression` lite).
 ///
 /// States are an independent mixture of OLS, not a filtered Markov chain —
@@ -3838,5 +4809,95 @@ mod tests {
                 .len(),
             3
         );
+        let y2 = Matrix::from_fn(40, 2, |i, j| {
+            if j == 0 {
+                y[i]
+            } else {
+                0.5 * y[i] + 0.05 * i as f64
+            }
+        });
+        let dfm = DynamicFactor::new(1)
+            .fit(&y2, &Session::new("dfm", "fit"))
+            .expect("dfm");
+        let dff = dfm
+            .value
+            .forecast(3, &Session::new("dfm", "fc"))
+            .expect("dff")
+            .value;
+        assert_eq!(dff.ncols(), 2);
+        assert_eq!(dff.nrows(), 3);
+        let varmax = Varmax::new(1)
+            .fit(&y2, &x, &Session::new("vmx", "fit"))
+            .expect("varmax");
+        let xf = Matrix::from_fn(3, 1, |i, _| 40.0 + i as f64);
+        let vmf = varmax
+            .value
+            .forecast(&xf, &Session::new("vmx", "fc"))
+            .expect("vmxf")
+            .value;
+        assert_eq!(vmf.shape(), (3, 2));
+        let mut bc = BoxCoxTransformer::new();
+        bc.fit_series(&ypos, &Session::new("bc", "fit"))
+            .expect("boxcox");
+        let zt = bc
+            .transform(&ypos, &Session::new("bc", "t"))
+            .expect("bct")
+            .value;
+        assert_eq!(zt.len(), ypos.len());
+        assert!(zt.as_slice().iter().all(|v| v.is_finite()));
+        let mut d1 = Differencer::new();
+        d1.fit_series(&y, &Session::new("d1", "fit")).expect("diff");
+        let dz = d1
+            .transform(&y, &Session::new("d1", "t"))
+            .expect("dt")
+            .value;
+        assert_eq!(dz.len(), y.len());
+        let cal = DateTimeFeatures::new(7)
+            .transform(20, &Session::new("dtf", "t"))
+            .expect("dtf")
+            .value;
+        assert_eq!(cal.shape(), (20, 4));
+        let col = ColumnEnsembleForecaster::new(1)
+            .fit(&y2, &Session::new("col", "fit"))
+            .expect("colens");
+        let cf = col
+            .value
+            .forecast(3, &Session::new("col", "fc"))
+            .expect("colf")
+            .value;
+        assert_eq!(cf.shape(), (3, 2));
+        let cc = ccf(&y, &y, 3, &Session::new("ccf", "t"))
+            .expect("ccf")
+            .value;
+        assert!((cc[0] - 1.0).abs() < 1e-8);
+        let pg = periodogram(&y, &Session::new("pg", "t")).expect("pg").value;
+        assert!(!pg.is_empty());
+        let mstl = Mstl::new(4, 8)
+            .fit_series(&y, &Session::new("mstl", "fit"))
+            .expect("mstl");
+        assert_eq!(mstl.value.resid.len(), y.len());
+        let lag = LagTransformer::new(2)
+            .transform(&y, &Session::new("lag", "t"))
+            .expect("lag")
+            .value;
+        assert_eq!(lag.ncols(), 2);
+        let ws = WindowSummarizer::new(4)
+            .transform(&y, &Session::new("ws", "t"))
+            .expect("ws")
+            .value;
+        assert_eq!(ws.ncols(), 4);
+        let mux = MultiplexForecaster::new(1)
+            .fit_series(&y, &Session::new("mux", "fit"))
+            .expect("mux");
+        assert!(mux.value.sse.is_finite());
+        let eg = Egarch::new()
+            .fit_series(&y, &Session::new("eg", "fit"))
+            .expect("egarch");
+        assert!(eg
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
     }
 }

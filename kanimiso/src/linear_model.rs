@@ -6,7 +6,7 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linalg::{least_squares, ridge_solve};
+use crate::linalg::{least_squares, ridge_solve, thin_svd};
 use crate::special::{f_pvalue, student_t_pvalue};
 use crate::traits::{Fit, PartialFit, Predict, Transform};
 use crate::validate::{inspect_collinearity, inspect_identification, inspect_xy};
@@ -1923,6 +1923,93 @@ impl Transform for FittedPlsCanonical {
     }
 }
 
+/// SVD of the cross-covariance `XᵀY` (sklearn `PLSSVD`).
+///
+/// Component count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct PlsSvd {
+    /// Latent directions.
+    pub n_components: usize,
+}
+
+impl Default for PlsSvd {
+    fn default() -> Self {
+        Self { n_components: 1 }
+    }
+}
+
+impl PlsSvd {
+    /// `k` SVD directions of `XᵀY`.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components: n_components.max(1),
+        }
+    }
+
+    /// Fit on two views.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedPlsCanonical>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        if x.nrows() != y.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("PLSSVD X rows ≠ Y rows")
+                    .build(),
+            );
+            return ctx.finish(FittedPlsCanonical {
+                x_weights: Matrix::zeros(x.ncols(), self.n_components),
+                y_weights: Matrix::zeros(y.ncols(), self.n_components),
+                x_mean: Vector::zeros(x.ncols()),
+                y_mean: Vector::zeros(y.ncols()),
+            });
+        }
+        let (xc, x_mean) = x.centered();
+        let (yc, y_mean) = y.centered();
+        let p = xc.ncols();
+        let t = yc.ncols();
+        let n = xc.nrows().min(yc.nrows());
+        let cxy = Matrix::from_fn(p, t, |j, k| {
+            let mut s = 0.0;
+            for i in 0..n {
+                s += xc.get(i, j) * yc.get(i, k);
+            }
+            s
+        });
+        let mut scratch = signlred::Report::new("plssvd", "svd");
+        let Some(svd) = thin_svd(&mut scratch, &cxy, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::SvdDidNotConverge)
+                    .message("PLSSVD of cross-covariance failed")
+                    .build(),
+            );
+            return ctx.finish(FittedPlsCanonical {
+                x_weights: Matrix::zeros(p, 1),
+                y_weights: Matrix::zeros(t, 1),
+                x_mean,
+                y_mean,
+            });
+        };
+        let k = self
+            .n_components
+            .max(1)
+            .min(svd.singular_values.len())
+            .min(p)
+            .min(t);
+        ctx.finish(FittedPlsCanonical {
+            x_weights: Matrix::from_fn(p, k, |j, c| svd.u[(j, c)]),
+            y_weights: Matrix::from_fn(t, k, |j, c| svd.v[(j, c)]),
+            x_mean,
+            y_mean,
+        })
+    }
+}
+
 /// Quantile regression via IRLS (asymmetric Laplace / weighted LS).
 #[derive(Clone, Debug)]
 pub struct QuantileRegressor {
@@ -3330,6 +3417,99 @@ impl ExpandingOls {
     }
 }
 
+/// Brown–Durbin–Evans recursive residuals (statsmodels `RecursiveLS`).
+///
+/// Each prefix OLS uses a scratch report. Prefix length is not passed as
+/// identification `p` on short windows.
+#[derive(Clone, Debug)]
+pub struct RecursiveLs {
+    /// Minimum observations before the first residual.
+    pub min_n: usize,
+}
+
+impl Default for RecursiveLs {
+    fn default() -> Self {
+        Self { min_n: 8 }
+    }
+}
+
+impl RecursiveLs {
+    /// Recursive residuals with the given burn-in.
+    pub fn new(min_n: usize) -> Self {
+        Self {
+            min_n: min_n.max(3),
+        }
+    }
+
+    /// Fit the recursive residual path.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRecursiveLs>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let n = x.nrows().min(y.len());
+        let p = x.ncols() + 1;
+        let start = self.min_n.max(p + 1).min(n.max(1));
+        if n < start {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!("RecursiveLS burn-in {start} > n={n}"))
+                    .build(),
+            );
+        }
+        if n > 5 * p {
+            inspect_identification(&mut ctx.report, n, p, &ctx.policy);
+        }
+        let mut resid = Vector::zeros(n.saturating_sub(start.saturating_sub(1)));
+        let mut last = Vector::zeros(x.ncols());
+        let mut last_int = y.mean();
+        let mut k = 0usize;
+        for end in start..=n {
+            let xt = Matrix::from_fn(end, x.ncols(), |i, j| x.get(i, j));
+            let yt = Vector::from_iter((0..end).map(|i| y[i]));
+            let design = xt.with_intercept();
+            let mut scratch = signlred::Report::new("rls", "ols");
+            let Some(beta) = least_squares(&mut scratch, &design, &yt, &ctx.policy) else {
+                continue;
+            };
+            last_int = beta.as_slice().first().copied().unwrap_or(0.0);
+            last = Vector::from_iter((1..beta.len()).map(|j| beta[j]));
+            if end < n {
+                let mut yhat = last_int;
+                for j in 0..x.ncols().min(last.len()) {
+                    yhat += last[j] * x.get(end, j);
+                }
+                if k < resid.len() {
+                    resid[k] = y[end] - yhat;
+                    k += 1;
+                }
+            }
+        }
+        if k < resid.len() {
+            resid = Vector::from_iter(resid.as_slice().iter().copied().take(k));
+        }
+        ctx.finish(FittedRecursiveLs {
+            coef: last,
+            intercept: last_int,
+            resid,
+        })
+    }
+}
+
+/// Fitted recursive least squares.
+#[derive(Clone, Debug)]
+pub struct FittedRecursiveLs {
+    /// Last expanding-window slopes.
+    pub coef: Vector,
+    /// Last intercept.
+    pub intercept: f64,
+    /// One-step recursive residuals after burn-in.
+    pub resid: Vector,
+}
+
 /// Coefficient path from a rolling or expanding OLS.
 #[derive(Clone, Debug)]
 pub struct FittedRollingOls {
@@ -3786,6 +3966,16 @@ mod tests {
             .value;
         assert_eq!(z.ncols(), 1);
         assert!(z.get(0, 0).is_finite());
+        let mut psvd = PlsSvd::new(1);
+        let sv = psvd
+            .fit(&x, &ym2, &Session::new("plssvd", "fit"))
+            .expect("plssvd");
+        assert_eq!(sv.value.x_weights.ncols(), 1);
+        let rls = RecursiveLs::new(10)
+            .fit(&x, &y, &Session::new("rls", "fit"))
+            .expect("rls");
+        assert!(rls.value.coef[0].is_finite());
+        assert!(!rls.value.resid.is_empty());
     }
 
     #[test]

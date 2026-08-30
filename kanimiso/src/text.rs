@@ -374,6 +374,95 @@ impl HashingVectorizer {
     }
 }
 
+/// Dict-of-features vectorizer (sklearn `DictVectorizer`).
+///
+/// Each document is a whitespace-separated `key=value` record. Keys become
+/// columns; missing keys are 0. An empty key alphabet is vacuous.
+#[derive(Clone, Debug, Default)]
+pub struct DictVectorizer {
+    vocab: Vec<String>,
+    fitted: bool,
+}
+
+impl DictVectorizer {
+    /// Empty vectorizer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sorted feature keys.
+    pub fn vocabulary(&self) -> &[String] {
+        &self.vocab
+    }
+
+    fn parse_record(doc: &str) -> BTreeMap<String, f64> {
+        let mut out = BTreeMap::new();
+        for tok in doc.split_whitespace() {
+            if let Some((k, v)) = tok.split_once('=') {
+                if k.is_empty() {
+                    continue;
+                }
+                let val = v.parse::<f64>().unwrap_or(1.0);
+                *out.entry(k.to_string()).or_insert(0.0) += val;
+            } else if !tok.is_empty() {
+                *out.entry(tok.to_string()).or_insert(0.0) += 1.0;
+            }
+        }
+        out
+    }
+
+    /// Learn keys from `key=value` records.
+    pub fn fit_docs(&mut self, docs: &[&str], session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        if docs.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .message("DictVectorizer received 0 records")
+                    .build(),
+            );
+            self.vocab.clear();
+            self.fitted = true;
+            return ctx.finish(self.clone());
+        }
+        let mut keys = BTreeMap::<String, ()>::new();
+        for d in docs {
+            for k in Self::parse_record(d).into_keys() {
+                keys.insert(k, ());
+            }
+        }
+        self.vocab = keys.into_keys().collect();
+        if self.vocab.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("DictVectorizer saw no keys")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "dict features",
+                        "an empty key alphabet cannot be vectorized",
+                        "supply key=value records",
+                    ))
+                    .build(),
+            );
+        }
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+
+    /// Map records to a dense `n × |vocab|` matrix.
+    pub fn transform_docs(&self, docs: &[&str], session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(Matrix::zeros(docs.len(), 0));
+        }
+        let p = self.vocab.len();
+        let out = Matrix::from_fn(docs.len(), p, |i, j| {
+            let rec = Self::parse_record(docs[i]);
+            rec.get(&self.vocab[j]).copied().unwrap_or(0.0)
+        });
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +498,16 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(h.shape(), (2, 8));
+        let recs = ["color=1 year=2012", "color=0 year=2013 extra=1"];
+        let mut dv = DictVectorizer::new();
+        dv.fit_docs(&recs, &Session::new("dv", "fit")).unwrap();
+        assert!(dv.vocabulary().contains(&"color".to_string()));
+        let xd = dv
+            .transform_docs(&recs, &Session::new("dv", "t"))
+            .unwrap()
+            .value;
+        assert_eq!(xd.nrows(), 2);
+        assert!(xd.ncols() >= 2);
+        assert!(xd.get(0, 0).is_finite());
     }
 }

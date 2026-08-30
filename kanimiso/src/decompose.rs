@@ -1754,6 +1754,160 @@ impl FitUnsupervised for SparsePca {
     }
 }
 
+/// Mini-batch sparse PCA (sklearn `MiniBatchSparsePCA`).
+///
+/// Each `partial_fit` takes one ISTA step on the batch Gram and must emit
+/// [`IncrementalExplain`]. Do not pass `n_components` as identification `p`.
+#[derive(Clone, Debug)]
+pub struct MiniBatchSparsePca {
+    /// Number of sparse components.
+    pub n_components: usize,
+    /// Soft-threshold level.
+    pub alpha: f64,
+    /// Batch size used by the offline `fit` alias.
+    pub batch_size: usize,
+    components: Matrix,
+    mean: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for MiniBatchSparsePca {
+    fn default() -> Self {
+        Self {
+            n_components: 2,
+            alpha: 0.1,
+            batch_size: 16,
+            components: Matrix::zeros(0, 0),
+            mean: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl MiniBatchSparsePca {
+    /// `k` sparse axes.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components: n_components.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Offline alias: one `partial_fit` on the full design.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedSparsePca>> {
+        self.partial_fit(x, None, session)?;
+        let mut ctx = FitCtx::with_session(session.child("finish"));
+        ctx.finish(FittedSparsePca {
+            components: self.components.clone(),
+            mean: self.mean.clone(),
+        })
+    }
+}
+
+impl PartialFit for MiniBatchSparsePca {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (n, p) = x.shape();
+        if n == 0 || p == 0 {
+            return ctx.finish(dummy_explain(self.updates, n, self.n_seen));
+        }
+        if !self.initialized {
+            let k = self.n_components.max(1).min(p);
+            self.components = Matrix::from_fn(k, p, |i, j| if i == j { 1.0 } else { 0.0 });
+            self.mean = Vector::zeros(p);
+            self.initialized = true;
+        } else if self.mean.len() != p {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .message("MiniBatchSparsePCA feature dimension changed")
+                    .build(),
+            );
+            return ctx.finish(dummy_explain(self.updates, n, self.n_seen));
+        }
+        let n_old = self.n_seen as f64;
+        let before = self.components.clone();
+        for j in 0..p {
+            let mut s = 0.0;
+            for i in 0..n {
+                s += x.get(i, j);
+            }
+            let bm = s / n as f64;
+            self.mean[j] = if n_old + n as f64 > 0.0 {
+                (n_old * self.mean[j] + n as f64 * bm) / (n_old + n as f64)
+            } else {
+                bm
+            };
+        }
+        let k = self.components.nrows();
+        for c in 0..k {
+            let mut scores = Vector::zeros(n);
+            for i in 0..n {
+                let mut s = 0.0;
+                for j in 0..p {
+                    s += (x.get(i, j) - self.mean[j]) * self.components.get(c, j);
+                }
+                scores[i] = s;
+            }
+            let mut w = Vector::zeros(p);
+            for j in 0..p {
+                let mut s = 0.0;
+                for i in 0..n {
+                    s += (x.get(i, j) - self.mean[j]) * scores[i];
+                }
+                w[j] = soft_threshold(s, self.alpha);
+            }
+            let nn = w.norm();
+            if nn <= ctx.policy.near_zero_variance {
+                ctx.push(
+                    Issue::builder(IssueCode::UpdateWithZeroInformation)
+                        .message(format!("mini-batch sparse PCA component {c} vanished"))
+                        .build(),
+                );
+                continue;
+            }
+            w = w.scale(1.0 / nn);
+            for j in 0..p {
+                self.components.set(c, j, w[j]);
+            }
+        }
+        self.n_seen += n as u64;
+        self.updates += 1;
+        let mut delta = 0.0;
+        for c in 0..k.min(before.nrows()) {
+            for j in 0..p.min(before.ncols()) {
+                let d = self.components.get(c, j) - before.get(c, j);
+                delta += d * d;
+            }
+        }
+        let mut q = IncrementalQuality::new(self.updates - 1, n, self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta.sqrt());
+        q.information_gain = Some(delta.sqrt());
+        q.still_identified = self.n_seen as usize > p;
+        q.warmup = self.n_seen < (p as u64 + 2);
+        q.explanation = format!("mini-batch sparse PCA ISTA on {n} rows");
+        let expl = IncrementalExplain::from_quality(
+            q,
+            "sparse principal axes",
+            "one ISTA / soft-threshold step on the batch covariance",
+            "previous loadings",
+            format!("n_seen={}", self.n_seen),
+        );
+        ctx.session.record_incremental(expl.clone());
+        ctx.finish(expl)
+    }
+}
+
 /// Dictionary learning (a few MOD / ISTA iterations).
 #[derive(Clone, Debug)]
 pub struct DictionaryLearning {
@@ -1946,6 +2100,200 @@ impl FitUnsupervised for DictionaryLearning {
     }
 }
 
+/// Mini-batch dictionary learning (sklearn `MiniBatchDictionaryLearning`).
+///
+/// Each `partial_fit` takes one ISTA / MOD step and must emit
+/// [`IncrementalExplain`]. Atom count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MiniBatchDictionaryLearning {
+    /// Number of atoms.
+    pub n_components: usize,
+    /// Soft-threshold on codes.
+    pub alpha: f64,
+    dictionary: Matrix,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for MiniBatchDictionaryLearning {
+    fn default() -> Self {
+        Self {
+            n_components: 4,
+            alpha: 0.1,
+            dictionary: Matrix::zeros(0, 0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl MiniBatchDictionaryLearning {
+    /// `k` atoms.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components: n_components.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current dictionary (`k` × `p`), if initialized.
+    pub fn dictionary(&self) -> Option<&Matrix> {
+        if self.initialized {
+            Some(&self.dictionary)
+        } else {
+            None
+        }
+    }
+}
+
+impl PartialFit for MiniBatchDictionaryLearning {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (n, p) = x.shape();
+        if n == 0 || p == 0 {
+            return ctx.finish(dummy_explain(self.updates, n, self.n_seen));
+        }
+        if !self.initialized {
+            let k = self.n_components.max(1).min(p.max(1));
+            self.dictionary = Matrix::from_fn(k, p, |i, j| if i == j { 1.0 } else { 0.05 });
+            self.initialized = true;
+        } else if self.dictionary.ncols() != p {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .message("MiniBatchDictionaryLearning feature dimension changed")
+                    .build(),
+            );
+            return ctx.finish(dummy_explain(self.updates, n, self.n_seen));
+        }
+        let before = self.dictionary.clone();
+        let codes = ista_codes(x, &self.dictionary, self.alpha, 12);
+        let mut scratch = signlred::Report::new("mbdl", "mod");
+        for j in 0..p {
+            let yj = x.column(j);
+            if let Some(atom_col) = ridge_solve(&mut scratch, &codes, &yj, 1e-4, &ctx.policy) {
+                for c in 0..self.dictionary.nrows().min(atom_col.len()) {
+                    self.dictionary.set(c, j, atom_col[c]);
+                }
+            }
+        }
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let k = self.dictionary.nrows();
+        for c in 0..k {
+            let mut n2: f64 = 0.0;
+            for j in 0..p {
+                n2 += self.dictionary.get(c, j) * self.dictionary.get(c, j);
+            }
+            let nn = n2.sqrt();
+            if nn <= ctx.policy.near_zero_variance {
+                ctx.push(
+                    Issue::builder(IssueCode::UpdateWithZeroInformation)
+                        .message(format!("mini-batch dictionary atom {c} vanished"))
+                        .build(),
+                );
+                continue;
+            }
+            for j in 0..p {
+                self.dictionary.set(c, j, self.dictionary.get(c, j) / nn);
+            }
+        }
+        self.n_seen += n as u64;
+        self.updates += 1;
+        let mut delta: f64 = 0.0;
+        for c in 0..k.min(before.nrows()) {
+            for j in 0..p.min(before.ncols()) {
+                let d = self.dictionary.get(c, j) - before.get(c, j);
+                delta += d * d;
+            }
+        }
+        let mut q = IncrementalQuality::new(self.updates - 1, n, self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta.sqrt());
+        q.information_gain = Some(delta.sqrt());
+        q.still_identified = self.n_seen as usize > p;
+        q.warmup = self.n_seen < (p as u64 + 2);
+        q.explanation = format!("mini-batch dictionary MOD on {n} rows");
+        let expl = IncrementalExplain::from_quality(
+            q,
+            "dictionary atoms",
+            "one ISTA code step and MOD atom update on the batch",
+            "previous atoms",
+            format!("n_seen={}", self.n_seen),
+        );
+        ctx.session.record_incremental(expl.clone());
+        ctx.finish(expl)
+    }
+}
+
+/// Sparse coding against a fixed dictionary (sklearn `SparseCoder`).
+///
+/// Atom count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SparseCoder {
+    /// Soft-threshold on codes.
+    pub alpha: f64,
+    dictionary: Matrix,
+    fitted: bool,
+}
+
+impl Default for SparseCoder {
+    fn default() -> Self {
+        Self {
+            alpha: 0.1,
+            dictionary: Matrix::zeros(0, 0),
+            fitted: false,
+        }
+    }
+}
+
+impl SparseCoder {
+    /// Coder with the given atoms (`k` × `p`).
+    pub fn new(dictionary: Matrix) -> Self {
+        Self {
+            dictionary,
+            fitted: true,
+            ..Self::default()
+        }
+    }
+}
+
+impl Transform for SparseCoder {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if !self.fitted || self.dictionary.nrows() == 0 {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), 0));
+        }
+        if x.ncols() != self.dictionary.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("SparseCoder X columns ≠ dictionary columns")
+                    .build(),
+            );
+        }
+        ctx.finish(ista_codes(x, &self.dictionary, self.alpha, 20))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2016,8 +2364,25 @@ mod tests {
         assert!(q.value.reconstruction_err.is_finite());
         assert!(q.value.h.nrows() >= 1);
         let mut mb = MiniBatchNmf::new(1);
+        let mut mbsp = MiniBatchSparsePca::new(1);
+        let qe = mbsp
+            .partial_fit(&x, None, &Session::new("mbsp", "pf"))
+            .expect("mbsp");
+        assert!(!qe.value.narrative.is_empty());
         mb.partial_fit(&x, None, &Session::new("mbnmf", "pf"))
             .expect("pf");
         assert!(mb.h().is_some());
+        let mut mbdl = MiniBatchDictionaryLearning::new(2);
+        let qdl = mbdl
+            .partial_fit(&x, None, &Session::new("mbdl", "pf"))
+            .expect("mbdl");
+        assert!(!qdl.value.narrative.is_empty());
+        let dict = mbdl.dictionary().cloned().unwrap();
+        let sc = SparseCoder::new(dict)
+            .transform(&x, &Session::new("sc", "t"))
+            .expect("sc")
+            .value;
+        assert_eq!(sc.nrows(), x.nrows());
+        assert!(sc.get(0, 0).is_finite());
     }
 }

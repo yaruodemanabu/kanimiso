@@ -2413,6 +2413,66 @@ impl Transform for KernelCenterer {
     }
 }
 
+/// Missing-value indicator (sklearn `MissingIndicator`).
+///
+/// Non-finite entries become 1. All-missing columns are valid indicators
+/// (every row is 1) and must not raise [`IssueCode::ImputationUndefined`].
+#[derive(Clone, Debug, Default)]
+pub struct MissingIndicator {
+    fitted: bool,
+    n_features: usize,
+}
+
+impl MissingIndicator {
+    /// Empty indicator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl FitUnsupervised for MissingIndicator {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let (n, p) = x.shape();
+        ctx.report.set_sample_shape(n, p);
+        if n == 0 || p == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .message(format!("MissingIndicator design is {n}×{p}"))
+                    .build(),
+            );
+        }
+        self.n_features = p;
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for MissingIndicator {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+        }
+        let p = x.ncols();
+        if self.fitted && p != self.n_features {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("MissingIndicator column count changed")
+                    .build(),
+            );
+        }
+        ctx.finish(Matrix::from_fn(x.nrows(), p, |i, j| {
+            if x.get(i, j).is_finite() {
+                0.0
+            } else {
+                1.0
+            }
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2525,5 +2585,12 @@ mod tests {
             }
         }
         assert!(mean.abs() < 1e-8, "centered gram mean={mean}");
+        let mut mi = MissingIndicator::new();
+        mi.fit_unsupervised(&xm, &Session::new("mi", "fit"))
+            .unwrap();
+        let ind = mi.transform(&xm, &Session::new("mi", "t")).unwrap().value;
+        assert_eq!(ind.shape(), xm.shape());
+        assert!((ind.get(3, 1) - 1.0).abs() < 1e-12);
+        assert!((ind.get(0, 0) - 0.0).abs() < 1e-12);
     }
 }

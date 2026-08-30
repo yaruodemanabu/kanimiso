@@ -1235,6 +1235,289 @@ impl Predict for FittedKnnTs {
     }
 }
 
+/// Soft-DTW nearest-neighbour regressor (tslearn `TimeSeriesSVR` / soft-DTW k-NN).
+///
+/// Neighbour count is not identification `p`. A constant `y` is vacuous via
+/// [`inspect_xy`].
+#[derive(Clone, Debug)]
+pub struct SoftDtwRegressor {
+    /// Neighbourhood size.
+    pub k: usize,
+    /// Soft-DTW smoothness.
+    pub gamma: f64,
+}
+
+impl Default for SoftDtwRegressor {
+    fn default() -> Self {
+        Self { k: 3, gamma: 0.5 }
+    }
+}
+
+impl SoftDtwRegressor {
+    /// `k`-NN soft-DTW regressor.
+    pub fn new(k: usize) -> Self {
+        Self {
+            k: k.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted soft-DTW regressor.
+#[derive(Clone, Debug)]
+pub struct FittedSoftDtwRegressor {
+    /// Training series (rows).
+    pub x_train: Matrix,
+    /// Training targets.
+    pub y_train: Vector,
+    /// Neighbourhood size.
+    pub k: usize,
+    /// Soft-DTW smoothness.
+    pub gamma: f64,
+}
+
+impl Fit for SoftDtwRegressor {
+    type Fitted = FittedSoftDtwRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSoftDtwRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if !self.gamma.is_finite() || self.gamma <= 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "SoftDtwRegressor gamma={} is not positive; using 0.5",
+                        self.gamma
+                    ))
+                    .build(),
+            );
+            self.gamma = 0.5;
+        }
+        ctx.finish(FittedSoftDtwRegressor {
+            x_train: x.clone(),
+            y_train: y.clone(),
+            k: self.k.max(1),
+            gamma: self.gamma,
+        })
+    }
+}
+
+impl Predict for FittedSoftDtwRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let k = self.k.max(1).min(self.x_train.nrows().max(1));
+        let g = self.gamma.max(1e-12);
+        let y = Vector::from_iter((0..x.nrows()).map(|i| {
+            let a = x.row(i);
+            let mut dist: Vec<(f64, f64)> = (0..self.x_train.nrows())
+                .map(|t| {
+                    let d = softdtw_raw(a.as_slice(), self.x_train.row(t).as_slice(), g);
+                    (d, self.y_train[t])
+                })
+                .collect();
+            dist.sort_by(|p, q| p.0.partial_cmp(&q.0).unwrap_or(std::cmp::Ordering::Equal));
+            let mut num = 0.0;
+            let mut den = 0.0;
+            for (d, yi) in dist.into_iter().take(k) {
+                let w = (-d).exp();
+                num += w * yi;
+                den += w;
+            }
+            if den > 0.0 {
+                num / den
+            } else {
+                0.0
+            }
+        }));
+        ctx.finish(y)
+    }
+}
+
+/// Piecewise aggregate approximation (tslearn `PiecewiseAggregateApproximation`).
+///
+/// Segment count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Paa {
+    /// Number of segments.
+    pub n_segments: usize,
+}
+
+impl Default for Paa {
+    fn default() -> Self {
+        Self { n_segments: 4 }
+    }
+}
+
+impl Paa {
+    /// PAA with `n_segments` bins.
+    pub fn new(n_segments: usize) -> Self {
+        Self {
+            n_segments: n_segments.max(1),
+        }
+    }
+}
+
+impl Transform for Paa {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let m = self.n_segments.max(1).min(x.ncols().max(1));
+        let out = Matrix::from_fn(x.nrows(), m, |i, s| {
+            let lo = s * x.ncols() / m;
+            let hi = ((s + 1) * x.ncols() / m).max(lo + 1);
+            let mut acc = 0.0;
+            let mut c = 0.0;
+            for j in lo..hi.min(x.ncols()) {
+                acc += x.get(i, j);
+                c += 1.0;
+            }
+            if c > 0.0 {
+                acc / c
+            } else {
+                0.0
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Symbolic aggregate approximation (tslearn `SymbolicAggregateApproximation`).
+#[derive(Clone, Debug)]
+pub struct Sax {
+    /// PAA segments.
+    pub n_segments: usize,
+    /// Alphabet size.
+    pub alphabet: usize,
+}
+
+impl Default for Sax {
+    fn default() -> Self {
+        Self {
+            n_segments: 4,
+            alphabet: 4,
+        }
+    }
+}
+
+impl Sax {
+    /// SAX with the given segments and alphabet.
+    pub fn new(n_segments: usize, alphabet: usize) -> Self {
+        Self {
+            n_segments: n_segments.max(1),
+            alphabet: alphabet.max(2),
+        }
+    }
+}
+
+impl Transform for Sax {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let paa = Paa::new(self.n_segments).transform(x, &session.child("paa"))?;
+        let mut ctx = FitCtx::with_session(session.child("sax"));
+        let z = paa.value;
+        let a = self.alphabet.max(2);
+        let out = Matrix::from_fn(z.nrows(), z.ncols(), |i, j| {
+            let v = z.get(i, j);
+            let u = 0.5 + 0.5 * crate::special::erf(v / std::f64::consts::SQRT_2);
+            ((u * a as f64).floor() as usize).min(a - 1) as f64
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Linear SVC on PAA features (tslearn `TimeSeriesSVC` lite).
+#[derive(Clone, Debug)]
+pub struct TimeSeriesSvc {
+    /// PAA segments.
+    pub n_segments: usize,
+    /// Ridge penalty on the PAA design.
+    pub alpha: f64,
+}
+
+impl Default for TimeSeriesSvc {
+    fn default() -> Self {
+        Self {
+            n_segments: 4,
+            alpha: 0.1,
+        }
+    }
+}
+
+impl TimeSeriesSvc {
+    /// SVC on a PAA map.
+    pub fn new(n_segments: usize) -> Self {
+        Self {
+            n_segments: n_segments.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl Fit for TimeSeriesSvc {
+    type Fitted = crate::classification::FittedRidgeClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<crate::classification::FittedRidgeClassifier>> {
+        let z = Paa::new(self.n_segments).transform(x, &session.child("paa"))?;
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, &z.value, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let classes: Vec<i64> = {
+            let mut c: Vec<i64> = y
+                .as_slice()
+                .iter()
+                .filter(|v| v.is_finite())
+                .map(|v| v.round() as i64)
+                .collect();
+            c.sort_unstable();
+            c.dedup();
+            c
+        };
+        let pm = Vector::from_iter(y.as_slice().iter().map(|&v| {
+            let lab = v.round() as i64;
+            if classes.len() >= 2 && lab == classes[classes.len() - 1] {
+                1.0
+            } else {
+                -1.0
+            }
+        }));
+        let mut scratch = signlred::Report::new("tssvc", "ridge");
+        let design = z.value.with_intercept();
+        let beta = crate::linalg::ridge_solve(
+            &mut scratch,
+            &design,
+            &pm,
+            self.alpha.max(0.0),
+            &ctx.policy,
+        )
+        .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        ctx.finish(
+            crate::classification::FittedRidgeClassifier::from_penalized(
+                FittedPenalized {
+                    coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                    intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+                    alpha: self.alpha,
+                    l1_ratio: 0.0,
+                },
+                if classes.len() >= 2 {
+                    classes
+                } else {
+                    vec![0, 1]
+                },
+            ),
+        )
+    }
+}
+
 /// Interval-feature forest regressor (sktime `TimeSeriesForestRegressor`).
 #[derive(Clone, Debug)]
 pub struct TimeSeriesForestRegressor {
@@ -2474,5 +2757,35 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(sp.len(), 6);
+        let yr = Vector::from_iter((0..6).map(|i| if i < 3 { 0.0 } else { 1.0 }));
+        let sdr = SoftDtwRegressor::new(2)
+            .fit(&x, &yr, &Session::new("ts", "sdr"))
+            .unwrap();
+        let pr = sdr
+            .value
+            .predict(&x, &Session::new("ts", "sdrp"))
+            .unwrap()
+            .value;
+        assert_eq!(pr.len(), 6);
+        assert!(pr.as_slice().iter().all(|v| v.is_finite()));
+        let paa = Paa::new(2)
+            .transform(&x, &Session::new("ts", "paa"))
+            .unwrap()
+            .value;
+        assert_eq!(paa.ncols(), 2);
+        let sax = Sax::new(2, 4)
+            .transform(&x, &Session::new("ts", "sax"))
+            .unwrap()
+            .value;
+        assert_eq!(sax.ncols(), 2);
+        let tsvc = TimeSeriesSvc::new(2)
+            .fit(&x, &yb, &Session::new("ts", "svc"))
+            .unwrap();
+        let sp2 = tsvc
+            .value
+            .predict(&paa, &Session::new("ts", "svcp"))
+            .unwrap()
+            .value;
+        assert_eq!(sp2.len(), 6);
     }
 }

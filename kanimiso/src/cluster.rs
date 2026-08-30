@@ -3177,6 +3177,111 @@ impl FitUnsupervised for SpectralCoclustering {
     }
 }
 
+/// Spectral bi-clustering (sklearn `SpectralBiclustering`, Kluger-style).
+///
+/// Rows and columns are clustered independently in the SVD embedding.
+/// Cluster count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SpectralBiclustering {
+    /// Number of row clusters.
+    pub n_clusters: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for SpectralBiclustering {
+    fn default() -> Self {
+        Self {
+            n_clusters: 2,
+            seed: 2,
+        }
+    }
+}
+
+impl SpectralBiclustering {
+    /// `k` row/column clusters.
+    pub fn new(n_clusters: usize) -> Self {
+        Self {
+            n_clusters: n_clusters.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedCocluster>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+impl FitUnsupervised for SpectralBiclustering {
+    type Fitted = FittedCocluster;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCocluster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (n, p) = x.shape();
+        if n == 0 || p == 0 {
+            return ctx.finish(FittedCocluster {
+                row_labels: Vector::zeros(n),
+                col_labels: Vector::zeros(p),
+            });
+        }
+        let mut rsum = vec![0.0; n];
+        let mut csum = vec![0.0; p];
+        let mut energy: f64 = 0.0;
+        for i in 0..n {
+            for j in 0..p {
+                let v = x.get(i, j).abs();
+                energy = energy.max(v);
+                rsum[i] += v;
+                csum[j] += v;
+            }
+        }
+        if energy <= ctx.policy.near_zero_variance {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("bi-clustering table is the zero map")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "bi-cluster labels",
+                        "a zero table has no row/column association to partition",
+                        "supply a non-zero matrix",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedCocluster {
+                row_labels: Vector::zeros(n),
+                col_labels: Vector::zeros(p),
+            });
+        }
+        let an = Matrix::from_fn(n, p, |i, j| {
+            x.get(i, j) / (rsum[i].max(1e-12) * csum[j].max(1e-12)).sqrt()
+        });
+        let mut scratch = signlred::Report::new("biclust", "svd");
+        let Some(svd) = thin_svd(&mut scratch, &an, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::SvdDidNotConverge)
+                    .message("bi-clustering SVD failed")
+                    .build(),
+            );
+            return ctx.finish(FittedCocluster {
+                row_labels: Vector::zeros(n),
+                col_labels: Vector::zeros(p),
+            });
+        };
+        let k = self.n_clusters.max(2);
+        let rkeep = svd.singular_values.len().min(k).max(1);
+        let zrow = Matrix::from_fn(n, rkeep, |i, c| svd.u[(i, c)]);
+        let zcol = Matrix::from_fn(p, rkeep, |j, c| svd.v[(j, c)]);
+        ctx.finish(FittedCocluster {
+            row_labels: local_kmeans(&zrow, k, self.seed),
+            col_labels: local_kmeans(&zcol, k, self.seed.wrapping_add(3)),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3310,5 +3415,10 @@ mod tests {
         assert_eq!(q.value.row_labels.len(), 12);
         assert_eq!(q.value.col_labels.len(), 8);
         assert_ne!(q.value.row_labels[0], q.value.row_labels[8]);
+        let bq = SpectralBiclustering::new(2)
+            .fit(&x, &Session::new("sbc", "fit"))
+            .expect("sbc");
+        assert_eq!(bq.value.row_labels.len(), 12);
+        assert_eq!(bq.value.col_labels.len(), 8);
     }
 }

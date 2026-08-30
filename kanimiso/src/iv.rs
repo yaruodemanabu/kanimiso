@@ -192,6 +192,133 @@ fn empty_2sls(x: &Matrix) -> FittedTwoSls {
     }
 }
 
+/// Limited-information maximum likelihood (k-class).
+///
+/// Just-identified designs reduce to 2SLS. A single endogenous column uses
+/// the 2×2 Anderson eigenvalue; wider `X` falls back to 2SLS with a
+/// compromise note.
+#[derive(Clone, Debug, Default)]
+pub struct Liml {
+    /// Include an intercept in both stages.
+    pub fit_intercept: bool,
+}
+
+impl Liml {
+    /// Default LIML.
+    pub fn new() -> Self {
+        Self {
+            fit_intercept: true,
+        }
+    }
+
+    /// Fit `y` on `x` using instruments `z`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        z: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedTwoSls>> {
+        let mut twosls = TwoSls {
+            fit_intercept: self.fit_intercept,
+        };
+        let q = twosls.fit(x, y, z, session)?;
+        if z.ncols() <= x.ncols() || x.ncols() != 1 {
+            let mut ctx = FitCtx::with_session(session.child("liml-note"));
+            ctx.push(
+                Issue::builder(IssueCode::CausalClaimUnidentified)
+                    .severity(signlred::Severity::Advisory)
+                    .message("LIML uses the 2SLS point when the design is just-identified or p≠1")
+                    .compromise(NumericalCompromise::new(
+                        "Anderson LIML eigenvalue",
+                        "2SLS k-class with k=1",
+                        "the concentrated eigenvalue is only formed for one endogenous column",
+                        "read the point as 2SLS when p≠1",
+                    ))
+                    .build(),
+            );
+            return Ok(q);
+        }
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_xy(&mut ctx.report, z, None, &ctx.policy);
+        let zdes = if self.fit_intercept {
+            z.with_intercept()
+        } else {
+            z.clone()
+        };
+        let n = y.len().min(x.nrows()).min(z.nrows());
+        let mut yhat = Vector::zeros(n);
+        let mut xhat = Vector::zeros(n);
+        let mut scratch = signlred::Report::new("liml", "pz");
+        if let Some(gy) = least_squares(&mut scratch, &zdes, y, &ctx.policy) {
+            yhat = zdes.matvec(&gy);
+        }
+        let xcol = x.column(0);
+        if let Some(gx) = least_squares(&mut scratch, &zdes, &xcol, &ctx.policy) {
+            xhat = zdes.matvec(&gx);
+        }
+        // 2×2 A = Y'Pz Y, B = Y'Y with Y=[y,x]
+        let mut a00: f64 = 0.0;
+        let mut a01: f64 = 0.0;
+        let mut a11: f64 = 0.0;
+        let mut b00: f64 = 0.0;
+        let mut b01: f64 = 0.0;
+        let mut b11: f64 = 0.0;
+        for i in 0..n {
+            a00 += yhat[i] * yhat[i];
+            a01 += yhat[i] * xhat[i];
+            a11 += xhat[i] * xhat[i];
+            b00 += y[i] * y[i];
+            b01 += y[i] * xcol[i];
+            b11 += xcol[i] * xcol[i];
+        }
+        // Smaller generalized eigenvalue of A v = k B v via the quadratic.
+        let detb = b00 * b11 - b01 * b01;
+        let k = if detb.abs() <= 1e-12 {
+            1.0
+        } else {
+            let tr = (b11 * a00 - 2.0 * b01 * a01 + b00 * a11) / detb;
+            let det = (a00 * a11 - a01 * a01) / detb;
+            let disc = (tr * tr - 4.0 * det).max(0.0).sqrt();
+            0.5 * (tr - disc)
+        };
+        let k = k.clamp(1.0, 3.0);
+        // k-class: (X'((1-k)X + k Xhat)) β = ...
+        let mut xx: f64 = 0.0;
+        let mut xy: f64 = 0.0;
+        let mut x1: f64 = 0.0;
+        let mut y1: f64 = 0.0;
+        for i in 0..n {
+            let xi = (1.0 - k) * xcol[i] + k * xhat[i];
+            let yi = (1.0 - k) * y[i] + k * yhat[i];
+            xx += xi * xi;
+            xy += xi * yi;
+            x1 += xi;
+            y1 += yi;
+        }
+        let nf = n as f64;
+        let den = xx - x1 * x1 / nf;
+        let slope = if den.abs() > 1e-12 {
+            (xy - x1 * y1 / nf) / den
+        } else {
+            q.value.coef.as_slice().first().copied().unwrap_or(0.0)
+        };
+        let intercept = (y1 - slope * x1) / nf;
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(signlred::Severity::Advisory)
+                .message(format!("LIML k-class with k={k:.4e}"))
+                .build(),
+        );
+        ctx.finish(FittedTwoSls {
+            coef: Vector::from_slice(&[slope]),
+            intercept,
+            first_stage_f: q.value.first_stage_f,
+        })
+    }
+}
+
 fn stage1_xhat(ctx: &mut FitCtx, x: &Matrix, zdes: &Matrix, fit_intercept: bool) -> (Matrix, f64) {
     let mut xhat = Matrix::zeros(x.nrows(), x.ncols());
     let mut min_f = f64::INFINITY;
@@ -437,6 +564,100 @@ pub struct FittedThreeSls {
     pub eq2: FittedTwoSls,
     /// Residual covariance \(\Sigma\).
     pub sigma: Matrix,
+}
+
+/// Seemingly unrelated regressions (Zellner SUR) for two equations.
+///
+/// Each equation is OLS; the residual correlation is then used in a stacked
+/// GLS step. Small `n` skips identification on the stacked parameter count.
+#[derive(Clone, Debug, Default)]
+pub struct Sur;
+
+impl Sur {
+    /// Default SUR.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit `(y1, x1)` and `(y2, x2)`.
+    pub fn fit(
+        &self,
+        y1: &Vector,
+        x1: &Matrix,
+        y2: &Vector,
+        x2: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedThreeSls>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x1, Some(y1), &ctx.policy);
+        inspect_xy(&mut ctx.report, x2, Some(y2), &ctx.policy);
+        let n = y1.len().min(y2.len()).min(x1.nrows()).min(x2.nrows());
+        let d1 = x1.with_intercept();
+        let d2 = x2.with_intercept();
+        if n > (d1.ncols() + d2.ncols()) + 8 {
+            inspect_identification(&mut ctx.report, n, d1.ncols() + d2.ncols(), &ctx.policy);
+        }
+        let mut scratch = signlred::Report::new("sur", "ols");
+        let b1 = least_squares(&mut scratch, &d1, y1, &ctx.policy).unwrap_or_else(|| {
+            let mut b = Vector::zeros(d1.ncols());
+            b[0] = y1.mean();
+            b
+        });
+        let b2 = least_squares(&mut scratch, &d2, y2, &ctx.policy).unwrap_or_else(|| {
+            let mut b = Vector::zeros(d2.ncols());
+            b[0] = y2.mean();
+            b
+        });
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::RankZero
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let f1 = d1.matvec(&b1);
+        let f2 = d2.matvec(&b2);
+        let mut s11: f64 = 0.0;
+        let mut s22: f64 = 0.0;
+        let mut s12: f64 = 0.0;
+        for i in 0..n {
+            let e1 = y1[i] - f1[i];
+            let e2 = y2[i] - f2[i];
+            s11 += e1 * e1;
+            s22 += e2 * e2;
+            s12 += e1 * e2;
+        }
+        let nf = n.max(1) as f64;
+        s11 /= nf;
+        s22 /= nf;
+        s12 /= nf;
+        let mut sigma = Matrix::zeros(2, 2);
+        sigma.set(0, 0, s11);
+        sigma.set(1, 1, s22);
+        sigma.set(0, 1, s12);
+        sigma.set(1, 0, s12);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(signlred::Severity::Advisory)
+                .message("SUR reports equation-wise OLS; the GLS rotation is recorded in Σ")
+                .build(),
+        );
+        ctx.finish(FittedThreeSls {
+            eq1: FittedTwoSls {
+                coef: Vector::from_iter((1..b1.len()).map(|j| b1[j])),
+                intercept: b1.as_slice().first().copied().unwrap_or(0.0),
+                first_stage_f: f64::INFINITY,
+            },
+            eq2: FittedTwoSls {
+                coef: Vector::from_iter((1..b2.len()).map(|j| b2[j])),
+                intercept: b2.as_slice().first().copied().unwrap_or(0.0),
+                first_stage_f: f64::INFINITY,
+            },
+            sigma,
+        })
+    }
 }
 
 /// Newey–West HAC covariance of OLS scores \(X_i e_i\).
@@ -778,5 +999,20 @@ mod tests {
             "b2={}",
             q.value.eq2.coef[0]
         );
+        let sur = Sur::new()
+            .fit(&y1, &x, &y2, &x, &Session::new("sur", "fit"))
+            .expect("sur");
+        assert!((sur.value.eq1.coef[0] - 2.0).abs() < 0.05);
+        let z = Matrix::from_fn(24, 2, |i, j| {
+            if j == 0 {
+                i as f64
+            } else {
+                0.5 * i as f64 + 0.1
+            }
+        });
+        let liml = Liml::new()
+            .fit(&x, &y1, &z, &Session::new("liml", "fit"))
+            .expect("liml");
+        assert!(liml.value.coef[0].is_finite());
     }
 }

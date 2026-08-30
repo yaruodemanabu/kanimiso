@@ -7,6 +7,8 @@
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linear_model::{FittedPenalized, Ridge};
+use crate::metrics::accuracy;
+use crate::model_selection::{take_rows, take_vec, KFold};
 use crate::traits::{Fit, Predict};
 use crate::validate::{inspect_classes, inspect_xy};
 use ojizou_san::Session;
@@ -139,6 +141,144 @@ impl Fit for RidgeClassifier {
             }
         };
         ctx.finish(FittedRidgeClassifier { inner, classes })
+    }
+}
+
+/// Ridge classifier with a K-fold accuracy grid over `alpha` (sklearn
+/// `RidgeClassifierCV`).
+///
+/// Fold fits that abort are skipped. A grid with no finite score is
+/// unidentified.
+#[derive(Clone, Debug)]
+pub struct RidgeClassifierCV {
+    /// Candidate ℓ₂ penalties.
+    pub alphas: Vec<f64>,
+    /// CV splitter.
+    pub cv: KFold,
+}
+
+impl Default for RidgeClassifierCV {
+    fn default() -> Self {
+        Self {
+            alphas: vec![0.1, 1.0, 10.0],
+            cv: KFold::new(3),
+        }
+    }
+}
+
+impl RidgeClassifierCV {
+    /// Grid over the given `alpha` values.
+    pub fn new(alphas: Vec<f64>) -> Self {
+        Self {
+            alphas,
+            cv: KFold::new(3),
+        }
+    }
+}
+
+/// Selected ridge classifier and the CV scores that justified it.
+#[derive(Clone, Debug)]
+pub struct FittedRidgeClassifierCV {
+    /// Penalty with the highest mean fold accuracy.
+    pub best_alpha: f64,
+    /// Mean CV accuracy of `best_alpha`.
+    pub best_score: f64,
+    /// `(alpha, mean_cv_acc)` for every grid point.
+    pub scores: Vec<(f64, f64)>,
+    /// Ridge classifier refit on the full training design.
+    pub fitted: FittedRidgeClassifier,
+}
+
+impl Fit for RidgeClassifierCV {
+    type Fitted = FittedRidgeClassifierCV;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRidgeClassifierCV>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let folds = match self.cv.split(x.nrows(), &session.child("cv")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                Vec::new()
+            }
+        };
+        let mut scores = Vec::new();
+        let mut best_alpha = self.alphas.first().copied().unwrap_or(1.0);
+        let mut best_score = f64::NEG_INFINITY;
+        for &alpha in &self.alphas {
+            let mut acc = 0.0;
+            let mut k = 0.0;
+            for (i, fold) in folds.iter().enumerate() {
+                let xt = take_rows(x, &fold.train);
+                let yt = take_vec(y, &fold.train);
+                let xv = take_rows(x, &fold.test);
+                let yv = take_vec(y, &fold.test);
+                match RidgeClassifier::new(alpha).fit(
+                    &xt,
+                    &yt,
+                    &session.child(format!("rccv_{alpha}_{i}")),
+                ) {
+                    Ok(q) => match q.value.predict(&xv, &session.child("p")) {
+                        Ok(p) => {
+                            if let Ok(s) = accuracy(&yv, &p.value, &session.child("acc")) {
+                                if s.value.is_finite() {
+                                    acc += s.value;
+                                    k += 1.0;
+                                }
+                            }
+                        }
+                        Err(_) => {}
+                    },
+                    Err(_) => {}
+                }
+            }
+            let mean = if k > 0.0 { acc / k } else { f64::NAN };
+            scores.push((alpha, mean));
+            if mean.is_finite() && mean > best_score {
+                best_score = mean;
+                best_alpha = alpha;
+            }
+        }
+        if !best_score.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("RidgeClassifierCV found no finite fold accuracy")
+                    .build(),
+            );
+        }
+        let fitted = match RidgeClassifier::new(best_alpha).fit(x, y, &session.child("refit")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                FittedRidgeClassifier::from_penalized(
+                    FittedPenalized {
+                        coef: Vector::zeros(x.ncols()),
+                        intercept: 0.0,
+                        alpha: best_alpha,
+                        l1_ratio: 0.0,
+                    },
+                    vec![0, 1],
+                )
+            }
+        };
+        ctx.finish(FittedRidgeClassifierCV {
+            best_alpha,
+            best_score,
+            scores,
+            fitted,
+        })
+    }
+}
+
+impl Predict for FittedRidgeClassifierCV {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.fitted.predict(x, session)
     }
 }
 
@@ -793,5 +933,18 @@ mod tests {
             .value;
         assert!(p[0] < 0.3, "p0={}", p[0]);
         assert!(p[15] > 0.7, "p15={}", p[15]);
+        let x = Matrix::from_fn(24, 1, |i, _| if i < 12 { -1.2 } else { 1.2 });
+        let y = Vector::from_iter((0..24).map(|i| if i < 12 { 0.0 } else { 1.0 }));
+        let rcv = RidgeClassifierCV::new(vec![0.1, 1.0])
+            .fit(&x, &y, &Session::new("rccv", "fit"))
+            .expect("rccv");
+        assert!(rcv.value.best_alpha.is_finite());
+        let pr = rcv
+            .value
+            .predict(&x, &Session::new("rccv", "p"))
+            .unwrap()
+            .value;
+        let ok = (0..24).filter(|&i| (pr[i] - y[i]).abs() < 0.5).count();
+        assert!(ok >= 18, "rccv ok={ok}");
     }
 }

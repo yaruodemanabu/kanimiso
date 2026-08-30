@@ -9,6 +9,8 @@
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linalg::least_squares;
+use crate::special::chi2_pvalue;
+use crate::stats::HypothesisTest;
 use crate::traits::Predict;
 use crate::validate::inspect_xy;
 use ojizou_san::Session;
@@ -634,6 +636,77 @@ impl RandomEffects {
     }
 }
 
+/// Hausman specification test: FE vs RE slopes.
+///
+/// Covariance of the difference is approximated by a residual-scale
+/// diagonal; that is recorded as a compromise. A large statistic is
+/// [`IssueCode::CausalClaimUnidentified`] (RE is inconsistent if FE differs).
+pub fn hausman(
+    x: &Matrix,
+    y: &Vector,
+    groups: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let fe = match PanelFe::new().fit(x, y, groups, &session.child("haus-fe")) {
+        Ok(q) => q.value,
+        Err(e) => {
+            ctx.push(e.primary);
+            return ctx.finish(HypothesisTest {
+                statistic: f64::NAN,
+                pvalue: f64::NAN,
+                df: x.ncols() as f64,
+                nobs: y.len() as f64,
+            });
+        }
+    };
+    let re = match RandomEffects::new().fit(x, y, groups, &session.child("haus-re")) {
+        Ok(q) => q.value,
+        Err(e) => {
+            ctx.push(e.primary);
+            return ctx.finish(HypothesisTest {
+                statistic: f64::NAN,
+                pvalue: f64::NAN,
+                df: x.ncols() as f64,
+                nobs: y.len() as f64,
+            });
+        }
+    };
+    let p = fe.coef.len().min(re.coef.len());
+    let mut d2 = 0.0;
+    for j in 0..p {
+        let d = fe.coef[j] - re.coef[j];
+        d2 += d * d;
+    }
+    let n = fe.n_eff.max(1) as f64;
+    let stat = n * d2;
+    let df = p.max(1) as f64;
+    let pvalue = chi2_pvalue(stat.max(0.0), df);
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("Hausman uses ||β_FE−β_RE||² n as χ²; Var(Δβ) is not the full sandwich")
+            .build(),
+    );
+    if pvalue.is_finite() && pvalue < 0.05 {
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .message(format!(
+                    "Hausman p={pvalue:.4}; RE is inconsistent relative to FE"
+                ))
+                .metric("h", stat)
+                .build(),
+        );
+    }
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df,
+        nobs: n,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,5 +759,7 @@ mod tests {
             "re={}",
             re.value.coef[0]
         );
+        let h = hausman(&x, &y, &g, &Session::new("haus", "t")).expect("haus");
+        assert!(h.value.statistic.is_finite() || h.value.pvalue.is_nan());
     }
 }

@@ -1785,6 +1785,292 @@ impl Fit for ExponentialAft {
     }
 }
 
+/// Log-logistic AFT: \(\log T = x^\top\beta + \sigma\varepsilon\), \(\varepsilon\sim\) logistic.
+///
+/// Fit is log-OLS with \(\sigma = \hat s \sqrt{3}/\pi\). `y ≤ 0` is
+/// [`IssueCode::NonPositiveSeries`].
+#[derive(Clone, Debug, Default)]
+pub struct LogLogisticAft;
+
+impl LogLogisticAft {
+    /// Default log-logistic AFT.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Fit for LogLogisticAft {
+    type Fitted = FittedWeibullAft;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedWeibullAft>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        for (i, &yi) in y.as_slice().iter().enumerate() {
+            if yi <= 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .message(format!(
+                            "Log-logistic AFT y[{i}]={yi} is not strictly positive"
+                        ))
+                        .build(),
+                );
+                break;
+            }
+        }
+        let design = x.with_intercept();
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let logy = Vector::from_iter(y.as_slice().iter().map(|v| v.max(1e-12).ln()));
+        let mut scratch = signlred::Report::new("ll_aft", "ols");
+        let beta = least_squares(&mut scratch, &design, &logy, &ctx.policy).unwrap_or_else(|| {
+            let mut b = Vector::zeros(design.ncols());
+            b[0] = logy.mean();
+            b
+        });
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let fit = design.matvec(&beta);
+        let mut sse = 0.0;
+        for i in 0..logy.len().min(fit.len()) {
+            let e = logy[i] - fit[i];
+            sse += e * e;
+        }
+        let n = logy.len().max(1) as f64;
+        let s = (sse / n).sqrt();
+        let sigma = (s * 3.0_f64.sqrt() / std::f64::consts::PI).max(1e-6);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Log-logistic AFT uses log-OLS + logistic scale, not a full MLE")
+                .compromise(NumericalCompromise::new(
+                    "log-logistic MLE",
+                    "log-OLS with σ = s √3 / π",
+                    "the logistic likelihood is not maximised",
+                    "read coefficients as log-mean slopes, not MLE AFT effects",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedWeibullAft {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            sigma,
+        })
+    }
+}
+
+/// Log-normal AFT: \(\log T = x^\top\beta + \sigma\varepsilon\), \(\varepsilon\sim N(0,1)\).
+///
+/// Fit is log-OLS with \(\sigma = \hat s\). `y ≤ 0` is
+/// [`IssueCode::NonPositiveSeries`].
+#[derive(Clone, Debug, Default)]
+pub struct LogNormalAft;
+
+impl LogNormalAft {
+    /// Default log-normal AFT.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Fit for LogNormalAft {
+    type Fitted = FittedWeibullAft;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedWeibullAft>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        for (i, &yi) in y.as_slice().iter().enumerate() {
+            if yi <= 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .message(format!(
+                            "Log-normal AFT y[{i}]={yi} is not strictly positive"
+                        ))
+                        .build(),
+                );
+                break;
+            }
+        }
+        let design = x.with_intercept();
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let logy = Vector::from_iter(y.as_slice().iter().map(|v| v.max(1e-12).ln()));
+        let mut scratch = signlred::Report::new("ln_aft", "ols");
+        let beta = least_squares(&mut scratch, &design, &logy, &ctx.policy).unwrap_or_else(|| {
+            let mut b = Vector::zeros(design.ncols());
+            b[0] = logy.mean();
+            b
+        });
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let fit = design.matvec(&beta);
+        let mut sse: f64 = 0.0;
+        for i in 0..logy.len().min(fit.len()) {
+            let e = logy[i] - fit[i];
+            sse += e * e;
+        }
+        let n = logy.len().max(1) as f64;
+        let sigma = (sse / n).sqrt().max(1e-6);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Log-normal AFT uses log-OLS, not a censored Gaussian MLE")
+                .compromise(NumericalCompromise::new(
+                    "log-normal MLE",
+                    "log-OLS with σ = s",
+                    "right-censoring is ignored",
+                    "read coefficients as log-mean slopes",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedWeibullAft {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            sigma,
+        })
+    }
+}
+
+/// Two-part hurdle: logit for \(P(Y>0)\) and log-OLS for \(E[\log Y \mid Y>0]\).
+///
+/// A series of all zeros is vacuous. Few positives are a warning, not
+/// [`IssueCode::InsufficientSample`] as an error.
+#[derive(Clone, Debug, Default)]
+pub struct Hurdle;
+
+impl Hurdle {
+    /// Default hurdle.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// Fitted two-part hurdle.
+#[derive(Clone, Debug)]
+pub struct FittedHurdle {
+    /// Logit intercept for the zero hurdle.
+    pub hurdle_intercept: f64,
+    /// Logit slopes.
+    pub hurdle_coef: Vector,
+    /// Log-mean intercept on the positive part.
+    pub pos_intercept: f64,
+    /// Log-mean slopes on the positive part.
+    pub pos_coef: Vector,
+}
+
+impl Fit for Hurdle {
+    type Fitted = FittedHurdle;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedHurdle>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let n = x.nrows().min(y.len());
+        let z = Vector::from_iter((0..n).map(|i| if y[i] > 0.0 { 1.0 } else { 0.0 }));
+        let n_pos = z.as_slice().iter().filter(|v| **v > 0.5).count();
+        if n_pos == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("hurdle saw no positive y")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "hurdle positive-part mean",
+                        "E[Y | Y>0] is unidentified when every y is zero",
+                        "collect positive counts",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedHurdle {
+                hurdle_intercept: 0.0,
+                hurdle_coef: Vector::zeros(x.ncols()),
+                pos_intercept: 0.0,
+                pos_coef: Vector::zeros(x.ncols()),
+            });
+        }
+        if n_pos < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!("hurdle positive part has only {n_pos} rows"))
+                    .build(),
+            );
+        }
+        let (h_int, h_coef) = if n_pos == n {
+            ctx.push(
+                Issue::builder(IssueCode::CausalClaimUnidentified)
+                    .severity(Severity::Advisory)
+                    .message("hurdle logit is unidentified: every y is positive")
+                    .build(),
+            );
+            (8.0, Vector::zeros(x.ncols()))
+        } else {
+            let mut lr = crate::linear_model::LogisticRegression::new();
+            match lr.fit(x, &z, &session.child("hurdle-logit")) {
+                Ok(q) => (q.value.intercept, q.value.coef),
+                Err(e) => {
+                    ctx.push(e.primary);
+                    (0.0, Vector::zeros(x.ncols()))
+                }
+            }
+        };
+        let idx: Vec<usize> = (0..n).filter(|&i| y[i] > 0.0).collect();
+        let xp = Matrix::from_fn(idx.len(), x.ncols(), |r, c| x.get(idx[r], c));
+        let yp = Vector::from_iter(idx.iter().map(|&i| y[i].max(1e-12).ln()));
+        let design = xp.with_intercept();
+        let mut scratch = signlred::Report::new("hurdle", "pos");
+        let beta = least_squares(&mut scratch, &design, &yp, &ctx.policy).unwrap_or_else(|| {
+            let mut b = Vector::zeros(design.ncols());
+            b[0] = yp.mean();
+            b
+        });
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedHurdle {
+            hurdle_intercept: h_int,
+            hurdle_coef: h_coef,
+            pos_intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            pos_coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+        })
+    }
+}
+
 fn gee_gls(
     design: &Matrix,
     y: &Vector,
@@ -2023,5 +2309,17 @@ mod tests {
             .unwrap()
             .value;
         assert!(ep.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let ll = LogLogisticAft::new()
+            .fit(&x, &yt, &Session::new("llaft", "fit"))
+            .expect("llaft");
+        assert!(ll.value.sigma > 0.0 && ll.value.sigma.is_finite());
+        let ln = LogNormalAft::new()
+            .fit(&x, &yt, &Session::new("lnaft", "fit"))
+            .expect("lnaft");
+        assert!(ln.value.sigma > 0.0 && ln.value.sigma.is_finite());
+        let hu = Hurdle::new()
+            .fit(&x, &y, &Session::new("hurdle", "fit"))
+            .expect("hurdle");
+        assert!(hu.value.pos_coef[0].is_finite());
     }
 }

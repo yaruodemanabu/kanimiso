@@ -851,6 +851,178 @@ impl Transform for SelectFdr {
     }
 }
 
+/// Bonferroni family-wise error selector (sklearn `SelectFwe`).
+#[derive(Clone, Debug)]
+pub struct SelectFwe {
+    /// Family-wise type-I rate.
+    pub alpha: f64,
+    support: Vec<bool>,
+    fitted: bool,
+}
+
+impl Default for SelectFwe {
+    fn default() -> Self {
+        Self {
+            alpha: 0.05,
+            support: Vec::new(),
+            fitted: false,
+        }
+    }
+}
+
+impl SelectFwe {
+    /// FWE selector with the given `α`.
+    pub fn new(alpha: f64) -> Self {
+        Self {
+            alpha,
+            ..Self::default()
+        }
+    }
+
+    /// Mask of kept columns.
+    pub fn support(&self) -> &[bool] {
+        &self.support
+    }
+}
+
+impl Fit for SelectFwe {
+    type Fitted = Self;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let alpha = if self.alpha.is_finite() && self.alpha > 0.0 && self.alpha < 1.0 {
+            self.alpha
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "SelectFwe α={} not in (0, 1); using 0.05",
+                        self.alpha
+                    ))
+                    .build(),
+            );
+            0.05
+        };
+        let scores = match f_regression(x, y, &session.child("fwe")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                self.support = vec![x.ncols() > 0];
+                if x.ncols() > 1 {
+                    self.support.resize(x.ncols(), false);
+                }
+                self.fitted = true;
+                return ctx.finish(self.clone());
+            }
+        };
+        let p = scores.pvalues.len().max(1);
+        let thresh = alpha / p as f64;
+        self.support = apply_univariate_mask(&scores, |_, pv| pv <= thresh, &mut ctx);
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for SelectFwe {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(x.clone());
+        }
+        ctx.finish(select_columns(x, &self.support))
+    }
+}
+
+/// Univariate selector with a named strategy (sklearn `GenericUnivariateSelect`).
+#[derive(Clone, Debug)]
+pub struct GenericUnivariateSelect {
+    /// One of `k_best`, `percentile`, `fpr`, `fwe`.
+    pub mode: UnivariateMode,
+    /// `k`, percentile, or `α` depending on `mode`.
+    pub param: f64,
+    support: Vec<bool>,
+    fitted: bool,
+}
+
+/// Strategy for [`GenericUnivariateSelect`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnivariateMode {
+    /// Keep the `k` highest F scores.
+    KBest,
+    /// Keep the top percentile of F scores.
+    Percentile,
+    /// Keep p-values below `α`.
+    Fpr,
+    /// Bonferroni: keep p-values below `α / p`.
+    Fwe,
+}
+
+impl Default for GenericUnivariateSelect {
+    fn default() -> Self {
+        Self {
+            mode: UnivariateMode::KBest,
+            param: 1.0,
+            support: Vec::new(),
+            fitted: false,
+        }
+    }
+}
+
+impl GenericUnivariateSelect {
+    /// Selector with the given mode and parameter.
+    pub fn new(mode: UnivariateMode, param: f64) -> Self {
+        Self {
+            mode,
+            param,
+            ..Self::default()
+        }
+    }
+
+    /// Mask of kept columns.
+    pub fn support(&self) -> &[bool] {
+        &self.support
+    }
+}
+
+impl Fit for GenericUnivariateSelect {
+    type Fitted = Self;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        self.support = match self.mode {
+            UnivariateMode::KBest => {
+                let mut s = SelectKBest::new(self.param.max(1.0) as usize);
+                s.fit(x, y, session)?.value.support().to_vec()
+            }
+            UnivariateMode::Percentile => {
+                let mut s = SelectPercentile::new(self.param);
+                s.fit(x, y, session)?.value.support().to_vec()
+            }
+            UnivariateMode::Fpr => {
+                let mut s = SelectFpr::new(self.param);
+                s.fit(x, y, session)?.value.support().to_vec()
+            }
+            UnivariateMode::Fwe => {
+                let mut s = SelectFwe::new(self.param);
+                s.fit(x, y, session)?.value.support().to_vec()
+            }
+        };
+        self.fitted = true;
+        let mut ctx = FitCtx::with_session(session.child("finish"));
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for GenericUnivariateSelect {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(x.clone());
+        }
+        ctx.finish(select_columns(x, &self.support))
+    }
+}
+
 /// Random Fourier features for an RBF kernel (Rahimi & Recht).
 #[derive(Clone, Debug)]
 pub struct RbfSampler {
@@ -1035,6 +1207,247 @@ impl Transform for AdditiveChi2Sampler {
                 amp * arg.cos()
             }
         });
+        ctx.finish(out)
+    }
+}
+
+/// Skewed χ² kernel map (sklearn `SkewedChi2Sampler`).
+///
+/// `z = log(x + c)` is mapped with random Fourier features. Entries with
+/// `x + c ≤ 0` are a [`IssueCode::NonPositiveSeries`] warning and are clipped.
+/// Do not pass the output dimension to identification.
+#[derive(Clone, Debug)]
+pub struct SkewedChi2Sampler {
+    /// Frequencies.
+    pub n_components: usize,
+    /// Offset `c > 0`.
+    pub skewedness: f64,
+    /// PRNG seed.
+    pub seed: u64,
+    weights: Matrix,
+    offset: Vector,
+    fitted: bool,
+}
+
+impl Default for SkewedChi2Sampler {
+    fn default() -> Self {
+        Self {
+            n_components: 8,
+            skewedness: 1.0,
+            seed: 1,
+            weights: Matrix::zeros(0, 0),
+            offset: Vector::zeros(0),
+            fitted: false,
+        }
+    }
+}
+
+impl SkewedChi2Sampler {
+    /// Sampler with `n_components` frequencies.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components: n_components.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl FitUnsupervised for SkewedChi2Sampler {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if self.skewedness <= 0.0 || !self.skewedness.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "SkewedChi2Sampler c={} is not positive; using 1",
+                        self.skewedness
+                    ))
+                    .build(),
+            );
+            self.skewedness = 1.0;
+        }
+        let mut bad = false;
+        for i in 0..x.nrows() {
+            for j in 0..x.ncols() {
+                if x.get(i, j) + self.skewedness <= 0.0 {
+                    bad = true;
+                }
+            }
+        }
+        if bad {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message("SkewedChi2Sampler saw x+c≤0; those entries are clipped")
+                    .build(),
+            );
+        }
+        let m = self.n_components.max(1);
+        let mut rng = Rng::new(self.seed);
+        self.weights = Matrix::from_fn(x.ncols(), m, |_, _| rng.standard_normal());
+        self.offset =
+            Vector::from_iter((0..m).map(|_| rng.uniform_range(0.0, 2.0 * std::f64::consts::PI)));
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for SkewedChi2Sampler {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(x.clone());
+        }
+        let c = self.skewedness.max(1e-12);
+        let m = self.offset.len();
+        let scale = (2.0 / m.max(1) as f64).sqrt();
+        let out = Matrix::from_fn(x.nrows(), m, |i, k| {
+            let mut s = self.offset[k];
+            for j in 0..x.ncols().min(self.weights.nrows()) {
+                let z = (x.get(i, j) + c).max(1e-12).ln();
+                s += z * self.weights.get(j, k);
+            }
+            scale * s.cos()
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Tensor / count sketch for a polynomial kernel (sklearn `PolynomialCountSketch`).
+///
+/// Degree-2 features are hashed into `n_components` bins. Do not identify on
+/// the sketch width.
+#[derive(Clone, Debug)]
+pub struct PolynomialCountSketch {
+    /// Sketch width.
+    pub n_components: usize,
+    /// Polynomial degree (`2` = pairwise).
+    pub degree: usize,
+    /// PRNG seed for hash signs.
+    pub seed: u64,
+    hash_idx: Vec<usize>,
+    hash_sign: Vec<f64>,
+    fitted: bool,
+}
+
+impl Default for PolynomialCountSketch {
+    fn default() -> Self {
+        Self {
+            n_components: 16,
+            degree: 2,
+            seed: 1,
+            hash_idx: Vec::new(),
+            hash_sign: Vec::new(),
+            fitted: false,
+        }
+    }
+}
+
+impl PolynomialCountSketch {
+    /// Sketch of width `n_components`.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components: n_components.max(2),
+            ..Self::default()
+        }
+    }
+}
+
+impl FitUnsupervised for PolynomialCountSketch {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let p = x.ncols();
+        let m = self.n_components.max(2);
+        let mut rng = Rng::new(self.seed);
+        self.hash_idx = (0..p).map(|_| rng.below(m)).collect();
+        self.hash_sign = (0..p)
+            .map(|_| if rng.uniform() < 0.5 { -1.0 } else { 1.0 })
+            .collect();
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for PolynomialCountSketch {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(x.clone());
+        }
+        let m = self.n_components.max(2);
+        let p = x.ncols().min(self.hash_idx.len());
+        let mut out = Matrix::zeros(x.nrows(), m);
+        for i in 0..x.nrows() {
+            let mut sketch = vec![0.0; m];
+            for j in 0..p {
+                sketch[self.hash_idx[j]] += self.hash_sign[j] * x.get(i, j);
+            }
+            if self.degree >= 2 {
+                let linear = sketch.clone();
+                for a in 0..m {
+                    for b in 0..m {
+                        sketch[(a + b) % m] += 0.5 * linear[a] * linear[b];
+                    }
+                }
+            }
+            for k in 0..m {
+                out.set(i, k, sketch[k] / (m as f64).sqrt());
+            }
+        }
+        ctx.finish(out)
+    }
+}
+
+/// Signed-hash feature map (sklearn `FeatureHasher`).
+///
+/// Column indices are hashed into `n_features` bins. Output width is not
+/// identification `p`.
+#[derive(Clone, Debug)]
+pub struct FeatureHasher {
+    /// Hash-bin count.
+    pub n_features: usize,
+}
+
+impl Default for FeatureHasher {
+    fn default() -> Self {
+        Self { n_features: 16 }
+    }
+}
+
+impl FeatureHasher {
+    /// Hasher with `n_features` bins.
+    pub fn new(n_features: usize) -> Self {
+        Self {
+            n_features: n_features.max(1),
+        }
+    }
+
+    fn bin(j: usize, n: usize) -> (usize, f64) {
+        let h = (j as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let sign = if (h >> 1) & 1 == 0 { 1.0 } else { -1.0 };
+        ((h as usize) % n.max(1), sign)
+    }
+}
+
+impl Transform for FeatureHasher {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let m = self.n_features.max(1);
+        let mut out = Matrix::zeros(x.nrows(), m);
+        for i in 0..x.nrows() {
+            for j in 0..x.ncols() {
+                let (b, s) = Self::bin(j, m);
+                out.set(i, b, out.get(i, b) + s * x.get(i, j));
+            }
+        }
         ctx.finish(out)
     }
 }
@@ -2168,5 +2581,32 @@ mod tests {
             .value;
         assert_eq!(z.ncols(), 8);
         assert!(z.get(0, 0).is_finite());
+        let mut sk = SkewedChi2Sampler::new(6);
+        sk.fit_unsupervised(&xnn, &Session::new("sch", "fit"))
+            .unwrap();
+        let zs = sk.transform(&xnn, &Session::new("sch", "t")).unwrap().value;
+        assert_eq!(zs.ncols(), 6);
+        assert!(zs.get(0, 0).is_finite());
+        let mut pcs = PolynomialCountSketch::new(8);
+        pcs.fit_unsupervised(&xnn, &Session::new("pcs", "fit"))
+            .unwrap();
+        let zp = pcs
+            .transform(&xnn, &Session::new("pcs", "t"))
+            .unwrap()
+            .value;
+        assert_eq!(zp.ncols(), 8);
+        assert!(zp.get(0, 0).is_finite());
+        let mut fwe = SelectFwe::new(0.05);
+        fwe.fit(&x, &y, &Session::new("fwe", "fit")).unwrap();
+        assert!(fwe.support()[0]);
+        let mut guni = GenericUnivariateSelect::new(UnivariateMode::KBest, 1.0);
+        guni.fit(&x, &y, &Session::new("guni", "fit")).unwrap();
+        assert!(guni.support().iter().any(|s| *s));
+        let zh = FeatureHasher::new(8)
+            .transform(&xnn, &Session::new("fh", "t"))
+            .unwrap()
+            .value;
+        assert_eq!(zh.ncols(), 8);
+        assert!(zh.get(0, 0).is_finite());
     }
 }
