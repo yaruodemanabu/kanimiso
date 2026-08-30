@@ -14748,6 +14748,434 @@ pub fn seasonal_kpss(
     }
 }
 
+/// Aggregate–disaggregate Croston (sktime `ADIDA`).
+///
+/// Period is not identification `p`. Fold only on a series with some positive
+/// demand — Croston's `MeaninglessFit` aborts on an all-zero series.
+#[derive(Clone, Debug)]
+pub struct Adida {
+    /// Aggregation bucket length.
+    pub period: usize,
+    /// Croston smoother on the aggregates.
+    pub alpha: f64,
+}
+
+impl Default for Adida {
+    fn default() -> Self {
+        Self {
+            period: 4,
+            alpha: 0.1,
+        }
+    }
+}
+
+impl Adida {
+    /// ADIDA with aggregation period `period`.
+    pub fn new(period: usize) -> Self {
+        Self {
+            period,
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted ADIDA rate on the original time scale.
+#[derive(Clone, Debug)]
+pub struct FittedAdida {
+    /// Disaggregated Croston rate.
+    pub rate: f64,
+    /// Aggregation period used.
+    pub period: usize,
+}
+
+impl FittedAdida {
+    /// Constant disaggregated rate.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(Vector::filled(h, self.rate))
+    }
+}
+
+fn adida_aggregate(y: &Vector, period: usize) -> Vector {
+    let s = period.max(1);
+    let n_agg = y.len().div_ceil(s);
+    Vector::from_iter((0..n_agg.max(1)).map(|k| {
+        let lo = k * s;
+        let hi = (lo + s).min(y.len());
+        if lo >= y.len() {
+            0.0
+        } else {
+            (lo..hi).map(|t| y[t]).sum::<f64>()
+        }
+    }))
+}
+
+impl FitSeries for Adida {
+    type Fitted = FittedAdida;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedAdida>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let s = self.period.max(1);
+        if y.len() < s {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .severity(Severity::Warning)
+                    .message(format!("ADIDA period={s} > n={}; using the raw series", y.len()))
+                    .build(),
+            );
+        }
+        let agg = adida_aggregate(y, s);
+        let crost = match Croston::new(self.alpha).fit_series(&agg, &session.child("adida_crost")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::R2IsOne
+                        | IssueCode::RankZero
+                ) {
+                    ctx.push(e.primary);
+                }
+                return ctx.finish(FittedAdida {
+                    rate: f64::NAN,
+                    period: s,
+                });
+            }
+        };
+        let rate = if crost.p.abs() > 1e-15 {
+            (crost.z / crost.p) / s as f64
+        } else {
+            f64::NAN
+        };
+        ctx.finish(FittedAdida { rate, period: s })
+    }
+}
+
+/// Four-Theta combination (sktime `FourThetaForecaster` lite).
+///
+/// Combines Theta, SES, and seasonal-naive. Period is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct FourTheta {
+    /// Seasonal period for the naive member.
+    pub period: usize,
+}
+
+impl Default for FourTheta {
+    fn default() -> Self {
+        Self { period: 4 }
+    }
+}
+
+impl FourTheta {
+    /// Four-Theta with seasonal period `period`.
+    pub fn new(period: usize) -> Self {
+        Self { period }
+    }
+}
+
+/// Fitted Four-Theta members.
+#[derive(Clone, Debug)]
+pub struct FittedFourTheta {
+    /// Theta member.
+    pub theta: FittedTheta,
+    /// SES level.
+    pub ses_level: f64,
+    /// Last seasonal cycle (length `period`).
+    pub seasonal_last: Vector,
+    /// Seasonal period.
+    pub period: usize,
+}
+
+impl FittedFourTheta {
+    /// Equal-weight combination of Theta, SES, and seasonal-naive.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let th = match self.theta.forecast(h, &session.child("fourtheta_th")) {
+            Ok(q) => q.value,
+            Err(_) => Vector::filled(h, self.theta.level),
+        };
+        let out = Vector::from_iter((0..h).map(|k| {
+            let naive = if self.seasonal_last.is_empty() {
+                self.ses_level
+            } else {
+                self.seasonal_last[k % self.seasonal_last.len()]
+            };
+            let t = if k < th.len() { th[k] } else { self.theta.level };
+            (t + self.ses_level + naive) / 3.0
+        }));
+        ctx.finish(out)
+    }
+}
+
+impl FitSeries for FourTheta {
+    type Fitted = FittedFourTheta;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedFourTheta>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let s = self.period.max(1);
+        if y.len() < 2 * s {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSeasonalCycles)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "FourTheta period={s} has fewer than two cycles in n={}",
+                        y.len()
+                    ))
+                    .build(),
+            );
+        }
+        let theta = match Theta.fit_series(y, &session.child("fourtheta_th")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::R2IsOne
+                        | IssueCode::RankZero
+                ) {
+                    ctx.push(e.primary);
+                }
+                FittedTheta {
+                    level: y.as_slice().last().copied().unwrap_or(0.0),
+                    alpha: 1.0,
+                    drift: 0.0,
+                }
+            }
+        };
+        let (_a, _b, ses_level, _tr, _f) = esm_fit(y.as_slice(), SmoothingKind::Simple, None, None);
+        let seasonal_last = if y.is_empty() {
+            Vector::zeros(0)
+        } else {
+            let take = s.min(y.len());
+            Vector::from_iter(((y.len() - take)..y.len()).map(|t| y[t]))
+        };
+        ctx.finish(FittedFourTheta {
+            theta,
+            ses_level,
+            seasonal_last,
+            period: s,
+        })
+    }
+}
+
+/// Ensemble batch prediction intervals (sktime `EnbPI` lite).
+///
+/// Residual-bootstrap intervals around last-value / SES. Bootstrap / member
+/// counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct EnbPI {
+    /// Bootstrap draws.
+    pub n_boot: usize,
+    /// Nominal two-sided miss rate.
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for EnbPI {
+    fn default() -> Self {
+        Self {
+            n_boot: 32,
+            alpha: 0.1,
+            seed: 3,
+        }
+    }
+}
+
+impl EnbPI {
+    /// EnbPI-lite with `n_boot` residual draws.
+    pub fn new(n_boot: usize) -> Self {
+        Self {
+            n_boot,
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted EnbPI-lite intervals.
+#[derive(Clone, Debug)]
+pub struct FittedEnbPI {
+    /// Point forecast (SES level).
+    pub point: f64,
+    /// Lower residual quantile (added to the point).
+    pub lo: f64,
+    /// Upper residual quantile.
+    pub hi: f64,
+}
+
+impl FittedEnbPI {
+    /// Constant SES point forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(Vector::filled(h, self.point))
+    }
+
+    /// Point plus residual-bootstrap interval bounds `(lo, mid, hi)` per step.
+    pub fn interval(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+        let ctx = FitCtx::with_session(session.child("interval"));
+        ctx.finish(Matrix::from_fn(h, 3, |_, j| {
+            if j == 0 {
+                self.point + self.lo
+            } else if j == 1 {
+                self.point
+            } else {
+                self.point + self.hi
+            }
+        }))
+    }
+}
+
+impl FitSeries for EnbPI {
+    type Fitted = FittedEnbPI;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedEnbPI>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .message("EnbPI needs at least one observation")
+                    .build(),
+            );
+            return ctx.finish(FittedEnbPI {
+                point: f64::NAN,
+                lo: 0.0,
+                hi: 0.0,
+            });
+        }
+        let (alpha, _b, level, _tr, fitted) =
+            esm_fit(y.as_slice(), SmoothingKind::Simple, None, None);
+        let mut resid: Vec<f64> = Vec::new();
+        for t in 0..y.len() {
+            let e = y[t] - fitted[t];
+            if e.is_finite() {
+                resid.push(e);
+            }
+        }
+        if resid.is_empty() {
+            resid.push(0.0);
+        }
+        let mut rng = Rng::new(self.seed);
+        let nb = self.n_boot.max(8);
+        let mut boots = Vec::with_capacity(nb);
+        for _ in 0..nb {
+            let i = rng.below(resid.len());
+            boots.push(resid[i]);
+        }
+        boots.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let a = if self.alpha.is_finite() && self.alpha > 0.0 && self.alpha < 1.0 {
+            self.alpha
+        } else {
+            0.1
+        };
+        let lo_i = ((a / 2.0) * (nb.saturating_sub(1)) as f64).floor() as usize;
+        let hi_i = (((1.0 - a / 2.0) * (nb.saturating_sub(1)) as f64).ceil() as usize).min(nb - 1);
+        let _ = alpha;
+        ctx.finish(FittedEnbPI {
+            point: level,
+            lo: boots[lo_i.min(nb - 1)],
+            hi: boots[hi_i],
+        })
+    }
+}
+
+/// Hamilton (2018) regression filter (statsmodels `HamiltonFilter` lite).
+///
+/// \(y_{t+h}\) on an intercept and `lags` of \(y_t,y_{t-1},\ldots\). Lag count
+/// is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct HamiltonFilter {
+    /// Forecast horizon \(h\).
+    pub horizon: usize,
+    /// Number of lags of \(y_t\).
+    pub lags: usize,
+}
+
+impl Default for HamiltonFilter {
+    fn default() -> Self {
+        Self {
+            horizon: 2,
+            lags: 4,
+        }
+    }
+}
+
+impl HamiltonFilter {
+    /// Hamilton filter with horizon `h` and `lags` lags.
+    pub fn new(horizon: usize, lags: usize) -> Self {
+        Self { horizon, lags }
+    }
+}
+
+/// Fitted Hamilton cycle.
+#[derive(Clone, Debug)]
+pub struct FittedHamiltonFilter {
+    /// Residual cycle (length \(n\); leading observations are NaN).
+    pub cycle: Vector,
+    /// OLS coefficients `[intercept, y_t, …]`.
+    pub coef: Vector,
+    /// Horizon used.
+    pub horizon: usize,
+}
+
+impl FitSeries for HamiltonFilter {
+    type Fitted = FittedHamiltonFilter;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedHamiltonFilter>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let h = self.horizon.max(1);
+        let p = self.lags.max(1);
+        let n = y.len();
+        let need = h + p;
+        if n <= need {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!("HamiltonFilter needs n>{need}; got n={n}"))
+                    .build(),
+            );
+            return ctx.finish(FittedHamiltonFilter {
+                cycle: Vector::from_iter((0..n).map(|_| f64::NAN)),
+                coef: Vector::zeros(p + 1),
+                horizon: h,
+            });
+        }
+        let n_reg = n - h - p + 1;
+        let design = Matrix::from_fn(n_reg, p + 1, |i, j| {
+            let t = i + (p - 1);
+            if j == 0 {
+                1.0
+            } else {
+                y[t + 1 - j]
+            }
+        });
+        let yy = Vector::from_iter((0..n_reg).map(|i| {
+            let t = i + (p - 1);
+            y[t + h]
+        }));
+        let coef = statistical_ols(&mut ctx, &design, &yy).unwrap_or_else(|| Vector::zeros(p + 1));
+        let mut cycle = Vector::from_iter((0..n).map(|_| f64::NAN));
+        for i in 0..n_reg {
+            let t = i + (p - 1);
+            let mut fit = 0.0;
+            for j in 0..coef.len() {
+                fit += design.get(i, j) * coef[j];
+            }
+            cycle[t + h] = y[t + h] - fit;
+        }
+        ctx.finish(FittedHamiltonFilter {
+            cycle,
+            coef,
+            horizon: h,
+        })
+    }
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -15821,5 +16249,45 @@ pub fn seasonal_kpss(
         assert!(x13.value.seasonal.as_slice().iter().all(|v| v.is_finite()));
         let sk = seasonal_kpss(&y, 4, &Session::new("skpss", "t")).expect("skpss");
         assert!(sk.value.stat.is_finite() || sk.value.pvalue.is_nan());
+        let ad = Adida::new(4)
+            .fit_series(&ypos, &Session::new("adida", "fit"))
+            .expect("adida");
+        let adf = ad
+            .value
+            .forecast(3, &Session::new("adida", "fc"))
+            .expect("adidaf")
+            .value;
+        assert_eq!(adf.len(), 3);
+        assert!(adf.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let ft = FourTheta::new(4)
+            .fit_series(&y, &Session::new("fth", "fit"))
+            .expect("fth");
+        let ftf = ft
+            .value
+            .forecast(4, &Session::new("fth", "fc"))
+            .expect("fthf")
+            .value;
+        assert_eq!(ftf.len(), 4);
+        assert!(ftf.as_slice().iter().all(|v| v.is_finite()));
+        let enb = EnbPI::new(16)
+            .fit_series(&y, &Session::new("enbpi", "fit"))
+            .expect("enbpi");
+        let enbf = enb
+            .value
+            .forecast(3, &Session::new("enbpi", "fc"))
+            .expect("enbf")
+            .value;
+        assert_eq!(enbf.len(), 3);
+        let enbi = enb
+            .value
+            .interval(3, &Session::new("enbpi", "int"))
+            .expect("enbi")
+            .value;
+        assert_eq!(enbi.shape(), (3, 3));
+        let ham = HamiltonFilter::new(2, 4)
+            .fit_series(&y, &Session::new("ham", "fit"))
+            .expect("ham");
+        assert_eq!(ham.value.cycle.len(), 40);
+        assert!(ham.value.coef.as_slice().iter().all(|v| v.is_finite()));
     }
 }

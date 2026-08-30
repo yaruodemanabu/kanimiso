@@ -4510,6 +4510,90 @@ const INVENTORY: &[Algorithm] = &[
         "sktime.classification.interval_based.RSTSF",
         "timeseries",
     ),
+    a(
+        "tslearn.LiteTime",
+        "sktime.classification.deep_learning.LITETimeClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.MrSqm",
+        "sktime.classification.dictionary_based.MrSQM",
+        "timeseries",
+    ),
+    a(
+        "tslearn.IndividualTde",
+        "sktime.classification.dictionary_based.IndividualTDE",
+        "timeseries",
+    ),
+    a(
+        "tslearn.TsFreshClassifier",
+        "sktime.classification.feature_based.TSFreshClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.SupervisedIntervals",
+        "sktime.transformations.panel.supervised_intervals.SupervisedIntervals",
+        "timeseries",
+    ),
+    a(
+        "tslearn.WeaselV2",
+        "sktime.classification.dictionary_based.WEASEL_V2",
+        "timeseries",
+    ),
+    a(
+        "tslearn.Teaser",
+        "sktime.classification.early_classification.TEASER",
+        "timeseries",
+    ),
+    a(
+        "tslearn.MultiRocketClassifier",
+        "sktime.classification.kernel_based.MultiRocketClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.MiniRocketRegressor",
+        "sktime.regression.kernel_based.MiniRocketRegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.RandomIntervalRegressor",
+        "sktime.regression.interval_based.RandomIntervalRegressor",
+        "timeseries",
+    ),
+    a("tsa.Adida", "sktime.forecasting.adida.ADIDA", "forecast"),
+    a(
+        "tsa.FourTheta",
+        "sktime.forecasting.four_theta.FourThetaForecaster",
+        "forecast",
+    ),
+    a("tsa.EnbPI", "sktime.forecasting.enbpi.EnbPIForecaster", "forecast"),
+    a(
+        "tsa.HamiltonFilter",
+        "statsmodels.tsa.filters.hamilton_filter.HamiltonFilter",
+        "forecast",
+    ),
+    a(
+        "glm.TruncatedNegativeBinomial",
+        "statsmodels.discrete.truncated_model.TruncatedNegativeBinomial",
+        "estimator",
+    ),
+    a(
+        "glm.ConditionalPoisson",
+        "statsmodels.discrete.conditional_models.ConditionalPoisson",
+        "estimator",
+    ),
+    a(
+        "online.OnlineHarmonicMean",
+        "river.stats.HarmonicMean",
+        "online",
+    ),
+    a(
+        "online.OnlineQuadraticMean",
+        "river.stats.QuadraticMean",
+        "online",
+    ),
+    a("online.RollingVar", "river.stats.RollingVar", "online"),
+    a("online.RollingCov", "river.stats.RollingCov", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4817,6 +4901,10 @@ mod tests {
             "online.OnlineGeometricMean",
             "tsa.X13",
             "stats.samplesize_proportions",
+            "tslearn.LiteTime",
+            "tsa.Adida",
+            "glm.TruncatedNegativeBinomial",
+            "online.OnlineHarmonicMean",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

@@ -10706,6 +10706,776 @@ impl Predict for FittedRstsf {
     }
 }
 
+/// Multi-scale convolution + ridge (tslearn / sktime `LITETimeClassifier` lite).
+///
+/// Kernel / width counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct LiteTime {
+    /// Kernels per width.
+    pub n_kernels: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for LiteTime {
+    fn default() -> Self {
+        Self {
+            n_kernels: 4,
+            alpha: 0.1,
+            seed: 19,
+        }
+    }
+}
+
+impl LiteTime {
+    /// Default LITETime-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted LITETime-lite ridge.
+#[derive(Clone, Debug)]
+pub struct FittedLiteTime {
+    kernels: Vec<Vec<f64>>,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for LiteTime {
+    type Fitted = FittedLiteTime;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLiteTime>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let t = x.ncols().max(1);
+        let widths = [3usize, 5, t.min(7)]
+            .into_iter()
+            .filter(|&w| w <= t && w > 0);
+        let mut rng = Rng::new(self.seed);
+        let mut kernels: Vec<Vec<f64>> = Vec::new();
+        for w in widths {
+            for _ in 0..self.n_kernels.max(1) {
+                kernels.push((0..w).map(|_| rng.standard_normal()).collect());
+            }
+        }
+        if kernels.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message("LiteTime has no kernel that fits T")
+                    .build(),
+            );
+            kernels.push(vec![1.0]);
+        }
+        let z = conv_maxpool(x, &kernels);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "litetime");
+        ctx.finish(FittedLiteTime { kernels, inner })
+    }
+}
+
+impl Predict for FittedLiteTime {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = conv_maxpool(x, &self.kernels);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// SAX-word features + ridge (sktime `MrSQM` lite).
+///
+/// Piece / alphabet counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MrSqm {
+    /// PAA pieces.
+    pub n_pieces: usize,
+    /// SAX alphabet size.
+    pub alphabet: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for MrSqm {
+    fn default() -> Self {
+        Self {
+            n_pieces: 4,
+            alphabet: 4,
+            alpha: 0.1,
+        }
+    }
+}
+
+impl MrSqm {
+    /// Default MrSQM-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted SAX-ridge classifier.
+#[derive(Clone, Debug)]
+pub struct FittedMrSqm {
+    n_pieces: usize,
+    alphabet: usize,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+fn sax_feature_rows(x: &Matrix, n_pieces: usize, alphabet: usize) -> Matrix {
+    let k = n_pieces.max(1);
+    Matrix::from_fn(x.nrows(), k, |i, j| {
+        let row = x.row(i);
+        let s = sax_symbols(row.as_slice(), k, alphabet);
+        s.get(j).copied().unwrap_or(0.0)
+    })
+}
+
+impl Fit for MrSqm {
+    type Fitted = FittedMrSqm;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedMrSqm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let z = sax_feature_rows(x, self.n_pieces, self.alphabet);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "mrsqm");
+        ctx.finish(FittedMrSqm {
+            n_pieces: self.n_pieces.max(1),
+            alphabet: self.alphabet.max(2),
+            inner,
+        })
+    }
+}
+
+impl Predict for FittedMrSqm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = sax_feature_rows(x, self.n_pieces, self.alphabet);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Single temporal-dictionary member (sktime `IndividualTDE` lite).
+///
+/// Word count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct IndividualTde {
+    /// Sliding-window length.
+    pub window: usize,
+    /// DFT coefficients kept per window.
+    pub word_len: usize,
+    /// SFA alphabet size.
+    pub alphabet: usize,
+    /// Words kept.
+    pub n_words: usize,
+}
+
+impl Default for IndividualTde {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            word_len: 4,
+            alphabet: 4,
+            n_words: 8,
+        }
+    }
+}
+
+impl IndividualTde {
+    /// Default single-dictionary TDE member.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for IndividualTde {
+    type Fitted = FittedBoss;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedBoss>> {
+        Weasel {
+            window: self.window,
+            word_len: self.word_len,
+            alphabet: self.alphabet,
+            n_words: self.n_words,
+        }
+        .fit(x, y, session)
+    }
+}
+
+/// Catch22 / tsfresh-lite features + ridge (sktime `TSFreshClassifier` lite).
+///
+/// Feature count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct TsFreshClassifier {
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for TsFreshClassifier {
+    fn default() -> Self {
+        Self { alpha: 0.1 }
+    }
+}
+
+impl TsFreshClassifier {
+    /// Default tsfresh-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted tsfresh-lite ridge.
+#[derive(Clone, Debug)]
+pub struct FittedTsFreshClassifier {
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for TsFreshClassifier {
+    type Fitted = FittedTsFreshClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedTsFreshClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let z = catch22_rows(x, session, &mut ctx);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "tsfresh");
+        ctx.finish(FittedTsFreshClassifier { inner })
+    }
+}
+
+impl Predict for FittedTsFreshClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let z = catch22_rows(x, session, &mut ctx);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Supervised-interval features + ridge (sktime `SupervisedIntervals` lite).
+///
+/// Interval count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SupervisedIntervals {
+    /// Intervals ranked by class-mean gap.
+    pub n_intervals: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for SupervisedIntervals {
+    fn default() -> Self {
+        Self {
+            n_intervals: 6,
+            alpha: 0.1,
+            seed: 6,
+        }
+    }
+}
+
+impl SupervisedIntervals {
+    /// Default supervised-interval classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted supervised-interval ridge.
+#[derive(Clone, Debug)]
+pub struct FittedSupervisedIntervals {
+    intervals: Vec<Interval>,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for SupervisedIntervals {
+    type Fitted = FittedSupervisedIntervals;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSupervisedIntervals>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let mut rng = Rng::new(self.seed);
+        let intervals = supervised_intervals(x, y, self.n_intervals, &mut rng);
+        let z = interval_feats(x, &intervals);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "supint");
+        ctx.finish(FittedSupervisedIntervals { intervals, inner })
+    }
+}
+
+impl Predict for FittedSupervisedIntervals {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = interval_feats(x, &self.intervals);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Two-window WEASEL histograms + ridge (sktime `WEASEL_V2` lite).
+///
+/// Word / window counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct WeaselV2 {
+    /// First sliding-window length.
+    pub window_a: usize,
+    /// Second sliding-window length.
+    pub window_b: usize,
+    /// DFT coefficients kept per window.
+    pub word_len: usize,
+    /// SFA alphabet size.
+    pub alphabet: usize,
+    /// Words kept per window.
+    pub n_words: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for WeaselV2 {
+    fn default() -> Self {
+        Self {
+            window_a: 8,
+            window_b: 4,
+            word_len: 4,
+            alphabet: 4,
+            n_words: 6,
+            alpha: 0.1,
+        }
+    }
+}
+
+impl WeaselV2 {
+    /// Default two-window WEASEL.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted two-window WEASEL ridge.
+#[derive(Clone, Debug)]
+pub struct FittedWeaselV2 {
+    spec_a: (usize, usize, usize),
+    spec_b: (usize, usize, usize),
+    idx_a: Vec<usize>,
+    idx_b: Vec<usize>,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+fn weasel_keep(h: &Matrix, n_words: usize) -> (Matrix, Vec<usize>) {
+    let mut vars: Vec<(usize, f64)> = (0..h.ncols()).map(|j| (j, h.column(j).std())).collect();
+    vars.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let keep = n_words.max(1).min(h.ncols().max(1));
+    let idx: Vec<usize> = vars.iter().take(keep).map(|p| p.0).collect();
+    let z = if idx.is_empty() {
+        Matrix::zeros(h.nrows(), 0)
+    } else {
+        Matrix::from_fn(h.nrows(), idx.len(), |i, t| h.get(i, idx[t]))
+    };
+    (z, idx)
+}
+
+fn concat_features(a: &Matrix, b: &Matrix) -> Matrix {
+    let n = a.nrows().max(b.nrows());
+    let pa = a.ncols();
+    let pb = b.ncols();
+    Matrix::from_fn(n, pa + pb, |i, j| {
+        if j < pa {
+            if i < a.nrows() {
+                a.get(i, j)
+            } else {
+                0.0
+            }
+        } else if i < b.nrows() {
+            b.get(i, j - pa)
+        } else {
+            0.0
+        }
+    })
+}
+
+fn weasel_v2_features(
+    x: &Matrix,
+    spec_a: (usize, usize, usize),
+    spec_b: (usize, usize, usize),
+    idx_a: &[usize],
+    idx_b: &[usize],
+) -> Matrix {
+    let (h1, _) = boss_histograms(x, spec_a.0, spec_a.1, spec_a.2);
+    let (h2, _) = boss_histograms(x, spec_b.0, spec_b.1, spec_b.2);
+    let z1 = if idx_a.is_empty() {
+        Matrix::zeros(h1.nrows(), 0)
+    } else {
+        Matrix::from_fn(h1.nrows(), idx_a.len(), |i, t| {
+            if idx_a[t] < h1.ncols() {
+                h1.get(i, idx_a[t])
+            } else {
+                0.0
+            }
+        })
+    };
+    let z2 = if idx_b.is_empty() {
+        Matrix::zeros(h2.nrows(), 0)
+    } else {
+        Matrix::from_fn(h2.nrows(), idx_b.len(), |i, t| {
+            if idx_b[t] < h2.ncols() {
+                h2.get(i, idx_b[t])
+            } else {
+                0.0
+            }
+        })
+    };
+    concat_features(&z1, &z2)
+}
+
+impl Fit for WeaselV2 {
+    type Fitted = FittedWeaselV2;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedWeaselV2>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let spec_a = (self.window_a.max(2), self.word_len.max(1), self.alphabet.max(2));
+        let spec_b = (self.window_b.max(2), self.word_len.max(1), self.alphabet.max(2));
+        let (h1, _) = boss_histograms(x, spec_a.0, spec_a.1, spec_a.2);
+        let (h2, _) = boss_histograms(x, spec_b.0, spec_b.1, spec_b.2);
+        let (z1, idx_a) = weasel_keep(&h1, self.n_words);
+        let (z2, idx_b) = weasel_keep(&h2, self.n_words);
+        let z = concat_features(&z1, &z2);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "weaselv2");
+        ctx.finish(FittedWeaselV2 {
+            spec_a,
+            spec_b,
+            idx_a,
+            idx_b,
+            inner,
+        })
+    }
+}
+
+impl Predict for FittedWeaselV2 {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = weasel_v2_features(x, self.spec_a, self.spec_b, &self.idx_a, &self.idx_b);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Early-classification prefix ridge (sktime `TEASER` lite).
+///
+/// Prefix length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Teaser {
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for Teaser {
+    fn default() -> Self {
+        Self { alpha: 0.1 }
+    }
+}
+
+impl Teaser {
+    /// Default TEASER-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted prefix-summary ridge.
+#[derive(Clone, Debug)]
+pub struct FittedTeaser {
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+fn prefix_summary(x: &Matrix) -> Matrix {
+    let t = x.ncols().max(1);
+    let half = (t / 2).max(1);
+    interval_feats(x, &[Interval { start: 0, end: half }])
+}
+
+impl Fit for Teaser {
+    type Fitted = FittedTeaser;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedTeaser>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let z = prefix_summary(x);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "teaser");
+        ctx.finish(FittedTeaser { inner })
+    }
+}
+
+impl Predict for FittedTeaser {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = prefix_summary(x);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// MultiROCKET features + ridge (sktime `MultiRocketClassifier`).
+///
+/// Kernel count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MultiRocketClassifier {
+    /// Random kernels.
+    pub n_kernels: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for MultiRocketClassifier {
+    fn default() -> Self {
+        Self {
+            n_kernels: 16,
+            alpha: 0.5,
+            seed: 8,
+        }
+    }
+}
+
+impl MultiRocketClassifier {
+    /// Default MultiROCKET classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted MultiROCKET ridge classifier.
+#[derive(Clone, Debug)]
+pub struct FittedMultiRocketClassifier {
+    rocket: MultiRocket,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for MultiRocketClassifier {
+    type Fitted = FittedMultiRocketClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMultiRocketClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let rocket = MultiRocket {
+            n_kernels: self.n_kernels.max(1),
+            seed: self.seed,
+        };
+        let feat = rocket.transform(x, &session.child("mrocketc"))?;
+        let inner = binary_ridge_from_features(&feat.value, y, self.alpha, &ctx.policy, "mrocketc");
+        ctx.finish(FittedMultiRocketClassifier { rocket, inner })
+    }
+}
+
+impl Predict for FittedMultiRocketClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let feat = self.rocket.transform(x, &session.child("mrocketc"))?;
+        self.inner.predict(&feat.value, session)
+    }
+}
+
+/// MiniROCKET features + ridge (sktime `MiniRocketRegressor`).
+///
+/// Kernel count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MiniRocketRegressor {
+    /// Random dilated kernels.
+    pub n_kernels: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for MiniRocketRegressor {
+    fn default() -> Self {
+        Self {
+            n_kernels: 16,
+            alpha: 1.0,
+            seed: 9,
+        }
+    }
+}
+
+impl MiniRocketRegressor {
+    /// Default MiniROCKET regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted MiniROCKET ridge.
+#[derive(Clone, Debug)]
+pub struct FittedMiniRocketRegressor {
+    rocket: MiniRocket,
+    inner: FittedPenalized,
+}
+
+impl Fit for MiniRocketRegressor {
+    type Fitted = FittedMiniRocketRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMiniRocketRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let rocket = MiniRocket {
+            n_kernels: self.n_kernels.max(1),
+            seed: self.seed,
+        };
+        let feat = rocket.transform(x, &session.child("minirocket"))?;
+        let mut scratch = signlred::Report::new("minirocket_reg", "ridge");
+        let design = feat.value.with_intercept();
+        let beta = ridge_solve(&mut scratch, &design, y, self.alpha.max(0.0), &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::PerfectCollinearity
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedMiniRocketRegressor {
+            rocket,
+            inner: FittedPenalized {
+                coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+                alpha: self.alpha,
+                l1_ratio: 0.0,
+            },
+        })
+    }
+}
+
+impl Predict for FittedMiniRocketRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let feat = self.rocket.transform(x, &session.child("minirocket"))?;
+        self.inner.predict(&feat.value, session)
+    }
+}
+
+/// Random-interval features + ridge (sktime `RandomIntervalRegressor`).
+///
+/// Interval count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RandomIntervalRegressor {
+    /// Random intervals.
+    pub n_intervals: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for RandomIntervalRegressor {
+    fn default() -> Self {
+        Self {
+            n_intervals: 6,
+            alpha: 0.1,
+            seed: 4,
+        }
+    }
+}
+
+impl RandomIntervalRegressor {
+    /// Default random-interval regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted random-interval ridge regressor.
+#[derive(Clone, Debug)]
+pub struct FittedRandomIntervalRegressor {
+    intervals: Vec<Interval>,
+    inner: FittedPenalized,
+}
+
+impl Fit for RandomIntervalRegressor {
+    type Fitted = FittedRandomIntervalRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRandomIntervalRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let tlen = x.ncols().max(1);
+        let mut rng = Rng::new(self.seed);
+        let ni = self.n_intervals.max(1);
+        let mut intervals = Vec::with_capacity(ni);
+        for _ in 0..ni {
+            let a = rng.below(tlen);
+            let span = rng.below(tlen).max(1);
+            let b = (a + span).min(tlen);
+            intervals.push(Interval {
+                start: a.min(b.saturating_sub(1)),
+                end: b.max(a + 1),
+            });
+        }
+        let z = interval_feats(x, &intervals);
+        let mut scratch = signlred::Report::new("rir", "ridge");
+        let design = z.with_intercept();
+        let beta = ridge_solve(&mut scratch, &design, y, self.alpha.max(0.0), &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::PerfectCollinearity
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedRandomIntervalRegressor {
+            intervals,
+            inner: FittedPenalized {
+                coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+                alpha: self.alpha,
+                l1_ratio: 0.0,
+            },
+        })
+    }
+}
+
+impl Predict for FittedRandomIntervalRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = interval_feats(x, &self.intervals);
+        self.inner.predict(&z, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10973,6 +11743,116 @@ mod tests {
             .value;
         assert_eq!(prst.len(), 8);
         assert!(prst.as_slice().iter().all(|v| v.is_finite()));
+        let lt = LiteTime::new()
+            .fit(&x, &y, &Session::new("ts", "lite"))
+            .unwrap();
+        assert_eq!(
+            lt.value
+                .predict(&x, &Session::new("ts", "litep"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let mq = MrSqm::new()
+            .fit(&x, &y, &Session::new("ts", "mrsqm"))
+            .unwrap();
+        assert_eq!(
+            mq.value
+                .predict(&x, &Session::new("ts", "mrsqmp"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let itde = IndividualTde::new()
+            .fit(&x, &y, &Session::new("ts", "itde"))
+            .unwrap();
+        assert!(itde
+            .value
+            .predict(&x, &Session::new("ts", "itdep"))
+            .unwrap()
+            .value
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite()));
+        let tsf = TsFreshClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "tsf"))
+            .unwrap();
+        assert_eq!(
+            tsf.value
+                .predict(&x, &Session::new("ts", "tsfp"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let si = SupervisedIntervals::new()
+            .fit(&x, &y, &Session::new("ts", "suint"))
+            .unwrap();
+        assert_eq!(
+            si.value
+                .predict(&x, &Session::new("ts", "suintp"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let wv2 = WeaselV2::new()
+            .fit(&x, &y, &Session::new("ts", "wv2"))
+            .unwrap();
+        assert_eq!(
+            wv2.value
+                .predict(&x, &Session::new("ts", "wv2p"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let te = Teaser::new()
+            .fit(&x, &y, &Session::new("ts", "teaser"))
+            .unwrap();
+        assert_eq!(
+            te.value
+                .predict(&x, &Session::new("ts", "teaserp"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let mrc = MultiRocketClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "mrc"))
+            .unwrap();
+        assert_eq!(
+            mrc.value
+                .predict(&x, &Session::new("ts", "mrcp"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let mirr = MiniRocketRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "mirr"))
+            .unwrap();
+        assert!(mirr
+            .value
+            .predict(&x, &Session::new("ts", "mirrp"))
+            .unwrap()
+            .value
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite()));
+        let rir = RandomIntervalRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "rir"))
+            .unwrap();
+        assert!(rir
+            .value
+            .predict(&x, &Session::new("ts", "rirp"))
+            .unwrap()
+            .value
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite()));
     }
 
     #[test]

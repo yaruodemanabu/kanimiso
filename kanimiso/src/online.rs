@@ -16001,6 +16001,360 @@ impl PartialFit for RollingMean {
     }
 }
 
+/// Expanding harmonic mean (river `stats.HarmonicMean`).
+///
+/// Non-positive values are skipped with a warning. Test streams that start at
+/// 0 must not abort.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineHarmonicMean {
+    inv_sum: f64,
+    n_pos: u64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl OnlineHarmonicMean {
+    /// Empty harmonic mean.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current harmonic mean, or NaN before the first positive value.
+    pub fn score(&self) -> f64 {
+        if self.n_pos == 0 || self.inv_sum.abs() < 1e-300 {
+            f64::NAN
+        } else {
+            self.n_pos as f64 / self.inv_sum
+        }
+    }
+}
+
+impl PartialFit for OnlineHarmonicMean {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        let mut skipped = 0usize;
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            self.n_seen += 1;
+            if v <= 0.0 {
+                skipped += 1;
+                continue;
+            }
+            self.inv_sum += 1.0 / v;
+            self.n_pos += 1;
+        }
+        if skipped > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "OnlineHarmonicMean skipped {skipped} non-positive values"
+                    ))
+                    .build(),
+            );
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_pos as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_pos >= 1;
+        q.warmup = self.n_pos < 1;
+        q.explanation = format!("OnlineHarmonicMean={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "expanding harmonic mean",
+                "n / sum(1/x) on strictly positive column 0",
+                format!("h={before:.6e}"),
+                format!("h={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Expanding quadratic mean / RMS (river `stats.QuadraticMean`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineQuadraticMean {
+    sumsq: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl OnlineQuadraticMean {
+    /// Empty quadratic mean.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current RMS, or NaN before the first finite value.
+    pub fn score(&self) -> f64 {
+        if self.n_seen == 0 {
+            f64::NAN
+        } else {
+            (self.sumsq / self.n_seen as f64).sqrt()
+        }
+    }
+}
+
+impl PartialFit for OnlineQuadraticMean {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            self.sumsq += v * v;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 1;
+        q.explanation = format!("OnlineQuadraticMean={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "expanding quadratic mean",
+                "RMS of column 0",
+                format!("rms={before:.6e}"),
+                format!("rms={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Rolling variance (river `stats.RollingVar`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingVar {
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingVar {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingVar {
+    /// Rolling variance with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Current sample variance, or NaN when the window has fewer than 2 points.
+    pub fn score(&self) -> f64 {
+        if self.buf.len() < 2 {
+            f64::NAN
+        } else {
+            let n = self.buf.len() as f64;
+            let mean = self.buf.iter().sum::<f64>() / n;
+            let ss = self.buf.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>();
+            ss / (n - 1.0)
+        }
+    }
+}
+
+impl PartialFit for RollingVar {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        let cap = self.window.max(2);
+        for i in 0..x.nrows() {
+            rolling_push(&mut self.buf, x.get(i, 0), cap);
+            if x.get(i, 0).is_finite() {
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.buf.len() >= 2;
+        q.warmup = self.buf.len() < 2;
+        q.explanation = format!("RollingVar={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed variance",
+                "sliding sample variance of column 0; window is not identification p",
+                format!("var={before:.6e}"),
+                format!("var={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Rolling covariance of column 0 and `y` (river `stats.RollingCov`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingCov {
+    /// Window capacity.
+    pub window: usize,
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingCov {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            xs: Vec::new(),
+            ys: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingCov {
+    /// Rolling covariance with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Current sample covariance, or NaN when the window has fewer than 2 pairs.
+    pub fn score(&self) -> f64 {
+        let n = self.xs.len().min(self.ys.len());
+        if n < 2 {
+            f64::NAN
+        } else {
+            let nf = n as f64;
+            let mx = self.xs.iter().take(n).sum::<f64>() / nf;
+            let my = self.ys.iter().take(n).sum::<f64>() / nf;
+            let mut c = 0.0;
+            for i in 0..n {
+                c += (self.xs[i] - mx) * (self.ys[i] - my);
+            }
+            c / (nf - 1.0)
+        }
+    }
+}
+
+impl PartialFit for RollingCov {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no y for RollingCov"),
+            );
+        };
+        let before = self.score();
+        let cap = self.window.max(2);
+        let n = x.nrows().min(y.len());
+        for i in 0..n {
+            let xv = x.get(i, 0);
+            let yv = y[i];
+            if xv.is_finite() && yv.is_finite() {
+                rolling_push(&mut self.xs, xv, cap);
+                rolling_push(&mut self.ys, yv, cap);
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.xs.len().min(self.ys.len()) as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.xs.len() >= 2 && self.ys.len() >= 2;
+        q.warmup = self.xs.len() < 2;
+        q.explanation = format!("RollingCov={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed covariance",
+                "sliding sample covariance of column 0 and y; window is not identification p",
+                format!("cov={before:.6e}"),
+                format!("cov={after:.6e}"),
+            ),
+        )
+    }
+}
+
 /// ADWIN-resetting bag of perceptrons (river `ensemble.ADWINBaggingClassifier`).
 #[derive(Clone, Debug)]
 pub struct AdwinBagging {
@@ -24632,6 +24986,18 @@ mod tests {
         OnlineBayesianMean::new(0.0)
             .partial_fit(&x, None, &session)
             .expect("obayes");
+        OnlineHarmonicMean::new()
+            .partial_fit(&x, None, &session)
+            .expect("oharm");
+        OnlineQuadraticMean::new()
+            .partial_fit(&x, None, &session)
+            .expect("oqmean");
+        RollingVar::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("rvar");
+        RollingCov::new(4)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("rcov");
 
         let n_expl = session
             .ledger()
