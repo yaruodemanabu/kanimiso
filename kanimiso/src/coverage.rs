@@ -123,6 +123,11 @@ const INVENTORY: &[Algorithm] = &[
         "estimator",
     ),
     a(
+        "mixed.MixedLM",
+        "statsmodels.regression.mixed_linear_model.MixedLM",
+        "estimator",
+    ),
+    a(
         "cluster.MeanShift",
         "sklearn.cluster.MeanShift",
         "estimator",

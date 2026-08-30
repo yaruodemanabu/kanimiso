@@ -32,6 +32,7 @@ pub mod linalg;
 pub mod linear_model;
 pub mod manifold;
 pub mod metrics;
+pub mod mixed;
 pub mod model_selection;
 pub mod naive_bayes;
 pub mod neighbors;
