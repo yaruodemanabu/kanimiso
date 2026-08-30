@@ -1,0 +1,17 @@
+[package]
+name = "kanimiso"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Pure-Rust machine learning and statistics covering the scope of sklearn, statsmodels, sktime, tslearn, hmmlearn, and river. Uses faer. Quality is enforced by signlred and ojizou-san."
+readme = "../README.md"
+keywords = ["machine-learning", "statistics", "time-series", "online-learning", "linear-algebra"]
+categories = ["science", "algorithms", "mathematics"]
+
+[dependencies]
+faer = { workspace = true }
+signlred = { workspace = true }
+ojizou-san = { workspace = true }
+
+[dev-dependencies]

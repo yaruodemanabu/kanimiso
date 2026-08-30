@@ -1,0 +1,1571 @@
+//! Hidden Markov models (hmmlearn-style).
+//!
+//! [`GaussianHmm`] supports univariate and multivariate sequences (`X` rows =
+//! time, columns = dimensions) with scaled forward–backward, Viterbi decoding,
+//! and Baum–Welch. [`MultinomialHmm`] uses integer emission codes. [`GmmHmm`]
+//! uses a diagonal Gaussian mixture per state (one component recovers a
+//! diagonal [`GaussianHmm`]).
+//!
+//! Quality: [`IssueCode::ForwardUnderflow`], [`IssueCode::ScaleFactorZero`],
+//! [`IssueCode::EmissionDegenerate`], [`IssueCode::AbsorbingStateOnly`],
+//! [`IssueCode::UnreachableState`].
+
+use crate::context::FitCtx;
+use crate::data::{Matrix, Vector};
+use crate::rng::Rng;
+use crate::traits::{FitUnsupervised, Predict};
+use crate::validate::{inspect_identification, inspect_xy};
+use ojizou_san::Session;
+use signlred::{Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result};
+
+const COV_FLOOR: f64 = 1e-6;
+const TRANS_FLOOR: f64 = 1e-8;
+const LN_2PI: f64 = 1.8378770664093453; // ln(2π)
+
+/// A sampled state path and its emissions.
+#[derive(Clone, Debug)]
+pub struct HmmSample {
+    /// Observations (`T` × `d`).
+    pub obs: Matrix,
+    /// Hidden-state ids as `f64`.
+    pub states: Vector,
+}
+
+fn logsumexp(xs: &[f64]) -> f64 {
+    let m = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if !m.is_finite() {
+        return m;
+    }
+    let mut s = 0.0;
+    for &v in xs {
+        s += (v - m).exp();
+    }
+    m + s.ln()
+}
+
+fn col_stds(x: &Matrix) -> Vector {
+    let p = x.ncols();
+    let mut out = Vector::zeros(p);
+    for j in 0..p {
+        out[j] = x.column(j).std();
+    }
+    out
+}
+
+fn series_zero_variance(x: &Matrix, tol: f64) -> bool {
+    if x.nrows() == 0 || x.ncols() == 0 {
+        return true;
+    }
+    col_stds(x).as_slice().iter().all(|s| *s <= tol)
+}
+
+fn emission_degenerate_issue(msg: impl Into<String>) -> Issue {
+    Issue::builder(IssueCode::EmissionDegenerate)
+        .message(msg)
+        .meaninglessness(Meaninglessness::vacuous(
+            "HMM emission parameters",
+            "zero-variance observations collapse every Gaussian / categorical to a delta; decoding is a hard assignment and covariances are unidentified",
+            "do not interpret emission scales; collect variation or switch to a discrete model",
+        ))
+        .build()
+}
+
+fn empty_labels(n: usize) -> Vector {
+    Vector::zeros(n)
+}
+
+fn renormalize_rows(m: &mut Matrix, floor: f64) {
+    let (r, c) = m.shape();
+    for i in 0..r {
+        let mut s = 0.0;
+        for j in 0..c {
+            let v = m.get(i, j).max(floor);
+            m.set(i, j, v);
+            s += v;
+        }
+        if s > 0.0 {
+            for j in 0..c {
+                m.set(i, j, m.get(i, j) / s);
+            }
+        } else if c > 0 {
+            let u = 1.0 / c as f64;
+            for j in 0..c {
+                m.set(i, j, u);
+            }
+        }
+    }
+}
+
+fn renormalize_vec(v: &mut Vector, floor: f64) {
+    let mut s = 0.0;
+    for i in 0..v.len() {
+        v[i] = v[i].max(floor);
+        s += v[i];
+    }
+    if s > 0.0 {
+        for i in 0..v.len() {
+            v[i] /= s;
+        }
+    } else if !v.as_slice().is_empty() {
+        let u = 1.0 / v.len() as f64;
+        for i in 0..v.len() {
+            v[i] = u;
+        }
+    }
+}
+
+fn log_diag_gauss(x: &Matrix, t: usize, mean: &Matrix, state: usize, var: &Matrix) -> f64 {
+    let d = x.ncols().min(mean.ncols()).min(var.ncols());
+    let mut s = 0.0;
+    for j in 0..d {
+        let v = var.get(state, j).max(COV_FLOOR);
+        let z = x.get(t, j) - mean.get(state, j);
+        s += LN_2PI + v.ln() + z * z / v;
+    }
+    -0.5 * s
+}
+
+/// Scaled forward–backward. `log_emit[t][j]` is log p(o_t | state j).
+struct ScaledFb {
+    loglik: f64,
+    gamma: Vec<Vec<f64>>,
+    xi: Vec<Vec<Vec<f64>>>,
+}
+
+fn scaled_forward_backward(
+    ctx: &mut FitCtx,
+    start: &Vector,
+    trans: &Matrix,
+    log_emit: &[Vec<f64>],
+) -> Option<ScaledFb> {
+    let t_len = log_emit.len();
+    let s = start.len();
+    if t_len == 0 || s == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("HMM forward–backward on an empty sequence")
+                .build(),
+        );
+        return None;
+    }
+    let mut alpha = vec![vec![0.0; s]; t_len];
+    let mut scale = vec![0.0; t_len];
+    for j in 0..s {
+        let e = log_emit[0][j].exp();
+        alpha[0][j] = start[j].max(0.0) * e;
+    }
+    scale[0] = alpha[0].iter().sum();
+    if scale[0] <= 0.0 || !scale[0].is_finite() {
+        ctx.push(
+            Issue::builder(IssueCode::ScaleFactorZero)
+                .message(
+                    "t=0 scale factor is zero; the sequence is impossible under the current HMM",
+                )
+                .metric("t", 0.0)
+                .build(),
+        );
+        ctx.push(
+            Issue::builder(IssueCode::ForwardUnderflow)
+                .message("unscaled forward mass vanished at t=0")
+                .build(),
+        );
+        return None;
+    }
+    if scale[0] < 1e-300 {
+        ctx.push(
+            Issue::builder(IssueCode::ForwardUnderflow)
+                .message(format!("forward scale at t=0 is {sc:.3e}", sc = scale[0]))
+                .metric("scale", scale[0])
+                .build(),
+        );
+    }
+    for j in 0..s {
+        alpha[0][j] /= scale[0];
+    }
+    for t in 1..t_len {
+        for j in 0..s {
+            let mut acc = 0.0;
+            for i in 0..s {
+                acc += alpha[t - 1][i] * trans.get(i, j);
+            }
+            alpha[t][j] = acc * log_emit[t][j].exp();
+        }
+        scale[t] = alpha[t].iter().sum();
+        if scale[t] <= 0.0 || !scale[t].is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::ScaleFactorZero)
+                    .message(format!("scale factor is zero at t={t}"))
+                    .metric("t", t as f64)
+                    .build(),
+            );
+            ctx.push(
+                Issue::builder(IssueCode::ForwardUnderflow)
+                    .message(format!("forward mass underflowed at t={t}"))
+                    .build(),
+            );
+            return None;
+        }
+        if scale[t] < 1e-300 {
+            ctx.push(
+                Issue::builder(IssueCode::ForwardUnderflow)
+                    .message(format!("forward scale at t={t} is {sc:.3e}", sc = scale[t]))
+                    .metric("t", t as f64)
+                    .metric("scale", scale[t])
+                    .build(),
+            );
+        }
+        for j in 0..s {
+            alpha[t][j] /= scale[t];
+        }
+    }
+    let mut loglik = 0.0;
+    for &c in &scale {
+        loglik += c.ln();
+    }
+    let mut beta = vec![vec![0.0; s]; t_len];
+    for j in 0..s {
+        beta[t_len - 1][j] = 1.0;
+    }
+    for t in (0..t_len - 1).rev() {
+        for i in 0..s {
+            let mut acc = 0.0;
+            for j in 0..s {
+                acc += trans.get(i, j) * log_emit[t + 1][j].exp() * beta[t + 1][j];
+            }
+            beta[t][i] = acc / scale[t + 1];
+        }
+    }
+    let mut gamma = vec![vec![0.0; s]; t_len];
+    for t in 0..t_len {
+        let mut nrm = 0.0;
+        for j in 0..s {
+            gamma[t][j] = alpha[t][j] * beta[t][j];
+            nrm += gamma[t][j];
+        }
+        if nrm > 0.0 {
+            for j in 0..s {
+                gamma[t][j] /= nrm;
+            }
+        }
+    }
+    let mut xi = vec![vec![vec![0.0; s]; s]; t_len.saturating_sub(1)];
+    for t in 0..t_len.saturating_sub(1) {
+        let mut nrm = 0.0;
+        for i in 0..s {
+            for j in 0..s {
+                let v = alpha[t][i] * trans.get(i, j) * log_emit[t + 1][j].exp() * beta[t + 1][j];
+                xi[t][i][j] = v;
+                nrm += v;
+            }
+        }
+        if nrm > 0.0 {
+            for i in 0..s {
+                for j in 0..s {
+                    xi[t][i][j] /= nrm;
+                }
+            }
+        }
+    }
+    if !loglik.is_finite() {
+        ctx.push(
+            Issue::builder(IssueCode::LossIsNan)
+                .message("HMM log-likelihood is not finite after scaled forward")
+                .build(),
+        );
+    }
+    let _ = (alpha, beta);
+    Some(ScaledFb { loglik, gamma, xi })
+}
+
+fn viterbi_path(start: &Vector, trans: &Matrix, log_emit: &[Vec<f64>]) -> (Vector, f64) {
+    let t_len = log_emit.len();
+    let s = start.len();
+    if t_len == 0 || s == 0 {
+        return (Vector::zeros(t_len), f64::NEG_INFINITY);
+    }
+    let mut delta = vec![vec![f64::NEG_INFINITY; s]; t_len];
+    let mut psi = vec![vec![0usize; s]; t_len];
+    for j in 0..s {
+        let lp = if start[j] > 0.0 {
+            start[j].ln()
+        } else {
+            f64::NEG_INFINITY
+        };
+        delta[0][j] = lp + log_emit[0][j];
+    }
+    for t in 1..t_len {
+        for j in 0..s {
+            let mut best = f64::NEG_INFINITY;
+            let mut arg = 0usize;
+            for i in 0..s {
+                let a = if trans.get(i, j) > 0.0 {
+                    trans.get(i, j).ln()
+                } else {
+                    f64::NEG_INFINITY
+                };
+                let v = delta[t - 1][i] + a;
+                if v > best {
+                    best = v;
+                    arg = i;
+                }
+            }
+            delta[t][j] = best + log_emit[t][j];
+            psi[t][j] = arg;
+        }
+    }
+    let mut last = 0usize;
+    let mut best = f64::NEG_INFINITY;
+    for j in 0..s {
+        if delta[t_len - 1][j] > best {
+            best = delta[t_len - 1][j];
+            last = j;
+        }
+    }
+    let mut path = vec![0usize; t_len];
+    path[t_len - 1] = last;
+    for t in (1..t_len).rev() {
+        path[t - 1] = psi[t][path[t]];
+    }
+    (Vector::from_iter(path.iter().map(|v| *v as f64)), best)
+}
+
+fn diagnose_chain(ctx: &mut FitCtx, start: &Vector, trans: &Matrix, occup: &[f64]) {
+    let s = start.len();
+    for j in 0..s {
+        let incoming: f64 = (0..s).map(|i| trans.get(i, j)).sum();
+        if start[j] <= TRANS_FLOOR && incoming <= TRANS_FLOOR * s as f64 {
+            ctx.push(
+                Issue::builder(IssueCode::UnreachableState)
+                    .message(format!("state {j} is unreachable from π and A"))
+                    .metric("state", j as f64)
+                    .build(),
+            );
+        }
+        if occup.get(j).copied().unwrap_or(0.0) <= TRANS_FLOOR {
+            ctx.push(
+                Issue::builder(IssueCode::UnreachableState)
+                    .message(format!("state {j} received ~0 posterior occupancy"))
+                    .metric("state", j as f64)
+                    .metric("occupancy", occup.get(j).copied().unwrap_or(0.0))
+                    .build(),
+            );
+        }
+        let diag = trans.get(j, j);
+        let mut off = 0.0;
+        for k in 0..s {
+            if k != j {
+                off += trans.get(j, k);
+            }
+        }
+        if diag >= 1.0 - 1e-6 && off <= 1e-6 {
+            ctx.push(
+                Issue::builder(IssueCode::AbsorbingStateOnly)
+                    .message(format!("state {j} is absorbing (A[{j},{j}]={diag:.6})"))
+                    .metric("state", j as f64)
+                    .metric("self_transition", diag)
+                    .build(),
+            );
+        }
+    }
+}
+
+fn kmeans_pp_rows(x: &Matrix, k: usize, rng: &mut Rng) -> Matrix {
+    let (n, p) = x.shape();
+    let k = k.max(1).min(n.max(1));
+    let mut centers = Matrix::zeros(k, p);
+    if n == 0 {
+        return centers;
+    }
+    let i0 = rng.below(n);
+    for j in 0..p {
+        centers.set(0, j, x.get(i0, j));
+    }
+    let mut d2 = vec![f64::INFINITY; n];
+    for c in 1..k {
+        for i in 0..n {
+            let mut s = 0.0;
+            for j in 0..p {
+                let d = x.get(i, j) - centers.get(c - 1, j);
+                s += d * d;
+            }
+            if s < d2[i] {
+                d2[i] = s;
+            }
+        }
+        let sum: f64 = d2.iter().sum();
+        let mut tick = rng.uniform() * sum.max(1e-300);
+        let mut chosen = n - 1;
+        for i in 0..n {
+            tick -= d2[i];
+            if tick <= 0.0 {
+                chosen = i;
+                break;
+            }
+        }
+        for j in 0..p {
+            centers.set(c, j, x.get(chosen, j));
+        }
+    }
+    centers
+}
+
+fn init_trans(k: usize) -> Matrix {
+    if k == 0 {
+        return Matrix::zeros(0, 0);
+    }
+    if k == 1 {
+        return Matrix::from_fn(1, 1, |_, _| 1.0);
+    }
+    let stay = 0.8;
+    let leave = (1.0 - stay) / (k - 1) as f64;
+    Matrix::from_fn(k, k, |i, j| if i == j { stay } else { leave })
+}
+
+fn init_start(k: usize) -> Vector {
+    if k == 0 {
+        Vector::zeros(0)
+    } else {
+        Vector::filled(k, 1.0 / k as f64)
+    }
+}
+
+fn global_diag_var(x: &Matrix) -> Vector {
+    let p = x.ncols();
+    let mut v = Vector::zeros(p);
+    for j in 0..p {
+        let s = x.column(j).std();
+        v[j] = (s * s).max(COV_FLOOR);
+    }
+    v
+}
+
+/// Gaussian HMM with diagonal (per-dimension) covariances.
+#[derive(Clone, Debug)]
+pub struct GaussianHmm {
+    /// Number of hidden states.
+    pub n_states: usize,
+    /// Baum–Welch iteration cap.
+    pub max_iter: usize,
+    /// Seed for k-means++ mean initialization.
+    pub seed: u64,
+}
+
+impl Default for GaussianHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 50,
+            seed: 0,
+        }
+    }
+}
+
+impl GaussianHmm {
+    /// `n_states` hidden Gaussians.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias for [`FitUnsupervised::fit_unsupervised`].
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGaussianHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted diagonal Gaussian HMM.
+#[derive(Clone, Debug)]
+pub struct FittedGaussianHmm {
+    /// Viterbi state path on the training sequence (`f64` ids).
+    pub labels: Vector,
+    /// Number of states.
+    pub n_states: usize,
+    /// Start distribution `π`.
+    pub start: Vector,
+    /// Transition matrix `A` (`n_states` × `n_states`).
+    pub trans: Matrix,
+    /// State means (`n_states` × `d`).
+    pub means: Matrix,
+    /// Diagonal variances (`n_states` × `d`).
+    pub covs: Matrix,
+    /// Training log-likelihood (scaled forward).
+    pub loglik: f64,
+}
+
+impl FittedGaussianHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let s = self.n_states;
+        let mut out = vec![vec![f64::NEG_INFINITY; s]; t];
+        for ti in 0..t {
+            for j in 0..s {
+                out[ti][j] = log_diag_gauss(x, ti, &self.means, j, &self.covs);
+            }
+        }
+        out
+    }
+
+    /// Viterbi state path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("decode"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.ncols() != self.means.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("decode X has a different observation dimension than the HMM")
+                    .build(),
+            );
+        }
+        if series_zero_variance(x, ctx.policy.near_zero_variance) {
+            ctx.push(emission_degenerate_issue(
+                "decode sequence has zero variance in every dimension",
+            ));
+        }
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+
+    /// Scaled-forward log-likelihood.
+    pub fn score(&self, x: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+        let mut ctx = FitCtx::with_session(session.child("score"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.nrows() == 0 {
+            return ctx.finish(f64::NEG_INFINITY);
+        }
+        let fb = scaled_forward_backward(&mut ctx, &self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(fb.map(|f| f.loglik).unwrap_or(f64::NEG_INFINITY))
+    }
+
+    /// Draw a sequence of length `n` and its hidden path.
+    pub fn sample(&self, n: usize, seed: u64, session: &Session) -> Result<Qualified<HmmSample>> {
+        let mut ctx = FitCtx::with_session(session.child("sample"));
+        inspect_identification(&mut ctx.report, n, self.n_states.max(1), &ctx.policy);
+        let d = self.means.ncols();
+        let s = self.n_states.max(1);
+        if n == 0 {
+            return ctx.finish(HmmSample {
+                obs: Matrix::zeros(0, d),
+                states: Vector::zeros(0),
+            });
+        }
+        let mut rng = Rng::new(seed | 1);
+        let mut states = Vector::zeros(n);
+        let mut obs = Matrix::zeros(n, d);
+        let pick = |rng: &mut Rng, probs: &Vector| -> usize {
+            let mut u = rng.uniform();
+            for i in 0..probs.len() {
+                u -= probs[i];
+                if u <= 0.0 {
+                    return i;
+                }
+            }
+            probs.len().saturating_sub(1)
+        };
+        let mut st = pick(&mut rng, &self.start);
+        for t in 0..n {
+            states[t] = st as f64;
+            for j in 0..d {
+                let sd = self
+                    .covs
+                    .get(st.min(self.covs.nrows().saturating_sub(1)), j)
+                    .max(COV_FLOOR)
+                    .sqrt();
+                obs.set(
+                    t,
+                    j,
+                    self.means
+                        .get(st.min(self.means.nrows().saturating_sub(1)), j)
+                        + sd * rng.standard_normal(),
+                );
+            }
+            if t + 1 < n {
+                let row = Vector::from_iter((0..s).map(|k| {
+                    if st < self.trans.nrows() && k < self.trans.ncols() {
+                        self.trans.get(st, k)
+                    } else {
+                        0.0
+                    }
+                }));
+                st = pick(&mut rng, &row);
+            }
+        }
+        ctx.finish(HmmSample { obs, states })
+    }
+}
+
+impl Predict for FittedGaussianHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for GaussianHmm {
+    type Fitted = FittedGaussianHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedGaussianHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_states.max(1),
+            &ctx.policy,
+        );
+        let (t_len, d) = x.shape();
+        let k = self.n_states.max(1);
+        if t_len == 0 || d == 0 {
+            return ctx.finish(FittedGaussianHmm {
+                labels: empty_labels(t_len),
+                n_states: k,
+                start: init_start(k),
+                trans: init_trans(k),
+                means: Matrix::zeros(k, d),
+                covs: Matrix::zeros(k, d),
+                loglik: f64::NAN,
+            });
+        }
+        if series_zero_variance(x, ctx.policy.near_zero_variance) {
+            ctx.push(emission_degenerate_issue(
+                "observation series has zero variance; Gaussian emissions are degenerate",
+            ));
+        }
+        if k != self.n_states {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("GaussianHmm requires n_states ≥ 1")
+                    .build(),
+            );
+        }
+        let mut rng = Rng::new(self.seed | 1);
+        let mut means = kmeans_pp_rows(x, k.min(t_len), &mut rng);
+        if means.nrows() < k {
+            let mut padded = Matrix::zeros(k, d);
+            for i in 0..means.nrows() {
+                for j in 0..d {
+                    padded.set(i, j, means.get(i, j));
+                }
+            }
+            means = padded;
+        }
+        let gvar = global_diag_var(x);
+        let mut covs = Matrix::from_fn(k, d, |_, j| gvar[j]);
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let mut log_emit = vec![vec![0.0; k]; t_len];
+            for t in 0..t_len {
+                for j in 0..k {
+                    log_emit[t][j] = log_diag_gauss(x, t, &means, j, &covs);
+                }
+            }
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &log_emit) else {
+                break;
+            };
+            loglik = fb.loglik;
+            ctx.session.step(it as u64, -loglik, None);
+            last_gamma = fb.gamma.clone();
+            // M-step: start / transitions.
+            for j in 0..k {
+                start[j] = fb.gamma[0][j];
+            }
+            renormalize_vec(&mut start, TRANS_FLOOR);
+            if t_len > 1 {
+                for i in 0..k {
+                    let mut den = 0.0;
+                    for t in 0..t_len - 1 {
+                        den += fb.gamma[t][i];
+                    }
+                    for j in 0..k {
+                        let mut num = 0.0;
+                        for t in 0..t_len - 1 {
+                            num += fb.xi[t][i][j];
+                        }
+                        trans.set(
+                            i,
+                            j,
+                            if den > 0.0 {
+                                num / den
+                            } else {
+                                trans.get(i, j)
+                            },
+                        );
+                    }
+                }
+                renormalize_rows(&mut trans, TRANS_FLOOR);
+            }
+            // Means / variances.
+            for j in 0..k {
+                let mut nj = 0.0;
+                for t in 0..t_len {
+                    nj += fb.gamma[t][j];
+                }
+                if nj <= TRANS_FLOOR {
+                    ctx.push(
+                        Issue::builder(IssueCode::UnreachableState)
+                            .message(format!("state {j} posterior mass {nj:.3e} during EM"))
+                            .metric("state", j as f64)
+                            .build(),
+                    );
+                    continue;
+                }
+                for dim in 0..d {
+                    let mut m = 0.0;
+                    for t in 0..t_len {
+                        m += fb.gamma[t][j] * x.get(t, dim);
+                    }
+                    means.set(j, dim, m / nj);
+                }
+                for dim in 0..d {
+                    let mut s = 0.0;
+                    for t in 0..t_len {
+                        let z = x.get(t, dim) - means.get(j, dim);
+                        s += fb.gamma[t][j] * z * z;
+                    }
+                    let raw = s / nj;
+                    if raw <= ctx.policy.near_zero_variance {
+                        ctx.push(
+                            Issue::builder(IssueCode::DegenerateDistribution)
+                                .message(format!(
+                                    "state {j} dim {dim} variance {raw:.3e} hit the floor"
+                                ))
+                                .metric("state", j as f64)
+                                .build(),
+                        );
+                    }
+                    covs.set(j, dim, raw.max(COV_FLOOR));
+                }
+            }
+            if it + 1 == self.max_iter {
+                ctx.push(
+                    Issue::builder(IssueCode::MaxIterReached)
+                        .message("Baum–Welch hit max_iter")
+                        .build(),
+                );
+            }
+        }
+        let occup: Vec<f64> = (0..k)
+            .map(|j| {
+                last_gamma
+                    .iter()
+                    .map(|g| g.get(j).copied().unwrap_or(0.0))
+                    .sum()
+            })
+            .collect();
+        diagnose_chain(&mut ctx, &start, &trans, &occup);
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .message("diagonal covariance and transition floors applied")
+                .compromise(NumericalCompromise::new(
+                    "unconstrained Baum–Welch",
+                    format!("cov ≥ {COV_FLOOR}, A,π ≥ {TRANS_FLOOR} then renormalized"),
+                    "zero cells make the sequence probability vanish and covariances singular",
+                    "small floors change the MLE; do not treat them as estimated parameters",
+                ))
+                .build(),
+        );
+        let log_emit: Vec<Vec<f64>> = (0..t_len)
+            .map(|t| {
+                (0..k)
+                    .map(|j| log_diag_gauss(x, t, &means, j, &covs))
+                    .collect()
+            })
+            .collect();
+        let (labels, _) = viterbi_path(&start, &trans, &log_emit);
+        if labels.as_slice().iter().any(|z| !z.is_finite()) {
+            ctx.push(
+                Issue::builder(IssueCode::NonFiniteOutput)
+                    .message("Viterbi path contains NaN/Inf")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedGaussianHmm {
+            labels,
+            n_states: k,
+            start,
+            trans,
+            means,
+            covs,
+            loglik,
+        })
+    }
+}
+
+/// Discrete-emission HMM. Observation codes are the rounded entries of `X`
+/// (typically a `T` × 1 matrix of integer symbols).
+#[derive(Clone, Debug)]
+pub struct MultinomialHmm {
+    /// Number of hidden states.
+    pub n_states: usize,
+    /// Baum–Welch iteration cap.
+    pub max_iter: usize,
+    /// Seed for emission jitter.
+    pub seed: u64,
+}
+
+impl Default for MultinomialHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 50,
+            seed: 0,
+        }
+    }
+}
+
+impl MultinomialHmm {
+    /// `n_states` discrete-emission states.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedMultinomialHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted multinomial HMM.
+#[derive(Clone, Debug)]
+pub struct FittedMultinomialHmm {
+    /// Viterbi path on the training codes.
+    pub labels: Vector,
+    /// Number of states.
+    pub n_states: usize,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Emission probabilities (`n_states` × `n_symbols`), using column-0 codes.
+    pub emission: Matrix,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+fn codes_from_x(x: &Matrix) -> (Vec<usize>, usize) {
+    let mut codes = Vec::with_capacity(x.nrows());
+    let mut max_c = 0usize;
+    for i in 0..x.nrows() {
+        let v = x.get(i, 0);
+        let c = if v.is_finite() && v >= 0.0 {
+            v.round() as usize
+        } else {
+            0
+        };
+        if c > max_c {
+            max_c = c;
+        }
+        codes.push(c);
+    }
+    (codes, max_c + 1)
+}
+
+impl FittedMultinomialHmm {
+    fn log_emit_seq(&self, codes: &[usize]) -> Vec<Vec<f64>> {
+        let s = self.n_states;
+        let mut out = vec![vec![f64::NEG_INFINITY; s]; codes.len()];
+        for (t, &c) in codes.iter().enumerate() {
+            for j in 0..s {
+                let p = if j < self.emission.nrows() && c < self.emission.ncols() {
+                    self.emission.get(j, c)
+                } else {
+                    0.0
+                };
+                out[t][j] = if p > 0.0 { p.ln() } else { f64::NEG_INFINITY };
+            }
+        }
+        out
+    }
+
+    /// Viterbi path for integer codes stored in column 0 of `x`.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("decode"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (codes, _) = codes_from_x(x);
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(&codes));
+        ctx.finish(path)
+    }
+
+    /// Scaled-forward log-likelihood.
+    pub fn score(&self, x: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+        let mut ctx = FitCtx::with_session(session.child("score"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (codes, _) = codes_from_x(x);
+        let fb = scaled_forward_backward(
+            &mut ctx,
+            &self.start,
+            &self.trans,
+            &self.log_emit_seq(&codes),
+        );
+        ctx.finish(fb.map(|f| f.loglik).unwrap_or(f64::NEG_INFINITY))
+    }
+
+    /// Sample integer codes (column 0) and the hidden path.
+    pub fn sample(&self, n: usize, seed: u64, session: &Session) -> Result<Qualified<HmmSample>> {
+        let ctx = FitCtx::with_session(session.child("sample"));
+        let n_sym = self.emission.ncols();
+        let s = self.n_states.max(1);
+        if n == 0 {
+            return ctx.finish(HmmSample {
+                obs: Matrix::zeros(0, 1),
+                states: Vector::zeros(0),
+            });
+        }
+        let mut rng = Rng::new(seed | 1);
+        let mut states = Vector::zeros(n);
+        let mut obs = Matrix::zeros(n, 1);
+        let pick = |rng: &mut Rng, row_i: usize, mat: &Matrix| -> usize {
+            let cols = mat.ncols();
+            let mut u = rng.uniform();
+            for j in 0..cols {
+                u -= mat.get(row_i, j);
+                if u <= 0.0 {
+                    return j;
+                }
+            }
+            cols.saturating_sub(1)
+        };
+        let pick_v = |rng: &mut Rng, v: &Vector| -> usize {
+            let mut u = rng.uniform();
+            for i in 0..v.len() {
+                u -= v[i];
+                if u <= 0.0 {
+                    return i;
+                }
+            }
+            v.len().saturating_sub(1)
+        };
+        let mut st = pick_v(&mut rng, &self.start);
+        for t in 0..n {
+            states[t] = st as f64;
+            let sym = if n_sym == 0 {
+                0
+            } else {
+                pick(
+                    &mut rng,
+                    st.min(self.emission.nrows().saturating_sub(1)),
+                    &self.emission,
+                )
+            };
+            obs.set(t, 0, sym as f64);
+            if t + 1 < n {
+                let row = Vector::from_iter((0..s).map(|k| {
+                    self.trans
+                        .get(st.min(self.trans.nrows().saturating_sub(1)), k)
+                }));
+                st = pick_v(&mut rng, &row);
+            }
+        }
+        ctx.finish(HmmSample { obs, states })
+    }
+}
+
+impl Predict for FittedMultinomialHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for MultinomialHmm {
+    type Fitted = FittedMultinomialHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedMultinomialHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_states.max(1),
+            &ctx.policy,
+        );
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        if t_len == 0 || x.ncols() == 0 {
+            return ctx.finish(FittedMultinomialHmm {
+                labels: empty_labels(0),
+                n_states: k,
+                start: init_start(k),
+                trans: init_trans(k),
+                emission: Matrix::zeros(k, 1),
+                loglik: f64::NAN,
+            });
+        }
+        let (codes, n_sym) = codes_from_x(x);
+        if n_sym <= 1 {
+            ctx.push(emission_degenerate_issue(
+                "multinomial HMM saw only one symbol; emissions are a delta",
+            ));
+        }
+        let mut rng = Rng::new(self.seed | 1);
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut emission = Matrix::from_fn(k, n_sym, |_, _| rng.uniform() + 0.1);
+        renormalize_rows(&mut emission, TRANS_FLOOR);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let log_emit: Vec<Vec<f64>> = codes
+                .iter()
+                .map(|&c| {
+                    (0..k)
+                        .map(|j| {
+                            let p = emission.get(j, c.min(n_sym.saturating_sub(1)));
+                            if p > 0.0 {
+                                p.ln()
+                            } else {
+                                f64::NEG_INFINITY
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &log_emit) else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                start[j] = fb.gamma[0][j];
+            }
+            renormalize_vec(&mut start, TRANS_FLOOR);
+            if t_len > 1 {
+                for i in 0..k {
+                    let den: f64 = (0..t_len - 1).map(|t| fb.gamma[t][i]).sum();
+                    for j in 0..k {
+                        let num: f64 = (0..t_len - 1).map(|t| fb.xi[t][i][j]).sum();
+                        trans.set(
+                            i,
+                            j,
+                            if den > 0.0 {
+                                num / den
+                            } else {
+                                trans.get(i, j)
+                            },
+                        );
+                    }
+                }
+                renormalize_rows(&mut trans, TRANS_FLOOR);
+            }
+            for j in 0..k {
+                let mut counts = vec![0.0; n_sym];
+                let mut den = 0.0;
+                for t in 0..t_len {
+                    let g = fb.gamma[t][j];
+                    den += g;
+                    counts[codes[t]] += g;
+                }
+                if den <= TRANS_FLOOR {
+                    ctx.push(
+                        Issue::builder(IssueCode::UnreachableState)
+                            .message(format!("multinomial state {j} has ~0 mass"))
+                            .metric("state", j as f64)
+                            .build(),
+                    );
+                    continue;
+                }
+                for c in 0..n_sym {
+                    emission.set(j, c, counts[c] / den);
+                }
+            }
+            renormalize_rows(&mut emission, TRANS_FLOOR);
+            if it + 1 == self.max_iter {
+                ctx.push(
+                    Issue::builder(IssueCode::MaxIterReached)
+                        .message("multinomial Baum–Welch hit max_iter")
+                        .build(),
+                );
+            }
+        }
+        let occup: Vec<f64> = (0..k)
+            .map(|j| {
+                last_gamma
+                    .iter()
+                    .map(|g| g.get(j).copied().unwrap_or(0.0))
+                    .sum()
+            })
+            .collect();
+        diagnose_chain(&mut ctx, &start, &trans, &occup);
+        let log_emit = FittedMultinomialHmm {
+            labels: Vector::zeros(0),
+            n_states: k,
+            start: start.clone(),
+            trans: trans.clone(),
+            emission: emission.clone(),
+            loglik,
+        }
+        .log_emit_seq(&codes);
+        let (labels, _) = viterbi_path(&start, &trans, &log_emit);
+        ctx.finish(FittedMultinomialHmm {
+            labels,
+            n_states: k,
+            start,
+            trans,
+            emission,
+            loglik,
+        })
+    }
+}
+
+/// HMM whose emissions are a diagonal Gaussian mixture per state.
+///
+/// `n_mix == 1` is a diagonal [`GaussianHmm`].
+#[derive(Clone, Debug)]
+pub struct GmmHmm {
+    /// Number of hidden states.
+    pub n_states: usize,
+    /// Mixture components per state.
+    pub n_mix: usize,
+    /// Baum–Welch iteration cap.
+    pub max_iter: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for GmmHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            n_mix: 1,
+            max_iter: 40,
+            seed: 0,
+        }
+    }
+}
+
+impl GmmHmm {
+    /// `n_states` states with `n_mix` diagonal Gaussians each.
+    pub fn new(n_states: usize, n_mix: usize) -> Self {
+        Self {
+            n_states,
+            n_mix,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmmHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted GMM-HMM.
+#[derive(Clone, Debug)]
+pub struct FittedGmmHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Number of states.
+    pub n_states: usize,
+    /// Mixture size per state.
+    pub n_mix: usize,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Mixture weights (`n_states` × `n_mix`).
+    pub mix_weights: Matrix,
+    /// Means (`n_states * n_mix` × `d`), row `s * n_mix + m`.
+    pub means: Matrix,
+    /// Diagonal variances, same layout as `means`.
+    pub vars: Matrix,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedGmmHmm {
+    fn mix_row(state: usize, mix: usize, n_mix: usize) -> usize {
+        state * n_mix + mix
+    }
+
+    fn log_state_emit(&self, x: &Matrix, t: usize, state: usize) -> f64 {
+        let mut parts = vec![0.0; self.n_mix.max(1)];
+        for m in 0..self.n_mix.max(1) {
+            let w = self.mix_weights.get(state, m).max(1e-300).ln();
+            let r = Self::mix_row(state, m, self.n_mix.max(1));
+            parts[m] = w + log_diag_gauss(x, t, &self.means, r, &self.vars);
+        }
+        logsumexp(&parts)
+    }
+
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        (0..x.nrows())
+            .map(|t| {
+                (0..self.n_states)
+                    .map(|s| self.log_state_emit(x, t, s))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("decode"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if series_zero_variance(x, ctx.policy.near_zero_variance) {
+            ctx.push(emission_degenerate_issue(
+                "GmmHmm decode sequence has zero variance",
+            ));
+        }
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+
+    /// Scaled-forward log-likelihood.
+    pub fn score(&self, x: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+        let mut ctx = FitCtx::with_session(session.child("score"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let fb = scaled_forward_backward(&mut ctx, &self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(fb.map(|f| f.loglik).unwrap_or(f64::NEG_INFINITY))
+    }
+
+    /// Sample observations and states (mixture component is marginalized in the draw).
+    pub fn sample(&self, n: usize, seed: u64, session: &Session) -> Result<Qualified<HmmSample>> {
+        let ctx = FitCtx::with_session(session.child("sample"));
+        let d = self.means.ncols();
+        let s = self.n_states.max(1);
+        let nm = self.n_mix.max(1);
+        if n == 0 {
+            return ctx.finish(HmmSample {
+                obs: Matrix::zeros(0, d),
+                states: Vector::zeros(0),
+            });
+        }
+        let mut rng = Rng::new(seed | 1);
+        let pick_v = |rng: &mut Rng, v: &Vector| -> usize {
+            let mut u = rng.uniform();
+            for i in 0..v.len() {
+                u -= v[i];
+                if u <= 0.0 {
+                    return i;
+                }
+            }
+            v.len().saturating_sub(1)
+        };
+        let mut states = Vector::zeros(n);
+        let mut obs = Matrix::zeros(n, d);
+        let mut st = pick_v(&mut rng, &self.start);
+        for t in 0..n {
+            states[t] = st as f64;
+            let mw = Vector::from_iter((0..nm).map(|m| {
+                self.mix_weights
+                    .get(st.min(self.mix_weights.nrows().saturating_sub(1)), m)
+            }));
+            let m = pick_v(&mut rng, &mw);
+            let row = Self::mix_row(st, m, nm);
+            for j in 0..d {
+                let sd = self
+                    .vars
+                    .get(row.min(self.vars.nrows().saturating_sub(1)), j)
+                    .max(COV_FLOOR)
+                    .sqrt();
+                obs.set(
+                    t,
+                    j,
+                    self.means
+                        .get(row.min(self.means.nrows().saturating_sub(1)), j)
+                        + sd * rng.standard_normal(),
+                );
+            }
+            if t + 1 < n {
+                let rowt = Vector::from_iter((0..s).map(|k| {
+                    self.trans
+                        .get(st.min(self.trans.nrows().saturating_sub(1)), k)
+                }));
+                st = pick_v(&mut rng, &rowt);
+            }
+        }
+        ctx.finish(HmmSample { obs, states })
+    }
+}
+
+impl Predict for FittedGmmHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for GmmHmm {
+    type Fitted = FittedGmmHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedGmmHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_states.max(1),
+            &ctx.policy,
+        );
+        let (t_len, d) = x.shape();
+        let k = self.n_states.max(1);
+        let nm = self.n_mix.max(1);
+        if t_len == 0 || d == 0 {
+            return ctx.finish(FittedGmmHmm {
+                labels: empty_labels(0),
+                n_states: k,
+                n_mix: nm,
+                start: init_start(k),
+                trans: init_trans(k),
+                mix_weights: Matrix::zeros(k, nm),
+                means: Matrix::zeros(k * nm, d),
+                vars: Matrix::zeros(k * nm, d),
+                loglik: f64::NAN,
+            });
+        }
+        if series_zero_variance(x, ctx.policy.near_zero_variance) {
+            ctx.push(emission_degenerate_issue(
+                "GmmHmm observation series has zero variance",
+            ));
+        }
+        let mut rng = Rng::new(self.seed | 1);
+        let seeds = kmeans_pp_rows(x, (k * nm).min(t_len), &mut rng);
+        let mut means = Matrix::zeros(k * nm, d);
+        for r in 0..(k * nm).min(seeds.nrows()) {
+            for j in 0..d {
+                means.set(r, j, seeds.get(r, j));
+            }
+        }
+        let gvar = global_diag_var(x);
+        let mut vars = Matrix::from_fn(k * nm, d, |_, j| gvar[j]);
+        let mut mix_weights = Matrix::from_fn(k, nm, |_, _| 1.0 / nm as f64);
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            // Per-time, per-state, per-mix log densities.
+            let mut log_emit = vec![vec![0.0; k]; t_len];
+            let mut log_comp = vec![vec![vec![0.0; nm]; k]; t_len];
+            for t in 0..t_len {
+                for j in 0..k {
+                    let mut parts = vec![0.0; nm];
+                    for m in 0..nm {
+                        let r = j * nm + m;
+                        let lp = mix_weights.get(j, m).max(1e-300).ln()
+                            + log_diag_gauss(x, t, &means, r, &vars);
+                        log_comp[t][j][m] = lp;
+                        parts[m] = lp;
+                    }
+                    log_emit[t][j] = logsumexp(&parts);
+                }
+            }
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &log_emit) else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            // Component responsibilities γ_t(j,m) = γ_t(j) * softmax_m log_comp
+            let mut gtm = vec![vec![vec![0.0; nm]; k]; t_len];
+            for t in 0..t_len {
+                for j in 0..k {
+                    let lse = logsumexp(&log_comp[t][j]);
+                    for m in 0..nm {
+                        let p = if lse.is_finite() {
+                            (log_comp[t][j][m] - lse).exp()
+                        } else {
+                            1.0 / nm as f64
+                        };
+                        gtm[t][j][m] = fb.gamma[t][j] * p;
+                    }
+                }
+            }
+            for j in 0..k {
+                start[j] = fb.gamma[0][j];
+            }
+            renormalize_vec(&mut start, TRANS_FLOOR);
+            if t_len > 1 {
+                for i in 0..k {
+                    let den: f64 = (0..t_len - 1).map(|t| fb.gamma[t][i]).sum();
+                    for j in 0..k {
+                        let num: f64 = (0..t_len - 1).map(|t| fb.xi[t][i][j]).sum();
+                        trans.set(
+                            i,
+                            j,
+                            if den > 0.0 {
+                                num / den
+                            } else {
+                                trans.get(i, j)
+                            },
+                        );
+                    }
+                }
+                renormalize_rows(&mut trans, TRANS_FLOOR);
+            }
+            for j in 0..k {
+                let mut wsum = 0.0;
+                for m in 0..nm {
+                    let mut nj = 0.0;
+                    for t in 0..t_len {
+                        nj += gtm[t][j][m];
+                    }
+                    mix_weights.set(j, m, nj);
+                    wsum += nj;
+                    if nj <= TRANS_FLOOR {
+                        ctx.push(
+                            Issue::builder(IssueCode::MixtureWeightCollapsed)
+                                .message(format!("state {j} mix {m} collapsed"))
+                                .metric("state", j as f64)
+                                .metric("mix", m as f64)
+                                .build(),
+                        );
+                        continue;
+                    }
+                    let r = j * nm + m;
+                    for dim in 0..d {
+                        let mut mu = 0.0;
+                        for t in 0..t_len {
+                            mu += gtm[t][j][m] * x.get(t, dim);
+                        }
+                        means.set(r, dim, mu / nj);
+                    }
+                    for dim in 0..d {
+                        let mut s = 0.0;
+                        for t in 0..t_len {
+                            let z = x.get(t, dim) - means.get(r, dim);
+                            s += gtm[t][j][m] * z * z;
+                        }
+                        vars.set(r, dim, (s / nj).max(COV_FLOOR));
+                    }
+                }
+                if wsum > 0.0 {
+                    for m in 0..nm {
+                        mix_weights.set(j, m, mix_weights.get(j, m) / wsum);
+                    }
+                } else {
+                    for m in 0..nm {
+                        mix_weights.set(j, m, 1.0 / nm as f64);
+                    }
+                }
+            }
+            if it + 1 == self.max_iter {
+                ctx.push(
+                    Issue::builder(IssueCode::MaxIterReached)
+                        .message("GmmHmm Baum–Welch hit max_iter")
+                        .build(),
+                );
+            }
+        }
+        let occup: Vec<f64> = (0..k)
+            .map(|j| {
+                last_gamma
+                    .iter()
+                    .map(|g| g.get(j).copied().unwrap_or(0.0))
+                    .sum()
+            })
+            .collect();
+        diagnose_chain(&mut ctx, &start, &trans, &occup);
+        let fitted_tmp = FittedGmmHmm {
+            labels: Vector::zeros(0),
+            n_states: k,
+            n_mix: nm,
+            start: start.clone(),
+            trans: trans.clone(),
+            mix_weights: mix_weights.clone(),
+            means: means.clone(),
+            vars: vars.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &fitted_tmp.log_emit_seq(x));
+        ctx.finish(FittedGmmHmm {
+            labels,
+            n_states: k,
+            n_mix: nm,
+            start,
+            trans,
+            mix_weights,
+            means,
+            vars,
+            loglik,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ojizou_san::Session;
+
+    fn two_gaussian_blocks() -> Matrix {
+        // 40 samples near −3, then 40 near +3 (tiny noise so variance is positive).
+        Matrix::from_fn(80, 1, |i, _| {
+            if i < 40 {
+                -3.0 + 0.05 * ((i % 10) as f64 - 4.5)
+            } else {
+                3.0 + 0.05 * (((i - 40) % 10) as f64 - 4.5)
+            }
+        })
+    }
+
+    #[test]
+    fn gaussian_hmm_learns_two_means() {
+        let x = two_gaussian_blocks();
+        let session = Session::new("gaussian_hmm", "fit");
+        let q = GaussianHmm {
+            n_states: 2,
+            max_iter: 40,
+            seed: 2,
+        }
+        .fit(&x, &session)
+        .expect("hmm");
+        let mut m0 = q.value.means.get(0, 0);
+        let mut m1 = q.value.means.get(1, 0);
+        if m0 > m1 {
+            std::mem::swap(&mut m0, &mut m1);
+        }
+        assert!(
+            (m0 + 3.0).abs() < 0.75,
+            "expected a mean near -3, got {m0} and {m1}"
+        );
+        assert!(
+            (m1 - 3.0).abs() < 0.75,
+            "expected a mean near +3, got {m0} and {m1}"
+        );
+        let path = q
+            .value
+            .decode(&x, &Session::new("gaussian_hmm", "decode"))
+            .expect("decode");
+        assert_eq!(path.value.len(), 80);
+        let sc = q
+            .value
+            .score(&x, &Session::new("gaussian_hmm", "score"))
+            .expect("score");
+        assert!(sc.value.is_finite());
+    }
+
+    #[test]
+    fn gaussian_hmm_zero_variance_is_degenerate() {
+        let x = Matrix::from_fn(24, 1, |_, _| 2.5);
+        let session = Session::new("gaussian_hmm", "fit");
+        let err = GaussianHmm {
+            n_states: 2,
+            max_iter: 5,
+            seed: 0,
+        }
+        .fit(&x, &session)
+        .unwrap_err();
+        assert_eq!(err.primary().code, IssueCode::EmissionDegenerate);
+    }
+}

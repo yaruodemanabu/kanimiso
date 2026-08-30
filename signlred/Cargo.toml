@@ -1,0 +1,12 @@
+[package]
+name = "signlred"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Quality-aware error handling for machine learning and linear algebra. Responsible for the trustworthiness of numerical results and statistical inference, not merely I/O or programmer errors."
+readme = "README.md"
+keywords = ["error-handling", "machine-learning", "linear-algebra", "statistics", "quality"]
+categories = ["rust-patterns", "science"]
+
+[dependencies]

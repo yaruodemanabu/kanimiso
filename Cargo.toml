@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["signlred", "ojizou-san", "kanimiso"]
+default-members = ["signlred", "ojizou-san", "kanimiso"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.84"
+authors = ["kanimiso contributors"]
+repository = "https://github.com/yaruodemanabu/kanimiso"
+
+[workspace.dependencies]
+faer = { version = "0.24.4", default-features = true }
+signlred = { path = "signlred", version = "0.1.0" }
+ojizou-san = { path = "ojizou-san", version = "0.1.0" }
