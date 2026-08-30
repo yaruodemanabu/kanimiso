@@ -11211,6 +11211,133 @@ impl Predict for FittedRotationForestClassifier {
     }
 }
 
+/// DTW proximity-forest regressor (sktime `ProximityForest` regression lite).
+///
+/// Each stump is two random exemplars; the closer series donates its response.
+/// Tree count is not identification `p`. Do not call `inspect_classes`.
+#[derive(Clone, Debug)]
+pub struct ProximityForestRegressor {
+    /// Number of proximity stumps. Not identification `p`.
+    pub n_trees: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for ProximityForestRegressor {
+    fn default() -> Self {
+        Self {
+            n_trees: 5,
+            seed: 17,
+        }
+    }
+}
+
+impl ProximityForestRegressor {
+    /// Default five-stump proximity regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ProxRegStump {
+    left: Vector,
+    right: Vector,
+    left_y: f64,
+    right_y: f64,
+}
+
+/// Fitted DTW proximity-forest regressor.
+#[derive(Clone, Debug)]
+pub struct FittedProximityForestRegressor {
+    trees: Vec<ProxRegStump>,
+    /// Fallback mean response.
+    pub default_value: f64,
+}
+
+impl Fit for ProximityForestRegressor {
+    type Fitted = FittedProximityForestRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedProximityForestRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let n = x.nrows().min(y.len());
+        let default_value = if n == 0 {
+            0.0
+        } else {
+            y.as_slice().iter().take(n).sum::<f64>() / n as f64
+        };
+        if n < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("ProximityForestRegressor needs two series to pick exemplars")
+                    .build(),
+            );
+            return ctx.finish(FittedProximityForestRegressor {
+                trees: Vec::new(),
+                default_value,
+            });
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("ProximityForestRegressor is random DTW exemplars, not a published PF")
+                .compromise(NumericalCompromise::new(
+                    "sktime ProximityForest with splitter search",
+                    "random pair of series as a 1-NN stump",
+                    "no entropy-driven split selection",
+                    "read as a DTW exemplar ensemble, not the paper accuracy",
+                ))
+                .build(),
+        );
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        for _ in 0..self.n_trees.max(1) {
+            let i0 = rng.below(n);
+            let mut i1 = rng.below(n);
+            if i1 == i0 {
+                i1 = (i0 + 1) % n;
+            }
+            trees.push(ProxRegStump {
+                left: x.row(i0),
+                right: x.row(i1),
+                left_y: y[i0],
+                right_y: y[i1],
+            });
+        }
+        ctx.finish(FittedProximityForestRegressor {
+            trees,
+            default_value,
+        })
+    }
+}
+
+impl Predict for FittedProximityForestRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.trees.is_empty() {
+            return ctx.finish(Vector::filled(x.nrows(), self.default_value));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let row = x.row(i);
+            let mut acc = 0.0_f64;
+            for t in &self.trees {
+                let dl = dtw_raw(row.as_slice(), t.left.as_slice());
+                let dr = dtw_raw(row.as_slice(), t.right.as_slice());
+                acc += if dl <= dr { t.left_y } else { t.right_y };
+            }
+            acc / self.trees.len() as f64
+        }));
+        ctx.finish(out)
+    }
+}
+
 /// Random supervised time-series forest (sktime `RSTSF` lite).
 ///
 /// Interval / tree counts are not identification `p`.
@@ -13189,6 +13316,16 @@ mod tests {
             .value;
         assert_eq!(prfc.len(), 8);
         assert!(prfc.as_slice().iter().all(|v| v.is_finite()));
+        let pfr = ProximityForestRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "pfr"))
+            .unwrap();
+        let ppfr = pfr
+            .value
+            .predict(&x, &Session::new("ts", "pfrp"))
+            .unwrap()
+            .value;
+        assert_eq!(ppfr.len(), 8);
+        assert!(ppfr.as_slice().iter().all(|v| v.is_finite()));
         let rst = Rstsf::new()
             .fit(&x, &y, &Session::new("ts", "rstsf"))
             .unwrap();

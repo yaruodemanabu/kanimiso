@@ -5426,6 +5426,25 @@ const INVENTORY: &[Algorithm] = &[
         "sktime.classification.sklearn.RotationForest",
         "estimator",
     ),
+    a(
+        "stats.greenwood",
+        "statsmodels.duration.survfunc.SurvfuncRight",
+        "function",
+    ),
+    a(
+        "stats.Greenwood",
+        "statsmodels.duration.survfunc.SurvfuncRight",
+        "estimator",
+    ),
+    a("stats.cox_snell", "lifelines.CoxPHFitter", "function"),
+    a("stats.martingale_resid", "lifelines.CoxPHFitter", "function"),
+    a("online.OnlineExponential", "scipy.stats.expon", "online"),
+    a("online.OnlineLogNormal", "scipy.stats.lognorm", "online"),
+    a(
+        "tslearn.ProximityForestRegressor",
+        "sktime.regression.distance_based.ProximityForest",
+        "estimator",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5820,6 +5839,10 @@ mod tests {
             "stats.cloglog_ph",
             "online.OnlineHistogram",
             "tslearn.RotationForestClassifier",
+            "stats.greenwood",
+            "stats.cox_snell",
+            "online.OnlineExponential",
+            "tslearn.ProximityForestRegressor",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

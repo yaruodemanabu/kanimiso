@@ -16674,6 +16674,278 @@ impl CloglogPH {
     }
 }
 
+/// Greenwood standard errors for a product-limit curve.
+#[derive(Clone, Debug)]
+pub struct GreenwoodResult {
+    /// Event times.
+    pub times: Vector,
+    /// \(\hat S(t)\).
+    pub survival: Vector,
+    /// Greenwood \(\widehat{\mathrm{se}}\{\hat S(t)\}\).
+    pub se: Vector,
+}
+
+/// Greenwood variance of the Kaplan–Meier curve (statsmodels `SurvfuncRight`).
+///
+/// \(\mathrm{Var}\hat S(t)=\hat S(t)^2\sum_{t_j\le t}d_j/(n_j(n_j-d_j))\).
+/// Do not call [`kaplan_meier_fit`]. Inspect times with `y=None`. Event count
+/// is not identification `p`.
+pub fn greenwood(
+    durations: &Vector,
+    events: &Vector,
+    session: &Session,
+) -> Result<Qualified<GreenwoodResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    if let Some(issue) = scan_finite(events.as_slice()).to_issue("events") {
+        ctx.push(issue);
+    }
+    let n = durations.len().min(events.len());
+    let mut rows: Vec<(f64, f64)> = (0..n)
+        .filter(|&i| durations[i].is_finite() && events[i].is_finite())
+        .map(|i| (durations[i], events[i]))
+        .collect();
+    if rows.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("greenwood received no finite pairs")
+                .build(),
+        );
+        return ctx.finish(GreenwoodResult {
+            times: Vector::zeros(0),
+            survival: Vector::zeros(0),
+            se: Vector::zeros(0),
+        });
+    }
+    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut times = Vec::new();
+    let mut surv = Vec::new();
+    let mut se = Vec::new();
+    let mut s = 1.0_f64;
+    let mut acc = 0.0_f64;
+    let mut i = 0;
+    let mut n_ev = 0.0_f64;
+    while i < rows.len() {
+        let t = rows[i].0;
+        let at_risk = (rows.len() - i) as f64;
+        let mut d = 0.0_f64;
+        while i < rows.len() && (rows[i].0 - t).abs() <= 0.0 {
+            if rows[i].1 > 0.5 {
+                d += 1.0;
+                n_ev += 1.0;
+            }
+            i += 1;
+        }
+        if d > 0.0 {
+            if at_risk > d {
+                acc += d / (at_risk * (at_risk - d));
+            } else if at_risk > 0.0 {
+                acc += d / (at_risk * at_risk);
+            }
+            s *= (1.0 - d / at_risk.max(1e-15)).max(0.0);
+            times.push(t);
+            surv.push(s);
+            se.push((s * s * acc).max(0.0).sqrt());
+        }
+    }
+    if n_ev <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("Greenwood has zero events; se is unidentified")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "Greenwood standard errors",
+                    "without events Ŝ≡1 and the sum is empty",
+                    "collect events",
+                ))
+                .build(),
+        );
+    }
+    ctx.finish(GreenwoodResult {
+        times: Vector::from_iter(times),
+        survival: Vector::from_iter(surv),
+        se: Vector::from_iter(se),
+    })
+}
+
+/// Named Greenwood SE wrapper.
+#[derive(Clone, Debug, Default)]
+pub struct Greenwood;
+
+impl Greenwood {
+    /// Default Greenwood calculator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit Greenwood SEs on right-censored times.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<GreenwoodResult>> {
+        greenwood(durations, events, session)
+    }
+}
+
+fn breslow_cumhaz(durations: &Vector, events: &Vector, x: &Matrix, beta: &Vector) -> Vector {
+    let n = x.nrows().min(durations.len()).min(events.len());
+    let p = x.ncols().min(beta.len());
+    let mut ev_times: Vec<f64> = (0..n)
+        .filter(|&i| events[i] > 0.5 && durations[i].is_finite())
+        .map(|i| durations[i])
+        .collect();
+    ev_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ev_times.dedup_by(|a, b| (*a - *b).abs() <= 0.0);
+    let mut h0_at: Vec<(f64, f64)> = Vec::new();
+    let mut acc = 0.0_f64;
+    for &t in &ev_times {
+        let mut s0 = 0.0_f64;
+        let mut d = 0.0_f64;
+        for i in 0..n {
+            if !durations[i].is_finite() || durations[i] + 1e-15 < t {
+                continue;
+            }
+            let mut xb = 0.0_f64;
+            for j in 0..p {
+                xb += x.get(i, j) * beta[j];
+            }
+            s0 += xb.clamp(-20.0, 20.0).exp();
+            if events[i] > 0.5 && (durations[i] - t).abs() <= 0.0 {
+                d += 1.0;
+            }
+        }
+        if s0 > 1e-15 {
+            acc += d / s0;
+        }
+        h0_at.push((t, acc));
+    }
+    Vector::from_iter((0..x.nrows()).map(|i| {
+        if i >= durations.len() || !durations[i].is_finite() {
+            return 0.0;
+        }
+        let t = durations[i];
+        let mut h0 = 0.0_f64;
+        for &(tj, hj) in &h0_at {
+            if tj <= t + 1e-15 {
+                h0 = hj;
+            }
+        }
+        let mut xb = 0.0_f64;
+        for j in 0..p {
+            xb += x.get(i, j) * beta[j];
+        }
+        h0 * xb.clamp(-20.0, 20.0).exp()
+    }))
+}
+
+fn cox_beta_or_zero(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+    ctx: &mut FitCtx,
+) -> Vector {
+    match CoxPH::new().fit(durations, events, x, &session.child("cox-resid")) {
+        Ok(q) => {
+            for issue in q.report.issues() {
+                if skip_aborting_inner(issue) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            q.value.coef
+        }
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("Cox residual path used β=0 after an inner Newton failure")
+                    .build(),
+            );
+            Vector::zeros(x.ncols())
+        }
+    }
+}
+
+/// Cox–Snell residuals \(\hat\Lambda(t_i\mid x_i)\) (Breslow baseline).
+///
+/// Do not call [`kaplan_meier_fit`] / [`nelson_aalen`] (zero events abort).
+/// Covariate count is identification `p`. Inspect times with `y=None`.
+pub fn cox_snell(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    if events.len() != x.nrows() || durations.len() != x.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("cox_snell lengths ≠ X rows")
+                .build(),
+        );
+    }
+    inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+    let n_events = (0..x.nrows())
+        .filter(|&i| i < events.len() && events[i] > 0.5)
+        .count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("Cox–Snell has no events; cumulative hazard is 0")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "Cox–Snell residuals",
+                    "without events the Breslow baseline never leaves 0",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(x.nrows()));
+    }
+    let beta = cox_beta_or_zero(durations, events, x, session, &mut ctx);
+    ctx.finish(breslow_cumhaz(durations, events, x, &beta))
+}
+
+/// Martingale residuals \(\delta_i-\hat\Lambda(t_i\mid x_i)\).
+///
+/// Same Breslow path as [`cox_snell`]. Event count is not a substitute `p`.
+pub fn martingale_resid(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let q = cox_snell(durations, events, x, &session.child("cs"))?;
+    let mut ctx = FitCtx::with_session(session.clone());
+    for issue in q.report.issues() {
+        if skip_aborting_inner(issue) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let out = Vector::from_iter((0..q.value.len()).map(|i| {
+        let d = if i < events.len() && events[i] > 0.5 {
+            1.0
+        } else {
+            0.0
+        };
+        d - q.value[i]
+    }));
+    ctx.finish(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -17383,5 +17655,14 @@ mod tests {
         assert!(clph.value.n_events > 0);
         assert_eq!(clph.value.coef.len(), 1);
         assert!(clph.value.intercept.is_finite());
+        let gwse = greenwood(&dur, &ev, &Session::new("gwood", "t")).expect("gwood");
+        assert_eq!(gwse.value.se.len(), gwse.value.survival.len());
+        assert!(gwse.value.se.as_slice().iter().all(|s| s.is_finite() && *s >= 0.0));
+        let csn = cox_snell(&dur, &ev, &xcox, &Session::new("csn", "t")).expect("csn");
+        assert_eq!(csn.value.len(), 20);
+        assert!(csn.value.as_slice().iter().all(|v| v.is_finite() && *v >= 0.0));
+        let mres = martingale_resid(&dur, &ev, &xcox, &Session::new("mres", "t")).expect("mres");
+        assert_eq!(mres.value.len(), 20);
+        assert!(mres.value.as_slice().iter().all(|v| v.is_finite()));
     }
 }

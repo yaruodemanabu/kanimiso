@@ -28694,6 +28694,200 @@ impl PartialFit for OnlineWeibull {
     }
 }
 
+/// Streaming exponential rate \(1/\bar x\) on positive column 0.
+///
+/// Rate is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineExponential {
+    n: f64,
+    sum: f64,
+    updates: u64,
+}
+
+impl OnlineExponential {
+    /// Empty exponential accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// MLE rate, or NaN during warmup.
+    pub fn rate(&self) -> f64 {
+        if self.n < 1.0 || self.sum <= 0.0 {
+            f64::NAN
+        } else {
+            self.n / self.sum
+        }
+    }
+}
+
+impl PartialFit for OnlineExponential {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.rate();
+        let mut nonpos = 0u64;
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            if v <= 0.0 {
+                nonpos += 1;
+                continue;
+            }
+            self.n += 1.0;
+            self.sum += v;
+        }
+        if nonpos > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "OnlineExponential skipped {nonpos} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        self.updates += 1;
+        let after = self.rate();
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 1.0 && after.is_finite();
+        q.warmup = self.n < 1.0;
+        q.explanation = format!("OnlineExponential rate={after:.6e}");
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("OnlineExponential needs one positive observation")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "exponential rate 1/mean",
+                "positive column-0 values only",
+                format!("rate={before:.6e}"),
+                format!("rate={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming log-normal via Welford on \(\log x\) (river-style `proba`).
+///
+/// Log-mean is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineLogNormal {
+    n: f64,
+    mean_log: f64,
+    m2_log: f64,
+    updates: u64,
+}
+
+impl OnlineLogNormal {
+    /// Empty log-normal accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Log-scale mean, or NaN during warmup.
+    pub fn mu(&self) -> f64 {
+        if self.n < 1.0 {
+            f64::NAN
+        } else {
+            self.mean_log
+        }
+    }
+}
+
+impl PartialFit for OnlineLogNormal {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.mu();
+        let mut nonpos = 0u64;
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            if v <= 0.0 {
+                nonpos += 1;
+                continue;
+            }
+            let z = v.ln();
+            self.n += 1.0;
+            let d = z - self.mean_log;
+            self.mean_log += d / self.n;
+            self.m2_log += d * (z - self.mean_log);
+        }
+        if nonpos > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "OnlineLogNormal skipped {nonpos} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        self.updates += 1;
+        let after = self.mu();
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 1.0 && after.is_finite();
+        q.warmup = self.n < 1.0;
+        q.explanation = format!("OnlineLogNormal μ={after:.6e}");
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("OnlineLogNormal needs one positive observation")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "log-normal Welford on log x",
+                "positive column-0 values only",
+                format!("mu={before:.6e}"),
+                format!("mu={after:.6e}"),
+            ),
+        )
+    }
+}
+
 /// AdaMax linear regressor (river `optim.AdaMax`).
 ///
 /// Infinity-norm second moment: \(u \leftarrow \max(\beta_2 u, |g|)\).
@@ -31140,6 +31334,12 @@ mod tests {
         OnlineWeibull::new()
             .partial_fit(&x, None, &session)
             .expect("oweib");
+        OnlineExponential::new()
+            .partial_fit(&x, None, &session)
+            .expect("oexp");
+        OnlineLogNormal::new()
+            .partial_fit(&x, None, &session)
+            .expect("oln");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
