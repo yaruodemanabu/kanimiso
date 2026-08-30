@@ -3472,6 +3472,146 @@ impl BorusyakJaravelSpiess {
     }
 }
 
+/// Sun–Abraham interaction-weighted event study.
+///
+/// Cohort / relative-time counts are not identification `p`. Each
+/// \(\mathrm{ATT}(g,k)\) is a 2×2 vs never-treated, then weighted by
+/// the cohort's share among treated units at that \(k\).
+#[derive(Clone, Debug)]
+pub struct SunAbraham {
+    /// Maximum post relative time. Not identification `p`.
+    pub window: usize,
+}
+
+impl Default for SunAbraham {
+    fn default() -> Self {
+        Self { window: 2 }
+    }
+}
+
+impl SunAbraham {
+    /// IW event study with post window `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+        }
+    }
+
+    /// Cohort-weighted average of post-period 2×2 ATTs.
+    pub fn fit(
+        &self,
+        y: &Vector,
+        times: &Vector,
+        first_treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSunAbraham>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let n = y.len().min(times.len()).min(first_treat.len());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_fn(n, 1, |i, _| times[i]),
+            Some(y),
+            &ctx.policy,
+        );
+        let w = self.window.max(1);
+        let mut cells: Vec<(f64, f64)> = Vec::new();
+        let mut cohorts: BTreeMap<i64, usize> = BTreeMap::new();
+        for i in 0..n {
+            if first_treat[i].is_finite() {
+                *cohorts.entry(first_treat[i].round() as i64).or_insert(0) += 1;
+            }
+        }
+        for (&g, _) in &cohorts {
+            let gf = g as f64;
+            for k in 0..=w {
+                let t = gf + k as f64;
+                let pre = gf - 1.0;
+                let mut yg = 0.0_f64;
+                let mut ng = 0.0_f64;
+                let mut yg0 = 0.0_f64;
+                let mut ng0 = 0.0_f64;
+                let mut yn = 0.0_f64;
+                let mut nn = 0.0_f64;
+                let mut yn0 = 0.0_f64;
+                let mut nn0 = 0.0_f64;
+                for i in 0..n {
+                    if !y[i].is_finite() || !times[i].is_finite() {
+                        continue;
+                    }
+                    if first_treat[i].is_finite() && first_treat[i].round() as i64 == g {
+                        if (times[i] - t).abs() < 1e-9 {
+                            yg += y[i];
+                            ng += 1.0;
+                        }
+                        if (times[i] - pre).abs() < 1e-9 {
+                            yg0 += y[i];
+                            ng0 += 1.0;
+                        }
+                    } else if !first_treat[i].is_finite() {
+                        if (times[i] - t).abs() < 1e-9 {
+                            yn += y[i];
+                            nn += 1.0;
+                        }
+                        if (times[i] - pre).abs() < 1e-9 {
+                            yn0 += y[i];
+                            nn0 += 1.0;
+                        }
+                    }
+                }
+                if ng > 0.0 && ng0 > 0.0 && nn > 0.0 && nn0 > 0.0 {
+                    let att = (yg / ng - yg0 / ng0) - (yn / nn - yn0 / nn0);
+                    cells.push((ng, att));
+                }
+            }
+        }
+        let att = if cells.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("SunAbraham found no identified (g,k) cells")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "IW event-study ATT",
+                        "every cohort-time cell lacked a pre period or never-treated control",
+                        "need never-treated units and a pre window",
+                    ))
+                    .build(),
+            );
+            f64::NAN
+        } else {
+            let den: f64 = cells.iter().map(|(w, _)| *w).sum();
+            if den > 0.0 {
+                cells.iter().map(|(w, a)| w * a).sum::<f64>() / den
+            } else {
+                f64::NAN
+            }
+        };
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SunAbraham is cell-size-weighted 2×2 ATTs, not the published IW estimator")
+                .compromise(NumericalCompromise::new(
+                    "Sun–Abraham interaction-weighted event study",
+                    "cohort-size weighted average of never-treated 2×2 cells",
+                    "saturated TWFE interactions and the published influence SE are omitted",
+                    "read ATT as a weighted cell average, not a published SA estimate",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedSunAbraham {
+            att,
+            n_cells: cells.len(),
+        })
+    }
+}
+
+/// IW event-study ATT.
+#[derive(Clone, Debug)]
+pub struct FittedSunAbraham {
+    /// Cohort-weighted average ATT.
+    pub att: f64,
+    /// Number of identified \((g,k)\) cells.
+    pub n_cells: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3669,5 +3809,9 @@ mod tests {
             .fit(&y, &time, &first, &g, &Session::new("bjs", "fit"))
             .expect("bjs");
         assert!(bjs.value.att.is_finite() || bjs.value.att.is_nan());
+        let sa = SunAbraham::new(2)
+            .fit(&y, &time, &first, &Session::new("sa", "fit"))
+            .expect("sa");
+        assert!(sa.value.att.is_finite() || sa.value.att.is_nan());
     }
 }

@@ -17309,6 +17309,144 @@ impl FitSeries for DeepArForecaster {
     }
 }
 
+fn timesnet_period(y: &[f64]) -> usize {
+    let t = y.len();
+    if t < 4 {
+        return 2;
+    }
+    let mut best_p = 2usize;
+    let mut best = 0.0_f64;
+    for p in 2..=(t / 2).max(2) {
+        let w = 2.0 * std::f64::consts::PI / p as f64;
+        let mut re = 0.0_f64;
+        let mut im = 0.0_f64;
+        for (u, &v) in y.iter().enumerate() {
+            if !v.is_finite() {
+                continue;
+            }
+            re += v * (w * u as f64).cos();
+            im += v * (w * u as f64).sin();
+        }
+        let pow = re * re + im * im;
+        if pow > best {
+            best = pow;
+            best_p = p;
+        }
+    }
+    best_p.max(2)
+}
+
+/// TimesNet forecaster (Wu et al. / sktime `TimesNetForecaster` lite).
+///
+/// The detected period is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct TimesNetForecaster;
+
+impl TimesNetForecaster {
+    /// Default TimesNet-lite forecaster.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// Fitted period-reshape seasonal means plus residual drift.
+#[derive(Clone, Debug)]
+pub struct FittedTimesNet {
+    period: usize,
+    seasonal: Vector,
+    drift: f64,
+    last: f64,
+}
+
+impl FittedTimesNet {
+    /// Repeat the period-reshape seasonal tile plus residual drift.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let p = self.period.max(2);
+        let out = Vector::from_iter((1..=h).map(|k| {
+            let s = if self.seasonal.is_empty() {
+                0.0
+            } else {
+                self.seasonal[(k - 1) % self.seasonal.len()]
+            };
+            self.last + s + self.drift * k as f64
+        }));
+        let _ = p;
+        ctx.finish(out)
+    }
+}
+
+impl FitSeries for TimesNetForecaster {
+    type Fitted = FittedTimesNet;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedTimesNet>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        let period = timesnet_period(y.as_slice()).min(n.max(2));
+        if n < 4 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .message("TimesNetForecaster needs n≥4")
+                    .build(),
+            );
+            return ctx.finish(FittedTimesNet {
+                period,
+                seasonal: Vector::zeros(period.max(2)),
+                drift: 0.0,
+                last: y.as_slice().last().copied().unwrap_or(0.0),
+            });
+        }
+        let seasonal = Vector::from_iter((0..period).map(|r| {
+            let mut s = 0.0_f64;
+            let mut c = 0.0_f64;
+            let mut t = r;
+            while t < n {
+                if y[t].is_finite() {
+                    s += y[t];
+                    c += 1.0;
+                }
+                t += period;
+            }
+            if c > 0.0 {
+                s / c
+            } else {
+                0.0
+            }
+        }));
+        let mut num = 0.0_f64;
+        let mut den = 0.0_f64;
+        for t in 0..n {
+            if !y[t].is_finite() {
+                continue;
+            }
+            let s = seasonal[t % period];
+            let r = y[t] - s;
+            let u = t as f64 - (n as f64 - 1.0) / 2.0;
+            num += u * r;
+            den += u * u;
+        }
+        let drift = if den > 1e-15 { num / den } else { 0.0 };
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("TimesNetForecaster is DFT-period seasonal means plus residual drift")
+                .compromise(NumericalCompromise::new(
+                    "TimesNet forecast head",
+                    "periodogram seasonality then linear residual drift",
+                    "2-D inception stacks and the published decoder are omitted",
+                    "read the path as a period-reshape sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedTimesNet {
+            period,
+            seasonal,
+            drift,
+            last: y.as_slice().last().copied().unwrap_or(0.0),
+        })
+    }
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -18605,5 +18743,14 @@ impl FitSeries for DeepArForecaster {
         assert_eq!(darp.value.len(), 2);
         assert!(darp.value.as_slice().iter().all(|v| v.is_finite()));
         assert!(dar.value.sigma.is_finite());
+        let tnf = TimesNetForecaster::new()
+            .fit_series(&y, &Session::new("tnf", "t"))
+            .expect("tnf");
+        let tnp = tnf
+            .value
+            .forecast(3, &Session::new("tnfp", "t"))
+            .expect("tnfp");
+        assert_eq!(tnp.value.len(), 3);
+        assert!(tnp.value.as_slice().iter().all(|v| v.is_finite()));
     }
 }

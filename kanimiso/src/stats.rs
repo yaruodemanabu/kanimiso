@@ -25861,6 +25861,481 @@ impl SurveyWls {
     }
 }
 
+fn comparable_pairs(durations: &Vector, events: &Vector, n: usize) -> Vec<(usize, usize)> {
+    let mut pairs = Vec::new();
+    for i in 0..n {
+        if events[i] <= 0.5 || !durations[i].is_finite() {
+            continue;
+        }
+        for j in 0..n {
+            if i == j || !durations[j].is_finite() {
+                continue;
+            }
+            if durations[j] > durations[i] + 1e-15 {
+                pairs.push((i, j));
+            }
+        }
+    }
+    pairs
+}
+
+/// Minimum-Lipschitz ranking survival (sksurv `MinlipSurvivalAnalysis` lite).
+///
+/// Pair count is not identification `p`. The coefficient is projected onto the
+/// unit sphere after hinge ISTA so \(\|\beta\|_2=1\).
+#[derive(Clone, Debug)]
+pub struct MinlipSurvival {
+    /// ISTA step size.
+    pub eta: f64,
+    /// Passes over comparable pairs.
+    pub max_iter: usize,
+}
+
+impl Default for MinlipSurvival {
+    fn default() -> Self {
+        Self {
+            eta: 0.1,
+            max_iter: 12,
+        }
+    }
+}
+
+impl MinlipSurvival {
+    /// Default Minlip ranking.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit a unit-norm linear ranking on comparable pairs.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedMinlip>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(durations.len()).min(events.len());
+        let p = x.ncols();
+        let pairs = comparable_pairs(durations, events, n);
+        if pairs.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("MinlipSurvival has no comparable pairs")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "Minlip ranking",
+                        "without an uncensored short-long pair the hinge is empty",
+                        "need at least one event before a later time",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedMinlip {
+                coef: Vector::zeros(p),
+                n_pairs: 0,
+            });
+        }
+        let eta = if self.eta.is_finite() && self.eta > 0.0 {
+            self.eta
+        } else {
+            0.1
+        };
+        let mut beta = Vector::zeros(p);
+        for _ in 0..self.max_iter.max(1) {
+            for &(i, j) in &pairs {
+                let mut s = 0.0;
+                for c in 0..p {
+                    s += (x.get(i, c) - x.get(j, c)) * beta[c];
+                }
+                if s < 1.0 {
+                    for c in 0..p {
+                        beta[c] += eta * (x.get(i, c) - x.get(j, c));
+                    }
+                }
+            }
+            let nrm = beta.norm();
+            if nrm > 1e-15 {
+                for c in 0..p {
+                    beta[c] /= nrm;
+                }
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("MinlipSurvival is unit-norm hinge ISTA, not Van Belle's QP")
+                .compromise(NumericalCompromise::new(
+                    "MinlipSurvivalAnalysis",
+                    "hinge ISTA with a unit-sphere Lipschitz projection",
+                    "the published QP / kernel Minlip solver is omitted",
+                    "read β as a unit ranking direction",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedMinlip {
+            coef: beta,
+            n_pairs: pairs.len(),
+        })
+    }
+}
+
+/// Fitted Minlip ranking.
+#[derive(Clone, Debug)]
+pub struct FittedMinlip {
+    /// Unit-norm ranking coefficients.
+    pub coef: Vector,
+    /// Comparable pair count.
+    pub n_pairs: usize,
+}
+
+impl FittedMinlip {
+    /// Linear risk scores.
+    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.ncols() != self.coef.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("MinlipSurvival predict width ≠ training p")
+                    .build(),
+            );
+        }
+        let p = x.ncols().min(self.coef.len());
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = 0.0;
+            for j in 0..p {
+                s += x.get(i, j) * self.coef[j];
+            }
+            s
+        })))
+    }
+}
+
+/// Kernel ranking survival SVM (sksurv `MinlipSurvivalAnalysis` RBF lite).
+///
+/// Dual / pair counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct KernelSurvivalSvm {
+    /// RBF bandwidth. Not identification `p`.
+    pub gamma: f64,
+    /// ISTA step size.
+    pub eta: f64,
+    /// Passes over comparable pairs.
+    pub max_iter: usize,
+}
+
+impl Default for KernelSurvivalSvm {
+    fn default() -> Self {
+        Self {
+            gamma: 0.5,
+            eta: 0.05,
+            max_iter: 10,
+        }
+    }
+}
+
+impl KernelSurvivalSvm {
+    /// Default RBF ranking SVM.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit dual coefficients on the RBF Gram of comparable pairs.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKernelSurvivalSvm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+        let n = x.nrows().min(durations.len()).min(events.len());
+        let p = x.ncols();
+        let pairs = comparable_pairs(durations, events, n);
+        if pairs.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("KernelSurvivalSvm has no comparable pairs")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "kernel ranking SVM",
+                        "the pairwise hinge has an empty support",
+                        "need at least one event before a later time",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedKernelSurvivalSvm {
+                dual: Vector::zeros(n),
+                support: x.clone(),
+                gamma: 0.5,
+                n_pairs: 0,
+            });
+        }
+        let g = if self.gamma.is_finite() && self.gamma > 0.0 {
+            self.gamma
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "KernelSurvivalSvm γ={:.6e} is not a finite >0; using 0.5",
+                        self.gamma
+                    ))
+                    .build(),
+            );
+            0.5
+        };
+        let mut gram = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..=i {
+                let mut d2 = 0.0;
+                for c in 0..p {
+                    let d = x.get(i, c) - x.get(j, c);
+                    d2 += d * d;
+                }
+                let k = (-g * d2).exp();
+                gram[i * n + j] = k;
+                gram[j * n + i] = k;
+            }
+        }
+        let eta = if self.eta.is_finite() && self.eta > 0.0 {
+            self.eta
+        } else {
+            0.05
+        };
+        let mut alpha = Vector::zeros(n);
+        for _ in 0..self.max_iter.max(1) {
+            for &(i, j) in &pairs {
+                let mut s = 0.0;
+                for u in 0..n {
+                    s += alpha[u] * (gram[u * n + i] - gram[u * n + j]);
+                }
+                if s < 1.0 {
+                    alpha[i] += eta;
+                    alpha[j] -= eta;
+                }
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("KernelSurvivalSvm is dual hinge ISTA on an RBF Gram")
+                .compromise(NumericalCompromise::new(
+                    "kernel survival SVM / Minlip",
+                    "pairwise hinge steps in the RBF feature space",
+                    "the published QP and Nyström / SMO solvers are omitted",
+                    "read scores as a kernel ranking sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedKernelSurvivalSvm {
+            dual: alpha,
+            support: Matrix::from_fn(n, p, |i, j| x.get(i, j)),
+            gamma: g,
+            n_pairs: pairs.len(),
+        })
+    }
+}
+
+/// Fitted kernel ranking SVM.
+#[derive(Clone, Debug)]
+pub struct FittedKernelSurvivalSvm {
+    /// Dual coefficients.
+    pub dual: Vector,
+    /// Training rows.
+    pub support: Matrix,
+    /// RBF bandwidth.
+    pub gamma: f64,
+    /// Comparable pair count.
+    pub n_pairs: usize,
+}
+
+impl FittedKernelSurvivalSvm {
+    /// Kernel risk scores.
+    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let n = self.support.nrows();
+        let p = x.ncols().min(self.support.ncols());
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = 0.0;
+            for u in 0..n.min(self.dual.len()) {
+                let mut d2 = 0.0;
+                for c in 0..p {
+                    let d = x.get(i, c) - self.support.get(u, c);
+                    d2 += d * d;
+                }
+                s += self.dual[u] * (-self.gamma * d2).exp();
+            }
+            s
+        })))
+    }
+}
+
+fn rotate_pair(loadings: &mut Matrix, j: usize, k: usize, phi: f64) {
+    let c = phi.cos();
+    let s = phi.sin();
+    let p = loadings.nrows();
+    for i in 0..p {
+        let a = loadings.get(i, j);
+        let b = loadings.get(i, k);
+        loadings.set(i, j, c * a - s * b);
+        loadings.set(i, k, s * a + c * b);
+    }
+}
+
+/// Kaiser varimax rotation (statsmodels `Factor.rotate('varimax')`).
+///
+/// Factor count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Varimax {
+    /// Givens sweeps.
+    pub max_iter: usize,
+}
+
+impl Default for Varimax {
+    fn default() -> Self {
+        Self { max_iter: 20 }
+    }
+}
+
+impl Varimax {
+    /// Default varimax.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Rotate the columns of a loading matrix.
+    pub fn rotate(&self, loadings: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, loadings, None, &ctx.policy);
+        let (p, k) = loadings.shape();
+        let mut l = Matrix::from_fn(p, k, |i, j| loadings.get(i, j));
+        if k < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .severity(Severity::Warning)
+                    .message("Varimax needs at least two factors")
+                    .build(),
+            );
+            return ctx.finish(l);
+        }
+        let nf = p.max(1) as f64;
+        for _ in 0..self.max_iter.max(1) {
+            for j in 0..k {
+                for kk in (j + 1)..k {
+                    let mut a = 0.0_f64;
+                    let mut b = 0.0_f64;
+                    let mut c = 0.0_f64;
+                    let mut d = 0.0_f64;
+                    for i in 0..p {
+                        let x = l.get(i, j);
+                        let y = l.get(i, kk);
+                        let u = x * x - y * y;
+                        let v = 2.0 * x * y;
+                        a += u;
+                        b += v;
+                        c += u * u - v * v;
+                        d += 2.0 * u * v;
+                    }
+                    let num = d - 2.0 * a * b / nf;
+                    let den = c - (a * a - b * b) / nf;
+                    let phi = 0.25 * num.atan2(den);
+                    if phi.is_finite() {
+                        rotate_pair(&mut l, j, kk, phi);
+                    }
+                }
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Varimax is Kaiser Givens sweeps, not a gradient / SVD solver")
+                .compromise(NumericalCompromise::new(
+                    "Kaiser varimax",
+                    "pairwise Givens angles from the varimax criterion",
+                    "normalised / raw variants and the published convergence test are omitted",
+                    "read the columns as a rotated loading sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(l)
+    }
+}
+
+/// Promax oblique rotation (statsmodels `Factor.rotate('promax')`).
+///
+/// Target power is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Promax {
+    /// Power on the varimax target.
+    pub power: f64,
+}
+
+impl Default for Promax {
+    fn default() -> Self {
+        Self { power: 4.0 }
+    }
+}
+
+impl Promax {
+    /// Promax with the given target power.
+    pub fn new(power: f64) -> Self {
+        Self { power }
+    }
+
+    /// Varimax, then OLS toward a powered target.
+    pub fn rotate(&self, loadings: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let q = Varimax::new().rotate(loadings, &session.child("varimax"))?;
+        let mut ctx = FitCtx::with_session(session.child("promax"));
+        let (p, k) = q.value.shape();
+        let pow = if self.power.is_finite() && self.power > 0.0 {
+            self.power
+        } else {
+            4.0
+        };
+        let mut out = Matrix::zeros(p, k);
+        for j in 0..k {
+            let target = Vector::from_iter((0..p).map(|i| {
+                let v = q.value.get(i, j);
+                v.abs().powf(pow) * v.signum()
+            }));
+            let design = Matrix::from_fn(p, k, |i, c| q.value.get(i, c));
+            let mut scratch = Report::new("promax", "ols");
+            let sol = least_squares(&mut scratch, &design, &target, &ctx.policy)
+                .unwrap_or_else(|| Vector::zeros(k));
+            for issue in scratch.issues() {
+                if skip_aborting_inner(issue) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            for i in 0..p {
+                let mut s = 0.0;
+                for c in 0..k {
+                    s += q.value.get(i, c) * sol[c];
+                }
+                out.set(i, j, s);
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Promax is column-wise OLS toward a powered varimax target")
+                .compromise(NumericalCompromise::new(
+                    "Hendrickson–White promax",
+                    "varimax then per-factor OLS onto |L|^κ sign(L)",
+                    "the published κ search and structure-matrix reporting are omitted",
+                    "read the columns as an oblique sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -27009,5 +27484,32 @@ mod tests {
             .fit(&xate, &dur, &wsvy, &Session::new("svy", "t"))
             .expect("svy");
         assert!(svy.value.coef[0].is_finite());
+        let mlp = MinlipSurvival::new()
+            .fit(&dur, &ev, &xate, &Session::new("mlp", "t"))
+            .expect("mlp");
+        assert!(mlp.value.coef[0].is_finite() || mlp.value.n_pairs == 0);
+        let ksv = KernelSurvivalSvm::new()
+            .fit(&dur, &ev, &xate, &Session::new("ksv", "t"))
+            .expect("ksv");
+        let pksv = ksv
+            .value
+            .predict(&xate, &Session::new("ksvp", "t"))
+            .expect("ksvp");
+        assert_eq!(pksv.value.len(), 20);
+        let loads = Matrix::from_fn(20, 2, |i, j| {
+            if j == 0 {
+                i as f64
+            } else {
+                (i as f64) * 0.3 + ((i % 3) as f64)
+            }
+        });
+        let vm = Varimax::new()
+            .rotate(&loads, &Session::new("vmx", "t"))
+            .expect("vmx");
+        assert_eq!(vm.value.shape(), (20, 2));
+        let prx = Promax::new(3.0)
+            .rotate(&loads, &Session::new("prx", "t"))
+            .expect("prx");
+        assert_eq!(prx.value.shape(), (20, 2));
     }
 }

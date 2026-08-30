@@ -6271,6 +6271,51 @@ const INVENTORY: &[Algorithm] = &[
         "statsmodels.treatment.api",
         "estimator",
     ),
+    a(
+        "stats.MinlipSurvival",
+        "sksurv.svm.MinlipSurvivalAnalysis",
+        "estimator",
+    ),
+    a(
+        "stats.KernelSurvivalSvm",
+        "sksurv.svm.MinlipSurvivalAnalysis",
+        "estimator",
+    ),
+    a(
+        "stats.Varimax",
+        "statsmodels.multivariate.factor.rotate",
+        "stats",
+    ),
+    a(
+        "stats.Promax",
+        "statsmodels.multivariate.factor.rotate",
+        "stats",
+    ),
+    a(
+        "tslearn.TimesNetClassifier",
+        "sktime.classification.deep_learning.timesnet.TimesNetClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.TcnClassifier",
+        "sktime.classification.deep_learning.tcn.TCNClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.TstClassifier",
+        "sktime.classification.deep_learning.tst.TSTClassifier",
+        "timeseries",
+    ),
+    a(
+        "tsa.TimesNetForecaster",
+        "sktime.forecasting.timesnet.TimesNetForecaster",
+        "forecast",
+    ),
+    a(
+        "panel.SunAbraham",
+        "statsmodels.treatment.api",
+        "estimator",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6778,6 +6823,11 @@ mod tests {
             "panel.BorusyakJaravelSpiess",
             "tslearn.PatchTstClassifier",
             "tsa.NhitsForecaster",
+            "stats.MinlipSurvival",
+            "tslearn.TimesNetClassifier",
+            "tslearn.TcnClassifier",
+            "panel.SunAbraham",
+            "stats.Varimax",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

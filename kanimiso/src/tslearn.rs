@@ -16069,6 +16069,398 @@ impl Predict for FittedPatchTstClassifier {
     }
 }
 
+fn dominant_period(row: &[f64]) -> usize {
+    let t = row.len();
+    if t < 4 {
+        return 2;
+    }
+    let mut best_p = 2usize;
+    let mut best = 0.0_f64;
+    for p in 2..=(t / 2).max(2) {
+        let w = 2.0 * std::f64::consts::PI / p as f64;
+        let mut re = 0.0_f64;
+        let mut im = 0.0_f64;
+        for (u, &v) in row.iter().enumerate() {
+            if !v.is_finite() {
+                continue;
+            }
+            re += v * (w * u as f64).cos();
+            im += v * (w * u as f64).sin();
+        }
+        let pow = re * re + im * im;
+        if pow > best {
+            best = pow;
+            best_p = p;
+        }
+    }
+    best_p.max(2)
+}
+
+fn timesnet_row(row: &[f64], period: usize) -> Vec<f64> {
+    let t = row.len();
+    let p = period.max(2).min(t.max(2));
+    let cols = (t / p).max(1);
+    let mut feat = Vec::with_capacity(p + cols + 2);
+    for r in 0..p {
+        let mut s = 0.0_f64;
+        let mut c = 0.0_f64;
+        for k in 0..cols {
+            let ix = r + k * p;
+            if ix < t && row[ix].is_finite() {
+                s += row[ix];
+                c += 1.0;
+            }
+        }
+        feat.push(if c > 0.0 { s / c } else { 0.0 });
+    }
+    for k in 0..cols {
+        let mut s = 0.0_f64;
+        let mut c = 0.0_f64;
+        for r in 0..p {
+            let ix = r + k * p;
+            if ix < t && row[ix].is_finite() {
+                s += row[ix];
+                c += 1.0;
+            }
+        }
+        feat.push(if c > 0.0 { s / c } else { 0.0 });
+    }
+    let mut mx = f64::NEG_INFINITY;
+    let mut mn = f64::INFINITY;
+    for &v in row {
+        if v.is_finite() {
+            mx = mx.max(v);
+            mn = mn.min(v);
+        }
+    }
+    feat.push(if mx.is_finite() { mx } else { 0.0 });
+    feat.push(if mn.is_finite() { mn } else { 0.0 });
+    feat
+}
+
+/// TimesNet-lite (Wu et al. / sktime `TimesNetClassifier`): FFT period + 2-D means.
+///
+/// Period is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct TimesNetClassifier;
+
+impl TimesNetClassifier {
+    /// Default TimesNet-lite classifier.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// Fitted TimesNet ridge.
+#[derive(Clone, Debug)]
+pub struct FittedTimesNetClassifier {
+    period: usize,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+fn timesnet_matrix(x: &Matrix, period: usize) -> Matrix {
+    let feats: Vec<Vec<f64>> = (0..x.nrows())
+        .map(|i| timesnet_row(x.row(i).as_slice(), period))
+        .collect();
+    let w = feats.first().map(|f| f.len()).unwrap_or(1);
+    Matrix::from_fn(x.nrows(), w.max(1), |i, j| {
+        feats[i].get(j).copied().unwrap_or(0.0)
+    })
+}
+
+impl Fit for TimesNetClassifier {
+    type Fitted = FittedTimesNetClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedTimesNetClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let mut votes: BTreeMap<usize, usize> = BTreeMap::new();
+        for i in 0..x.nrows() {
+            let p = dominant_period(x.row(i).as_slice());
+            *votes.entry(p).or_insert(0) += 1;
+        }
+        let period = votes
+            .into_iter()
+            .max_by_key(|(_, c)| *c)
+            .map(|(p, _)| p)
+            .unwrap_or(2)
+            .min(x.ncols().max(2));
+        let z = timesnet_matrix(x, period);
+        let inner = binary_ridge_from_features(&z, y, 0.1, &ctx.policy, "timesnet");
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("TimesNetClassifier is FFT-period 2-D means + ridge, not Inception over 2-D maps")
+                .compromise(NumericalCompromise::new(
+                    "TimesNet 2-D inception",
+                    "dominant DFT period, then row/column means of the period reshape",
+                    "learned 2-D convolutions and multi-period stacking are omitted",
+                    "read scores as a periodogram sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedTimesNetClassifier { period, inner })
+    }
+}
+
+impl Predict for FittedTimesNetClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = timesnet_matrix(x, self.period);
+        self.inner.predict(&z, session)
+    }
+}
+
+fn tcn_row(row: &[f64], w: &[f64], dilation: usize) -> f64 {
+    let t = row.len();
+    let mut acc = f64::NEG_INFINITY;
+    if w.is_empty() {
+        return 0.0;
+    }
+    let d = dilation.max(1);
+    let span = (w.len() - 1) * d;
+    if t <= span {
+        return 0.0;
+    }
+    for t0 in span..t {
+        let mut s = 0.0;
+        for (k, &wk) in w.iter().enumerate() {
+            let ix = t0 - k * d;
+            s += wk * row[ix];
+        }
+        if s > acc {
+            acc = s;
+        }
+    }
+    if acc.is_finite() {
+        acc
+    } else {
+        0.0
+    }
+}
+
+/// Temporal convolutional network (sktime `TCNClassifier` lite).
+///
+/// Dilation / kernel counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct TcnClassifier {
+    /// Kernels per dilation.
+    pub n_kernels: usize,
+    /// Kernel width.
+    pub width: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for TcnClassifier {
+    fn default() -> Self {
+        Self {
+            n_kernels: 3,
+            width: 2,
+            alpha: 0.1,
+            seed: 23,
+        }
+    }
+}
+
+impl TcnClassifier {
+    /// Default TCN-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted dilated-conv ridge.
+#[derive(Clone, Debug)]
+pub struct FittedTcnClassifier {
+    kernels: Vec<(usize, Vec<f64>)>,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for TcnClassifier {
+    type Fitted = FittedTcnClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedTcnClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let w = self.width.max(1).min(x.ncols().max(1));
+        let mut rng = Rng::new(self.seed);
+        let mut kernels = Vec::new();
+        for &d in &[1usize, 2] {
+            if (w.saturating_sub(1)) * d >= x.ncols() {
+                continue;
+            }
+            for _ in 0..self.n_kernels.max(1) {
+                kernels.push((d, (0..w).map(|_| rng.standard_normal()).collect()));
+            }
+        }
+        if kernels.is_empty() {
+            kernels.push((1, vec![1.0]));
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message("TcnClassifier dilated span exceeded T; used a unit kernel")
+                    .build(),
+            );
+        }
+        let z = Matrix::from_fn(x.nrows(), kernels.len(), |i, k| {
+            let (d, ref w) = kernels[k];
+            tcn_row(x.row(i).as_slice(), w, d)
+        });
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "tcn");
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("TcnClassifier is max-pooled dilated conv + ridge")
+                .compromise(NumericalCompromise::new(
+                    "temporal convolutional network",
+                    "dilations 1 and 2 with random kernels and temporal max-pool",
+                    "residual TCN stacks and weight-norm are omitted",
+                    "read scores as a dilated-conv sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedTcnClassifier { kernels, inner })
+    }
+}
+
+impl Predict for FittedTcnClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = Matrix::from_fn(x.nrows(), self.kernels.len(), |i, k| {
+            let (d, ref w) = self.kernels[k];
+            tcn_row(x.row(i).as_slice(), w, d)
+        });
+        self.inner.predict(&z, session)
+    }
+}
+
+fn patch_attention(x: &Matrix, patch_len: usize) -> Matrix {
+    let t = x.ncols();
+    let pl = patch_len.max(1).min(t.max(1));
+    let n_patches = if t >= pl { t / pl } else { 1 };
+    Matrix::from_fn(x.nrows(), pl, |i, j| {
+        let mut dots = vec![0.0; n_patches];
+        let mut mx = f64::NEG_INFINITY;
+        for pidx in 0..n_patches {
+            let start = pidx * pl;
+            let mut s = 0.0;
+            for u in 0..pl {
+                let ix = start + u;
+                if ix < t {
+                    s += x.get(i, ix);
+                }
+            }
+            dots[pidx] = s;
+            if s > mx {
+                mx = s;
+            }
+        }
+        let mut den = 0.0_f64;
+        for pidx in 0..n_patches {
+            den += (dots[pidx] - mx).exp();
+        }
+        if !den.is_finite() || den <= 0.0 {
+            let start = 0;
+            return if start + j < t { x.get(i, j) } else { 0.0 };
+        }
+        let mut acc = 0.0;
+        for pidx in 0..n_patches {
+            let w = (dots[pidx] - mx).exp() / den;
+            let ix = pidx * pl + j;
+            if ix < t {
+                acc += w * x.get(i, ix);
+            }
+        }
+        acc
+    })
+}
+
+/// Time-series Transformer lite (sktime `TSTClassifier`): patch softmax attention + ridge.
+///
+/// Patch count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct TstClassifier {
+    /// Patch length. Not identification `p`.
+    pub patch_len: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for TstClassifier {
+    fn default() -> Self {
+        Self {
+            patch_len: 2,
+            alpha: 0.1,
+        }
+    }
+}
+
+impl TstClassifier {
+    /// Default TST-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted attention-pooled ridge.
+#[derive(Clone, Debug)]
+pub struct FittedTstClassifier {
+    patch_len: usize,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for TstClassifier {
+    type Fitted = FittedTstClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedTstClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let z = patch_attention(x, self.patch_len);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "tst");
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("TstClassifier is patch softmax attention + ridge, not a multi-head Transformer")
+                .compromise(NumericalCompromise::new(
+                    "Time Series Transformer",
+                    "softmax over patch sums, then ridge on the attended patch",
+                    "multi-head attention, positional encodings, and stacked layers are omitted",
+                    "read scores as an attention-pool sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedTstClassifier {
+            patch_len: self.patch_len.max(1),
+            inner,
+        })
+    }
+}
+
+impl Predict for FittedTstClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = patch_attention(x, self.patch_len);
+        self.inner.predict(&z, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -16626,6 +17018,39 @@ mod tests {
         assert_eq!(
             pts.value
                 .predict(&x, &Session::new("ts", "ptsp"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let tn = TimesNetClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "tn"))
+            .unwrap();
+        assert_eq!(
+            tn.value
+                .predict(&x, &Session::new("ts", "tnp"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let tcn = TcnClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "tcn"))
+            .unwrap();
+        assert_eq!(
+            tcn.value
+                .predict(&x, &Session::new("ts", "tcnp"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let tst = TstClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "tst"))
+            .unwrap();
+        assert_eq!(
+            tst.value
+                .predict(&x, &Session::new("ts", "tstp"))
                 .unwrap()
                 .value
                 .len(),
