@@ -489,6 +489,23 @@ pub fn cdist_wdtw(a: &Matrix, b: &Matrix, g: f64, session: &Session) -> Result<Q
     ctx.finish(out)
 }
 
+/// Pairwise derivative DTW (tslearn `cdist` with DDTW).
+///
+/// Series / pair counts are not identification `p`.
+pub fn cdist_ddtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        let da = ddtw_deriv(ai.as_slice());
+        let db = ddtw_deriv(bj.as_slice());
+        dtw_raw(&da, &db)
+    });
+    ctx.finish(out)
+}
+
 fn embed_series(s: &[f64], d: usize) -> Matrix {
     let d = d.max(1);
     let n = s.len().saturating_sub(d - 1).max(1);
@@ -9599,6 +9616,22 @@ pub fn binary_segmentation(y: &Vector, session: &Session) -> Result<Qualified<f6
     clasp_change_point(y, session)
 }
 
+/// Named binary-segmentation detector (sktime `BinarySegmentation` / ruptures `Binseg`).
+#[derive(Clone, Debug, Default)]
+pub struct Binseg;
+
+impl Binseg {
+    /// Default binary segmentation.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Index of the principal mean-change split.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+        binary_segmentation(y, session)
+    }
+}
+
 fn ridge_reg_from_features(
     z: &Matrix,
     y: &Vector,
@@ -12897,6 +12930,16 @@ mod tests {
         assert_eq!(cwd.shape(), (8, 8));
         assert!(cwd.get(0, 0).abs() < 1e-12);
         assert!(cwd.get(0, 1).is_finite());
+        let cdd = cdist_ddtw(&x, &x, &Session::new("ts", "cddtw"))
+            .unwrap()
+            .value;
+        assert_eq!(cdd.shape(), (8, 8));
+        assert!(cdd.get(0, 0).abs() < 1e-12);
+        let bsg = Binseg::new()
+            .fit(&yr, &Session::new("ts", "binseg2"))
+            .unwrap()
+            .value;
+        assert!(bsg.is_finite());
     }
 
     #[test]

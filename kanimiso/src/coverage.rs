@@ -5062,6 +5062,36 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a(
+        "glm.BayesMixedGLM",
+        "statsmodels.genmod.bayes_mixed_glm.BayesMixedGLM",
+        "estimator",
+    ),
+    a(
+        "tslearn.Binseg",
+        "ruptures.detection.Binseg",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_ddtw",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "online.RollingLogCosh",
+        "river.metrics.LogCosh",
+        "online",
+    ),
+    a(
+        "online.RollingCrossEntropy",
+        "river.metrics.CrossEntropy",
+        "online",
+    ),
+    a(
+        "online.RollingAccuracy",
+        "river.metrics.Accuracy",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5410,6 +5440,10 @@ mod tests {
             "iv.cov_hac",
             "online.RollingLogLoss",
             "tslearn.cdist_wdtw",
+            "glm.BayesMixedGLM",
+            "tslearn.Binseg",
+            "tslearn.cdist_ddtw",
+            "online.RollingLogCosh",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

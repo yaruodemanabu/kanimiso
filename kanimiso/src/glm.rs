@@ -5356,6 +5356,140 @@ impl Fit for TLinear {
     }
 }
 
+/// Variational / Laplace random-intercept logit (statsmodels `BayesMixedGLM` lite).
+///
+/// Group count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct BayesMixedGLM {
+    /// IRLS cycles for the fixed-effect seed.
+    pub max_iter: usize,
+}
+
+impl Default for BayesMixedGLM {
+    fn default() -> Self {
+        Self { max_iter: 20 }
+    }
+}
+
+impl BayesMixedGLM {
+    /// Default random-intercept logit.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit a binary response with a Gaussian random intercept per `groups`.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedBayesMixedGlm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if groups.len() != y.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "BayesMixedGLM groups.len()={} ≠ y.len()={}",
+                        groups.len(),
+                        y.len()
+                    ))
+                    .build(),
+            );
+        }
+        if let Some(issue) = signlred::scan_finite(groups.as_slice()).to_issue("groups") {
+            ctx.push(issue);
+        }
+        let n = x.nrows().min(y.len()).min(groups.len());
+        let design = x.with_intercept();
+        let yn = Vector::from_iter((0..n).map(|i| if y[i] > 0.5 { 1.0 } else { 0.0 }));
+        let d = Matrix::from_fn(n, design.ncols(), |i, j| design.get(i, j));
+        let beta = binary_irls(&d, &yn, &ctx.policy, self.max_iter);
+        let mut keys: Vec<i64> = Vec::new();
+        let mut acc: Vec<f64> = Vec::new();
+        let mut cnt: Vec<f64> = Vec::new();
+        for i in 0..n {
+            if !groups[i].is_finite() {
+                continue;
+            }
+            let g = groups[i].round() as i64;
+            let slot = if let Some(k) = keys.iter().position(|&kk| kk == g) {
+                k
+            } else {
+                keys.push(g);
+                acc.push(0.0);
+                cnt.push(0.0);
+                acc.len() - 1
+            };
+            let mut eta = 0.0_f64;
+            for j in 0..beta.len().min(d.ncols()) {
+                eta += beta[j] * d.get(i, j);
+            }
+            let p = sigmoid(eta).clamp(1e-6, 1.0 - 1e-6);
+            acc[slot] += (yn[i] - p) / (p * (1.0 - p)).max(1e-12);
+            cnt[slot] += 1.0;
+        }
+        if keys.len() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateDistribution)
+                    .message("BayesMixedGLM saw fewer than two groups")
+                    .build(),
+            );
+        }
+        let mut re = Vector::zeros(keys.len());
+        let mut tau2 = 0.0_f64;
+        for g in 0..keys.len() {
+            let u = if cnt[g] > 0.0 { acc[g] / cnt[g] } else { 0.0 };
+            re[g] = u;
+            tau2 += u * u;
+        }
+        tau2 = if keys.is_empty() {
+            0.0
+        } else {
+            tau2 / keys.len() as f64
+        };
+        let intercept = beta.as_slice().first().copied().unwrap_or(0.0);
+        let coef = if beta.len() > 1 {
+            Vector::from_iter((1..beta.len()).map(|j| beta[j]))
+        } else {
+            Vector::zeros(0)
+        };
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("BayesMixedGLM uses a Laplace random-intercept residual, not full VB")
+                .compromise(NumericalCompromise::new(
+                    "variational Bayes mixed GLM with a structured posterior",
+                    "pooled logit IRLS plus group-mean working residuals",
+                    "the random-effect posterior covariance is not formed",
+                    "treat τ² as a between-group working-residual scale, not a VB variance",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedBayesMixedGlm {
+            coef,
+            intercept,
+            tau2,
+            re,
+        })
+    }
+}
+
+/// Fitted Bayes mixed GLM.
+#[derive(Clone, Debug)]
+pub struct FittedBayesMixedGlm {
+    /// Fixed-effect slopes.
+    pub coef: Vector,
+    /// Fixed intercept.
+    pub intercept: f64,
+    /// Random-intercept variance.
+    pub tau2: f64,
+    /// Group-level random intercepts (one per distinct group key).
+    pub re: Vector,
+}
+
 /// Scobit (skewed logit) binary GLM (statsmodels `Scobit`).
 ///
 /// \(P=\sigma(\eta)^\alpha\). The shape \(\alpha\) is not identification `p`.
@@ -5828,5 +5962,11 @@ mod tests {
             .unwrap()
             .value;
         assert!(tlp.as_slice().iter().all(|v| v.is_finite()));
+        let bmg = BayesMixedGLM::new()
+            .fit(&x, &ych, &g, &Session::new("bmg", "fit"))
+            .expect("bayesmixed");
+        assert!(bmg.value.intercept.is_finite());
+        assert!(bmg.value.tau2.is_finite() && bmg.value.tau2 >= 0.0);
+        assert!(!bmg.value.re.is_empty());
     }
 }

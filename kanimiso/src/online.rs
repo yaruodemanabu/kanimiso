@@ -19243,6 +19243,305 @@ impl PartialFit for RollingHuber {
     }
 }
 
+/// Rolling log-cosh (river `metrics.Rolling` + `LogCosh`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingLogCosh {
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingLogCosh {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingLogCosh {
+    /// Rolling log-cosh with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window mean log-cosh, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.buf.is_empty() {
+            f64::NAN
+        } else {
+            self.buf.iter().sum::<f64>() / self.buf.len() as f64
+        }
+    }
+}
+
+impl PartialFit for RollingLogCosh {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no y for RollingLogCosh"),
+            );
+        };
+        let before = self.score();
+        let cap = self.window.max(1);
+        for i in 0..x.nrows().min(y.len()) {
+            let pred = x.get(i, 0);
+            let truth = y[i];
+            if pred.is_finite() && truth.is_finite() {
+                let e = pred - truth;
+                let ae = e.abs();
+                let lch = ae + ((-2.0 * ae).exp() + 1.0).ln() - 2.0_f64.ln();
+                rolling_push(&mut self.buf, lch, cap);
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.buf.is_empty();
+        q.warmup = self.buf.is_empty();
+        q.explanation = format!("RollingLogCosh={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed log-cosh",
+                "sliding log cosh of (pred−y); window is not identification p",
+                format!("lch={before:.6e}"),
+                format!("lch={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Rolling soft cross-entropy (river `metrics.Rolling` + `CrossEntropy`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingCrossEntropy {
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingCrossEntropy {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingCrossEntropy {
+    /// Rolling cross-entropy with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window mean cross-entropy, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.buf.is_empty() {
+            f64::NAN
+        } else {
+            self.buf.iter().sum::<f64>() / self.buf.len() as f64
+        }
+    }
+}
+
+impl PartialFit for RollingCrossEntropy {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "no y for RollingCrossEntropy",
+                ),
+            );
+        };
+        let before = self.score();
+        let cap = self.window.max(1);
+        for i in 0..x.nrows().min(y.len()) {
+            let p = x.get(i, 0);
+            let t = y[i];
+            if p.is_finite() && t.is_finite() {
+                let p = p.clamp(1e-12, 1.0 - 1e-12);
+                let t = t.clamp(0.0, 1.0);
+                let ce = -(t * p.ln() + (1.0 - t) * (1.0 - p).ln());
+                rolling_push(&mut self.buf, ce, cap);
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.buf.is_empty();
+        q.warmup = self.buf.is_empty();
+        q.explanation = format!("RollingCrossEntropy={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed cross-entropy",
+                "sliding soft CE of column 0 vs y; window is not identification p",
+                format!("ce={before:.6e}"),
+                format!("ce={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Rolling accuracy (river `metrics.Rolling` + `Accuracy`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingAccuracy {
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingAccuracy {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingAccuracy {
+    /// Rolling accuracy with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window accuracy, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.buf.is_empty() {
+            f64::NAN
+        } else {
+            self.buf.iter().sum::<f64>() / self.buf.len() as f64
+        }
+    }
+}
+
+impl PartialFit for RollingAccuracy {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no y for RollingAccuracy"),
+            );
+        };
+        let before = self.score();
+        let cap = self.window.max(1);
+        for i in 0..x.nrows().min(y.len()) {
+            let pred = x.get(i, 0);
+            let truth = y[i];
+            if pred.is_finite() && truth.is_finite() {
+                let ph: f64 = if pred > 0.5 { 1.0 } else { 0.0 };
+                let th: f64 = if truth > 0.5 { 1.0 } else { 0.0 };
+                let hit = if (ph - th).abs() < 0.5 { 1.0 } else { 0.0 };
+                rolling_push(&mut self.buf, hit, cap);
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.buf.is_empty();
+        q.warmup = self.buf.is_empty();
+        q.explanation = format!("RollingAccuracy={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed accuracy",
+                "sliding 0-1 score of hard 0.5 on column 0 vs y; window is not identification p",
+                format!("acc={before:.6e}"),
+                format!("acc={after:.6e}"),
+            ),
+        )
+    }
+}
+
 /// ADWIN-resetting bag of perceptrons (river `ensemble.ADWINBaggingClassifier`).
 #[derive(Clone, Debug)]
 pub struct AdwinBagging {
@@ -27976,6 +28275,15 @@ mod tests {
         RollingHuber::new(4, 1.0)
             .partial_fit(&x, Some(&y), &session)
             .expect("rhub");
+        RollingLogCosh::new(4)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("rlch");
+        RollingCrossEntropy::new(4)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("rce");
+        RollingAccuracy::new(4)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("racc");
 
         let n_expl = session
             .ledger()
