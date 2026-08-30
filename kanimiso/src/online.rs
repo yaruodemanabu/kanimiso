@@ -33897,6 +33897,166 @@ impl Predict for CosineAnnealingRegressor {
     }
 }
 
+/// Polynomial factorisation machine (river `facto` 2-way polynomial FM).
+///
+/// Pair count is not identification `p`. A 1-column design has no pair term.
+#[derive(Clone, Debug)]
+pub struct PolynomialFm {
+    /// SGD step.
+    pub learning_rate: f64,
+    w0: f64,
+    w: Vector,
+    pair: HashMap<(usize, usize), f64>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for PolynomialFm {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            w0: 0.0,
+            w: Vector::zeros(0),
+            pair: HashMap::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl PolynomialFm {
+    /// Empty polynomial FM.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let p = x.ncols().min(self.w.len());
+        let mut s = self.w0;
+        for j in 0..p {
+            s += self.w[j] * x.get(i, j);
+        }
+        for j in 0..p {
+            for k in (j + 1)..p {
+                let wjk = self.pair.get(&(j, k)).copied().unwrap_or(0.0);
+                s += wjk * x.get(i, j) * x.get(i, k);
+            }
+        }
+        s
+    }
+}
+
+impl PartialFit for PolynomialFm {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let p = x.ncols().max(1);
+        if !self.initialized {
+            self.w = Vector::zeros(p);
+            self.initialized = true;
+        } else if self.w.len() != p {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message("PolynomialFm feature dim changed")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("PolynomialFm learning_rate was non-positive; using 0.05")
+                    .build(),
+            );
+            0.05
+        };
+        let mut sse0 = 0.0_f64;
+        let mut sse1 = 0.0_f64;
+        let mut moved = 0.0_f64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let yhat = self.predict_row(x, i);
+            let err = yhat - y[i];
+            sse0 += err * err;
+            self.w0 -= eta * err;
+            for j in 0..x.ncols().min(self.w.len()) {
+                let d = eta * err * x.get(i, j);
+                self.w[j] -= d;
+                moved += d.abs();
+            }
+            let pp = x.ncols().min(self.w.len());
+            for j in 0..pp {
+                for k in (j + 1)..pp {
+                    let xjk = x.get(i, j) * x.get(i, k);
+                    let cur = self.pair.get(&(j, k)).copied().unwrap_or(0.0);
+                    let nxt = cur - eta * err * xjk;
+                    moved += (nxt - cur).abs();
+                    self.pair.insert((j, k), nxt);
+                }
+            }
+            let after = self.predict_row(x, i);
+            let e1 = after - y[i];
+            sse1 += e1 * e1;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &Vector::filled(1, moved),
+            sse0,
+            sse1,
+            self.n_seen >= 2,
+            self.n_seen < 2,
+            "polynomial FM",
+            "SGD on 1 + linear + pairwise x_j x_k; pair count is not p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for PolynomialFm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -34434,6 +34594,9 @@ mod tests {
         CosineAnnealingRegressor::new(8)
             .partial_fit(&x, Some(&y), &session)
             .expect("cosann");
+        PolynomialFm::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("polyfm");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

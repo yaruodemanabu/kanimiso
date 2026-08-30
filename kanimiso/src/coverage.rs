@@ -5640,6 +5640,23 @@ const INVENTORY: &[Algorithm] = &[
         "estimator",
     ),
     a("tslearn.Rist", "sktime.classification.hybrid.RISTClassifier", "estimator"),
+    a(
+        "stats.generalized_gamma_fitter",
+        "lifelines.GeneralizedGammaFitter",
+        "function",
+    ),
+    a(
+        "stats.GeneralizedGammaFitter",
+        "lifelines.GeneralizedGammaFitter",
+        "estimator",
+    ),
+    a("stats.AalenAdditiveFitter", "lifelines.AalenAdditiveFitter", "estimator"),
+    a("panel.ClusteredFamaMacBeth", "linearmodels.FamaMacBeth", "estimator"),
+    a("panel.Between2Sls", "linearmodels.IV2SLS", "estimator"),
+    a("online.PolynomialFm", "river.facto.FMRegressor", "online"),
+    a("tslearn.BossVs", "sktime.classification.dictionary_based.BOSSVS", "estimator"),
+    a("tslearn.PeltAnnotator", "sktime.annotation.clasp.Pelt", "estimator"),
+    a("tslearn.ClaSPAnnotator", "sktime.annotation.clasp.ClaSP", "estimator"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6063,6 +6080,10 @@ mod tests {
             "online.Snmf",
             "tslearn.Rist",
             "stats.MixtureCureFitter",
+            "stats.GeneralizedGammaFitter",
+            "panel.ClusteredFamaMacBeth",
+            "online.PolynomialFm",
+            "tslearn.BossVs",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

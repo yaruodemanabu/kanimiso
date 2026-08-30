@@ -19513,6 +19513,154 @@ pub fn scaled_schoenfeld(
     ctx.finish(out)
 }
 
+/// Generalized-gamma lifetime via log-moment + log-skew (lifelines
+/// `GeneralizedGammaFitter`).
+///
+/// Event count is not identification `p`. Inspect times with `y=None`.
+pub fn generalized_gamma_fitter(
+    durations: &Vector,
+    events: &Vector,
+    session: &Session,
+) -> Result<Qualified<FittedGeneralizedGamma>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    let n = durations.len().min(events.len());
+    let mut logs: Vec<f64> = Vec::new();
+    for i in 0..n {
+        if events[i] > 0.5 && durations[i].is_finite() && durations[i] > 0.0 {
+            logs.push(durations[i].ln());
+        }
+    }
+    if logs.len() < 3 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("generalized_gamma_fitter needs three positive event times")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "generalized-gamma (d, p, a)",
+                    "log-skew is unidentified with <3 events",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedGeneralizedGamma {
+            shape: f64::NAN,
+            power: f64::NAN,
+            scale: f64::NAN,
+            n_events: logs.len(),
+            n,
+        });
+    }
+    let m = logs.iter().sum::<f64>() / logs.len() as f64;
+    let mut m2 = 0.0_f64;
+    let mut m3 = 0.0_f64;
+    for v in &logs {
+        let d = v - m;
+        m2 += d * d;
+        m3 += d * d * d;
+    }
+    let nn = logs.len() as f64;
+    let var = m2 / (nn - 1.0);
+    let sd = var.max(0.0).sqrt();
+    let skew = if sd > 1e-12 {
+        (m3 / nn) / sd.powi(3)
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::NearZeroVariance)
+                .message("generalized_gamma_fitter log-times are nearly constant")
+                .build(),
+        );
+        0.0
+    };
+    let power = (1.0 / (1.0 + 0.5 * skew.abs())).clamp(0.25, 4.0);
+    let shape = if sd > 1e-12 {
+        (std::f64::consts::PI / (sd * 6.0_f64.sqrt())).max(0.25)
+    } else {
+        1.0
+    };
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("generalized_gamma_fitter is a log-moment sketch, not a censored GG MLE")
+            .compromise(NumericalCompromise::new(
+                "right-censored generalized-gamma MLE",
+                "Weibull-like shape from SD(log T); power from |skew(log T)|",
+                "censored rows do not enter (d, p, a)",
+                "read the triple as a planning sketch, not the lifelines MLE",
+            ))
+            .build(),
+    );
+    ctx.finish(FittedGeneralizedGamma {
+        shape,
+        power,
+        scale: m.exp(),
+        n_events: logs.len(),
+        n,
+    })
+}
+
+/// Fitted generalized-gamma lifetime.
+#[derive(Clone, Debug)]
+pub struct FittedGeneralizedGamma {
+    /// Stacy shape \(d\).
+    pub shape: f64,
+    /// Stacy power \(p\).
+    pub power: f64,
+    /// Scale \(a\).
+    pub scale: f64,
+    /// Uncensored events.
+    pub n_events: usize,
+    /// Sample size.
+    pub n: usize,
+}
+
+/// Named generalized-gamma fitter.
+#[derive(Clone, Debug, Default)]
+pub struct GeneralizedGammaFitter;
+
+impl GeneralizedGammaFitter {
+    /// Default generalized-gamma lifetime.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on durations and event indicators.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedGeneralizedGamma>> {
+        generalized_gamma_fitter(durations, events, session)
+    }
+}
+
+/// Named Aalen additive hazards (lifelines `AalenAdditiveFitter`).
+#[derive(Clone, Debug, Default)]
+pub struct AalenAdditiveFitter;
+
+impl AalenAdditiveFitter {
+    /// Default additive hazards.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit cumulative additive coefficients.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<AalenAdditiveResult>> {
+        aalen_additive(durations, events, x, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -20342,5 +20490,14 @@ mod tests {
         let ssch = scaled_schoenfeld(&dur, &ev, &xcox, &Session::new("ssch", "t")).expect("ssch");
         assert!(ssch.value.ncols() == 1);
         assert!(ssch.value.nrows() == 0 || ssch.value.get(0, 0).is_finite());
+        let ggf = GeneralizedGammaFitter::new()
+            .fit(&dur, &ev, &Session::new("ggf", "t"))
+            .expect("ggf");
+        assert!(ggf.value.scale.is_finite() && ggf.value.scale > 0.0);
+        assert!(ggf.value.power.is_finite() && ggf.value.power > 0.0);
+        let aaf = AalenAdditiveFitter::new()
+            .fit(&dur, &ev, &xcox, &Session::new("aaf", "t"))
+            .expect("aaf");
+        assert!(aaf.value.cumulative.ncols() == 1);
     }
 }

@@ -1650,6 +1650,263 @@ impl HausmanTaylor {
     }
 }
 
+/// Fama–MacBeth with lag-1 Newey–West SEs on the time series of slopes
+/// (linearmodels clustered / HAC FM).
+///
+/// Time count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct ClusteredFamaMacBeth;
+
+impl ClusteredFamaMacBeth {
+    /// Default clustered two-pass estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit `y ~ 1 + X` in each time slice; SE is lag-1 HAC of the slopes.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        times: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedFamaMacBeth>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let n = y.len().min(x.nrows()).min(times.len());
+        let p = x.ncols();
+        let mut by_t: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+        for i in 0..n {
+            if times[i].is_finite() {
+                by_t.entry(times[i].round() as i64).or_default().push(i);
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("ClusteredFamaMacBeth is lag-1 HAC on CS slopes, not entity-clustered FM")
+                .compromise(NumericalCompromise::new(
+                    "entity-clustered Fama–MacBeth",
+                    "Newey–West lag 1 on the time series of cross-section slopes",
+                    "within-time residual clustering is omitted",
+                    "read se as a date-HAC planning SE",
+                ))
+                .build(),
+        );
+        let mut betas: Vec<Vector> = Vec::new();
+        let mut intercepts: Vec<f64> = Vec::new();
+        let mut n_cs = 0.0_f64;
+        for (_t, rows) in &by_t {
+            if rows.len() < 2 {
+                continue;
+            }
+            let xt = Matrix::from_fn(rows.len(), p, |r, j| x.get(rows[r], j));
+            let yt = Vector::from_iter(rows.iter().map(|&i| y[i]));
+            let design = xt.with_intercept();
+            let mut scratch = signlred::Report::new("cfm", "cs-ols");
+            let Some(sol) = least_squares(&mut scratch, &design, &yt, &ctx.policy) else {
+                continue;
+            };
+            for issue in scratch.issues() {
+                if matches!(
+                    issue.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::R2IsOne
+                        | IssueCode::RankZero
+                        | IssueCode::CholeskyFailed
+                ) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            if !sol.as_slice().iter().all(|v| v.is_finite()) {
+                continue;
+            }
+            intercepts.push(sol.as_slice().first().copied().unwrap_or(0.0));
+            betas.push(Vector::from_iter((0..p).map(|j| {
+                sol.as_slice().get(j + 1).copied().unwrap_or(0.0)
+            })));
+            n_cs += rows.len() as f64;
+        }
+        let n_times = betas.len();
+        if n_times == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("ClusteredFamaMacBeth has no usable time slice")
+                    .build(),
+            );
+            return ctx.finish(FittedFamaMacBeth {
+                coef: Vector::zeros(p),
+                intercept: 0.0,
+                se: Vector::zeros(p),
+                n_times: 0,
+                n_cs_avg: 0.0,
+            });
+        }
+        let intercept = intercepts.iter().sum::<f64>() / n_times as f64;
+        let coef = Vector::from_iter((0..p).map(|j| {
+            betas.iter().map(|b| b[j]).sum::<f64>() / n_times as f64
+        }));
+        let se = Vector::from_iter((0..p).map(|j| {
+            if n_times < 2 {
+                return f64::NAN;
+            }
+            let m = coef[j];
+            let mut g0 = 0.0_f64;
+            let mut g1 = 0.0_f64;
+            for t in 0..n_times {
+                let d = betas[t][j] - m;
+                g0 += d * d;
+                if t + 1 < n_times {
+                    g1 += d * (betas[t + 1][j] - m);
+                }
+            }
+            g0 /= n_times as f64;
+            g1 /= n_times as f64;
+            let nw = (g0 + g1).max(0.0);
+            (nw / n_times as f64).sqrt()
+        }));
+        ctx.finish(FittedFamaMacBeth {
+            coef,
+            intercept,
+            se,
+            n_times,
+            n_cs_avg: n_cs / n_times as f64,
+        })
+    }
+}
+
+/// Between 2SLS: group-mean IV (linearmodels `BetweenIV` / 2SLS on \(\bar y_g\)).
+///
+/// Group count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct Between2Sls;
+
+impl Between2Sls {
+    /// Default between IV.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit \(\bar y_g\) on \(\widehat{\bar X}_g(Z)\).
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        z: &Matrix,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPanel>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if groups.len() != y.len() || z.nrows() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("Between2Sls groups/Z length ≠ n")
+                    .build(),
+            );
+        }
+        let sizes = group_sizes(groups);
+        warn_panel_groups(&mut ctx, &sizes, "Between2Sls");
+        if sizes.len() <= 1 {
+            return ctx.finish(empty_panel(x.ncols()));
+        }
+        let (mx, my) = group_means(x, y, groups, &sizes);
+        let z_dummy = Vector::zeros(y.len().min(z.nrows()));
+        let (mz, _) = group_means(z, &z_dummy, groups, &sizes);
+        let keys: Vec<i64> = mx.keys().copied().collect();
+        let g = keys.len();
+        let p = x.ncols();
+        let q = z.ncols();
+        let xb = Matrix::from_fn(g, p, |i, j| mx[&keys[i]][j]);
+        let zb = Matrix::from_fn(g, q, |i, j| mz.get(&keys[i]).map(|v| v[j]).unwrap_or(0.0));
+        let yb = Vector::from_iter(keys.iter().map(|k| my.get(k).copied().unwrap_or(0.0)));
+        if yb.std() <= ctx.policy.near_zero_variance {
+            ctx.push(
+                Issue::builder(IssueCode::ConstantTarget)
+                    .message("Between2Sls between y is constant")
+                    .build(),
+            );
+            return ctx.finish(empty_panel(p));
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Between2Sls is group-mean 2SLS, not clustered LIML")
+                .compromise(NumericalCompromise::new(
+                    "panel IV with clustered covariance",
+                    "between OLS first and second stages on group means",
+                    "within variation is discarded",
+                    "read the slope as a between-IV sketch",
+                ))
+                .build(),
+        );
+        let z1 = zb.with_intercept();
+        let mut xhat = Matrix::zeros(g, p);
+        for j in 0..p {
+            let xj = Vector::from_iter((0..g).map(|i| xb.get(i, j)));
+            let mut scratch = signlred::Report::new("b2sls", "fs");
+            if let Some(pi) = least_squares(&mut scratch, &z1, &xj, &ctx.policy) {
+                for i in 0..g {
+                    let mut s = 0.0_f64;
+                    for k in 0..pi.len().min(z1.ncols()) {
+                        s += z1.get(i, k) * pi[k];
+                    }
+                    xhat.set(i, j, s);
+                }
+            }
+            for issue in scratch.issues() {
+                if matches!(
+                    issue.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::R2IsOne
+                        | IssueCode::RankZero
+                        | IssueCode::CholeskyFailed
+                        | IssueCode::PerfectCollinearity
+                ) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+        }
+        let design = xhat.with_intercept();
+        let mut scratch = signlred::Report::new("b2sls", "ss");
+        let Some(beta) = least_squares(&mut scratch, &design, &yb, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("Between2Sls second stage failed")
+                    .build(),
+            );
+            return ctx.finish(empty_panel(p));
+        };
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::R2IsOne
+                    | IssueCode::RankZero
+                    | IssueCode::CholeskyFailed
+                    | IssueCode::PerfectCollinearity
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedPanel {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            coef: Vector::from_iter((0..p).map(|j| {
+                beta.as_slice().get(j + 1).copied().unwrap_or(0.0)
+            })),
+            n_groups: g,
+            n_eff: g,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1764,5 +2021,14 @@ mod tests {
             .fit(&x, &y, &g, &Session::new("ht", "fit"))
             .expect("ht");
         assert!((ht.value.coef[0] - 2.0).abs() < 0.25, "ht={}", ht.value.coef[0]);
+        let cfm = ClusteredFamaMacBeth::new()
+            .fit(&xfm, &y, &time, &Session::new("cfm", "fit"))
+            .expect("cfm");
+        assert_eq!(cfm.value.coef.len(), 1);
+        assert!(cfm.value.coef[0].is_finite());
+        let b2 = Between2Sls::new()
+            .fit(&xfm, &y, &xfm, &g, &Session::new("b2s", "fit"))
+            .expect("b2s");
+        assert!(b2.value.coef[0].is_finite());
     }
 }

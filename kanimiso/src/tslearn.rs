@@ -14080,6 +14080,190 @@ impl Predict for FittedRist {
     }
 }
 
+/// BOSS vector space (sktime `BOSSVSClassifier`): class-mean SFA histograms
+/// with cosine vote.
+///
+/// Vocabulary size is not identification `p`. Window must be ≤ series length.
+#[derive(Clone, Debug)]
+pub struct BossVs {
+    /// Sliding-window length.
+    pub window: usize,
+    /// DFT coefficients kept per window.
+    pub word_len: usize,
+    /// SFA alphabet size.
+    pub alphabet: usize,
+}
+
+impl Default for BossVs {
+    fn default() -> Self {
+        Self {
+            window: 4,
+            word_len: 4,
+            alphabet: 4,
+        }
+    }
+}
+
+impl BossVs {
+    /// Default BOSS-VS.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted BOSS-VS class centroids.
+#[derive(Clone, Debug)]
+pub struct FittedBossVs {
+    spec: (usize, usize, usize),
+    centroids: BTreeMap<i64, Vector>,
+    default_label: f64,
+}
+
+impl Fit for BossVs {
+    type Fitted = FittedBossVs;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedBossVs>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let w = self.window.max(2).min(x.ncols().max(2));
+        if x.ncols() < self.window {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "BossVs window {} > series length {}",
+                        self.window,
+                        x.ncols()
+                    ))
+                    .build(),
+            );
+        }
+        let (h, _vocab) = boss_histograms(x, w, self.word_len.max(1), self.alphabet.max(2));
+        let mut sums: BTreeMap<i64, Vector> = BTreeMap::new();
+        let mut cnt: BTreeMap<i64, f64> = BTreeMap::new();
+        let default_label = y
+            .as_slice()
+            .iter()
+            .copied()
+            .find(|v| v.is_finite())
+            .unwrap_or(0.0);
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let lab = y[i].round() as i64;
+            let acc = sums.entry(lab).or_insert_with(|| Vector::zeros(h.ncols()));
+            if acc.len() != h.ncols() {
+                *acc = Vector::zeros(h.ncols());
+            }
+            for j in 0..h.ncols() {
+                acc[j] += h.get(i, j);
+            }
+            *cnt.entry(lab).or_insert(0.0) += 1.0;
+        }
+        let mut centroids = BTreeMap::new();
+        for (lab, mut acc) in sums {
+            let n = cnt.get(&lab).copied().unwrap_or(1.0).max(1.0);
+            for j in 0..acc.len() {
+                acc[j] /= n;
+            }
+            centroids.insert(lab, acc);
+        }
+        if centroids.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("BossVs has no class centroid")
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("BossVs is cosine-to-mean SFA histograms, not the published BOSS-VS")
+                .compromise(NumericalCompromise::new(
+                    "sktime BOSSVS tf-idf / IDF-weighted cosine",
+                    "class-mean BOSS histograms and plain cosine",
+                    "IDF and multiple window ensembles are omitted",
+                    "do not read as a published BOSS-VS accuracy",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedBossVs {
+            spec: (w, self.word_len.max(1), self.alphabet.max(2)),
+            centroids,
+            default_label,
+        })
+    }
+}
+
+impl Predict for FittedBossVs {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let (h, _) = boss_histograms(x, self.spec.0, self.spec.1, self.spec.2);
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut best_lab = self.default_label;
+            let mut best = f64::NEG_INFINITY;
+            for (&lab, c) in &self.centroids {
+                let mut dot = 0.0_f64;
+                let mut na = 0.0_f64;
+                let mut nb = 0.0_f64;
+                for j in 0..h.ncols().min(c.len()) {
+                    let a = h.get(i, j);
+                    let b = c[j];
+                    dot += a * b;
+                    na += a * a;
+                    nb += b * b;
+                }
+                let den = (na.sqrt() * nb.sqrt()).max(1e-12);
+                let cos = dot / den;
+                if cos > best {
+                    best = cos;
+                    best_lab = lab as f64;
+                }
+            }
+            best_lab
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// Named PELT annotator (sktime `Pelt`).
+#[derive(Clone, Debug, Default)]
+pub struct PeltAnnotator {
+    inner: Pelt,
+}
+
+impl PeltAnnotator {
+    /// Default PELT annotator.
+    pub fn new() -> Self {
+        Self {
+            inner: Pelt::default(),
+        }
+    }
+
+    /// Change-point locations.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.fit(y, session)
+    }
+}
+
+/// Named ClaSP annotator (sktime `ClaSP`).
+#[derive(Clone, Debug, Default)]
+pub struct ClaSPAnnotator;
+
+impl ClaSPAnnotator {
+    /// Default ClaSP annotator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Index of the principal ClaSP split.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+        ClaSPSegmentation::new().fit(y, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -14469,6 +14653,25 @@ mod tests {
             .value;
         assert_eq!(prist.len(), 8);
         assert!(prist.as_slice().iter().all(|v| v.is_finite()));
+        let bvs = BossVs::new()
+            .fit(&x, &y, &Session::new("ts", "bvs"))
+            .unwrap();
+        let pbvs = bvs
+            .value
+            .predict(&x, &Session::new("ts", "bvsp"))
+            .unwrap()
+            .value;
+        assert_eq!(pbvs.len(), 8);
+        assert!(pbvs.as_slice().iter().all(|v| v.is_finite()));
+        let yann = Vector::from_iter((0..8).map(|i| i as f64));
+        let pelta = PeltAnnotator::new()
+            .fit(&yann, &Session::new("ts", "pelta"))
+            .unwrap();
+        assert!(pelta.value.as_slice().iter().all(|v| v.is_finite()));
+        let claspa = ClaSPAnnotator::new()
+            .fit(&yann, &Session::new("ts", "claspa"))
+            .unwrap();
+        assert!(claspa.value.is_finite() || claspa.value.is_nan());
         let rst = Rstsf::new()
             .fit(&x, &y, &Session::new("ts", "rstsf"))
             .unwrap();
