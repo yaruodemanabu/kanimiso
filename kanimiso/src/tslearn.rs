@@ -14840,6 +14840,41 @@ impl Predict for FittedWeaselD {
     }
 }
 
+/// Catch22 + ExtraTrees classifier (sktime `Catch22` forest classification).
+///
+/// Catch22 width and tree count are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Catch22ForestClassifier {
+    inner: Catch22El,
+}
+
+impl Default for Catch22ForestClassifier {
+    fn default() -> Self {
+        Self {
+            inner: Catch22El::default(),
+        }
+    }
+}
+
+impl Catch22ForestClassifier {
+    /// Default Catch22 forest classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for Catch22ForestClassifier {
+    type Fitted = FittedCatch22El;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCatch22El>> {
+        self.inner.fit(x, y, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -15270,6 +15305,15 @@ mod tests {
         let c22fr = Catch22ForestRegressor::new()
             .fit(&x, &yr, &Session::new("ts", "c22fr"))
             .unwrap();
+        let c22fc = Catch22ForestClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "c22fc"))
+            .unwrap();
+        let pc22fc = c22fc
+            .value
+            .predict(&x, &Session::new("ts", "c22fcp"))
+            .unwrap()
+            .value;
+        assert_eq!(pc22fc.len(), 8);
         let pc22fr = c22fr
             .value
             .predict(&x, &Session::new("ts", "c22frp"))

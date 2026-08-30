@@ -5696,6 +5696,147 @@ impl Fit for Scobit {
     }
 }
 
+/// Named Weibull AFT (lifelines `WeibullAFTFitter`).
+#[derive(Clone, Debug)]
+pub struct WeibullAftFitter {
+    inner: WeibullAft,
+}
+
+impl Default for WeibullAftFitter {
+    fn default() -> Self {
+        Self {
+            inner: WeibullAft::default(),
+        }
+    }
+}
+
+impl WeibullAftFitter {
+    /// Default Weibull AFT fitter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for WeibullAftFitter {
+    type Fitted = FittedWeibullAft;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedWeibullAft>> {
+        self.inner.fit(x, y, session)
+    }
+}
+
+/// Named exponential AFT (lifelines `ExponentialFitter` / AFT).
+#[derive(Clone, Debug)]
+pub struct ExponentialAftFitter {
+    inner: ExponentialAft,
+}
+
+impl Default for ExponentialAftFitter {
+    fn default() -> Self {
+        Self {
+            inner: ExponentialAft::default(),
+        }
+    }
+}
+
+impl ExponentialAftFitter {
+    /// Default exponential AFT fitter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for ExponentialAftFitter {
+    type Fitted = FittedWeibullAft;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedWeibullAft>> {
+        self.inner.fit(x, y, session)
+    }
+}
+
+/// Named log-logistic AFT (lifelines `LogLogisticAFTFitter`).
+#[derive(Clone, Debug, Default)]
+pub struct LogLogisticAftFitter {
+    inner: LogLogisticAft,
+}
+
+impl LogLogisticAftFitter {
+    /// Default log-logistic AFT fitter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for LogLogisticAftFitter {
+    type Fitted = FittedWeibullAft;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedWeibullAft>> {
+        self.inner.fit(x, y, session)
+    }
+}
+
+/// Named log-normal AFT (lifelines `LogNormalAFTFitter`).
+#[derive(Clone, Debug, Default)]
+pub struct LogNormalAftFitter {
+    inner: LogNormalAft,
+}
+
+impl LogNormalAftFitter {
+    /// Default log-normal AFT fitter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for LogNormalAftFitter {
+    type Fitted = FittedWeibullAft;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedWeibullAft>> {
+        self.inner.fit(x, y, session)
+    }
+}
+
+/// Named Gompertz AFT (lifelines `GompertzFitter` / AFT).
+#[derive(Clone, Debug, Default)]
+pub struct GompertzAftFitter {
+    inner: GompertzAft,
+}
+
+impl GompertzAftFitter {
+    /// Default Gompertz AFT fitter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for GompertzAftFitter {
+    type Fitted = FittedWeibullAft;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedWeibullAft>> {
+        self.inner.fit(x, y, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6056,5 +6197,25 @@ mod tests {
         assert!(bmg.value.intercept.is_finite());
         assert!(bmg.value.tau2.is_finite() && bmg.value.tau2 >= 0.0);
         assert!(!bmg.value.re.is_empty());
+        let waf = WeibullAftFitter::new()
+            .fit(&x, &yt, &Session::new("waftf", "fit"))
+            .expect("waftf");
+        assert!(waf.value.sigma > 0.0 && waf.value.sigma.is_finite());
+        let eaf = ExponentialAftFitter::new()
+            .fit(&x, &yt, &Session::new("eaftf", "fit"))
+            .expect("eaftf");
+        assert!((eaf.value.sigma - 1.0).abs() < 1e-12);
+        let llaf = LogLogisticAftFitter::new()
+            .fit(&x, &yt, &Session::new("llaftf", "fit"))
+            .expect("llaftf");
+        assert!(llaf.value.sigma > 0.0);
+        let lnaf = LogNormalAftFitter::new()
+            .fit(&x, &yt, &Session::new("lnaftf", "fit"))
+            .expect("lnaftf");
+        assert!(lnaf.value.sigma > 0.0);
+        let gaf = GompertzAftFitter::new()
+            .fit(&x, &yt, &Session::new("gaftf", "fit"))
+            .expect("gaftf");
+        assert!(gaf.value.sigma > 0.0);
     }
 }

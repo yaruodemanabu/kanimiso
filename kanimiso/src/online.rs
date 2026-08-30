@@ -35291,6 +35291,421 @@ impl Predict for AdaptiveRandomForestClassifier {
     }
 }
 
+/// Lookahead SGD (Zhang et al. / river `optim.Lookahead`).
+///
+/// Sync period is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct LookaheadRegressor {
+    /// Inner step.
+    pub eta: f64,
+    /// Slow-weight blend \(\alpha\).
+    pub alpha: f64,
+    /// Sync every `k` rows.
+    pub k: usize,
+    fast: Vector,
+    slow: Vector,
+    b_fast: f64,
+    b_slow: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for LookaheadRegressor {
+    fn default() -> Self {
+        Self {
+            eta: 0.1,
+            alpha: 0.5,
+            k: 3,
+            fast: Vector::zeros(0),
+            slow: Vector::zeros(0),
+            b_fast: 0.0,
+            b_slow: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl LookaheadRegressor {
+    /// Lookahead with sync period `k`.
+    pub fn new(k: usize) -> Self {
+        Self {
+            k: k.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let mut s = self.b_slow;
+        for j in 0..x.ncols().min(self.slow.len()) {
+            s += self.slow[j] * x.get(i, j);
+        }
+        s
+    }
+
+    fn predict_fast(&self, x: &Matrix, i: usize) -> f64 {
+        let mut s = self.b_fast;
+        for j in 0..x.ncols().min(self.fast.len()) {
+            s += self.fast[j] * x.get(i, j);
+        }
+        s
+    }
+}
+
+impl PartialFit for LookaheadRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let p = x.ncols().max(1);
+        if !self.initialized {
+            self.fast = Vector::zeros(p);
+            self.slow = Vector::zeros(p);
+            self.initialized = true;
+        } else if self.fast.len() != p {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message("LookaheadRegressor feature dim changed")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let eta = if self.eta.is_finite() && self.eta > 0.0 {
+            self.eta
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("LookaheadRegressor eta invalid; using 0.1")
+                    .build(),
+            );
+            0.1
+        };
+        let alpha = if self.alpha.is_finite() && self.alpha > 0.0 && self.alpha <= 1.0 {
+            self.alpha
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("LookaheadRegressor alpha invalid; using 0.5")
+                    .build(),
+            );
+            0.5
+        };
+        let k = self.k.max(1);
+        let mut sse0 = 0.0_f64;
+        let mut sse1 = 0.0_f64;
+        let mut moved = 0.0_f64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let yhat = self.predict_row(x, i);
+            let err_slow = yhat - y[i];
+            sse0 += err_slow * err_slow;
+            let err = self.predict_fast(x, i) - y[i];
+            self.b_fast -= eta * err;
+            for j in 0..x.ncols().min(self.fast.len()) {
+                let d = eta * err * x.get(i, j);
+                self.fast[j] -= d;
+                moved += d.abs();
+            }
+            self.n_seen += 1;
+            if self.n_seen % k as u64 == 0 {
+                self.b_slow = (1.0 - alpha) * self.b_slow + alpha * self.b_fast;
+                for j in 0..self.slow.len().min(self.fast.len()) {
+                    self.slow[j] = (1.0 - alpha) * self.slow[j] + alpha * self.fast[j];
+                }
+            }
+            let after = self.predict_row(x, i);
+            sse1 += (after - y[i]) * (after - y[i]);
+        }
+        self.updates += 1;
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &Vector::filled(1, moved),
+            sse0,
+            sse1,
+            self.n_seen >= 2,
+            self.n_seen < 2,
+            "lookahead SGD",
+            "slow weights track fast SGD every k rows; k is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for LookaheadRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
+/// Named ALMA classifier (river `linear_model.ALMAClassifier`).
+#[derive(Clone, Debug)]
+pub struct AlmaClassifier {
+    inner: Alma,
+}
+
+impl Default for AlmaClassifier {
+    fn default() -> Self {
+        Self {
+            inner: Alma::default(),
+        }
+    }
+}
+
+impl AlmaClassifier {
+    /// Default ALMA classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for AlmaClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for AlmaClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+/// Named HAT classifier (river `tree.HoeffdingAdaptiveTreeClassifier`).
+#[derive(Clone, Debug)]
+pub struct HoeffdingAdaptiveTreeClassifier {
+    inner: HoeffdingAdaptiveTree,
+}
+
+impl Default for HoeffdingAdaptiveTreeClassifier {
+    fn default() -> Self {
+        Self {
+            inner: HoeffdingAdaptiveTree::default(),
+        }
+    }
+}
+
+impl HoeffdingAdaptiveTreeClassifier {
+    /// Default HAT classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for HoeffdingAdaptiveTreeClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for HoeffdingAdaptiveTreeClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+/// Named EFDT classifier (river `tree.ExtremelyFastDecisionTreeClassifier`).
+#[derive(Clone, Debug)]
+pub struct ExtremelyFastDecisionTreeClassifier {
+    inner: ExtremelyFastDecisionTree,
+}
+
+impl Default for ExtremelyFastDecisionTreeClassifier {
+    fn default() -> Self {
+        Self {
+            inner: ExtremelyFastDecisionTree::default(),
+        }
+    }
+}
+
+impl ExtremelyFastDecisionTreeClassifier {
+    /// Default EFDT classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for ExtremelyFastDecisionTreeClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for ExtremelyFastDecisionTreeClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+/// Named SRP classifier (river `ensemble.SRPClassifier`).
+#[derive(Clone, Debug)]
+pub struct StreamingRandomPatchesClassifier {
+    inner: StreamingRandomPatches,
+}
+
+impl Default for StreamingRandomPatchesClassifier {
+    fn default() -> Self {
+        Self {
+            inner: StreamingRandomPatches::default(),
+        }
+    }
+}
+
+impl StreamingRandomPatchesClassifier {
+    /// Default SRP classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for StreamingRandomPatchesClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for StreamingRandomPatchesClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+/// Named leveraging-bagging classifier (river `ensemble.LeveragingBaggingClassifier`).
+#[derive(Clone, Debug)]
+pub struct LeveragingBaggingClassifier {
+    inner: LeveragingBagging,
+}
+
+impl Default for LeveragingBaggingClassifier {
+    fn default() -> Self {
+        Self {
+            inner: LeveragingBagging::default(),
+        }
+    }
+}
+
+impl LeveragingBaggingClassifier {
+    /// Default leveraging-bagging classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for LeveragingBaggingClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for LeveragingBaggingClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+/// Named ADWIN bagging classifier (river `ensemble.ADWINBaggingClassifier`).
+#[derive(Clone, Debug)]
+pub struct AdwinBaggingClassifier {
+    inner: AdwinBagging,
+}
+
+impl Default for AdwinBaggingClassifier {
+    fn default() -> Self {
+        Self {
+            inner: AdwinBagging::default(),
+        }
+    }
+}
+
+impl AdwinBaggingClassifier {
+    /// Default ADWIN-bagging classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for AdwinBaggingClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for AdwinBaggingClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -35858,6 +36273,27 @@ mod tests {
         AdaptiveRandomForestClassifier::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("arfc");
+        LookaheadRegressor::new(3)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("look");
+        AlmaClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("almac");
+        HoeffdingAdaptiveTreeClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("hatc");
+        ExtremelyFastDecisionTreeClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("efdtc");
+        StreamingRandomPatchesClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("srpc");
+        LeveragingBaggingClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("lbagc");
+        AdwinBaggingClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("adwinc");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

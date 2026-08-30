@@ -2690,6 +2690,145 @@ impl MeanGroup {
     }
 }
 
+/// Entity-clustered Fama–MacBeth (linearmodels clustered covariance).
+///
+/// Time and entity counts are not identification `p`. Point estimates match
+/// the two-pass average; SE come from entity-summed scores, not date HAC.
+#[derive(Clone, Debug, Default)]
+pub struct EntityClusteredFamaMacBeth;
+
+impl EntityClusteredFamaMacBeth {
+    /// Default entity-clustered two-pass estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit `y ~ 1 + X` in each time slice; cluster the scores by `groups`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        times: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedFamaMacBeth>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if times.len() != y.len() || groups.len() != y.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("EntityClusteredFamaMacBeth times/groups length ≠ n")
+                    .build(),
+            );
+        }
+        let n = y.len().min(x.nrows()).min(times.len()).min(groups.len());
+        let p = x.ncols();
+        let mut by_t: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+        for i in 0..n {
+            if times[i].is_finite() {
+                by_t.entry(times[i].round() as i64).or_default().push(i);
+            }
+        }
+        let mut betas: Vec<Vector> = Vec::new();
+        let mut intercepts: Vec<f64> = Vec::new();
+        let mut alpha_t: BTreeMap<i64, f64> = BTreeMap::new();
+        let mut n_cs = 0.0_f64;
+        for (&t, rows) in &by_t {
+            if rows.len() < 2 {
+                continue;
+            }
+            let xt = Matrix::from_fn(rows.len(), p, |r, j| x.get(rows[r], j));
+            let yt = Vector::from_iter(rows.iter().map(|&i| y[i]));
+            let design = xt.with_intercept();
+            let mut scratch = signlred::Report::new("ecfm", "cs-ols");
+            let Some(sol) = least_squares(&mut scratch, &design, &yt, &ctx.policy) else {
+                continue;
+            };
+            for issue in scratch.issues() {
+                if skip_panel_inner(issue) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            if !sol.as_slice().iter().all(|v| v.is_finite()) {
+                continue;
+            }
+            let a = sol.as_slice().first().copied().unwrap_or(0.0);
+            intercepts.push(a);
+            alpha_t.insert(t, a);
+            betas.push(Vector::from_iter((0..p).map(|j| {
+                sol.as_slice().get(j + 1).copied().unwrap_or(0.0)
+            })));
+            n_cs += rows.len() as f64;
+        }
+        let n_times = betas.len();
+        if n_times == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("EntityClusteredFamaMacBeth has no usable time slice")
+                    .build(),
+            );
+            return ctx.finish(FittedFamaMacBeth {
+                coef: Vector::zeros(p),
+                intercept: 0.0,
+                se: Vector::zeros(p),
+                n_times: 0,
+                n_cs_avg: 0.0,
+            });
+        }
+        let intercept = intercepts.iter().sum::<f64>() / n_times as f64;
+        let coef = Vector::from_iter((0..p).map(|j| {
+            betas.iter().map(|b| b[j]).sum::<f64>() / n_times as f64
+        }));
+        let mut scores: BTreeMap<i64, Vector> = BTreeMap::new();
+        for i in 0..n {
+            if !times[i].is_finite() || !groups[i].is_finite() {
+                continue;
+            }
+            let t = times[i].round() as i64;
+            let g = groups[i].round() as i64;
+            let a = alpha_t.get(&t).copied().unwrap_or(intercept);
+            let mut xb = a;
+            for j in 0..p {
+                xb += x.get(i, j) * coef[j];
+            }
+            let e = y[i] - xb;
+            let s = scores.entry(g).or_insert_with(|| Vector::zeros(p));
+            for j in 0..p {
+                s[j] += x.get(i, j) * e;
+            }
+        }
+        let gcount = scores.len().max(1) as f64;
+        let se = Vector::from_iter((0..p).map(|j| {
+            let mut ss = 0.0_f64;
+            for s in scores.values() {
+                ss += s[j] * s[j];
+            }
+            (ss.max(0.0) / (gcount * n_times as f64)).sqrt()
+        }));
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("EntityClusteredFamaMacBeth uses entity-summed CS scores, not Cameron–Gelbach–Miller")
+                .compromise(NumericalCompromise::new(
+                    "entity-clustered Fama–MacBeth sandwich",
+                    "two-pass slopes plus Σ_g s_g s_g' / (G T)",
+                    "finite-sample CGM and multi-way clustering are omitted",
+                    "read se as an entity-clustered planning SE",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedFamaMacBeth {
+            coef,
+            intercept,
+            se,
+            n_times,
+            n_cs_avg: n_cs / n_times as f64,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2845,5 +2984,11 @@ mod tests {
             .fit(&x, &y, &g, &Session::new("mg", "fit"))
             .expect("mg");
         assert!((mg.value.coef[0] - 2.0).abs() < 0.25, "mg={}", mg.value.coef[0]);
+        let ecfm = EntityClusteredFamaMacBeth::new()
+            .fit(&xfm, &y, &time, &g, &Session::new("ecfm", "fit"))
+            .expect("ecfm");
+        assert_eq!(ecfm.value.coef.len(), 1);
+        assert!(ecfm.value.coef[0].is_finite());
+        assert!(ecfm.value.se[0].is_finite() || ecfm.value.se[0].is_nan());
     }
 }

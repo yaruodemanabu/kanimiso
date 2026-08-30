@@ -20850,6 +20850,270 @@ impl GrangerCausality {
     }
 }
 
+fn weighted_pava(y: &[f64], w: &[f64]) -> Vec<f64> {
+    struct Block {
+        sum: f64,
+        wt: f64,
+        n: usize,
+    }
+    let mut stack: Vec<Block> = Vec::new();
+    for i in 0..y.len() {
+        let mut b = Block {
+            sum: y[i] * w.get(i).copied().unwrap_or(1.0).max(1e-15),
+            wt: w.get(i).copied().unwrap_or(1.0).max(1e-15),
+            n: 1,
+        };
+        while let Some(prev) = stack.last() {
+            if prev.sum / prev.wt <= b.sum / b.wt + 1e-15 {
+                break;
+            }
+            let p = stack.pop().unwrap();
+            b = Block {
+                sum: p.sum + b.sum,
+                wt: p.wt + b.wt,
+                n: p.n + b.n,
+            };
+        }
+        stack.push(b);
+    }
+    let mut out = Vec::with_capacity(y.len());
+    for b in stack {
+        let v = b.sum / b.wt;
+        for _ in 0..b.n {
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// Iterative convex minorant NPMLE for interval-censored times (Groeneboom–Wellner).
+///
+/// Interval / support counts are not identification `p`. Do not call
+/// [`kaplan_meier_fit`]. `+∞` rights are right-censoring and must not go
+/// through [`scan_finite`].
+pub fn iterative_convex_minorant(
+    left: &Vector,
+    right: &Vector,
+    session: &Session,
+) -> Result<Qualified<FittedKaplanMeier>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(left),
+        None,
+        &ctx.policy,
+    );
+    let nans = right.as_slice().iter().filter(|v| v.is_nan()).count();
+    if nans > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .severity(Severity::Warning)
+                .message(format!("ICM right contains {nans} NaN"))
+                .build(),
+        );
+    }
+    let n_inf = right
+        .as_slice()
+        .iter()
+        .filter(|v| v.is_infinite() && **v > 0.0)
+        .count();
+    if n_inf > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .severity(Severity::Advisory)
+                .message(format!("ICM treats {n_inf} +∞ rights as right-censoring"))
+                .compromise(NumericalCompromise::new(
+                    "finite right endpoints",
+                    "+∞ as an open right-censored interval",
+                    "right-censoring has no observed event time",
+                    "those rows contribute only after L",
+                ))
+                .build(),
+        );
+    }
+    let n = left.len().min(right.len());
+    if left.len() != right.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "ICM left.len()={} ≠ right.len()={}",
+                    left.len(),
+                    right.len()
+                ))
+                .build(),
+        );
+    }
+    let mut times: Vec<f64> = Vec::new();
+    let mut intervals: Vec<(f64, f64)> = Vec::new();
+    for i in 0..n {
+        let lo = left[i];
+        let hi = right[i];
+        if !lo.is_finite() && !hi.is_finite() {
+            continue;
+        }
+        intervals.push((lo, hi));
+        if lo.is_finite() {
+            times.push(lo);
+        }
+        if hi.is_finite() {
+            times.push(hi);
+        }
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    times.dedup_by(|a, b| (*a - *b).abs() <= 1e-12);
+    if times.is_empty() || intervals.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("ICM has no finite interval endpoints")
+                .build(),
+        );
+        return ctx.finish(FittedKaplanMeier {
+            times: Vector::zeros(0),
+            survival: Vector::zeros(0),
+            n_risk: Vector::zeros(0),
+            n_event: Vector::zeros(0),
+        });
+    }
+    let m = times.len();
+    let mut f: Vec<f64> = (0..m).map(|j| (j + 1) as f64 / m as f64).collect();
+    let ones = vec![1.0_f64; m];
+    for _ in 0..40 {
+        let mut g = vec![0.0_f64; m];
+        for &(lo, hi) in &intervals {
+            if lo.is_finite() && hi.is_finite() && (lo - hi).abs() <= 1e-12 {
+                let mut jstar = 0usize;
+                for (j, &t) in times.iter().enumerate() {
+                    if (t - lo).abs() <= 1e-12 {
+                        jstar = j;
+                        break;
+                    }
+                    if t <= lo {
+                        jstar = j;
+                    }
+                }
+                let prev = if jstar == 0 { 0.0 } else { f[jstar - 1] };
+                let mass = (f[jstar] - prev).max(1e-15);
+                g[jstar] += 1.0 / mass;
+                continue;
+            }
+            let mut i_l: Option<usize> = None;
+            let mut i_r: Option<usize> = None;
+            for (j, &t) in times.iter().enumerate() {
+                if lo.is_finite() && t <= lo + 1e-15 {
+                    i_l = Some(j);
+                }
+                if !hi.is_finite() || t <= hi + 1e-15 {
+                    i_r = Some(j);
+                }
+            }
+            if i_r.is_none() && hi.is_finite() {
+                continue;
+            }
+            let fr = i_r.map(|j| f[j]).unwrap_or(1.0);
+            let fl = i_l.map(|j| f[j]).unwrap_or(0.0);
+            let mass = (fr - fl).max(1e-15);
+            if let Some(jr) = i_r {
+                g[jr] += 1.0 / mass;
+            }
+            if let Some(jl) = i_l {
+                g[jl] -= 1.0 / mass;
+            }
+        }
+        let y: Vec<f64> = (0..m).map(|j| f[j] + 0.15 * g[j]).collect();
+        let mut nxt = weighted_pava(&y, &ones);
+        for v in &mut nxt {
+            *v = v.clamp(0.0, 1.0);
+        }
+        let mx = nxt.last().copied().unwrap_or(1.0).max(1e-15);
+        for v in &mut nxt {
+            *v /= mx;
+        }
+        let mut moved = 0.0_f64;
+        for j in 0..m {
+            moved += (nxt[j] - f[j]).abs();
+            f[j] = nxt[j];
+        }
+        if moved < 1e-8 {
+            break;
+        }
+    }
+    let mut p = vec![0.0_f64; m];
+    p[0] = f[0].max(0.0);
+    for j in 1..m {
+        p[j] = (f[j] - f[j - 1]).max(0.0);
+    }
+    let tot: f64 = p.iter().sum();
+    if tot > 1e-15 {
+        for pj in &mut p {
+            *pj /= tot;
+        }
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("ICM is PAVA on the F-space score, not Jongbloed's inner-outer loop")
+            .compromise(NumericalCompromise::new(
+                "Groeneboom–Wellner / Jongbloed ICM on innermost intervals",
+                "PAVA projection of F + step × score on unique finite endpoints",
+                "the published vertex characterisation of the NPMLE is omitted",
+                "read Ŝ as an isotonic NPMLE sketch on the observed grid",
+            ))
+            .build(),
+    );
+    let surv = Vector::from_iter(f.iter().map(|v| (1.0 - *v).max(0.0)));
+    ctx.finish(FittedKaplanMeier {
+        times: Vector::from_iter(times),
+        survival: surv,
+        n_risk: Vector::from_iter((0..m).map(|_| intervals.len() as f64)),
+        n_event: Vector::from_iter(p.iter().map(|v| v * intervals.len() as f64)),
+    })
+}
+
+/// Named ICM estimator (statsmodels / Groeneboom–Wellner).
+#[derive(Clone, Debug, Default)]
+pub struct IterativeConvexMinorant;
+
+impl IterativeConvexMinorant {
+    /// Default ICM.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on left and right interval endpoints (`right` may be \(+\infty\)).
+    pub fn fit(
+        &self,
+        left: &Vector,
+        right: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedKaplanMeier>> {
+        iterative_convex_minorant(left, right, session)
+    }
+}
+
+/// Named Finkelstein ICM (interval-censored NPMLE, not grouped cloglog PH).
+#[derive(Clone, Debug, Default)]
+pub struct FinkelsteinIcm {
+    inner: IterativeConvexMinorant,
+}
+
+impl FinkelsteinIcm {
+    /// Default Finkelstein ICM.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit the interval-censored NPMLE.
+    pub fn fit(
+        &self,
+        left: &Vector,
+        right: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedKaplanMeier>> {
+        self.inner.fit(left, right, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -21768,5 +22032,24 @@ mod tests {
             .test(&xv, &y, &Session::new("gc", "t"))
             .expect("gc");
         assert!(gc.value.f_stat.is_finite() || gc.value.pvalue.is_nan());
+        let icm = IterativeConvexMinorant::new()
+            .fit(&left, &right, &Session::new("icm", "t"))
+            .expect("icm");
+        assert!(!icm.value.times.is_empty());
+        assert!(icm
+            .value
+            .survival
+            .as_slice()
+            .iter()
+            .all(|s| *s >= 0.0 && *s <= 1.0));
+        let ficm = FinkelsteinIcm::new()
+            .fit(&dur, &icr, &Session::new("ficm", "t"))
+            .expect("ficm");
+        assert!(ficm
+            .value
+            .survival
+            .as_slice()
+            .iter()
+            .all(|s| *s >= 0.0 && *s <= 1.0));
     }
 }

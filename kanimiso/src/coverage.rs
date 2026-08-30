@@ -5777,6 +5777,59 @@ const INVENTORY: &[Algorithm] = &[
         "river.forest.ARFClassifier",
         "online",
     ),
+    a(
+        "stats.iterative_convex_minorant",
+        "statsmodels.duration.survfunc.SurvfuncRight.survfunc_dc",
+        "function",
+    ),
+    a(
+        "stats.IterativeConvexMinorant",
+        "statsmodels.duration.survfunc.SurvfuncRight",
+        "estimator",
+    ),
+    a("stats.FinkelsteinIcm", "lifelines.KaplanMeierFitter", "estimator"),
+    a(
+        "panel.EntityClusteredFamaMacBeth",
+        "linearmodels.panel.model.FamaMacBeth",
+        "estimator",
+    ),
+    a("glm.WeibullAftFitter", "lifelines.WeibullAFTFitter", "estimator"),
+    a("glm.ExponentialAftFitter", "lifelines.ExponentialFitter", "estimator"),
+    a("glm.LogLogisticAftFitter", "lifelines.LogLogisticAFTFitter", "estimator"),
+    a("glm.LogNormalAftFitter", "lifelines.LogNormalAFTFitter", "estimator"),
+    a("glm.GompertzAftFitter", "lifelines.GompertzFitter", "estimator"),
+    a("online.LookaheadRegressor", "river.optim.Lookahead", "online"),
+    a("online.AlmaClassifier", "river.linear_model.ALMAClassifier", "online"),
+    a(
+        "online.HoeffdingAdaptiveTreeClassifier",
+        "river.tree.HoeffdingAdaptiveTreeClassifier",
+        "online",
+    ),
+    a(
+        "online.ExtremelyFastDecisionTreeClassifier",
+        "river.tree.ExtremelyFastDecisionTreeClassifier",
+        "online",
+    ),
+    a(
+        "online.StreamingRandomPatchesClassifier",
+        "river.ensemble.SRPClassifier",
+        "online",
+    ),
+    a(
+        "online.LeveragingBaggingClassifier",
+        "river.ensemble.LeveragingBaggingClassifier",
+        "online",
+    ),
+    a(
+        "online.AdwinBaggingClassifier",
+        "river.ensemble.ADWINBaggingClassifier",
+        "online",
+    ),
+    a(
+        "tslearn.Catch22ForestClassifier",
+        "sktime.classification.feature_based.Catch22Classifier",
+        "estimator",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6230,6 +6283,13 @@ mod tests {
             "online.LambRegressor",
             "online.HoeffdingTreeClassifier",
             "stats.GrangerCausality",
+            "stats.iterative_convex_minorant",
+            "panel.EntityClusteredFamaMacBeth",
+            "glm.WeibullAftFitter",
+            "online.LookaheadRegressor",
+            "online.HoeffdingAdaptiveTreeClassifier",
+            "online.ExtremelyFastDecisionTreeClassifier",
+            "tslearn.Catch22ForestClassifier",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
