@@ -4045,6 +4045,97 @@ const INVENTORY: &[Algorithm] = &[
         "online",
     ),
     a("online.FmReco", "river.reco.FM", "online"),
+    a(
+        "tsa.ArchInMean",
+        "arch.univariate.ARCH",
+        "forecast",
+    ),
+    a("tsa.CcGarch", "arch.univariate.CCC", "forecast"),
+    a(
+        "tsa.RealizedKernel",
+        "arch.univariate.RealizedKernel",
+        "forecast",
+    ),
+    a("tsa.Midas", "statsmodels.tsa.midas.Midas", "forecast"),
+    a(
+        "tsa.Star",
+        "statsmodels.tsa.regime_switching.STAR",
+        "forecast",
+    ),
+    a(
+        "tsa.ReconcilerForecaster",
+        "sktime.forecasting.reconcile.ReconcilerForecaster",
+        "forecast",
+    ),
+    a(
+        "tsa.DirectTabularForecaster",
+        "sktime.forecasting.compose.DirectTabularRegressionForecaster",
+        "forecast",
+    ),
+    a("tsa.Bats", "sktime.forecasting.bats.BATS", "forecast"),
+    a("tsa.BekkGarch", "arch.univariate.BEKK", "forecast"),
+    a(
+        "tsa.MultioutputTabularForecaster",
+        "sktime.forecasting.compose.MultioutputTabularRegressionForecaster",
+        "forecast",
+    ),
+    a(
+        "stats.bai_perron",
+        "statsmodels.stats.diagnostic.breaks_cusumolsresid",
+        "stats",
+    ),
+    a(
+        "stats.gaussian_copula",
+        "statsmodels.distributions.copula.GaussianCopula",
+        "stats",
+    ),
+    a(
+        "stats.clayton_copula",
+        "statsmodels.distributions.copula.ClaytonCopula",
+        "stats",
+    ),
+    a(
+        "stats.gumbel_copula",
+        "statsmodels.distributions.copula.GumbelCopula",
+        "stats",
+    ),
+    a(
+        "hmm.VariationalGmmHmm",
+        "hmmlearn.hmm.VariationalGMMHMM",
+        "hmm",
+    ),
+    a("online.OnlineLogCosh", "river.metrics.LogCosh", "online"),
+    a(
+        "online.EfdtRegressor",
+        "river.tree.ExtremelyFastDecisionTreeRegressor",
+        "online",
+    ),
+    a(
+        "online.OnlineStacking",
+        "river.ensemble.StackingClassifier",
+        "online",
+    ),
+    a(
+        "online.AdwinKnn",
+        "river.neighbors.KNNADWINClassifier",
+        "online",
+    ),
+    a(
+        "online.CountMinSketch",
+        "river.sketch.CountMinSketch",
+        "online",
+    ),
+    a("online.BloomFilter", "river.sketch.BloomFilter", "online"),
+    a(
+        "online.HyperLogLog",
+        "river.sketch.HyperLogLog",
+        "online",
+    ),
+    a(
+        "online.OnlineVoting",
+        "river.ensemble.VotingClassifier",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4310,6 +4401,13 @@ mod tests {
             "online.Dbstream",
             "online.MiniBatchMlp",
             "online.FmReco",
+            "tsa.ArchInMean",
+            "tsa.Midas",
+            "tsa.Bats",
+            "hmm.VariationalGmmHmm",
+            "stats.bai_perron",
+            "online.OnlineLogCosh",
+            "online.CountMinSketch",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

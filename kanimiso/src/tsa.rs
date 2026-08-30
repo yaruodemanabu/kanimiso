@@ -7096,6 +7096,1018 @@ impl HierarchyEnsembleForecaster {
     }
 }
 
+/// GARCH-in-mean (arch `ARCH-in-mean`): \(y_t=\mu+\lambda\sqrt{h_t}+\varepsilon_t\).
+///
+/// The mean-volatility slope is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ArchInMean {
+    /// Coordinate-search iterations.
+    pub max_iter: usize,
+}
+
+impl Default for ArchInMean {
+    fn default() -> Self {
+        Self { max_iter: 28 }
+    }
+}
+
+impl ArchInMean {
+    /// Default GARCH-in-mean settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted GARCH-in-mean state.
+#[derive(Clone, Debug)]
+pub struct FittedArchInMean {
+    /// Mean intercept.
+    pub mu: f64,
+    /// Risk premium \(\lambda\).
+    pub lambda: f64,
+    /// ω.
+    pub omega: f64,
+    /// ARCH coefficient.
+    pub alpha: f64,
+    /// GARCH coefficient.
+    pub beta: f64,
+    /// In-sample conditional variances.
+    pub sigma2: Vector,
+}
+
+fn aim_path(y: &[f64], mu: f64, lam: f64, omega: f64, alpha: f64, beta: f64) -> (Vec<f64>, Vec<f64>) {
+    let var0 = y.iter().map(|v| {
+        let e = v - mu;
+        e * e
+    }).sum::<f64>()
+        / y.len().max(1) as f64;
+    let mut h = vec![var0.max(omega).max(1e-12); y.len()];
+    let mut e = vec![0.0; y.len()];
+    for t in 0..y.len() {
+        if t > 0 {
+            h[t] = omega + alpha * e[t - 1] * e[t - 1] + beta * h[t - 1];
+            if !h[t].is_finite() || h[t] <= 0.0 {
+                h[t] = omega.max(1e-12);
+            }
+        }
+        e[t] = y[t] - mu - lam * h[t].sqrt();
+    }
+    (h, e)
+}
+
+fn aim_nll(y: &[f64], mu: f64, lam: f64, omega: f64, alpha: f64, beta: f64) -> f64 {
+    if omega <= 0.0 || alpha < 0.0 || beta < 0.0 {
+        return f64::INFINITY;
+    }
+    let (h, e) = aim_path(y, mu, lam, omega, alpha, beta);
+    let mut nll = 0.0;
+    for t in 0..y.len() {
+        let v = h[t].max(1e-12);
+        nll += 0.5 * (v.ln() + e[t] * e[t] / v);
+    }
+    nll
+}
+
+impl FitSeries for ArchInMean {
+    type Fitted = FittedArchInMean;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedArchInMean>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("ARCH-in-mean QMLE needs a longer series")
+                    .build(),
+            );
+        }
+        let mut mu = y.mean();
+        let mut lam = 0.0;
+        let var = y.std() * y.std();
+        let mut omega = 0.05 * var.max(1e-8);
+        let mut alpha = 0.05;
+        let mut beta = 0.80;
+        let mut best = aim_nll(y.as_slice(), mu, lam, omega, alpha, beta);
+        let mut step = 0.05;
+        for it in 0..self.max_iter {
+            let mut improved = false;
+            for (i, cur) in [mu, lam, omega, alpha, beta].into_iter().enumerate() {
+                for dir in [-step, step] {
+                    let mut cand = [mu, lam, omega, alpha, beta];
+                    cand[i] = if i >= 2 { (cur + dir).max(1e-8) } else { cur + dir };
+                    if cand[3] + cand[4] >= 0.999 {
+                        continue;
+                    }
+                    let nll = aim_nll(y.as_slice(), cand[0], cand[1], cand[2], cand[3], cand[4]);
+                    if nll < best {
+                        best = nll;
+                        mu = cand[0];
+                        lam = cand[1];
+                        omega = cand[2];
+                        alpha = cand[3];
+                        beta = cand[4];
+                        improved = true;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, best, None);
+            if !improved {
+                step *= 0.5;
+                if step < 1e-5 {
+                    ctx.session.converged("ARCH-in-mean coordinate search", it as u64);
+                    break;
+                }
+            }
+        }
+        if !best.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("ARCH-in-mean QMLE likelihood is non-finite")
+                    .build(),
+            );
+        }
+        let (h, _) = aim_path(y.as_slice(), mu, lam, omega, alpha, beta);
+        ctx.finish(FittedArchInMean {
+            mu,
+            lambda: lam,
+            omega,
+            alpha,
+            beta,
+            sigma2: Vector::from_iter(h),
+        })
+    }
+}
+
+/// Constant conditional correlation GARCH (Bollerslev CCC).
+///
+/// Series count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct CcGarch;
+
+/// Fitted CCC-GARCH margins and constant correlation.
+#[derive(Clone, Debug)]
+pub struct FittedCcGarch {
+    /// Per-series GARCH(1,1) variances (`T` × `k`).
+    pub sigma2: Matrix,
+    /// Constant correlation (`k` × `k`).
+    pub corr: Matrix,
+}
+
+impl CcGarch {
+    /// Empty CCC estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit marginal GARCH(1,1) and the sample correlation of standardized residuals.
+    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedCcGarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let (n, k) = y.shape();
+        if k < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("CCC-GARCH needs at least two series")
+                    .build(),
+            );
+        }
+        let mut sigma2 = Matrix::zeros(n, k);
+        let mut z = Matrix::zeros(n, k);
+        for j in 0..k {
+            let col = y.column(j);
+            let mean = col.mean();
+            let e: Vec<f64> = col.as_slice().iter().map(|v| v - mean).collect();
+            let var = e.iter().map(|v| v * v).sum::<f64>() / n.max(1) as f64;
+            let s2 = garch_sigma2(&e, 0.05 * var.max(1e-8), 0.05, 0.80);
+            for t in 0..n {
+                let v = s2.get(t).copied().unwrap_or(var).max(1e-12);
+                sigma2.set(t, j, v);
+                z.set(t, j, e.get(t).copied().unwrap_or(0.0) / v.sqrt());
+            }
+        }
+        let mut corr = Matrix::zeros(k, k);
+        for a in 0..k {
+            for b in 0..k {
+                let mut s = 0.0;
+                for t in 0..n {
+                    s += z.get(t, a) * z.get(t, b);
+                }
+                let den = n.max(1) as f64;
+                corr.set(a, b, (s / den).clamp(-1.0, 1.0));
+            }
+            corr.set(a, a, 1.0);
+        }
+        ctx.finish(FittedCcGarch { sigma2, corr })
+    }
+}
+
+/// Bartlett realized kernel (arch `RealizedKernel`).
+///
+/// Bandwidth \(\lfloor\sqrt{n}\rfloor\) is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct RealizedKernel;
+
+/// Fitted realized-kernel value.
+#[derive(Clone, Debug)]
+pub struct FittedRealizedKernel {
+    /// Kernel estimate of integrated variance.
+    pub rk: f64,
+    /// Bartlett bandwidth.
+    pub bandwidth: usize,
+}
+
+impl RealizedKernel {
+    /// Empty realized-kernel estimator.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl FitSeries for RealizedKernel {
+    type Fitted = FittedRealizedKernel;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRealizedKernel>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        if n < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("realized kernel on n<2 is a single square")
+                    .build(),
+            );
+            return ctx.finish(FittedRealizedKernel {
+                rk: y.as_slice().first().copied().unwrap_or(0.0).powi(2),
+                bandwidth: 0,
+            });
+        }
+        let mean = y.mean();
+        let e: Vec<f64> = y.as_slice().iter().map(|v| v - mean).collect();
+        let h = (n as f64).sqrt().floor() as usize;
+        let h = h.max(1).min(n.saturating_sub(1));
+        let gamma = |lag: usize| {
+            let mut s = 0.0;
+            let m = n.saturating_sub(lag);
+            for t in lag..n {
+                s += e[t] * e[t - lag];
+            }
+            s / m.max(1) as f64
+        };
+        let mut rk = gamma(0);
+        for lag in 1..=h {
+            let w = 1.0 - lag as f64 / (h as f64 + 1.0);
+            rk += 2.0 * w * gamma(lag);
+        }
+        if rk < 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::NearZeroVariance)
+                    .severity(Severity::Warning)
+                    .message("realized kernel is negative; Bartlett weights can overshoot")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedRealizedKernel {
+            rk,
+            bandwidth: h,
+        })
+    }
+}
+
+/// MIDAS distributed lag (statsmodels `Midas`).
+///
+/// Lag count is not identification `p`. Exponential Almon weights use one \(\theta\).
+#[derive(Clone, Debug)]
+pub struct Midas {
+    /// Number of high-frequency lags.
+    pub lags: usize,
+}
+
+impl Default for Midas {
+    fn default() -> Self {
+        Self { lags: 4 }
+    }
+}
+
+impl Midas {
+    /// MIDAS with `lags` weights.
+    pub fn new(lags: usize) -> Self {
+        Self { lags: lags.max(1) }
+    }
+
+    /// Fit \(y_t=a+b\sum_k w_k(\theta)x_{t-k}\).
+    pub fn fit(&self, y: &Vector, x: &Vector, session: &Session) -> Result<Qualified<FittedMidas>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        inspect_univariate(&mut ctx, x);
+        let lags = self.lags.max(1);
+        let n = y.len().min(x.len());
+        if n <= lags + 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("MIDAS needs n > lags + 2")
+                    .build(),
+            );
+        }
+        let weights = |theta: f64| {
+            let mut w = vec![0.0; lags];
+            let mut s = 0.0;
+            for k in 0..lags {
+                let wk = (theta * (k as f64 + 1.0)).exp();
+                w[k] = wk;
+                s += wk;
+            }
+            if s > 0.0 {
+                for wk in &mut w {
+                    *wk /= s;
+                }
+            }
+            w
+        };
+        let mut best_th = -0.2;
+        let mut best_a = y.mean();
+        let mut best_b = 0.0;
+        let mut best_sse = f64::INFINITY;
+        for step in 0..9 {
+            let th = -0.8 + 0.2 * step as f64;
+            let w = weights(th);
+            let mut xs = Vec::new();
+            let mut ys = Vec::new();
+            for t in lags..n {
+                if !y[t].is_finite() {
+                    continue;
+                }
+                let mut s = 0.0;
+                for k in 0..lags {
+                    s += w[k] * x[t - 1 - k];
+                }
+                xs.push(s);
+                ys.push(y[t]);
+            }
+            if ys.len() < 3 {
+                continue;
+            }
+            let design = Matrix::from_fn(ys.len(), 2, |i, j| if j == 0 { 1.0 } else { xs[i] });
+            let target = Vector::from_iter(ys.iter().copied());
+            let mut scratch = Report::new("midas", "ols");
+            let coef = match least_squares(&mut scratch, &design, &target, &ctx.policy) {
+                Some(c) => c,
+                None => continue,
+            };
+            let mut sse = 0.0;
+            for i in 0..target.len() {
+                let yhat = coef[0] + coef.as_slice().get(1).copied().unwrap_or(0.0) * design.get(i, 1);
+                let e = target[i] - yhat;
+                sse += e * e;
+            }
+            if sse < best_sse {
+                best_sse = sse;
+                best_th = th;
+                best_a = coef[0];
+                best_b = coef.as_slice().get(1).copied().unwrap_or(0.0);
+            }
+        }
+        ctx.finish(FittedMidas {
+            intercept: best_a,
+            slope: best_b,
+            theta: best_th,
+            lags,
+            last_x: Vector::from_iter(
+                x.as_slice()
+                    .iter()
+                    .rev()
+                    .take(lags)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev(),
+            ),
+        })
+    }
+}
+
+/// Fitted MIDAS weights.
+#[derive(Clone, Debug)]
+pub struct FittedMidas {
+    /// Intercept.
+    pub intercept: f64,
+    /// Scale on the weighted high-frequency sum.
+    pub slope: f64,
+    /// Exponential Almon \(\theta\).
+    pub theta: f64,
+    /// Lag count.
+    pub lags: usize,
+    last_x: Vector,
+}
+
+impl FittedMidas {
+    /// One-step MIDAS using the stored high-frequency tail (then flat).
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let mut s = 0.0;
+        let mut den = 0.0;
+        for k in 0..self.lags {
+            let w = (self.theta * (k as f64 + 1.0)).exp();
+            den += w;
+            if k < self.last_x.len() {
+                s += w * self.last_x[self.last_x.len() - 1 - k];
+            }
+        }
+        let yhat = self.intercept + self.slope * if den > 0.0 { s / den } else { 0.0 };
+        ctx.finish(Vector::filled(h, yhat))
+    }
+}
+
+/// Logistic smooth-transition AR (statsmodels STAR lite).
+///
+/// \(y_t=(a_0+b_0 y_{t-1})+G(y_{t-1};\gamma,c)\,(a_1+b_1 y_{t-1})\).
+/// Regime / lag counts are not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct Star;
+
+/// Fitted logistic STAR.
+#[derive(Clone, Debug)]
+pub struct FittedStar {
+    /// Low-regime intercept and AR(1).
+    pub low: Vector,
+    /// High-regime intercept and AR(1).
+    pub high: Vector,
+    /// Transition slope \(\gamma\).
+    pub gamma: f64,
+    /// Transition location.
+    pub location: f64,
+    /// Last observation.
+    pub last: f64,
+}
+
+fn star_g(z: f64, gamma: f64, c: f64) -> f64 {
+    let u = (-gamma * (z - c)).clamp(-40.0, 40.0);
+    1.0 / (1.0 + u.exp())
+}
+
+impl FittedStar {
+    /// Iterate the STAR recursion.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let mut prev = self.last;
+        let mut out = Vector::zeros(h);
+        for i in 0..h {
+            let g = star_g(prev, self.gamma, self.location);
+            let yhat = self.low[0]
+                + self.low.as_slice().get(1).copied().unwrap_or(0.0) * prev
+                + g * (self.high[0] + self.high.as_slice().get(1).copied().unwrap_or(0.0) * prev);
+            out[i] = yhat;
+            prev = yhat;
+        }
+        ctx.finish(out)
+    }
+}
+
+impl FitSeries for Star {
+    type Fitted = FittedStar;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedStar>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        let last = y.as_slice().last().copied().unwrap_or(0.0);
+        if n < 6 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("STAR needs a longer series")
+                    .build(),
+            );
+            return ctx.finish(FittedStar {
+                low: Vector::from_slice(&[last, 0.0]),
+                high: Vector::from_slice(&[0.0, 0.0]),
+                gamma: 1.0,
+                location: last,
+                last,
+            });
+        }
+        let mut a0 = y.mean();
+        let mut b0 = 0.3;
+        let mut a1 = 0.0;
+        let mut b1 = 0.0;
+        let mut gamma = 1.0;
+        let mut c = y.mean();
+        let nll = |a0: f64, b0: f64, a1: f64, b1: f64, gamma: f64, c: f64| {
+            let mut sse = 0.0;
+            for t in 1..n {
+                let g = star_g(y[t - 1], gamma, c);
+                let yhat = a0 + b0 * y[t - 1] + g * (a1 + b1 * y[t - 1]);
+                let e = y[t] - yhat;
+                sse += e * e;
+            }
+            sse
+        };
+        let mut best = nll(a0, b0, a1, b1, gamma, c);
+        let mut step = 0.2;
+        for it in 0..24 {
+            let mut improved = false;
+            for (i, cur) in [a0, b0, a1, b1, gamma, c].into_iter().enumerate() {
+                for dir in [-step, step] {
+                    let mut cand = [a0, b0, a1, b1, gamma, c];
+                    cand[i] = if i == 4 { (cur + dir).max(0.05) } else { cur + dir };
+                    let sse = nll(cand[0], cand[1], cand[2], cand[3], cand[4], cand[5]);
+                    if sse < best {
+                        best = sse;
+                        a0 = cand[0];
+                        b0 = cand[1];
+                        a1 = cand[2];
+                        b1 = cand[3];
+                        gamma = cand[4];
+                        c = cand[5];
+                        improved = true;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, best, None);
+            if !improved {
+                step *= 0.5;
+                if step < 1e-4 {
+                    break;
+                }
+            }
+        }
+        ctx.finish(FittedStar {
+            low: Vector::from_slice(&[a0, b0]),
+            high: Vector::from_slice(&[a1, b1]),
+            gamma,
+            location: c,
+            last,
+        })
+    }
+}
+
+/// Last-value hierarchy plus bottom-up reconcile (sktime `ReconcilerForecaster`).
+///
+/// Node count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct ReconcilerForecaster;
+
+/// Fitted last-value hierarchy.
+#[derive(Clone, Debug)]
+pub struct FittedReconcilerForecaster {
+    /// Last value of each series.
+    pub last: Vector,
+}
+
+impl FittedReconcilerForecaster {
+    /// Repeat last values, then [`reconcile_bottom_up`].
+    ///
+    /// `last` may be the full node vector or the bottom-level series
+    /// (`last.len() == summing.ncols()`); bottoms are expanded through `S`.
+    pub fn forecast(
+        &self,
+        h: usize,
+        summing: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<Matrix>> {
+        let n_nodes = summing.nrows();
+        let n_bot = summing.ncols();
+        let yhat = if self.last.len() == n_nodes {
+            Matrix::from_fn(h, n_nodes, |_, j| self.last[j])
+        } else if self.last.len() == n_bot {
+            Matrix::from_fn(h, n_nodes, |_, i| {
+                let mut s = 0.0;
+                for j in 0..n_bot {
+                    s += summing.get(i, j) * self.last[j];
+                }
+                s
+            })
+        } else {
+            Matrix::from_fn(h, n_nodes.max(1), |_, j| {
+                self.last.as_slice().get(j).copied().unwrap_or(0.0)
+            })
+        };
+        reconcile_bottom_up(&yhat, summing, session)
+    }
+}
+
+impl ReconcilerForecaster {
+    /// Empty reconciler.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Store the last observation of each column.
+    pub fn fit(
+        &self,
+        y: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedReconcilerForecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let last = Vector::from_iter((0..y.ncols()).map(|j| {
+            y.column(j)
+                .as_slice()
+                .last()
+                .copied()
+                .unwrap_or(0.0)
+        }));
+        ctx.finish(FittedReconcilerForecaster { last })
+    }
+}
+
+/// Direct tabular reduction (sktime `DirectTabularRegressionForecaster`).
+///
+/// Window / horizon counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct DirectTabularForecaster {
+    /// Lag window.
+    pub window: usize,
+    /// Direct horizons.
+    pub horizon: usize,
+}
+
+impl Default for DirectTabularForecaster {
+    fn default() -> Self {
+        Self {
+            window: 3,
+            horizon: 3,
+        }
+    }
+}
+
+impl DirectTabularForecaster {
+    /// Direct reducer with lag `window` and `horizon` models.
+    pub fn new(window: usize, horizon: usize) -> Self {
+        Self {
+            window: window.max(1),
+            horizon: horizon.max(1),
+        }
+    }
+}
+
+impl FitSeries for DirectTabularForecaster {
+    type Fitted = crate::reducer::FittedDirectReducer;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<crate::reducer::FittedDirectReducer>> {
+        crate::reducer::DirectReducer {
+            window: self.window,
+            horizon: self.horizon,
+        }
+        .fit_series(y, session)
+    }
+}
+
+/// BATS-lite (sktime `BATS`): Box–Cox / identity + trend + seasonal dummies + AR(1).
+///
+/// Distinct from [`Tbats`] (trigonometric seasonality). Period / dummy count
+/// is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Bats {
+    /// Seasonal period.
+    pub period: usize,
+    /// Log / Box–Cox (`λ = 0`) map. Requires a strictly positive series.
+    pub use_boxcox: bool,
+}
+
+impl Default for Bats {
+    fn default() -> Self {
+        Self {
+            period: 4,
+            use_boxcox: false,
+        }
+    }
+}
+
+impl Bats {
+    /// BATS with seasonal period `period`.
+    pub fn new(period: usize) -> Self {
+        Self {
+            period: period.max(2),
+            use_boxcox: false,
+        }
+    }
+}
+
+/// Fitted BATS-lite state.
+#[derive(Clone, Debug)]
+pub struct FittedBats {
+    /// OLS coefficients on `[1, t, seasonal dummies]`.
+    pub coef: Vector,
+    /// AR(1) residual coefficient.
+    pub phi: f64,
+    /// Last residual on the transformed scale.
+    pub last_resid: f64,
+    /// Period.
+    pub period: usize,
+    /// Log map.
+    pub use_boxcox: bool,
+    /// Training length.
+    pub n: usize,
+}
+
+impl FittedBats {
+    fn design_row(&self, t: usize) -> Vector {
+        let per = self.period.max(2);
+        let p = 2 + per.saturating_sub(1);
+        let mut v = Vector::zeros(p);
+        v[0] = 1.0;
+        if p > 1 {
+            v[1] = t as f64;
+        }
+        let s = t % per;
+        for k in 1..per {
+            let j = 1 + k;
+            if j < p {
+                v[j] = if s == k { 1.0 } else { 0.0 };
+            }
+        }
+        v
+    }
+
+    /// `h`-step forecast on the original scale.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        let mut e = self.last_resid;
+        let y = Vector::from_iter((0..h).map(|s| {
+            let row = self.design_row(self.n + s);
+            let mut mu = 0.0;
+            for j in 0..self.coef.len().min(row.len()) {
+                mu += self.coef[j] * row[j];
+            }
+            e *= self.phi;
+            let z = mu + e;
+            if self.use_boxcox {
+                z.exp()
+            } else {
+                z
+            }
+        }));
+        ctx.finish(y)
+    }
+}
+
+impl FitSeries for Bats {
+    type Fitted = FittedBats;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedBats>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let period = self.period.max(2);
+        if y.len() < 2 * period {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSeasonalCycles)
+                    .severity(Severity::Warning)
+                    .message(format!("BATS n={} < 2s with s={period}", y.len()))
+                    .build(),
+            );
+        }
+        let z = if self.use_boxcox {
+            reject_nonpositive(&mut ctx, y, "BATS Box–Cox");
+            Vector::from_iter(y.as_slice().iter().map(|v| v.max(1e-12).ln()))
+        } else {
+            y.clone()
+        };
+        let n = z.len();
+        let p = 2 + period.saturating_sub(1);
+        // Dummy / trend width is a seasonal template, not a regression `p`.
+        let spec = FittedBats {
+            coef: Vector::zeros(p),
+            phi: 0.0,
+            last_resid: 0.0,
+            period,
+            use_boxcox: self.use_boxcox,
+            n,
+        };
+        let x = Matrix::from_fn(n, p, |t, j| spec.design_row(t)[j]);
+        let mut scratch = Report::new("bats", "ols");
+        let coef = least_squares(&mut scratch, &x, &z, &ctx.policy).unwrap_or_else(|| {
+            let mut c = Vector::zeros(p);
+            c[0] = z.mean();
+            c
+        });
+        let fit = x.matvec(&coef);
+        let mut resid = Vector::zeros(n);
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for t in 0..n {
+            resid[t] = z[t] - fit[t];
+            if t > 0 {
+                num += resid[t] * resid[t - 1];
+                den += resid[t - 1] * resid[t - 1];
+            }
+        }
+        let phi = if den > 1e-12 {
+            (num / den).clamp(-0.99, 0.99)
+        } else {
+            0.0
+        };
+        ctx.finish(FittedBats {
+            coef,
+            phi,
+            last_resid: resid.as_slice().last().copied().unwrap_or(0.0),
+            period,
+            use_boxcox: self.use_boxcox,
+            n,
+        })
+    }
+}
+
+/// Diagonal BEKK(1,1) (Engle–Kroner). Series count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct BekkGarch;
+
+/// Fitted diagonal BEKK variances and terminal correlation.
+#[derive(Clone, Debug)]
+pub struct FittedBekkGarch {
+    /// Per-series conditional variances (`T` × `k`).
+    pub sigma2: Matrix,
+    /// Terminal correlation (`k` × `k`).
+    pub corr: Matrix,
+}
+
+impl BekkGarch {
+    /// Empty BEKK estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit a diagonal BEKK path on demeaned columns.
+    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedBekkGarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let (n, k) = y.shape();
+        if k < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("BEKK needs at least two series")
+                    .build(),
+            );
+        }
+        let mut e = Matrix::zeros(n, k);
+        let mut uncond = vec![1e-8; k];
+        for j in 0..k {
+            let col = y.column(j);
+            let mean = col.mean();
+            let mut s = 0.0;
+            for t in 0..n {
+                let v = col.as_slice().get(t).copied().unwrap_or(0.0) - mean;
+                e.set(t, j, v);
+                s += v * v;
+            }
+            uncond[j] = (s / n.max(1) as f64).max(1e-8);
+        }
+        let a = 0.20_f64;
+        let b = 0.90_f64;
+        let mut h = Matrix::from_fn(k, k, |i, j| {
+            if i == j {
+                uncond[i]
+            } else {
+                0.0
+            }
+        });
+        let mut sigma2 = Matrix::zeros(n, k);
+        for t in 0..n {
+            if t > 0 {
+                let mut nxt = Matrix::zeros(k, k);
+                for i in 0..k {
+                    let ci = (0.05 * uncond[i]).sqrt();
+                    for j in 0..k {
+                        let cj = (0.05 * uncond[j]).sqrt();
+                        nxt.set(
+                            i,
+                            j,
+                            ci * cj
+                                + a * a * e.get(t - 1, i) * e.get(t - 1, j)
+                                + b * b * h.get(i, j),
+                        );
+                    }
+                }
+                h = nxt;
+            }
+            for j in 0..k {
+                let v = h.get(j, j);
+                if !v.is_finite() || v <= 0.0 {
+                    h.set(j, j, uncond[j]);
+                }
+                sigma2.set(t, j, h.get(j, j).max(1e-12));
+            }
+        }
+        let mut corr = Matrix::zeros(k, k);
+        for i in 0..k {
+            for j in 0..k {
+                let den = (h.get(i, i).max(1e-12) * h.get(j, j).max(1e-12)).sqrt();
+                corr.set(i, j, (h.get(i, j) / den).clamp(-1.0, 1.0));
+            }
+            corr.set(i, i, 1.0);
+        }
+        ctx.finish(FittedBekkGarch { sigma2, corr })
+    }
+}
+
+/// Multi-output direct tabular reduction (sktime `MultioutputTabularRegressionForecaster`).
+///
+/// One [`crate::reducer::DirectReducer`] per column. Column / window / horizon
+/// counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MultioutputTabularForecaster {
+    /// Lag window.
+    pub window: usize,
+    /// Direct horizons.
+    pub horizon: usize,
+}
+
+impl Default for MultioutputTabularForecaster {
+    fn default() -> Self {
+        Self {
+            window: 3,
+            horizon: 3,
+        }
+    }
+}
+
+impl MultioutputTabularForecaster {
+    /// Direct reducer on every column.
+    pub fn new(window: usize, horizon: usize) -> Self {
+        Self {
+            window: window.max(1),
+            horizon: horizon.max(1),
+        }
+    }
+
+    /// Fit a direct lag-OLS model on each column.
+    pub fn fit(
+        &self,
+        y: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedMultioutputTabular>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let mut models = Vec::new();
+        for j in 0..y.ncols() {
+            let col = y.column(j);
+            let mut reducer = crate::reducer::DirectReducer {
+                window: self.window,
+                horizon: self.horizon,
+            };
+            match reducer.fit_series(&col, &session.child(format!("motab_{j}"))) {
+                Ok(q) => models.push(q.value),
+                Err(err) => {
+                    for issue in err.report.issues() {
+                        if !matches!(
+                            issue.code,
+                            IssueCode::ResidualTooLarge
+                                | IssueCode::NearSingular
+                                | IssueCode::RankZero
+                                | IssueCode::R2IsOne
+                                | IssueCode::MeaninglessFit
+                        ) {
+                            ctx.push(issue.clone());
+                        }
+                    }
+                }
+            }
+        }
+        if models.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("every multi-output tabular column failed to fit")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedMultioutputTabular { models })
+    }
+}
+
+/// Fitted per-column direct reducers.
+#[derive(Clone, Debug)]
+pub struct FittedMultioutputTabular {
+    models: Vec<crate::reducer::FittedDirectReducer>,
+}
+
+impl FittedMultioutputTabular {
+    /// Horizon × series forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        let k = self.models.len();
+        let mut out = Matrix::zeros(h, k);
+        for (j, m) in self.models.iter().enumerate() {
+            match m.forecast(h, &session.child(format!("motab_fc_{j}"))) {
+                Ok(q) => {
+                    for t in 0..h.min(q.value.len()) {
+                        out.set(t, j, q.value[t]);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        ctx.finish(out)
+    }
+}
+
 fn fit_arima(spec: &Arima, y: &Vector, session: &Session) -> Result<Qualified<FittedArima>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
@@ -12134,5 +13146,89 @@ mod tests {
             .expect("hierf")
             .value;
         assert_eq!(hierf.shape(), (3, 3));
+        let aim = ArchInMean::new()
+            .fit_series(&y, &Session::new("aim", "fit"))
+            .expect("aim");
+        assert!(aim
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        assert!(aim.value.lambda.is_finite());
+        let ccc = CcGarch::new()
+            .fit(&y2, &Session::new("ccc", "fit"))
+            .expect("ccc");
+        assert_eq!(ccc.value.corr.shape(), (2, 2));
+        assert!(ccc.value.corr.get(0, 1).is_finite());
+        let rk = RealizedKernel::new()
+            .fit_series(&y, &Session::new("rk", "fit"))
+            .expect("rk");
+        assert!(rk.value.rk.is_finite());
+        let mid = Midas::new(3)
+            .fit(&y, &y, &Session::new("midas", "fit"))
+            .expect("midas");
+        assert!(mid.value.intercept.is_finite());
+        let midf = mid
+            .value
+            .forecast(3, &Session::new("midas", "fc"))
+            .expect("midf")
+            .value;
+        assert_eq!(midf.len(), 3);
+        let star = Star
+            .fit_series(&y, &Session::new("star", "fit"))
+            .expect("star");
+        let starf = star
+            .value
+            .forecast(3, &Session::new("star", "fc"))
+            .expect("starf")
+            .value;
+        assert_eq!(starf.len(), 3);
+        assert!(starf.as_slice().iter().all(|v| v.is_finite()));
+        let recf = ReconcilerForecaster::new()
+            .fit(&y2, &Session::new("recf", "fit"))
+            .expect("recf");
+        let recff = recf
+            .value
+            .forecast(2, &s, &Session::new("recf", "fc"))
+            .expect("recff")
+            .value;
+        assert_eq!(recff.shape(), (2, 3));
+        assert!((recff.get(0, 0) + recff.get(0, 1) - recff.get(0, 2)).abs() < 1e-8);
+        let dtab = DirectTabularForecaster::new(3, 3)
+            .fit_series(&y, &Session::new("dtab", "fit"))
+            .expect("dtab");
+        let dtabf = dtab
+            .value
+            .forecast(3, &Session::new("dtab", "fc"))
+            .expect("dtabf")
+            .value;
+        assert_eq!(dtabf.len(), 3);
+        assert!(dtabf.as_slice().iter().all(|v| v.is_finite()));
+        let bats = Bats::new(4)
+            .fit_series(&y, &Session::new("bats", "fit"))
+            .expect("bats");
+        let batsf = bats
+            .value
+            .forecast(3, &Session::new("bats", "fc"))
+            .expect("batsf")
+            .value;
+        assert_eq!(batsf.len(), 3);
+        assert!(batsf.as_slice().iter().all(|v| v.is_finite()));
+        let bekk = BekkGarch::new()
+            .fit(&y2, &Session::new("bekk", "fit"))
+            .expect("bekk");
+        assert_eq!(bekk.value.corr.shape(), (2, 2));
+        assert!(bekk.value.corr.get(0, 1).is_finite());
+        let mot = MultioutputTabularForecaster::new(3, 3)
+            .fit(&y2, &Session::new("mot", "fit"))
+            .expect("mot");
+        let motf = mot
+            .value
+            .forecast(3, &Session::new("mot", "fc"))
+            .expect("motf")
+            .value;
+        assert_eq!(motf.shape(), (3, 2));
+        assert!(motf.get(0, 0).is_finite() && motf.get(2, 1).is_finite());
     }
 }

@@ -4337,6 +4337,331 @@ impl FitUnsupervised for VariationalPoissonHmm {
     }
 }
 
+/// Mean-field variational GMM-HMM (Dirichlet on \(\pi,A,w\); Normal-Gamma on mixtures).
+///
+/// Mix count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct VariationalGmmHmm {
+    /// Hidden states.
+    pub n_states: usize,
+    /// Mixture components per state.
+    pub n_mix: usize,
+    /// Variational EM iteration cap.
+    pub max_iter: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for VariationalGmmHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            n_mix: 1,
+            max_iter: 40,
+            seed: 0,
+        }
+    }
+}
+
+impl VariationalGmmHmm {
+    /// `n_states` states with `n_mix` variational Gaussians each.
+    pub fn new(n_states: usize, n_mix: usize) -> Self {
+        Self {
+            n_states,
+            n_mix,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedVariationalGmmHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted variational GMM-HMM (posterior-mean parameters).
+#[derive(Clone, Debug)]
+pub struct FittedVariationalGmmHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Number of states.
+    pub n_states: usize,
+    /// Mixture size.
+    pub n_mix: usize,
+    /// Posterior-mean start.
+    pub start: Vector,
+    /// Posterior-mean transitions.
+    pub trans: Matrix,
+    /// Mixture weights.
+    pub mix_weights: Matrix,
+    /// Mixture means.
+    pub means: Matrix,
+    /// Diagonal variances.
+    pub vars: Matrix,
+    /// ELBO proxy.
+    pub elbo: f64,
+}
+
+impl FittedVariationalGmmHmm {
+    fn as_gmm(&self) -> FittedGmmHmm {
+        FittedGmmHmm {
+            labels: self.labels.clone(),
+            n_states: self.n_states,
+            n_mix: self.n_mix,
+            start: self.start.clone(),
+            trans: self.trans.clone(),
+            mix_weights: self.mix_weights.clone(),
+            means: self.means.clone(),
+            vars: self.vars.clone(),
+            loglik: self.elbo,
+        }
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.as_gmm().decode(x, session)
+    }
+
+    /// Scaled-forward log-likelihood.
+    pub fn score(&self, x: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+        self.as_gmm().score(x, session)
+    }
+}
+
+impl Predict for FittedVariationalGmmHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for VariationalGmmHmm {
+    type Fitted = FittedVariationalGmmHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedVariationalGmmHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_states.max(1),
+            &ctx.policy,
+        );
+        let (t_len, d) = x.shape();
+        let k = self.n_states.max(1);
+        let nm = self.n_mix.max(1);
+        if t_len == 0 || d == 0 {
+            return ctx.finish(FittedVariationalGmmHmm {
+                labels: empty_labels(0),
+                n_states: k,
+                n_mix: nm,
+                start: init_start(k),
+                trans: init_trans(k),
+                mix_weights: Matrix::from_fn(k, nm, |_, _| 1.0 / nm as f64),
+                means: Matrix::zeros(k * nm, d),
+                vars: Matrix::zeros(k * nm, d),
+                elbo: f64::NAN,
+            });
+        }
+        if series_zero_variance(x, ctx.policy.near_zero_variance) {
+            ctx.push(emission_degenerate_issue(
+                "variational GMM-HMM observation series has zero variance",
+            ));
+        }
+        let mut rng = Rng::new(self.seed | 11);
+        let seeds = kmeans_pp_rows(x, (k * nm).min(t_len), &mut rng);
+        let mut means = Matrix::zeros(k * nm, d);
+        for r in 0..(k * nm).min(seeds.nrows()) {
+            for j in 0..d {
+                means.set(r, j, seeds.get(r, j));
+            }
+        }
+        let gvar = global_diag_var(x);
+        let mut vars = Matrix::from_fn(k * nm, d, |_, j| gvar[j]);
+        let mut mix_dir = Matrix::from_fn(k, nm, |_, _| 1.0);
+        let mut alpha0 = Vector::filled(k, 1.0);
+        let mut alpha_a = Matrix::from_fn(k, k, |_, _| 1.0);
+        let mut elbo = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let mut start = Vector::zeros(k);
+            let sum_a0: f64 = (0..k).map(|j| alpha0[j]).sum();
+            for j in 0..k {
+                start[j] = (digamma(alpha0[j]) - digamma(sum_a0)).exp();
+            }
+            renormalize_vec(&mut start, TRANS_FLOOR);
+            let mut trans = Matrix::zeros(k, k);
+            for i in 0..k {
+                let row_s: f64 = (0..k).map(|j| alpha_a.get(i, j)).sum();
+                for j in 0..k {
+                    trans.set(i, j, (digamma(alpha_a.get(i, j)) - digamma(row_s)).exp());
+                }
+            }
+            renormalize_rows(&mut trans, TRANS_FLOOR);
+            let mut mix_weights = Matrix::zeros(k, nm);
+            for j in 0..k {
+                let row_s: f64 = (0..nm).map(|m| mix_dir.get(j, m)).sum();
+                for m in 0..nm {
+                    mix_weights.set(j, m, (digamma(mix_dir.get(j, m)) - digamma(row_s)).exp());
+                }
+            }
+            let mut log_emit = vec![vec![0.0; k]; t_len];
+            let mut log_comp = vec![vec![vec![0.0; nm]; k]; t_len];
+            for t in 0..t_len {
+                for j in 0..k {
+                    let mut parts = vec![0.0; nm];
+                    for m in 0..nm {
+                        let r = mix_index(j, m, nm);
+                        let lp = mix_weights.get(j, m).max(1e-300).ln()
+                            + log_diag_gauss(x, t, &means, r, &vars);
+                        log_comp[t][j][m] = lp;
+                        parts[m] = lp;
+                    }
+                    log_emit[t][j] = logsumexp(&parts);
+                }
+            }
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &log_emit) else {
+                break;
+            };
+            elbo = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -elbo, None);
+            for j in 0..k {
+                alpha0[j] = 1.0 + fb.gamma[0][j];
+            }
+            if t_len > 1 {
+                for i in 0..k {
+                    for j in 0..k {
+                        let mut num = 1.0;
+                        for t in 0..t_len - 1 {
+                            num += fb.xi[t][i][j];
+                        }
+                        alpha_a.set(i, j, num);
+                    }
+                }
+            }
+            let n0 = 1e-3;
+            for j in 0..k {
+                for m in 0..nm {
+                    let lse = |t: usize| logsumexp(&log_comp[t][j]);
+                    let mut nj = 0.0;
+                    let mut acc = vec![0.0; d];
+                    for t in 0..t_len {
+                        let p = if lse(t).is_finite() {
+                            (log_comp[t][j][m] - lse(t)).exp()
+                        } else {
+                            1.0 / nm as f64
+                        };
+                        let g = fb.gamma[t][j] * p;
+                        nj += g;
+                        for dim in 0..d {
+                            acc[dim] += g * x.get(t, dim);
+                        }
+                    }
+                    mix_dir.set(j, m, 1.0 + nj);
+                    if nj <= TRANS_FLOOR {
+                        ctx.push(
+                            Issue::builder(IssueCode::MixtureWeightCollapsed)
+                                .message(format!("variational GMM-HMM state {j} mix {m} collapsed"))
+                                .build(),
+                        );
+                        continue;
+                    }
+                    let r = mix_index(j, m, nm);
+                    for dim in 0..d {
+                        let xbar = acc[dim] / nj;
+                        means.set(r, dim, (n0 * gvar[dim].sqrt() + nj * xbar) / (n0 + nj));
+                        let mut s = n0;
+                        for t in 0..t_len {
+                            let p = if lse(t).is_finite() {
+                                (log_comp[t][j][m] - lse(t)).exp()
+                            } else {
+                                1.0 / nm as f64
+                            };
+                            let g = fb.gamma[t][j] * p;
+                            let z = x.get(t, dim) - means.get(r, dim);
+                            s += g * z * z;
+                        }
+                        vars.set(r, dim, (s / (nj + n0)).max(COV_FLOOR));
+                    }
+                }
+            }
+            if it + 1 == self.max_iter {
+                ctx.push(
+                    Issue::builder(IssueCode::MaxIterReached)
+                        .message("variational GMM-HMM hit max_iter")
+                        .build(),
+                );
+            }
+        }
+        let occup: Vec<f64> = (0..k)
+            .map(|j| {
+                last_gamma
+                    .iter()
+                    .map(|g| g.get(j).copied().unwrap_or(0.0))
+                    .sum()
+            })
+            .collect();
+        let mut start = Vector::zeros(k);
+        let sum_a0: f64 = (0..k).map(|j| alpha0[j]).sum();
+        for j in 0..k {
+            start[j] = alpha0[j] / sum_a0.max(1e-12);
+        }
+        let mut trans = Matrix::zeros(k, k);
+        for i in 0..k {
+            let row_s: f64 = (0..k).map(|j| alpha_a.get(i, j)).sum();
+            for j in 0..k {
+                trans.set(i, j, alpha_a.get(i, j) / row_s.max(1e-12));
+            }
+        }
+        let mut mix_weights = Matrix::zeros(k, nm);
+        for j in 0..k {
+            let row_s: f64 = (0..nm).map(|m| mix_dir.get(j, m)).sum();
+            for m in 0..nm {
+                mix_weights.set(j, m, mix_dir.get(j, m) / row_s.max(1e-12));
+            }
+        }
+        diagnose_chain(&mut ctx, &start, &trans, &occup);
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .message("variational GMM-HMM uses Dirichlet(1) and Normal-Gamma floors")
+                .compromise(NumericalCompromise::new(
+                    "unconstrained variational Bayes",
+                    "Dirichlet(1) + diagonal variance floor",
+                    "zero cells make the sequence probability vanish",
+                    "posterior means are shrunk; do not treat them as MLEs",
+                ))
+                .build(),
+        );
+        let tmp = FittedGmmHmm {
+            labels: Vector::zeros(0),
+            n_states: k,
+            n_mix: nm,
+            start: start.clone(),
+            trans: trans.clone(),
+            mix_weights: mix_weights.clone(),
+            means: means.clone(),
+            vars: vars.clone(),
+            loglik: elbo,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &tmp.log_emit_seq(x));
+        ctx.finish(FittedVariationalGmmHmm {
+            labels,
+            n_states: k,
+            n_mix: nm,
+            start,
+            trans,
+            mix_weights,
+            means,
+            vars,
+            elbo,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4487,6 +4812,23 @@ mod tests {
         );
         assert_eq!(gtied.value.covs.len(), 2);
         assert_eq!(gtied.value.covs[0].shape(), (1, 1));
+        let vg = VariationalGmmHmm::new(2, 1)
+            .fit(&x, &Session::new("vgmm_hmm", "fit"))
+            .expect("vgmm");
+        let mut vm0 = vg.value.means.get(0, 0);
+        let mut vm1 = vg.value.means.get(1, 0);
+        if vm0 > vm1 {
+            std::mem::swap(&mut vm0, &mut vm1);
+        }
+        assert!(
+            (vm0 + 3.0).abs() < 1.2,
+            "variational GMM-HMM expected a mean near -3, got {vm0} and {vm1}"
+        );
+        assert!(
+            (vm1 - 3.0).abs() < 1.2,
+            "variational GMM-HMM expected a mean near +3, got {vm0} and {vm1}"
+        );
+        assert_eq!(vg.value.labels.len(), 80);
     }
 
     #[test]

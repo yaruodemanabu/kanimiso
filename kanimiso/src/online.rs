@@ -16714,6 +16714,675 @@ impl Predict for FmReco {
     }
 }
 
+/// River `metrics.LogCosh` — online \(\log\cosh\) residual loss.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineLogCosh {
+    acc: f64,
+    n: u64,
+    updates: u64,
+}
+
+impl OnlineLogCosh {
+    /// Empty log-cosh metric.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current mean log-cosh, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.n == 0 {
+            f64::NAN
+        } else {
+            self.acc / self.n as f64
+        }
+    }
+}
+
+impl PartialFit for OnlineLogCosh {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        metric_partial(
+            session,
+            "log_cosh",
+            x,
+            y,
+            self.updates,
+            self.n,
+            |pred, truth| {
+                let e = pred - truth;
+                let ae = e.abs();
+                // `log(cosh(e))` = `|e| + log(1 + exp(-2|e|)) - log(2)`.
+                let lch = ae + ((-2.0 * ae).exp() + 1.0).ln() - 2.0_f64.ln();
+                self.acc += lch;
+                self.n += 1;
+                self.updates += 1;
+                self.score()
+            },
+        )
+    }
+}
+
+/// Extremely Fast Decision Tree regressor (`river.tree.HoeffdingAdaptiveTreeRegressor` / EFDT).
+///
+/// Same sufficient statistics as [`HoeffdingRegressor`], with a smaller
+/// `min_samples` and larger `tau` so splits fire earlier.
+#[derive(Clone, Debug)]
+pub struct EfdtRegressor {
+    inner: HoeffdingRegressor,
+}
+
+impl Default for EfdtRegressor {
+    fn default() -> Self {
+        Self {
+            inner: HoeffdingRegressor {
+                min_samples: 5,
+                tau: 0.15,
+                ..HoeffdingRegressor::default()
+            },
+        }
+    }
+}
+
+impl EfdtRegressor {
+    /// Eager Hoeffding regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for EfdtRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let q = self.inner.partial_fit(x, y, session)?;
+        let mut ctx = FitCtx::with_session(session.child("efdt_regressor"));
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .severity(Severity::Advisory)
+                .message(
+                    "EFDT-regressor uses an eager Hoeffding bound; it does not re-evaluate existing splits",
+                )
+                .build(),
+        );
+        ctx.finish(q.value)
+    }
+}
+
+impl Predict for EfdtRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+/// River stacking classifier: two perceptrons plus a meta perceptron.
+///
+/// Member count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineStacking {
+    a: Perceptron,
+    b: Perceptron,
+    meta: Perceptron,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl OnlineStacking {
+    /// Empty stacked perceptrons.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_one(p: &Perceptron, x: &Matrix, i: usize) -> f64 {
+        let mut s = 0.0;
+        let w = p.coef();
+        for j in 0..x.ncols().min(w.len()) {
+            s += w[j] * x.get(i, j);
+        }
+        s
+    }
+}
+
+impl PartialFit for OnlineStacking {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("online_stacking"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        let z = Matrix::from_fn(x.nrows(), 2, |i, j| {
+            if j == 0 {
+                Self::score_one(&self.a, x, i)
+            } else {
+                Self::score_one(&self.b, x, i)
+            }
+        });
+        self.a.partial_fit(x, Some(y), session)?;
+        self.b.partial_fit(x, Some(y), session)?;
+        self.meta.partial_fit(&z, Some(y), session)?;
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen > 1;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("stacked perceptrons; n={}", self.n_seen);
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("online stacking has seen fewer than 2 rows")
+                    .build(),
+            );
+        }
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "updated two base perceptrons and the meta-learner",
+                "river stacking trains bases then a meta-learner on their scores",
+                "previous stacked state",
+                format!("n_seen={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+/// ADWIN-resetting kNN (`river.neighbors.KNNADWINClassifier`).
+///
+/// Neighborhood size `k` is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct AdwinKnn {
+    knn: KnnClassifier,
+    adwin: Adwin,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for AdwinKnn {
+    fn default() -> Self {
+        Self {
+            knn: KnnClassifier::new(3),
+            adwin: Adwin::default(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl AdwinKnn {
+    /// kNN with ADWIN window reset.
+    pub fn new(k: usize) -> Self {
+        Self {
+            knn: KnnClassifier::new(k.max(1)),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for AdwinKnn {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("adwin_knn"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        let mut drifted = false;
+        if !self.knn.xs.is_empty() {
+            match self.knn.predict(x, session) {
+                Ok(pred) => {
+                    for i in 0..x.nrows().min(y.len()).min(pred.value.len()) {
+                        let err = if (pred.value[i] - y[i]).abs() > 0.5 {
+                            1.0
+                        } else {
+                            0.0
+                        };
+                        match self.adwin.update(err, session) {
+                            Ok(q) => {
+                                if matches!(q.value, DriftDecision::Drift { .. }) {
+                                    drifted = true;
+                                }
+                            }
+                            Err(e) => {
+                                if e.primary().code == IssueCode::ConceptDriftDetected {
+                                    drifted = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        if drifted {
+            ctx.push(
+                Issue::builder(IssueCode::ConceptDriftDetected)
+                    .message("ADWIN detected a change; kNN memory was cleared")
+                    .build(),
+            );
+            self.knn.xs.clear();
+            self.knn.ys.clear();
+        }
+        self.knn.partial_fit(x, Some(y), session)?;
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.knn.xs.len() as f64;
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.knn.xs.len() >= self.knn.k;
+        q.warmup = self.knn.xs.len() < self.knn.k;
+        q.explanation = if drifted {
+            "ADWIN reset the kNN window after a detected change".into()
+        } else {
+            format!("stored neighbors; window={}", self.knn.xs.len())
+        };
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                if drifted {
+                    "cleared then stored the new neighborhood"
+                } else {
+                    "appended labeled neighbors"
+                },
+                "ADWIN-kNN forgets neighbors when the 0-1 loss stream changes",
+                "previous neighbor window",
+                format!("window={}", self.knn.xs.len()),
+            ),
+        )
+    }
+}
+
+fn mix_hash(item: f64, salt: u64) -> u64 {
+    let mut h = item.to_bits() ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 27;
+    h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+    h ^= h >> 31;
+    h
+}
+
+fn row_hash(x: &Matrix, i: usize, salt: u64) -> u64 {
+    let mut h = salt;
+    for j in 0..x.ncols() {
+        h ^= mix_hash(x.get(i, j), (j as u64).wrapping_add(1));
+    }
+    h
+}
+
+/// Count–Min sketch (river `sketch.CountMinSketch`).
+///
+/// Depth / width are sketch sizes, not identification `p`.
+#[derive(Clone, Debug)]
+pub struct CountMinSketch {
+    /// Hash rows.
+    pub depth: usize,
+    /// Buckets per row.
+    pub width: usize,
+    table: Vec<Vec<u64>>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for CountMinSketch {
+    fn default() -> Self {
+        Self::new(3, 32)
+    }
+}
+
+impl CountMinSketch {
+    /// `depth` × `width` sketch.
+    pub fn new(depth: usize, width: usize) -> Self {
+        let d = depth.max(1);
+        let w = width.max(2);
+        Self {
+            depth: d,
+            width: w,
+            table: vec![vec![0; w]; d],
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+
+    fn add(&mut self, key: u64) {
+        for r in 0..self.depth {
+            let j = (mix_hash(key as f64, r as u64 + 1) as usize) % self.width;
+            self.table[r][j] = self.table[r][j].saturating_add(1);
+        }
+    }
+
+    /// Conservative count for a hashed key.
+    pub fn estimate(&self, key: u64) -> u64 {
+        let mut m = u64::MAX;
+        for r in 0..self.depth {
+            let j = (mix_hash(key as f64, r as u64 + 1) as usize) % self.width;
+            m = m.min(self.table[r][j]);
+        }
+        if m == u64::MAX {
+            0
+        } else {
+            m
+        }
+    }
+}
+
+impl PartialFit for CountMinSketch {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("count_min_sketch"));
+        inspect_online_xy(&mut ctx, x, y);
+        let before = self.n_seen;
+        for i in 0..x.nrows() {
+            self.add(row_hash(x, i, 1));
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = true;
+        q.explanation = format!("Count-Min ingested {} rows", x.nrows());
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("added {} hashed rows to the Count-Min table", x.nrows()),
+                "river.sketch.CountMinSketch stores conservative frequency estimates",
+                format!("n={before}"),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+/// Bloom filter (river `sketch.BloomFilter`).
+///
+/// Bit / hash counts are sketch sizes, not identification `p`.
+#[derive(Clone, Debug)]
+pub struct BloomFilter {
+    /// Bit capacity.
+    pub n_bits: usize,
+    /// Independent hashes.
+    pub n_hashes: usize,
+    words: Vec<u64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for BloomFilter {
+    fn default() -> Self {
+        Self::new(256, 3)
+    }
+}
+
+impl BloomFilter {
+    /// `n_bits` filter with `n_hashes` probes.
+    pub fn new(n_bits: usize, n_hashes: usize) -> Self {
+        let bits = n_bits.max(64);
+        Self {
+            n_bits: bits,
+            n_hashes: n_hashes.max(1),
+            words: vec![0; (bits + 63) / 64],
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+
+    fn set_bit(&mut self, i: usize) {
+        let w = i / 64;
+        let b = i % 64;
+        if let Some(word) = self.words.get_mut(w) {
+            *word |= 1u64 << b;
+        }
+    }
+
+    fn get_bit(&self, i: usize) -> bool {
+        let w = i / 64;
+        let b = i % 64;
+        self.words
+            .get(w)
+            .map(|word| (*word >> b) & 1 == 1)
+            .unwrap_or(false)
+    }
+
+    fn add(&mut self, key: u64) {
+        for h in 0..self.n_hashes {
+            let idx = (mix_hash(key as f64, h as u64 + 11) as usize) % self.n_bits;
+            self.set_bit(idx);
+        }
+    }
+
+    /// Whether `key` may have been inserted.
+    pub fn maybe_contains(&self, key: u64) -> bool {
+        (0..self.n_hashes).all(|h| {
+            let idx = (mix_hash(key as f64, h as u64 + 11) as usize) % self.n_bits;
+            self.get_bit(idx)
+        })
+    }
+}
+
+impl PartialFit for BloomFilter {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("bloom_filter"));
+        inspect_online_xy(&mut ctx, x, y);
+        let before = self.n_seen;
+        for i in 0..x.nrows() {
+            self.add(row_hash(x, i, 3));
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = true;
+        q.explanation = format!("Bloom filter ingested {} rows", x.nrows());
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("set bits for {} hashed rows", x.nrows()),
+                "river.sketch.BloomFilter records membership with a false-positive rate",
+                format!("n={before}"),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+/// HyperLogLog cardinality sketch (river `sketch.HyperLogLog`).
+///
+/// Register count \(2^{p}\) is a sketch size, not identification `p`.
+#[derive(Clone, Debug)]
+pub struct HyperLogLog {
+    /// Precision bits (`4..=16`).
+    pub precision: usize,
+    registers: Vec<u8>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for HyperLogLog {
+    fn default() -> Self {
+        Self::new(6)
+    }
+}
+
+impl HyperLogLog {
+    /// HyperLogLog with `precision` index bits.
+    pub fn new(precision: usize) -> Self {
+        let p = precision.clamp(4, 16);
+        Self {
+            precision: p,
+            registers: vec![0; 1usize << p],
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+
+    fn add(&mut self, key: u64) {
+        let h = mix_hash(key as f64, 0x0111_u64);
+        let nreg = self.registers.len();
+        let idx = ((h >> (64 - self.precision)) as usize).min(nreg.saturating_sub(1));
+        let w = h << self.precision;
+        let rho = (w.leading_zeros() + 1).min(64 - self.precision as u32 + 1) as u8;
+        if let Some(reg) = self.registers.get_mut(idx) {
+            *reg = (*reg).max(rho);
+        }
+    }
+
+    /// Cardinality estimate.
+    pub fn estimate(&self) -> f64 {
+        let m = self.registers.len() as f64;
+        let mut s = 0.0;
+        let mut zeros = 0usize;
+        for &r in &self.registers {
+            s += 2.0_f64.powi(-(r as i32));
+            if r == 0 {
+                zeros += 1;
+            }
+        }
+        let alpha = match self.registers.len() {
+            16 => 0.673,
+            32 => 0.697,
+            64 => 0.709,
+            _ => 0.7213 / (1.0 + 1.079 / m),
+        };
+        let e = alpha * m * m / s.max(1e-12);
+        if e <= 2.5 * m && zeros > 0 {
+            m * (m / zeros as f64).ln()
+        } else {
+            e
+        }
+    }
+}
+
+impl PartialFit for HyperLogLog {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("hyperloglog"));
+        inspect_online_xy(&mut ctx, x, y);
+        let before = self.estimate();
+        for i in 0..x.nrows() {
+            self.add(row_hash(x, i, 7));
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let after = self.estimate();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = after;
+        q.information_gain = Some((after - before).abs());
+        q.still_identified = true;
+        q.explanation = format!("HLL cardinality ≈ {after:.4e}");
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("updated HyperLogLog registers ({:.4e} → {after:.4e})", before),
+                "river.sketch.HyperLogLog estimates distinct hashed rows",
+                format!("card≈{before:.4e}"),
+                format!("card≈{after:.4e}"),
+            ),
+        )
+    }
+}
+
+/// Online majority vote of two perceptrons (river `ensemble.VotingClassifier`).
+///
+/// Member count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineVoting {
+    a: Perceptron,
+    b: Perceptron,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl OnlineVoting {
+    /// Empty voting ensemble.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for OnlineVoting {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("online_voting"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        self.a.partial_fit(x, Some(y), session)?;
+        self.b.partial_fit(x, Some(y), session)?;
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen > 1;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("voting perceptrons; n={}", self.n_seen);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "updated both voting members",
+                "river VotingClassifier trains members independently and averages signs",
+                "previous vote state",
+                format!("n_seen={}", self.n_seen),
+            ),
+        )
+    }
+}
+
 fn online_linear_dim(fit_intercept: bool, p: usize) -> usize {
     p + if fit_intercept { 1 } else { 0 }
 }
@@ -21106,6 +21775,30 @@ mod tests {
         FmReco::new(2)
             .partial_fit(&x, Some(&y), &session)
             .expect("fmreco");
+        OnlineLogCosh::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("logcosh");
+        EfdtRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("efdtr");
+        OnlineStacking::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("ostack");
+        AdwinKnn::new(3)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("adwknn");
+        CountMinSketch::new(3, 32)
+            .partial_fit(&x, None, &session)
+            .expect("cms");
+        BloomFilter::new(256, 3)
+            .partial_fit(&x, None, &session)
+            .expect("bloom");
+        HyperLogLog::new(6)
+            .partial_fit(&x, None, &session)
+            .expect("hll");
+        OnlineVoting::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("ovote");
 
         let n_expl = session
             .ledger()

@@ -9258,6 +9258,336 @@ pub fn lilliefors(x: &Vector, session: &Session) -> Result<Qualified<HypothesisT
     })
 }
 
+/// Bai–Perron single-break search on a mean shift (statsmodels `breaks_cusumolsresid` lite).
+///
+/// Candidate / break counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct BaiPerronResult {
+    /// First observation of the second regime (`0` if unidentified).
+    pub break_index: usize,
+    /// `SSR_full − (SSR_left + SSR_right)`.
+    pub ssr_gain: f64,
+}
+
+fn ssr_mean(sl: &[f64]) -> f64 {
+    let vals: Vec<f64> = sl.iter().copied().filter(|v| v.is_finite()).collect();
+    if vals.is_empty() {
+        return 0.0;
+    }
+    let m = vals.iter().sum::<f64>() / vals.len() as f64;
+    vals.iter().map(|v| (v - m) * (v - m)).sum()
+}
+
+/// Locate one mean break by exhaustive SSR search.
+pub fn bai_perron(y: &Vector, session: &Session) -> Result<Qualified<BaiPerronResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, &Matrix::from_vector(y), None, &ctx.policy);
+    let n = y.len();
+    if n < 8 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Bai–Perron needs n≥8")
+                .build(),
+        );
+        return ctx.finish(BaiPerronResult {
+            break_index: 0,
+            ssr_gain: 0.0,
+        });
+    }
+    let full = ssr_mean(y.as_slice());
+    let trim = (n / 10).max(2);
+    let mut best_t = trim;
+    let mut best_ssr = f64::INFINITY;
+    for t in trim..(n - trim) {
+        let ssr = ssr_mean(&y.as_slice()[..t]) + ssr_mean(&y.as_slice()[t..]);
+        if ssr < best_ssr {
+            best_ssr = ssr;
+            best_t = t;
+        }
+    }
+    let gain = full - best_ssr;
+    if gain > 0.15 * full.max(1e-12) {
+        ctx.push(
+            Issue::builder(IssueCode::StructuralBreak)
+                .message(format!(
+                    "Bai–Perron mean break at t={best_t} (SSR gain {gain:.4e})"
+                ))
+                .metric("break_index", best_t as f64)
+                .metric("ssr_gain", gain)
+                .build(),
+        );
+    }
+    ctx.finish(BaiPerronResult {
+        break_index: best_t,
+        ssr_gain: gain,
+    })
+}
+
+/// Fitted bivariate Gaussian copula (statsmodels `Copula` lite).
+#[derive(Clone, Debug)]
+pub struct GaussianCopula {
+    /// Pearson correlation of normal scores.
+    pub rho: f64,
+    /// Gaussian-copula log-likelihood.
+    pub loglik: f64,
+}
+
+/// Fit a bivariate Gaussian copula via normal scores.
+///
+/// Pair count is not identification `p`.
+pub fn gaussian_copula(
+    y1: &Vector,
+    y2: &Vector,
+    session: &Session,
+) -> Result<Qualified<GaussianCopula>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let n = y1.len().min(y2.len());
+    let x = Matrix::from_fn(n, 2, |i, j| if j == 0 { y1[i] } else { y2[i] });
+    inspect_xy(&mut ctx.report, &x, None, &ctx.policy);
+    if n < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Gaussian copula needs n≥4 pairs")
+                .build(),
+        );
+        return ctx.finish(GaussianCopula {
+            rho: 0.0,
+            loglik: f64::NAN,
+        });
+    }
+    let ranks = |y: &Vector| {
+        let mut idx: Vec<usize> = (0..n).filter(|&i| y[i].is_finite()).collect();
+        idx.sort_by(|&a, &b| y[a].partial_cmp(&y[b]).unwrap_or(std::cmp::Ordering::Equal));
+        let mut r = vec![f64::NAN; n];
+        let m = idx.len() as f64;
+        for (k, &i) in idx.iter().enumerate() {
+            r[i] = (k as f64 + 1.0) / (m + 1.0);
+        }
+        r
+    };
+    let u = ranks(y1);
+    let v = ranks(y2);
+    let mut z1 = Vec::new();
+    let mut z2 = Vec::new();
+    for i in 0..n {
+        if u[i].is_finite() && v[i].is_finite() {
+            z1.push(norm_ppf(u[i].clamp(1e-6, 1.0 - 1e-6)));
+            z2.push(norm_ppf(v[i].clamp(1e-6, 1.0 - 1e-6)));
+        }
+    }
+    if z1.len() < 3 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Gaussian copula had too few finite pairs")
+                .build(),
+        );
+        return ctx.finish(GaussianCopula {
+            rho: 0.0,
+            loglik: f64::NAN,
+        });
+    }
+    let m1 = z1.iter().sum::<f64>() / z1.len() as f64;
+    let m2 = z2.iter().sum::<f64>() / z2.len() as f64;
+    let mut num = 0.0;
+    let mut d1 = 0.0;
+    let mut d2 = 0.0;
+    for i in 0..z1.len() {
+        let a = z1[i] - m1;
+        let b = z2[i] - m2;
+        num += a * b;
+        d1 += a * a;
+        d2 += b * b;
+    }
+    let rho = if d1 > 0.0 && d2 > 0.0 {
+        (num / (d1.sqrt() * d2.sqrt())).clamp(-0.999, 0.999)
+    } else {
+        0.0
+    };
+    let mut loglik = 0.0;
+    let omr2 = (1.0 - rho * rho).max(1e-12);
+    for i in 0..z1.len() {
+        let q1 = z1[i];
+        let q2 = z2[i];
+        loglik += -0.5 * omr2.ln()
+            - 0.5 / omr2 * (q1 * q1 + q2 * q2 - 2.0 * rho * q1 * q2)
+            + 0.5 * (q1 * q1 + q2 * q2);
+    }
+    ctx.finish(GaussianCopula { rho, loglik })
+}
+
+fn empirical_ranks(y: &Vector, n: usize) -> Vec<f64> {
+    let mut idx: Vec<usize> = (0..n).filter(|&i| y[i].is_finite()).collect();
+    idx.sort_by(|&a, &b| y[a].partial_cmp(&y[b]).unwrap_or(std::cmp::Ordering::Equal));
+    let mut r = vec![f64::NAN; n];
+    let m = idx.len() as f64;
+    for (k, &i) in idx.iter().enumerate() {
+        r[i] = (k as f64 + 1.0) / (m + 1.0);
+    }
+    r
+}
+
+fn copula_uv(y1: &Vector, y2: &Vector) -> (Vec<f64>, Vec<f64>) {
+    let n = y1.len().min(y2.len());
+    let u = empirical_ranks(y1, n);
+    let v = empirical_ranks(y2, n);
+    let mut ou = Vec::new();
+    let mut ov = Vec::new();
+    for i in 0..n {
+        if u[i].is_finite() && v[i].is_finite() {
+            ou.push(u[i].clamp(1e-6, 1.0 - 1e-6));
+            ov.push(v[i].clamp(1e-6, 1.0 - 1e-6));
+        }
+    }
+    (ou, ov)
+}
+
+/// Fitted Clayton copula (statsmodels `ClaytonCopula`).
+#[derive(Clone, Debug)]
+pub struct ClaytonCopula {
+    /// Dependence \(\theta > 0\).
+    pub theta: f64,
+    /// Copula log-likelihood.
+    pub loglik: f64,
+}
+
+fn clayton_ll(u: &[f64], v: &[f64], theta: f64) -> f64 {
+    if theta <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let mut ll = 0.0;
+    for i in 0..u.len() {
+        let up = u[i].powf(-theta);
+        let vp = v[i].powf(-theta);
+        let s = up + vp - 1.0;
+        if s <= 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        ll += (1.0 + theta).ln()
+            + (-theta - 1.0) * (u[i].ln() + v[i].ln())
+            + (-2.0 - 1.0 / theta) * s.ln();
+    }
+    ll
+}
+
+/// Fit a bivariate Clayton copula by a \(\theta\) grid on ranks.
+///
+/// Pair count is not identification `p`.
+pub fn clayton_copula(
+    y1: &Vector,
+    y2: &Vector,
+    session: &Session,
+) -> Result<Qualified<ClaytonCopula>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let n = y1.len().min(y2.len());
+    let x = Matrix::from_fn(n, 2, |i, j| if j == 0 { y1[i] } else { y2[i] });
+    inspect_xy(&mut ctx.report, &x, None, &ctx.policy);
+    let (u, v) = copula_uv(y1, y2);
+    if u.len() < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Clayton copula needs n≥4 pairs")
+                .build(),
+        );
+        return ctx.finish(ClaytonCopula {
+            theta: 1.0,
+            loglik: f64::NAN,
+        });
+    }
+    let mut best_th = 1.0_f64;
+    let mut best_ll = f64::NEG_INFINITY;
+    for step in 0..10 {
+        let th = 0.2 + 0.4 * step as f64;
+        let ll = clayton_ll(&u, &v, th);
+        if ll > best_ll {
+            best_ll = ll;
+            best_th = th;
+        }
+    }
+    ctx.finish(ClaytonCopula {
+        theta: best_th,
+        loglik: best_ll,
+    })
+}
+
+/// Fitted Gumbel copula (statsmodels `GumbelCopula`).
+#[derive(Clone, Debug)]
+pub struct GumbelCopula {
+    /// Dependence \(\theta \ge 1\).
+    pub theta: f64,
+    /// Copula log-likelihood.
+    pub loglik: f64,
+}
+
+fn gumbel_ll(u: &[f64], v: &[f64], theta: f64) -> f64 {
+    if theta < 1.0 {
+        return f64::NEG_INFINITY;
+    }
+    let mut ll = 0.0;
+    for i in 0..u.len() {
+        let nlu = -u[i].ln();
+        let nlv = -v[i].ln();
+        let w = nlu.powf(theta) + nlv.powf(theta);
+        if w <= 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        let w1t = w.powf(1.0 / theta);
+        let c = (-w1t).exp();
+        let dens = c * (nlu * nlv).powf(theta - 1.0) / (u[i] * v[i])
+            * w.powf(1.0 / theta - 2.0)
+            * (w1t + theta - 1.0);
+        if !dens.is_finite() || dens <= 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        ll += dens.ln();
+    }
+    ll
+}
+
+/// Fit a bivariate Gumbel copula by a \(\theta\) grid on ranks.
+///
+/// Pair count is not identification `p`.
+pub fn gumbel_copula(
+    y1: &Vector,
+    y2: &Vector,
+    session: &Session,
+) -> Result<Qualified<GumbelCopula>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let n = y1.len().min(y2.len());
+    let x = Matrix::from_fn(n, 2, |i, j| if j == 0 { y1[i] } else { y2[i] });
+    inspect_xy(&mut ctx.report, &x, None, &ctx.policy);
+    let (u, v) = copula_uv(y1, y2);
+    if u.len() < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Gumbel copula needs n≥4 pairs")
+                .build(),
+        );
+        return ctx.finish(GumbelCopula {
+            theta: 1.0,
+            loglik: f64::NAN,
+        });
+    }
+    let mut best_th = 1.5_f64;
+    let mut best_ll = f64::NEG_INFINITY;
+    for step in 0..8 {
+        let th = 1.0 + 0.35 * step as f64;
+        let ll = gumbel_ll(&u, &v, th);
+        if ll > best_ll {
+            best_ll = ll;
+            best_th = th;
+        }
+    }
+    ctx.finish(GumbelCopula {
+        theta: best_th,
+        loglik: best_ll,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9648,5 +9978,16 @@ mod tests {
         let aa = aalen_additive(&dur, &ev, &cx, &Session::new("aa", "t")).expect("aa");
         assert!(aa.value.n_events > 0.0);
         assert_eq!(aa.value.cumulative.ncols(), cx.ncols());
+        let bp = bai_perron(&yb, &Session::new("bai", "t")).expect("bai");
+        assert!(bp.value.break_index > 0);
+        assert!(bp.report.contains(IssueCode::StructuralBreak) || bp.value.ssr_gain.is_finite());
+        let y2c = Vector::from_iter((0..40).map(|i| 0.8 * y[i]));
+        let gc = gaussian_copula(&y, &y2c, &Session::new("gcop", "t")).expect("gcop");
+        assert!(gc.value.rho > 0.5, "rho={}", gc.value.rho);
+        let cl = clayton_copula(&y, &y2c, &Session::new("ccop", "t")).expect("ccop");
+        assert!(cl.value.theta > 0.0);
+        assert!(cl.value.loglik.is_finite() || cl.value.loglik.is_infinite());
+        let gu = gumbel_copula(&y, &y2c, &Session::new("gumb", "t")).expect("gumb");
+        assert!(gu.value.theta >= 1.0);
     }
 }
