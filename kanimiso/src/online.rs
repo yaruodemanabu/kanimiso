@@ -18912,6 +18912,337 @@ impl PartialFit for RollingMse {
     }
 }
 
+/// Rolling log-loss (river `metrics.Rolling` + `LogLoss`).
+///
+/// Window length is not identification `p`. Predictions are clipped to
+/// \((\varepsilon,1-\varepsilon)\).
+#[derive(Clone, Debug)]
+pub struct RollingLogLoss {
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingLogLoss {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingLogLoss {
+    /// Rolling log-loss with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window mean log-loss, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.buf.is_empty() {
+            f64::NAN
+        } else {
+            self.buf.iter().sum::<f64>() / self.buf.len() as f64
+        }
+    }
+}
+
+impl PartialFit for RollingLogLoss {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no y for RollingLogLoss"),
+            );
+        };
+        let before = self.score();
+        let cap = self.window.max(1);
+        for i in 0..x.nrows().min(y.len()) {
+            let p = x.get(i, 0).clamp(1e-12, 1.0 - 1e-12);
+            let t = if y[i] > 0.5 { 1.0 } else { 0.0 };
+            if p.is_finite() && y[i].is_finite() {
+                let ll = -(t * p.ln() + (1.0 - t) * (1.0 - p).ln());
+                rolling_push(&mut self.buf, ll, cap);
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.buf.is_empty();
+        q.warmup = self.buf.is_empty();
+        q.explanation = format!("RollingLogLoss={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed log-loss",
+                "sliding mean of clipped Bernoulli NLL; window is not identification p",
+                format!("ll={before:.6e}"),
+                format!("ll={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Rolling pinball / quantile loss (river `metrics.Rolling` + `Pinball`).
+///
+/// Window length and \(\tau\) are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingPinball {
+    /// Quantile \(\tau\in(0,1)\).
+    pub tau: f64,
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingPinball {
+    fn default() -> Self {
+        Self {
+            tau: 0.5,
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingPinball {
+    /// Rolling pinball at quantile `tau` with capacity `window`.
+    pub fn new(window: usize, tau: f64) -> Self {
+        Self {
+            tau,
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window mean pinball, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.buf.is_empty() {
+            f64::NAN
+        } else {
+            self.buf.iter().sum::<f64>() / self.buf.len() as f64
+        }
+    }
+}
+
+impl PartialFit for RollingPinball {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no y for RollingPinball"),
+            );
+        };
+        let tau = if self.tau.is_finite() && self.tau > 0.0 && self.tau < 1.0 {
+            self.tau
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "RollingPinball tau={} is not in (0,1); using 0.5",
+                        self.tau
+                    ))
+                    .build(),
+            );
+            0.5
+        };
+        let before = self.score();
+        let cap = self.window.max(1);
+        for i in 0..x.nrows().min(y.len()) {
+            let pred = x.get(i, 0);
+            let truth = y[i];
+            if pred.is_finite() && truth.is_finite() {
+                let e = truth - pred;
+                let loss = if e >= 0.0 { tau * e } else { (tau - 1.0) * e };
+                rolling_push(&mut self.buf, loss, cap);
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.buf.is_empty();
+        q.warmup = self.buf.is_empty();
+        q.explanation = format!("RollingPinball={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed pinball",
+                "sliding quantile loss of column 0 vs y; window is not identification p",
+                format!("pinball={before:.6e}"),
+                format!("pinball={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Rolling Huber loss (river `metrics.Rolling` + `Huber`).
+///
+/// Window length and \(\delta\) are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingHuber {
+    /// Huber threshold.
+    pub delta: f64,
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingHuber {
+    fn default() -> Self {
+        Self {
+            delta: 1.0,
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingHuber {
+    /// Rolling Huber with threshold `delta` and capacity `window`.
+    pub fn new(window: usize, delta: f64) -> Self {
+        Self {
+            delta,
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window mean Huber loss, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.buf.is_empty() {
+            f64::NAN
+        } else {
+            self.buf.iter().sum::<f64>() / self.buf.len() as f64
+        }
+    }
+}
+
+impl PartialFit for RollingHuber {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no y for RollingHuber"),
+            );
+        };
+        let d = if self.delta.is_finite() && self.delta > 0.0 {
+            self.delta
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "RollingHuber delta={} is not positive; using 1",
+                        self.delta
+                    ))
+                    .build(),
+            );
+            1.0
+        };
+        let before = self.score();
+        let cap = self.window.max(1);
+        for i in 0..x.nrows().min(y.len()) {
+            let pred = x.get(i, 0);
+            let truth = y[i];
+            if pred.is_finite() && truth.is_finite() {
+                let e = (pred - truth).abs();
+                let loss = if e <= d {
+                    0.5 * e * e
+                } else {
+                    d * (e - 0.5 * d)
+                };
+                rolling_push(&mut self.buf, loss, cap);
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.buf.is_empty();
+        q.warmup = self.buf.is_empty();
+        q.explanation = format!("RollingHuber={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed Huber",
+                "sliding Huber loss of column 0 vs y; window is not identification p",
+                format!("huber={before:.6e}"),
+                format!("huber={after:.6e}"),
+            ),
+        )
+    }
+}
+
 /// ADWIN-resetting bag of perceptrons (river `ensemble.ADWINBaggingClassifier`).
 #[derive(Clone, Debug)]
 pub struct AdwinBagging {
@@ -27636,6 +27967,15 @@ mod tests {
         RollingMse::new(4)
             .partial_fit(&x, Some(&y), &session)
             .expect("rmse2");
+        RollingLogLoss::new(4)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("rll");
+        RollingPinball::new(4, 0.5)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("rpin");
+        RollingHuber::new(4, 1.0)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("rhub");
 
         let n_expl = session
             .ledger()

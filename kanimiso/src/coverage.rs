@@ -4966,6 +4966,102 @@ const INVENTORY: &[Algorithm] = &[
         "timeseries",
     ),
     a("online.RollingMse", "river.metrics.MSE", "online"),
+    a(
+        "robust.HuberT",
+        "statsmodels.robust.norms.HuberT",
+        "estimator",
+    ),
+    a(
+        "robust.TukeyBiweight",
+        "statsmodels.robust.norms.TukeyBiweight",
+        "estimator",
+    ),
+    a(
+        "robust.Hampel",
+        "statsmodels.robust.norms.Hampel",
+        "estimator",
+    ),
+    a(
+        "robust.AndrewWave",
+        "statsmodels.robust.norms.AndrewWave",
+        "estimator",
+    ),
+    a(
+        "robust.RamsayE",
+        "statsmodels.robust.norms.RamsayE",
+        "estimator",
+    ),
+    a(
+        "tsa.arma_acovf",
+        "statsmodels.tsa.arima_process.arma_acovf",
+        "forecast",
+    ),
+    a(
+        "tsa.arma_pacf",
+        "statsmodels.tsa.arima_process.arma_pacf",
+        "forecast",
+    ),
+    a(
+        "tsa.ConditionalDeseasonalizer",
+        "sktime.transformations.series.detrend.ConditionalDeseasonalizer",
+        "forecast",
+    ),
+    a(
+        "stats.get_prediction",
+        "statsmodels.regression.linear_model.OLSResults.get_prediction",
+        "stats",
+    ),
+    a(
+        "stats.t_test",
+        "statsmodels.regression.linear_model.OLSResults.t_test",
+        "stats",
+    ),
+    a(
+        "stats.f_test",
+        "statsmodels.regression.linear_model.OLSResults.f_test",
+        "stats",
+    ),
+    a(
+        "stats.conf_int",
+        "statsmodels.regression.linear_model.OLSResults.conf_int",
+        "stats",
+    ),
+    a(
+        "stats.kernel_censored_reg",
+        "statsmodels.nonparametric.kernel_regression.KernelCensoredReg",
+        "stats",
+    ),
+    a(
+        "stats.process_mle",
+        "statsmodels.regression.process.ProcessMLE",
+        "stats",
+    ),
+    a(
+        "iv.cov_white",
+        "statsmodels.stats.sandwich_covariance.cov_white",
+        "function",
+    ),
+    a(
+        "iv.cov_hac",
+        "statsmodels.stats.sandwich_covariance.cov_hac",
+        "function",
+    ),
+    a(
+        "online.RollingLogLoss",
+        "river.metrics.LogLoss",
+        "online",
+    ),
+    a(
+        "online.RollingPinball",
+        "river.metrics.Pinball",
+        "online",
+    ),
+    a("online.RollingHuber", "river.metrics.Huber", "online"),
+    a(
+        "tslearn.cdist_wdtw",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5304,6 +5400,16 @@ mod tests {
             "tsa.ArmaProcess",
             "tslearn.cdist_frechet",
             "online.RollingMse",
+            "robust.HuberT",
+            "robust.TukeyBiweight",
+            "tsa.arma_pacf",
+            "tsa.ConditionalDeseasonalizer",
+            "stats.get_prediction",
+            "stats.kernel_censored_reg",
+            "stats.process_mle",
+            "iv.cov_hac",
+            "online.RollingLogLoss",
+            "tslearn.cdist_wdtw",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

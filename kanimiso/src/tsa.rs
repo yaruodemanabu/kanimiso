@@ -10336,6 +10336,140 @@ impl FitSeries for Deseasonalizer {
     }
 }
 
+/// Deseasonalize only when a seasonal F-ratio is large
+/// (sktime `ConditionalDeseasonalizer`).
+///
+/// Period is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ConditionalDeseasonalizer {
+    /// Seasonal period.
+    pub period: usize,
+    /// Seasonal means (`length = period`) when applied.
+    pub means: Vec<f64>,
+    /// Whether seasonality was judged strong enough to subtract.
+    pub applied: bool,
+    fitted: bool,
+}
+
+impl Default for ConditionalDeseasonalizer {
+    fn default() -> Self {
+        Self {
+            period: 4,
+            means: Vec::new(),
+            applied: false,
+            fitted: false,
+        }
+    }
+}
+
+impl ConditionalDeseasonalizer {
+    /// Conditional deseasonalizer with period `s`.
+    pub fn new(period: usize) -> Self {
+        Self {
+            period: period.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Subtract seasonal means when [`Self::applied`], else return `y`.
+    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(y.clone());
+        }
+        if !self.applied || self.means.is_empty() {
+            return ctx.finish(y.clone());
+        }
+        let s = self.means.len();
+        let z = Vector::from_iter(
+            y.as_slice()
+                .iter()
+                .enumerate()
+                .map(|(i, v)| v - self.means[i % s]),
+        );
+        ctx.finish(z)
+    }
+}
+
+impl FitSeries for ConditionalDeseasonalizer {
+    type Fitted = Self;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let period = self.period.max(2);
+        if y.len() < 2 * period {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSeasonalCycles)
+                    .severity(Severity::Warning)
+                    .message(format!("ConditionalDeseasonalizer n={} < 2s", y.len()))
+                    .build(),
+            );
+        }
+        let mut acc = vec![0.0_f64; period];
+        let mut cnt = vec![0.0_f64; period];
+        let mut grand = 0.0_f64;
+        let mut nfin = 0.0_f64;
+        for (i, &v) in y.as_slice().iter().enumerate() {
+            if v.is_finite() {
+                acc[i % period] += v;
+                cnt[i % period] += 1.0;
+                grand += v;
+                nfin += 1.0;
+            }
+        }
+        let means: Vec<f64> = acc
+            .iter()
+            .zip(&cnt)
+            .map(|(a, c)| if *c > 0.0 { a / c } else { 0.0 })
+            .collect();
+        let mu = if nfin > 0.0 { grand / nfin } else { 0.0 };
+        let mut ss_season = 0.0_f64;
+        let mut ss_resid = 0.0_f64;
+        for (i, &v) in y.as_slice().iter().enumerate() {
+            if !v.is_finite() {
+                continue;
+            }
+            let m = means[i % period];
+            ss_season += (m - mu) * (m - mu);
+            ss_resid += (v - m) * (v - m);
+        }
+        let df1 = (period.saturating_sub(1)).max(1) as f64;
+        let df2 = (nfin - period as f64).max(1.0);
+        let f = (ss_season / df1) / (ss_resid / df2).max(1e-18);
+        self.applied = f.is_finite() && f > 2.0;
+        self.means = if self.applied {
+            means
+        } else {
+            vec![mu; period]
+        };
+        self.fitted = true;
+        if !self.applied {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSeasonalCycles)
+                    .severity(Severity::Advisory)
+                    .message(format!(
+                        "ConditionalDeseasonalizer F={f:.4e} is weak; leaving the series unadjusted"
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("ConditionalDeseasonalizer uses a seasonal-mean F-ratio, not Canova–Hansen")
+                .compromise(NumericalCompromise::new(
+                    "a formal seasonal-unit-root or Canova–Hansen test",
+                    "F of seasonal means versus residuals with a fixed cutoff of 2",
+                    "the cutoff is not a size-correct p-value",
+                    "treat applied=false as a weak-seasonality hint, not a proven absence",
+                ))
+                .build(),
+        );
+        ctx.finish(self.clone())
+    }
+}
+
 /// Polynomial trend forecaster (sktime `PolynomialTrendForecaster`).
 #[derive(Clone, Debug)]
 pub struct PolynomialTrendForecaster {
@@ -16141,6 +16275,145 @@ pub fn arma_impulse_response(
     arma2ma(ar, ma, lags, session)
 }
 
+/// Theoretical ARMA autocovariance (statsmodels `arima_process.arma_acovf`).
+///
+/// Returns \(\gamma(0),\ldots,\gamma(\mathrm{nlags})\) for unit innovation
+/// variance via a truncated MA(\(\infty\)) expansion. Orders are not
+/// identification `p`.
+pub fn arma_acovf(
+    ar: &Vector,
+    ma: &Vector,
+    nlags: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, ar);
+    inspect_univariate(&mut ctx, ma);
+    let h = nlags.max(1);
+    if nlags == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message("arma_acovf nlags=0; using 1")
+                .build(),
+        );
+    }
+    let trunc = h.saturating_add(32).max(64);
+    let psi = match arma2ma(ar, ma, trunc, &session.child("arma_acovf_psi")) {
+        Ok(q) => q.value,
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("arma_acovf MA(∞) expansion failed")
+                    .build(),
+            );
+            return ctx.finish(Vector::from_iter((0..=h).map(|k| if k == 0 { 1.0 } else { 0.0 })));
+        }
+    };
+    let acov = Vector::from_iter((0..=h).map(|k| {
+        let mut g = 0.0_f64;
+        for j in 0..psi.len().saturating_sub(k) {
+            g += psi[j] * psi[j + k];
+        }
+        g
+    }));
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("arma_acovf uses a truncated MA(∞) expansion, not the exact Lyapunov system")
+            .compromise(NumericalCompromise::new(
+                "exact ARMA autocovariance via the Lyapunov / Toeplitz system",
+                format!("MA({trunc}) truncation of ψ"),
+                "higher lags of ψ are dropped",
+                "use a longer truncation before reading far-lag γ as exact",
+            ))
+            .build(),
+    );
+    ctx.finish(acov)
+}
+
+/// Theoretical ARMA PACF (statsmodels `arima_process.arma_pacf`).
+///
+/// Levinson–Durbin reflection coefficients of [`arma_acf`]. Orders are not
+/// identification `p`.
+pub fn arma_pacf(
+    ar: &Vector,
+    ma: &Vector,
+    nlags: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, ar);
+    inspect_univariate(&mut ctx, ma);
+    let h = nlags.max(1);
+    if nlags == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message("arma_pacf nlags=0; using 1")
+                .build(),
+        );
+    }
+    let rho = match arma_acf(ar, ma, h, &session.child("arma_pacf_acf")) {
+        Ok(q) => q.value,
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("arma_pacf theoretical ACF failed")
+                    .build(),
+            );
+            return ctx.finish(Vector::from_iter((0..=h).map(|k| if k == 0 { 1.0 } else { 0.0 })));
+        }
+    };
+    let mut pacf = Vector::zeros(h + 1);
+    pacf[0] = 1.0;
+    let mut a = vec![0.0_f64; h + 1];
+    a[0] = 1.0;
+    let mut e = 1.0_f64;
+    for m in 1..=h {
+        let mut num = if m < rho.len() { rho[m] } else { 0.0 };
+        for j in 1..m {
+            num += a[j] * if m >= j && (m - j) < rho.len() {
+                rho[m - j]
+            } else {
+                0.0
+            };
+        }
+        let km = if e.abs() > 1e-18 { -num / e } else { 0.0 };
+        if km.abs() > 1.0 + 1e-8 {
+            ctx.push(
+                Issue::builder(IssueCode::NonStationary)
+                    .message(format!("arma_pacf |φ_{{{m},{m}}}|={km:.3} exceeds 1"))
+                    .build(),
+            );
+        }
+        let prev = a.clone();
+        for j in 1..m {
+            a[j] = prev[j] + km * prev[m - j];
+        }
+        a[m] = km;
+        e *= 1.0 - km * km;
+        pacf[m] = km;
+        if e <= 1e-18 {
+            ctx.push(
+                Issue::builder(IssueCode::JitterInjected)
+                    .message("arma_pacf innovation variance collapsed")
+                    .compromise(NumericalCompromise::new(
+                        "positive prediction-error variance",
+                        "Levinson–Durbin stopped with σ²≈0",
+                        "the theoretical ACF is linearly dependent at this lag",
+                        "do not treat later PACF lags as identified",
+                    ))
+                    .build(),
+            );
+            break;
+        }
+    }
+    ctx.finish(pacf)
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -17353,5 +17626,24 @@ pub fn arma_impulse_response(
         )
         .expect("air");
         assert!((air.value[1] - 0.5).abs() < 1e-12);
+        let aacv = arma_acovf(&ar1, &ma0, 5, &Session::new("aacv", "t")).expect("aacv");
+        assert_eq!(aacv.value.len(), 6);
+        assert!((aacv.value[0] - 1.0 / (1.0 - 0.25)).abs() < 0.15);
+        assert!(aacv.value[1] / aacv.value[0] > 0.4);
+        let apacf = arma_pacf(&ar1, &ma0, 5, &Session::new("apacf", "t")).expect("apacf");
+        assert_eq!(apacf.value.len(), 6);
+        assert!((apacf.value[0] - 1.0).abs() < 1e-12);
+        assert!((apacf.value[1] - 0.5).abs() < 0.08);
+        let mut cds = ConditionalDeseasonalizer::new(4);
+        let cdf = cds
+            .fit_series(&y, &Session::new("cdes", "fit"))
+            .expect("cdes");
+        let cdz = cdf
+            .value
+            .transform(&y, &Session::new("cdes", "z"))
+            .expect("cdesz")
+            .value;
+        assert_eq!(cdz.len(), y.len());
+        assert!(cdz.as_slice().iter().all(|v| v.is_finite()));
     }
 }

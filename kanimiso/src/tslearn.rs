@@ -462,6 +462,33 @@ pub fn cdist_hausdorff(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qual
     ctx.finish(out)
 }
 
+/// Pairwise weighted DTW (tslearn `cdist` with WDTW).
+///
+/// Series / pair counts are not identification `p`. The logistic slope `g`
+/// is not identification `p`.
+pub fn cdist_wdtw(a: &Matrix, b: &Matrix, g: f64, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let g = if g.is_finite() && g >= 0.0 {
+        g
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("cdist_wdtw g={g} is not a finite ≥0 slope; using 0.1"))
+                .build(),
+        );
+        0.1
+    };
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        wdtw_raw(ai.as_slice(), bj.as_slice(), g)
+    });
+    ctx.finish(out)
+}
+
 fn embed_series(s: &[f64], d: usize) -> Matrix {
     let d = d.max(1);
     let n = s.len().saturating_sub(d - 1).max(1);
@@ -12864,6 +12891,12 @@ mod tests {
         let chd = cdist_hausdorff(&x, &x, &Session::new("ts", "chd")).unwrap().value;
         assert_eq!(chd.shape(), (8, 8));
         assert!(chd.get(0, 0).abs() < 1e-12);
+        let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
+            .unwrap()
+            .value;
+        assert_eq!(cwd.shape(), (8, 8));
+        assert!(cwd.get(0, 0).abs() < 1e-12);
+        assert!(cwd.get(0, 1).is_finite());
     }
 
     #[test]

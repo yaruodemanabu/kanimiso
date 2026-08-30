@@ -13091,6 +13091,499 @@ pub fn denton_cholette(
     ctx.finish(Vector::from_iter((0..years * s).map(|i| z[i] * w[i])))
 }
 
+/// OLS prediction means, SEs, and a normal interval
+/// (statsmodels `OLSResults.get_prediction`).
+///
+/// Observation count is not identification `p`. The interval uses
+/// \(\Phi^{-1}(1-\alpha/2)\,s\sqrt{1+h_{ii}}\), not a Student-\(t\) quantile.
+#[derive(Clone, Debug)]
+pub struct PredictionResults {
+    /// Fitted mean.
+    pub predicted: Vector,
+    /// Standard error of the mean.
+    pub se_mean: Vector,
+    /// Predictive SE.
+    pub se_obs: Vector,
+    /// Lower bound of the observation interval.
+    pub lower: Vector,
+    /// Upper bound of the observation interval.
+    pub upper: Vector,
+}
+
+/// In-sample OLS prediction summary.
+pub fn get_prediction(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<PredictionResults>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let wps = match wls_prediction_std(x, y, &session.child("getpred")) {
+        Ok(q) => q.value,
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("get_prediction: WLS prediction SEs failed")
+                    .build(),
+            );
+            return ctx.finish(PredictionResults {
+                predicted: Vector::zeros(y.len()),
+                se_mean: Vector::zeros(y.len()),
+                se_obs: Vector::zeros(y.len()),
+                lower: Vector::zeros(y.len()),
+                upper: Vector::zeros(y.len()),
+            });
+        }
+    };
+    let z = norm_ppf(0.975);
+    let n = wps.predicted.len();
+    let lower = Vector::from_iter((0..n).map(|i| wps.predicted[i] - z * wps.se_obs[i]));
+    let upper = Vector::from_iter((0..n).map(|i| wps.predicted[i] + z * wps.se_obs[i]));
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .severity(Severity::Advisory)
+            .message("get_prediction intervals use a normal quantile, not Student-t")
+            .compromise(NumericalCompromise::new(
+                "t_{n-p} predictive interval",
+                "z_{0.975} times the OLS predictive SE",
+                "the interval is slightly too narrow in small samples",
+                "read the band as an approximate 95% Gaussian interval",
+            ))
+            .build(),
+    );
+    ctx.finish(PredictionResults {
+        predicted: wps.predicted,
+        se_mean: wps.se_mean,
+        se_obs: wps.se_obs,
+        lower,
+        upper,
+    })
+}
+
+/// OLS coefficient t-tests (statsmodels `OLSResults.t_test` for H0: β = 0).
+///
+/// Coefficient count is the design width (including intercept), which is the
+/// model's identification `p`.
+#[derive(Clone, Debug)]
+pub struct OlsTTest {
+    /// Intercept then slopes.
+    pub params: Vector,
+    /// Standard errors.
+    pub se: Vector,
+    /// t statistics.
+    pub tvalues: Vector,
+    /// Two-sided Student-t p-values.
+    pub pvalues: Vector,
+    /// Residual degrees of freedom.
+    pub df: f64,
+}
+
+/// Individual OLS t-tests of \(H_0:\beta_j=0\).
+pub fn t_test(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<OlsTTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let design = x.with_intercept();
+    let n = design.nrows().min(y.len());
+    let p = design.ncols();
+    let empty = || OlsTTest {
+        params: Vector::zeros(p),
+        se: Vector::zeros(p),
+        tvalues: Vector::zeros(p),
+        pvalues: Vector::from_iter((0..p).map(|_| f64::NAN)),
+        df: (n as f64 - p as f64).max(1.0),
+    };
+    let mut scratch = Report::new("ttest", "ols");
+    let Some(beta) = least_squares(&mut scratch, &design, y, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::UnidentifiedModel)
+                .message("t_test: OLS failed")
+                .build(),
+        );
+        return ctx.finish(empty());
+    };
+    for issue in scratch.issues() {
+        if matches!(
+            issue.code,
+            IssueCode::ResidualTooLarge
+                | IssueCode::NearSingular
+                | IssueCode::R2IsOne
+                | IssueCode::RankZero
+                | IssueCode::CholeskyFailed
+        ) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let fit = design.matvec(&beta);
+    let mut sse = 0.0_f64;
+    for i in 0..n {
+        let e = y[i] - fit[i];
+        sse += e * e;
+    }
+    let df = (n as f64 - p as f64).max(1.0);
+    let sigma2 = sse / df;
+    let xtx = design.gram();
+    let mut se = Vector::zeros(p);
+    let mut ok = true;
+    for j in 0..p {
+        let mut e = Vector::zeros(p);
+        e[j] = 1.0;
+        let mut sc = Report::new("ttest", "inv");
+        match chol_solve(&mut sc, &xtx, &e, &ctx.policy) {
+            Some(col) => {
+                se[j] = (sigma2 * col[j].max(0.0)).sqrt();
+            }
+            None => {
+                ok = false;
+                se[j] = f64::NAN;
+            }
+        }
+    }
+    if !ok {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("t_test: X'X is not SPD; some SEs are unidentified")
+                .build(),
+        );
+    }
+    let tvalues = Vector::from_iter((0..p).map(|j| {
+        if se[j].is_finite() && se[j] > 1e-18 {
+            beta[j] / se[j]
+        } else {
+            f64::NAN
+        }
+    }));
+    let pvalues = Vector::from_iter((0..p).map(|j| student_t_pvalue(tvalues[j], df)));
+    ctx.finish(OlsTTest {
+        params: beta,
+        se,
+        tvalues,
+        pvalues,
+        df,
+    })
+}
+
+/// Joint OLS Wald / F test that every slope is zero
+/// (statsmodels `OLSResults.f_test` for H0: slopes = 0).
+pub fn f_test(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    wald_ols(x, y, session)
+}
+
+/// OLS coefficient confidence intervals (statsmodels `OLSResults.conf_int`).
+///
+/// Uses a normal quantile times the OLS SE. Coefficient count is the design
+/// width.
+#[derive(Clone, Debug)]
+pub struct OlsConfInt {
+    /// Lower bounds (intercept then slopes).
+    pub low: Vector,
+    /// Upper bounds.
+    pub high: Vector,
+    /// Point estimates.
+    pub params: Vector,
+}
+
+/// Two-sided OLS coefficient intervals at level `1 − alpha`.
+pub fn conf_int(
+    x: &Matrix,
+    y: &Vector,
+    alpha: f64,
+    session: &Session,
+) -> Result<Qualified<OlsConfInt>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let a = if alpha.is_finite() && alpha > 0.0 && alpha < 1.0 {
+        alpha
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("conf_int alpha={alpha} is not in (0,1); using 0.05"))
+                .build(),
+        );
+        0.05
+    };
+    let tt = match t_test(x, y, &session.child("confint")) {
+        Ok(q) => q.value,
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("conf_int: t_test failed")
+                    .build(),
+            );
+            return ctx.finish(OlsConfInt {
+                low: Vector::zeros(x.ncols() + 1),
+                high: Vector::zeros(x.ncols() + 1),
+                params: Vector::zeros(x.ncols() + 1),
+            });
+        }
+    };
+    let z = norm_ppf(1.0 - 0.5 * a);
+    let p = tt.params.len();
+    let low = Vector::from_iter((0..p).map(|j| tt.params[j] - z * tt.se[j]));
+    let high = Vector::from_iter((0..p).map(|j| tt.params[j] + z * tt.se[j]));
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .severity(Severity::Advisory)
+            .message("conf_int uses a normal quantile, not Student-t")
+            .compromise(NumericalCompromise::new(
+                "t_{n-p} interval",
+                format!("z_{{{:.3}}} times the OLS SE", 1.0 - 0.5 * a),
+                "the interval is slightly too narrow in small samples",
+                "read the bounds as an approximate Gaussian interval",
+            ))
+            .build(),
+    );
+    ctx.finish(OlsConfInt {
+        low,
+        high,
+        params: tt.params,
+    })
+}
+
+/// Inverse-probability-of-censoring Nadaraya–Watson
+/// (statsmodels `KernelCensoredReg`).
+///
+/// Bandwidth `h` is not identification `p`. Censoring weights are computed
+/// locally; a fully uncensored sample reduces to [`kernel_reg`].
+pub fn kernel_censored_reg(
+    x: &Vector,
+    y: &Vector,
+    event: &Vector,
+    h: f64,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_pair(&mut ctx, x, y);
+    if event.len() != y.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "kernel_censored_reg event.len()={} ≠ y.len()={}",
+                    event.len(),
+                    y.len()
+                ))
+                .build(),
+        );
+    }
+    if let Some(issue) = scan_finite(event.as_slice()).to_issue("event") {
+        ctx.push(issue);
+    }
+    let mut bw = h;
+    if !bw.is_finite() || bw <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("KernelCensoredReg bandwidth {h} is not positive; using 1"))
+                .build(),
+        );
+        bw = 1.0;
+    }
+    let n = x.len().min(y.len()).min(event.len());
+    let mut rows: Vec<(f64, usize)> = (0..n)
+        .filter(|&i| y[i].is_finite() && event[i].is_finite())
+        .map(|i| (y[i], i))
+        .collect();
+    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut g_at = vec![1.0_f64; n];
+    let mut g = 1.0_f64;
+    let mut i = 0usize;
+    while i < rows.len() {
+        let t = rows[i].0;
+        let at_risk = rows.len() - i;
+        let mut c = 0.0_f64;
+        let start = i;
+        while i < rows.len() && (rows[i].0 - t).abs() <= 0.0 {
+            if rows[i].1 < n && event[rows[i].1] <= 0.5 {
+                c += 1.0;
+            }
+            i += 1;
+        }
+        for k in start..i {
+            g_at[rows[k].1] = g;
+        }
+        if c > 0.0 && at_risk > 0 {
+            g *= 1.0 - c / at_risk as f64;
+            if g < 1e-12 {
+                g = 1e-12;
+            }
+        }
+    }
+    let mut wgt = vec![0.0_f64; n];
+    let mut n_unc = 0usize;
+    for i in 0..n {
+        if event[i] > 0.5 {
+            n_unc += 1;
+            wgt[i] = 1.0 / g_at[i].max(1e-12);
+        }
+    }
+    if n_unc == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("kernel_censored_reg has no uncensored responses; returning y")
+                .build(),
+        );
+        return ctx.finish(Vector::from_iter((0..n).map(|i| y[i])));
+    }
+    let out = Vector::from_iter((0..n).map(|i| {
+        let mut num = 0.0_f64;
+        let mut den = 0.0_f64;
+        for j in 0..n {
+            if wgt[j] <= 0.0 {
+                continue;
+            }
+            let z = (x[i] - x[j]) / bw;
+            let k = (-0.5 * z * z).exp() * wgt[j];
+            num += k * y[j];
+            den += k;
+        }
+        if den > 0.0 {
+            num / den
+        } else {
+            y[i]
+        }
+    }));
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("KernelCensoredReg uses IPCW Nadaraya–Watson, not Beran's local likelihood")
+            .compromise(NumericalCompromise::new(
+                "Beran / Dabrowska kernel survival regression",
+                "IPCW Gaussian Nadaraya–Watson on uncensored rows",
+                "the censoring law is estimated by a product-limit of the complementary events",
+                "treat the curve as a weighted smoother, not the nonparametric MLE",
+            ))
+            .build(),
+    );
+    ctx.finish(out)
+}
+
+/// Gaussian process with exponential covariance
+/// (statsmodels `ProcessMLE` lite).
+///
+/// Covariance parameters are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ProcessMleFit {
+    /// Estimated mean.
+    pub mean: f64,
+    /// Marginal variance.
+    pub sigma2: f64,
+    /// Exponential range \(\rho\).
+    pub range: f64,
+}
+
+/// Profile a mean-plus-exponential-covariance process on irregular time.
+///
+/// `t` is the observation time; `y` is the response. A small grid over \(\rho\)
+/// is scored by GLS residual quadratic form. Failed Cholesky trials are skipped.
+pub fn process_mle(t: &Vector, y: &Vector, session: &Session) -> Result<Qualified<ProcessMleFit>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_pair(&mut ctx, t, y);
+    let n = t.len().min(y.len());
+    if n == 0 {
+        return ctx.finish(ProcessMleFit {
+            mean: f64::NAN,
+            sigma2: f64::NAN,
+            range: f64::NAN,
+        });
+    }
+    let mut dts: Vec<f64> = Vec::new();
+    let mut order: Vec<usize> = (0..n).filter(|&i| t[i].is_finite() && y[i].is_finite()).collect();
+    order.sort_by(|a, b| t[*a].partial_cmp(&t[*b]).unwrap_or(std::cmp::Ordering::Equal));
+    for w in order.windows(2) {
+        let d = t[w[1]] - t[w[0]];
+        if d > 0.0 {
+            dts.push(d);
+        }
+    }
+    dts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let dt = if dts.is_empty() {
+        1.0
+    } else {
+        dts[dts.len() / 2]
+    };
+    let mu0 = y.mean();
+    let mut sse0 = 0.0_f64;
+    for i in 0..n {
+        let e = y[i] - mu0;
+        sse0 += e * e;
+    }
+    let s20 = (sse0 / n.max(1) as f64).max(1e-12);
+    let grid = [dt, 2.0 * dt, 4.0 * dt, 8.0 * dt, 16.0 * dt];
+    let mut best = ProcessMleFit {
+        mean: mu0,
+        sigma2: s20,
+        range: dt,
+    };
+    let mut best_q = f64::INFINITY;
+    for &rho in &grid {
+        if !(rho.is_finite() && rho > 0.0) {
+            continue;
+        }
+        let mut c = Mat::<f64>::zeros(n, n);
+        for i in 0..n {
+            for j in 0..n {
+                c[(i, j)] = (-(t[i] - t[j]).abs() / rho).exp();
+            }
+            c[(i, i)] += 1e-8;
+        }
+        let ones = Vector::from_iter((0..n).map(|_| 1.0));
+        let yn = Vector::from_iter((0..n).map(|i| y[i]));
+        let mut sc1 = Report::new("pmle", "ones");
+        let mut sc2 = Report::new("pmle", "y");
+        let Some(z) = chol_solve(&mut sc1, &c, &ones, &ctx.policy) else {
+            continue;
+        };
+        let Some(w) = chol_solve(&mut sc2, &c, &yn, &ctx.policy) else {
+            continue;
+        };
+        let den = ones.dot(&z);
+        if den.abs() <= 1e-18 {
+            continue;
+        }
+        let mu = ones.dot(&w) / den;
+        let e = Vector::from_iter((0..n).map(|i| y[i] - mu));
+        let mut sc3 = Report::new("pmle", "e");
+        let Some(u) = chol_solve(&mut sc3, &c, &e, &ctx.policy) else {
+            continue;
+        };
+        let q = e.dot(&u);
+        if q.is_finite() && q < best_q {
+            best_q = q;
+            best = ProcessMleFit {
+                mean: mu,
+                sigma2: (q / n.max(1) as f64).max(1e-12),
+                range: rho,
+            };
+        }
+    }
+    if !best_q.is_finite() {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("process_mle: every exponential trial failed Cholesky; using MOM")
+                .build(),
+        );
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("ProcessMLE profiles a 5-point ρ grid, not a joint Gaussian MLE")
+            .compromise(NumericalCompromise::new(
+                "joint MLE of (μ, σ², ρ) for the exponential covariance",
+                "GLS mean on a discrete ρ grid with a nugget",
+                "the likelihood is not maximised in σ² jointly with ρ",
+                "treat ρ as a grid index, not the exact MLE range",
+            ))
+            .build(),
+    );
+    ctx.finish(best)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -13659,5 +14152,31 @@ mod tests {
         }
         let nad = normal_ad(&y, &Session::new("nad", "t")).expect("nad");
         assert!(nad.value.statistic.is_finite() || nad.value.pvalue.is_nan());
+        let gp = get_prediction(&x, &y, &Session::new("gpred", "t")).expect("gpred");
+        assert_eq!(gp.value.predicted.len(), 40);
+        assert!(gp
+            .value
+            .lower
+            .as_slice()
+            .iter()
+            .zip(gp.value.upper.as_slice())
+            .all(|(lo, hi)| lo <= hi));
+        let tt = t_test(&x, &y, &Session::new("ttestols", "t")).expect("ttestols");
+        assert_eq!(tt.value.params.len(), 2);
+        assert!(tt.value.tvalues[1].is_finite());
+        assert!(tt.value.pvalues[1].is_finite());
+        let ft = f_test(&x, &y, &Session::new("ftestols", "t")).expect("ftestols");
+        assert!(ft.value.statistic.is_finite() || ft.value.pvalue.is_nan());
+        let ci = conf_int(&x, &y, 0.05, &Session::new("ciols", "t")).expect("ciols");
+        assert_eq!(ci.value.low.len(), 2);
+        assert!(ci.value.low[1] <= ci.value.high[1]);
+        let ev1 = Vector::from_iter((0..20).map(|_| 1.0));
+        let kcr = kernel_censored_reg(&xs, &ys, &ev1, 1.0, &Session::new("kcr", "t")).expect("kcr");
+        assert_eq!(kcr.value.len(), 20);
+        assert!((kcr.value[10] - 20.0).abs() < 3.0);
+        let pm = process_mle(&xs, &ys, &Session::new("pmle", "t")).expect("pmle");
+        assert!(pm.value.mean.is_finite());
+        assert!(pm.value.sigma2.is_finite() && pm.value.sigma2 > 0.0);
+        assert!(pm.value.range.is_finite() && pm.value.range > 0.0);
     }
 }

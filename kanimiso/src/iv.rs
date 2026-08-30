@@ -2063,6 +2063,119 @@ pub fn cov_cluster(
     ctx.finish(out)
 }
 
+/// White / HC0 sandwich (statsmodels `cov_white`).
+pub fn cov_white(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+    hc0(x, resid, session)
+}
+
+/// Newey–West HAC sandwich of OLS scores (statsmodels `cov_hac`).
+///
+/// Lag count is not identification `p`. `x` should already include an intercept
+/// if one was used. Failed bread Cholesky is a warning, not a fatal abort.
+pub fn cov_hac(
+    x: &Matrix,
+    resid: &Vector,
+    lags: usize,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    if let Some(issue) = signlred::scan_finite(resid.as_slice()).to_issue("resid") {
+        ctx.push(issue);
+    }
+    let n = x.nrows().min(resid.len());
+    let p = x.ncols();
+    if resid.len() != x.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "cov_hac residual length {} ≠ n_x={}",
+                    resid.len(),
+                    x.nrows()
+                ))
+                .build(),
+        );
+    }
+    if n == 0 || p == 0 {
+        return ctx.finish(Matrix::zeros(p, p));
+    }
+    let scores = Matrix::from_fn(n, p, |i, j| x.get(i, j) * resid[i]);
+    let meat_avg = match newey_west(&scores, lags, &session.child("hac_meat")) {
+        Ok(q) => q.value,
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("cov_hac Newey–West meat failed")
+                    .build(),
+            );
+            return ctx.finish(Matrix::zeros(p, p));
+        }
+    };
+    let xtx = x.gram();
+    let mut inv = Mat::<f64>::zeros(p, p);
+    let mut bread_ok = true;
+    for j in 0..p {
+        let mut e = Vector::zeros(p);
+        e[j] = 1.0;
+        let mut scratch = signlred::Report::new("hac", "xtx");
+        match chol_solve(&mut scratch, &xtx, &e, &ctx.policy) {
+            Some(col) => {
+                for i in 0..p {
+                    inv[(i, j)] = col[i];
+                }
+            }
+            None => {
+                bread_ok = false;
+                break;
+            }
+        }
+    }
+    if !bread_ok {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("cov_hac X'X is not SPD; sandwich is unidentified")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(p, p));
+    }
+    let mut meat = Matrix::zeros(p, p);
+    for a in 0..p {
+        for b in 0..p {
+            meat.set(a, b, meat_avg.get(a, b) * n as f64);
+        }
+    }
+    let mut out = Matrix::zeros(p, p);
+    for a in 0..p {
+        for b in 0..p {
+            let mut s = 0.0_f64;
+            for k in 0..p {
+                let mut t = 0.0_f64;
+                for m in 0..p {
+                    t += meat.get(k, m) * inv[(m, b)];
+                }
+                s += inv[(a, k)] * t;
+            }
+            out.set(a, b, s);
+        }
+    }
+    ctx.push(
+        Issue::builder(IssueCode::Heteroscedasticity)
+            .severity(Severity::Advisory)
+            .message("HAC sandwich is not the OLS information covariance")
+            .compromise(NumericalCompromise::new(
+                "model-based OLS covariance σ²(X'X)⁻¹",
+                "Newey–West HAC meat of X_i e_i",
+                "serial correlation is Bartlett-weighted",
+                "do not read these as Gauss–Markov SEs",
+            ))
+            .build(),
+    );
+    ctx.finish(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2109,6 +2222,13 @@ mod tests {
         assert_eq!(cl.value.shape(), (2, 2));
         assert!(cl.value.get(0, 0).is_finite());
         assert!(cl.value.get(0, 0) >= 0.0);
+        let cw = cov_white(&x, &e, &Session::new("hc", "w")).expect("cw");
+        assert_eq!(cw.value.shape(), (2, 2));
+        assert!((cw.value.get(0, 0) - q.value.get(0, 0)).abs() < 1e-12);
+        let hac = cov_hac(&x, &e, 2, &Session::new("hc", "hac")).expect("hac");
+        assert_eq!(hac.value.shape(), (2, 2));
+        assert!(hac.value.get(0, 0).is_finite());
+        assert!(hac.value.get(0, 0) >= 0.0);
     }
 
     #[test]
