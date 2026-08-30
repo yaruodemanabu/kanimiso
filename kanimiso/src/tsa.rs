@@ -18473,6 +18473,403 @@ impl FitSeries for TcnForecaster {
     }
 }
 
+fn patch_window(win: &[f64], patch: usize) -> Vec<f64> {
+    let plen = patch.max(1);
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    while start < win.len() {
+        let end = (start + plen).min(win.len());
+        let sl = &win[start..end];
+        let mut s = 0.0_f64;
+        let mut c = 0.0_f64;
+        for &v in sl {
+            if v.is_finite() {
+                s += v;
+                c += 1.0;
+            }
+        }
+        let mean = if c > 0.0 { s / c } else { 0.0 };
+        let mut var = 0.0_f64;
+        for &v in sl {
+            if v.is_finite() {
+                let d = v - mean;
+                var += d * d;
+            }
+        }
+        let std = if c > 1.0 { (var / (c - 1.0)).sqrt() } else { 0.0 };
+        out.push(mean);
+        out.push(std);
+        out.push(sl.first().copied().unwrap_or(0.0));
+        out.push(sl.last().copied().unwrap_or(0.0));
+        if end == win.len() {
+            break;
+        }
+        start = end;
+    }
+    if out.is_empty() {
+        out.push(gap_mean(win));
+    }
+    out
+}
+
+fn elman_window(win: &[f64], wx: &Vector, uh: &Vector) -> Vec<f64> {
+    let hdim = wx.len().max(1);
+    (0..hdim)
+        .map(|h| {
+            let mut state = 0.0;
+            let mut acc_max = f64::NEG_INFINITY;
+            let w = wx.as_slice().get(h).copied().unwrap_or(0.0);
+            let u = uh.as_slice().get(h).copied().unwrap_or(0.0);
+            for &xt in win {
+                if !xt.is_finite() {
+                    continue;
+                }
+                state = (w * xt + u * state).tanh();
+                if state > acc_max {
+                    acc_max = state;
+                }
+            }
+            if acc_max.is_finite() {
+                acc_max
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+fn lstmfcn_window(win: &[f64], wx: &Vector, uh: &Vector, kernels: &[Vec<f64>]) -> Vec<f64> {
+    let mut out = elman_window(win, wx, uh);
+    out.extend(cnn_window(win, kernels));
+    out
+}
+
+fn disjoint_window(win: &[f64], kernels: &[Vec<f64>], n_blocks: usize) -> Vec<f64> {
+    let nb = n_blocks.max(1);
+    let t = win.len();
+    let block = (t / nb).max(1);
+    let mut out = Vec::new();
+    for b in 0..nb {
+        let start = b * block;
+        if start >= t {
+            break;
+        }
+        let end = if b + 1 == nb { t } else { (start + block).min(t) };
+        let sl = &win[start..end];
+        out.extend(cnn_window(sl, kernels));
+    }
+    if out.is_empty() {
+        out.push(gap_mean(win));
+    }
+    out
+}
+
+/// PatchTST reduction forecaster (sktime `PatchTSTForecaster` lite).
+///
+/// Patch count is not identification `p`. Distinct from [`CnnForecaster`]
+/// (no patches) and [`Catch22Forecaster`] (global summaries).
+#[derive(Clone, Debug)]
+pub struct PatchTstForecaster {
+    /// Lag window.
+    pub window: usize,
+    /// Patch length. Not identification `p`.
+    pub patch: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for PatchTstForecaster {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            patch: 4,
+            alpha: 0.1,
+        }
+    }
+}
+
+impl PatchTstForecaster {
+    /// Default PatchTST-lite forecaster.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted patch-window ridge.
+#[derive(Clone, Debug)]
+pub struct FittedPatchTstForecaster {
+    patch: usize,
+    coef: Vector,
+    intercept: f64,
+    last: Vec<f64>,
+}
+
+impl FittedPatchTstForecaster {
+    /// Recursive patch-window forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(recurse_features(
+            &self.last,
+            h,
+            |w| patch_window(w, self.patch),
+            &self.coef,
+            self.intercept,
+        ))
+    }
+}
+
+impl FitSeries for PatchTstForecaster {
+    type Fitted = FittedPatchTstForecaster;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPatchTstForecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let patch = self.patch.max(1).min(self.window.max(1));
+        let (coef, intercept, last) =
+            window_ridge_forecast(y, self.window, |win| patch_window(win, patch), self.alpha, &ctx.policy);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("PatchTstForecaster is patch mean/std/ends + ridge, not a Transformer")
+                .compromise(NumericalCompromise::new(
+                    "sktime PatchTSTForecaster",
+                    "non-overlapping patch mean/std/endpoints, then ridge",
+                    "attention, positional encodings, and the published decoder are omitted",
+                    "read the path as a patch-window sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedPatchTstForecaster {
+            patch,
+            coef,
+            intercept,
+            last,
+        })
+    }
+}
+
+/// LSTM-FCN reduction forecaster (sktime `LSTMFCNForecaster` lite).
+///
+/// Hidden / kernel counts are not identification `p`. Distinct from
+/// [`FcnForecaster`] (no recurrence) and [`TcnForecaster`] (no Elman state).
+#[derive(Clone, Debug)]
+pub struct LstmFcnForecaster {
+    /// Lag window.
+    pub window: usize,
+    /// Elman hidden width. Not identification `p`.
+    pub hidden: usize,
+    /// Conv kernels.
+    pub n_kernels: usize,
+    /// Kernel width.
+    pub width: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for LstmFcnForecaster {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            hidden: 2,
+            n_kernels: 2,
+            width: 3,
+            alpha: 0.1,
+            seed: 53,
+        }
+    }
+}
+
+impl LstmFcnForecaster {
+    /// Default LSTM-FCN-lite forecaster.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted LSTM-FCN-window ridge.
+#[derive(Clone, Debug)]
+pub struct FittedLstmFcnForecaster {
+    wx: Vector,
+    uh: Vector,
+    kernels: Vec<Vec<f64>>,
+    coef: Vector,
+    intercept: f64,
+    last: Vec<f64>,
+}
+
+impl FittedLstmFcnForecaster {
+    /// Recursive Elman+conv forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(recurse_features(
+            &self.last,
+            h,
+            |w| lstmfcn_window(w, &self.wx, &self.uh, &self.kernels),
+            &self.coef,
+            self.intercept,
+        ))
+    }
+}
+
+impl FitSeries for LstmFcnForecaster {
+    type Fitted = FittedLstmFcnForecaster;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLstmFcnForecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let h = self.hidden.max(1);
+        let wlen = self.width.max(1).min(self.window.max(1));
+        let mut rng = Rng::new(self.seed);
+        let wx = Vector::from_iter((0..h).map(|_| rng.standard_normal()));
+        let uh = Vector::from_iter((0..h).map(|_| 0.2 * rng.standard_normal()));
+        let kernels: Vec<Vec<f64>> = (0..self.n_kernels.max(1))
+            .map(|_| (0..wlen).map(|_| rng.standard_normal()).collect())
+            .collect();
+        let (coef, intercept, last) = window_ridge_forecast(
+            y,
+            self.window,
+            |win| lstmfcn_window(win, &wx, &uh, &kernels),
+            self.alpha,
+            &ctx.policy,
+        );
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("LstmFcnForecaster is random Elman max + conv + ridge")
+                .compromise(NumericalCompromise::new(
+                    "sktime LSTMFCNForecaster",
+                    "random Elman hidden max-pool concatenated with conv max-pool, then ridge",
+                    "learned LSTM cells and the published FCN head are omitted",
+                    "read the path as a recurrent-conv sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedLstmFcnForecaster {
+            wx,
+            uh,
+            kernels,
+            coef,
+            intercept,
+            last,
+        })
+    }
+}
+
+/// Disjoint-CNN reduction forecaster (sktime `DisjointCNNForecaster` lite).
+///
+/// Block count is not identification `p`. Distinct from [`CnnForecaster`]
+/// (full-window conv) and [`InceptionTimeForecaster`] (multi-width, not blocked).
+#[derive(Clone, Debug)]
+pub struct DisjointCnnForecaster {
+    /// Lag window.
+    pub window: usize,
+    /// Contiguous blocks. Not identification `p`.
+    pub n_blocks: usize,
+    /// Shared kernels.
+    pub n_kernels: usize,
+    /// Kernel width.
+    pub width: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for DisjointCnnForecaster {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            n_blocks: 2,
+            n_kernels: 2,
+            width: 3,
+            alpha: 0.1,
+            seed: 59,
+        }
+    }
+}
+
+impl DisjointCnnForecaster {
+    /// Default disjoint-CNN-lite forecaster.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted disjoint-CNN-window ridge.
+#[derive(Clone, Debug)]
+pub struct FittedDisjointCnnForecaster {
+    kernels: Vec<Vec<f64>>,
+    n_blocks: usize,
+    coef: Vector,
+    intercept: f64,
+    last: Vec<f64>,
+}
+
+impl FittedDisjointCnnForecaster {
+    /// Recursive block-conv forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(recurse_features(
+            &self.last,
+            h,
+            |w| disjoint_window(w, &self.kernels, self.n_blocks),
+            &self.coef,
+            self.intercept,
+        ))
+    }
+}
+
+impl FitSeries for DisjointCnnForecaster {
+    type Fitted = FittedDisjointCnnForecaster;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedDisjointCnnForecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let wlen = self.width.max(1);
+        let mut rng = Rng::new(self.seed);
+        let kernels: Vec<Vec<f64>> = (0..self.n_kernels.max(1))
+            .map(|_| (0..wlen).map(|_| rng.standard_normal()).collect())
+            .collect();
+        let (coef, intercept, last) = window_ridge_forecast(
+            y,
+            self.window,
+            |win| disjoint_window(win, &kernels, self.n_blocks),
+            self.alpha,
+            &ctx.policy,
+        );
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("DisjointCnnForecaster is shared-kernel block conv + ridge")
+                .compromise(NumericalCompromise::new(
+                    "sktime DisjointCNNForecaster",
+                    "shared kernels on contiguous window blocks, then ridge",
+                    "learned filters and the published decoder are omitted",
+                    "read the path as a blocked-conv sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedDisjointCnnForecaster {
+            kernels,
+            n_blocks: self.n_blocks.max(1),
+            coef,
+            intercept,
+            last,
+        })
+    }
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -19838,5 +20235,30 @@ impl FitSeries for TcnForecaster {
             .expect("tcfp");
         assert_eq!(tcp.value.len(), 2);
         assert!(tcp.value.as_slice().iter().all(|v| v.is_finite()));
+        let ptf = PatchTstForecaster::new()
+            .fit_series(&y, &Session::new("ptf", "t"))
+            .expect("ptf");
+        let ptp = ptf
+            .value
+            .forecast(2, &Session::new("ptfp", "t"))
+            .expect("ptfp");
+        assert_eq!(ptp.value.len(), 2);
+        let lff = LstmFcnForecaster::new()
+            .fit_series(&y, &Session::new("lff", "t"))
+            .expect("lff");
+        let lfp = lff
+            .value
+            .forecast(2, &Session::new("lffp", "t"))
+            .expect("lffp");
+        assert_eq!(lfp.value.len(), 2);
+        let djf = DisjointCnnForecaster::new()
+            .fit_series(&y, &Session::new("djf", "t"))
+            .expect("djf");
+        let djp = djf
+            .value
+            .forecast(2, &Session::new("djfp", "t"))
+            .expect("djfp");
+        assert_eq!(djp.value.len(), 2);
+        assert!(djp.value.as_slice().iter().all(|v| v.is_finite()));
     }
 }

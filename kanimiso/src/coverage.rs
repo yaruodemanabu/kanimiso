@@ -6399,6 +6399,28 @@ const INVENTORY: &[Algorithm] = &[
         "river.rules.AMRulesClassifier",
         "online",
     ),
+    a(
+        "stats.CausalForestDml",
+        "econml.dml.CausalForestDML",
+        "estimator",
+    ),
+    a("stats.NonParamDml", "econml.dml.NonParamDML", "estimator"),
+    a("stats.DeepIv", "econml.iv.nnet.DeepIV", "estimator"),
+    a(
+        "tsa.PatchTstForecaster",
+        "sktime.forecasting.patchtst.PatchTSTForecaster",
+        "forecast",
+    ),
+    a(
+        "tsa.LstmFcnForecaster",
+        "sktime.forecasting.lstmfcn.LSTMFCNForecaster",
+        "forecast",
+    ),
+    a(
+        "tsa.DisjointCnnForecaster",
+        "sktime.forecasting.disjoint_cnn.DisjointCNNForecaster",
+        "forecast",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6926,6 +6948,11 @@ mod tests {
             "tsa.InceptionTimeForecaster",
             "online.AMRulesClassifier",
             "panel.DeChaisemartin",
+            "stats.CausalForestDml",
+            "stats.NonParamDml",
+            "stats.DeepIv",
+            "tsa.PatchTstForecaster",
+            "tsa.LstmFcnForecaster",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

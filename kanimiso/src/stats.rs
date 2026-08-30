@@ -28074,6 +28074,550 @@ impl FittedForestDr {
     }
 }
 
+fn residual_leaf(yres: &Vector, dres: &Vector, idx: &[usize]) -> f64 {
+    let mut num = 0.0_f64;
+    let mut den = 0.0_f64;
+    for &i in idx {
+        if i < yres.len() && i < dres.len() && yres[i].is_finite() && dres[i].is_finite() {
+            num += dres[i] * yres[i];
+            den += dres[i] * dres[i];
+        }
+    }
+    if den.abs() > 1e-12 {
+        num / den
+    } else {
+        0.0
+    }
+}
+
+fn residual_varies(dres: &Vector, idx: &[usize]) -> bool {
+    let mut s = 0.0_f64;
+    let mut s2 = 0.0_f64;
+    let mut c = 0.0_f64;
+    for &i in idx {
+        if i < dres.len() && dres[i].is_finite() {
+            s += dres[i];
+            s2 += dres[i] * dres[i];
+            c += 1.0;
+        }
+    }
+    if c < 2.0 {
+        return false;
+    }
+    (s2 / c - (s / c) * (s / c)) > 1e-12
+}
+
+fn grow_ortho_tree(
+    x: &Matrix,
+    yres: &Vector,
+    dres: &Vector,
+    idx: &[usize],
+    depth: usize,
+    max_depth: usize,
+    min_leaf: usize,
+    rng: &mut Rng,
+) -> CateNode {
+    let tau = residual_leaf(yres, dres, idx);
+    if depth >= max_depth || idx.len() < min_leaf.saturating_mul(2) || !residual_varies(dres, idx)
+    {
+        return CateNode::Leaf { cate: tau };
+    }
+    let p = x.ncols();
+    if p == 0 || idx.is_empty() {
+        return CateNode::Leaf { cate: tau };
+    }
+    let mut best_gain = 0.0_f64;
+    let mut best: Option<(usize, f64, Vec<usize>, Vec<usize>)> = None;
+    for _ in 0..8 {
+        let feat = rng.below(p);
+        let a = idx[rng.below(idx.len())];
+        let b = idx[rng.below(idx.len())];
+        let thresh = 0.5 * (x.get(a, feat) + x.get(b, feat));
+        if !thresh.is_finite() {
+            continue;
+        }
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for &i in idx {
+            if x.get(i, feat) <= thresh {
+                left.push(i);
+            } else {
+                right.push(i);
+            }
+        }
+        if left.len() < min_leaf || right.len() < min_leaf {
+            continue;
+        }
+        if !residual_varies(dres, &left) || !residual_varies(dres, &right) {
+            continue;
+        }
+        let tl = residual_leaf(yres, dres, &left);
+        let tr = residual_leaf(yres, dres, &right);
+        let gain = (tl - tr).abs() * ((left.len() * right.len()) as f64).sqrt();
+        if gain > best_gain {
+            best_gain = gain;
+            best = Some((feat, thresh, left, right));
+        }
+    }
+    match best {
+        Some((feat, thresh, left, right)) => CateNode::Split {
+            feat,
+            thresh,
+            left: Box::new(grow_ortho_tree(
+                x, yres, dres, &left, depth + 1, max_depth, min_leaf, rng,
+            )),
+            right: Box::new(grow_ortho_tree(
+                x, yres, dres, &right, depth + 1, max_depth, min_leaf, rng,
+            )),
+        },
+        None => CateNode::Leaf { cate: tau },
+    }
+}
+
+/// Orthogonal / DML causal forest (econml `CausalForestDML`).
+///
+/// Residualize \(Y\) and \(D\) on \(X\), then extra-trees with leaf
+/// \(\hat\tau=\sum\tilde D\tilde Y/\sum\tilde D^2\). Distinct from
+/// [`CausalForest`] (raw arm-mean gaps) and [`DoubleMl`] (scalar ATE).
+#[derive(Clone, Debug)]
+pub struct CausalForestDml {
+    /// Trees. Not identification `p`.
+    pub n_estimators: usize,
+    /// Depth cap.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for CausalForestDml {
+    fn default() -> Self {
+        Self {
+            n_estimators: 8,
+            max_depth: 3,
+            seed: 47,
+        }
+    }
+}
+
+impl CausalForestDml {
+    /// Default orthogonal causal forest.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted orthogonal causal forest.
+#[derive(Clone, Debug)]
+pub struct FittedCausalForestDml {
+    trees: Vec<CateNode>,
+}
+
+impl CausalForestDml {
+    /// Residualize then grow extra-trees on \(\tilde D,\tilde Y\).
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCausalForestDml>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let idx: Vec<usize> = (0..n).collect();
+        if !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("CausalForestDml needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "orthogonal causal-forest CATE",
+                        "D̃ is unidentified with a single arm",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedCausalForestDml { trees: Vec::new() });
+        }
+        let (by, ay) = ols_arm(x, y, &idx, &ctx.policy);
+        let (bd, ad) = ols_arm(x, treat, &idx, &ctx.policy);
+        let yres = Vector::from_iter((0..n).map(|i| y[i] - mu_lin(x, i, ay, &by)));
+        let dres = Vector::from_iter((0..n).map(|i| treat[i] - mu_lin(x, i, ad, &bd)));
+        if !residual_varies(&dres, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("CausalForestDml residual treatment has no variance")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "orthogonal causal-forest CATE",
+                        "D̃≈0 leaves leaf τ unidentified",
+                        "need overlap after residualizing X",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedCausalForestDml { trees: Vec::new() });
+        }
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        for _ in 0..self.n_estimators.max(1) {
+            trees.push(grow_ortho_tree(
+                x,
+                &yres,
+                &dres,
+                &idx,
+                0,
+                self.max_depth.max(1),
+                2,
+                &mut rng,
+            ));
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("CausalForestDml is residual extra-trees, not honest DML forests")
+                .compromise(NumericalCompromise::new(
+                    "econml CausalForestDML",
+                    "OLS residualize Y and D, then extra-trees on Σ D̃Ỹ / Σ D̃²",
+                    "cross-fitting, honesty, and the published forest weights are omitted",
+                    "read CATE as an ensemble residual-ratio leaf",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedCausalForestDml { trees })
+    }
+}
+
+impl FittedCausalForestDml {
+    /// Ensemble-mean residual-ratio leaf.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let m = self.trees.len().max(1) as f64;
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            if self.trees.is_empty() {
+                0.0
+            } else {
+                self.trees.iter().map(|t| walk_cate(t, x, i)).sum::<f64>() / m
+            }
+        })))
+    }
+}
+
+/// Nonparametric DML CATE (econml `NonParamDML`).
+///
+/// Residualize \(Y,D\) on \(X\), then a Gaussian-kernel local Robinson
+/// ratio. Distinct from [`RLearner`] / [`DoubleMl`] (global linear) and
+/// [`CausalForestDml`] (tree partitions). Bandwidth is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct NonParamDml {
+    /// RBF length-scale. Not identification `p`.
+    pub bandwidth: f64,
+}
+
+impl Default for NonParamDml {
+    fn default() -> Self {
+        Self { bandwidth: 1.0 }
+    }
+}
+
+impl NonParamDml {
+    /// Kernel DML with bandwidth `h`.
+    pub fn new(bandwidth: f64) -> Self {
+        Self { bandwidth }
+    }
+}
+
+/// Fitted kernel residual-on-residual CATE.
+#[derive(Clone, Debug)]
+pub struct FittedNonParamDml {
+    x_train: Matrix,
+    yres: Vector,
+    dres: Vector,
+    bandwidth: f64,
+}
+
+impl NonParamDml {
+    /// Fit residuals and store the kernel table.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedNonParamDml>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let idx: Vec<usize> = (0..n).collect();
+        let h = if self.bandwidth.is_finite() && self.bandwidth > 0.0 {
+            self.bandwidth
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("NonParamDml bandwidth is not a positive finite; using 1")
+                    .build(),
+            );
+            1.0
+        };
+        if !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("NonParamDml needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "nonparametric DML CATE",
+                        "D̃ is unidentified with a single arm",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedNonParamDml {
+                x_train: Matrix::from_fn(0, x.ncols(), |_, _| 0.0),
+                yres: Vector::zeros(0),
+                dres: Vector::zeros(0),
+                bandwidth: h,
+            });
+        }
+        let (by, ay) = ols_arm(x, y, &idx, &ctx.policy);
+        let (bd, ad) = ols_arm(x, treat, &idx, &ctx.policy);
+        let yres = Vector::from_iter((0..n).map(|i| y[i] - mu_lin(x, i, ay, &by)));
+        let dres = Vector::from_iter((0..n).map(|i| treat[i] - mu_lin(x, i, ad, &bd)));
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("NonParamDml is one-shot kernel Robinson, not cross-fit NonParamDML")
+                .compromise(NumericalCompromise::new(
+                    "econml NonParamDML",
+                    "OLS residualize, then Nadaraya–Watson of ỸD̃ / D̃²",
+                    "cross-fitting and a data-driven bandwidth are omitted",
+                    "read CATE as a kernel residual-ratio sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedNonParamDml {
+            x_train: Matrix::from_fn(n, x.ncols(), |i, j| x.get(i, j)),
+            yres,
+            dres,
+            bandwidth: h,
+        })
+    }
+}
+
+impl FittedNonParamDml {
+    /// Kernel residual-ratio CATE.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let h2 = (2.0 * self.bandwidth * self.bandwidth).max(1e-12);
+        let p = x.ncols().min(self.x_train.ncols());
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut num = 0.0_f64;
+            let mut den = 0.0_f64;
+            for r in 0..self.x_train.nrows() {
+                if r >= self.yres.len() || r >= self.dres.len() {
+                    continue;
+                }
+                if !self.yres[r].is_finite() || !self.dres[r].is_finite() {
+                    continue;
+                }
+                let mut dist = 0.0_f64;
+                for j in 0..p {
+                    let d = x.get(i, j) - self.x_train.get(r, j);
+                    dist += d * d;
+                }
+                let k = (-dist / h2).exp();
+                num += k * self.dres[r] * self.yres[r];
+                den += k * self.dres[r] * self.dres[r];
+            }
+            if den.abs() > 1e-15 {
+                num / den
+            } else {
+                0.0
+            }
+        })))
+    }
+}
+
+/// Two-stage deep IV (econml `DeepIV`).
+///
+/// First stage: one-hidden tanh map of \([X,Z]\) trained by SGD on \(D\).
+/// Second stage: OLS of \(Y\) on \([1,X,\hat D]\). Hidden width is not
+/// identification `p`. Distinct from [`DmlIv`] (linear residual Wald) and
+/// [`WaldLate`] (no covariates).
+#[derive(Clone, Debug)]
+pub struct DeepIv {
+    /// SGD steps. Not identification `p`.
+    pub max_iter: usize,
+}
+
+impl Default for DeepIv {
+    fn default() -> Self {
+        Self { max_iter: 40 }
+    }
+}
+
+impl DeepIv {
+    /// Default DeepIV-lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted two-stage deep IV.
+#[derive(Clone, Debug)]
+pub struct FittedDeepIv {
+    /// Coefficient on \(\hat D\).
+    pub ate: f64,
+    wx: Vector,
+    wz: f64,
+    b: f64,
+    v: f64,
+    c: f64,
+    coef_x: Vector,
+    intercept: f64,
+}
+
+impl DeepIv {
+    /// Fit the tanh first stage, then OLS second stage.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        instrument: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedDeepIv>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x
+            .nrows()
+            .min(y.len())
+            .min(treat.len())
+            .min(instrument.len());
+        let p = x.ncols();
+        let idx: Vec<usize> = (0..n).collect();
+        if !both_arms(treat, &idx) || !instrument_varies(instrument, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("DeepIv needs treatment and instrument variation")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "DeepIV ATE",
+                        "the first stage is unidentified without Z and D contrast",
+                        "collect a non-degenerate instrument and both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedDeepIv {
+                ate: f64::NAN,
+                wx: Vector::zeros(p),
+                wz: 0.0,
+                b: 0.0,
+                v: 0.0,
+                c: 0.0,
+                coef_x: Vector::zeros(p),
+                intercept: 0.0,
+            });
+        }
+        let mut wx = Vector::zeros(p);
+        let mut wz = 0.1_f64;
+        let mut b = 0.0_f64;
+        let mut v = 0.1_f64;
+        let mut c = 0.0_f64;
+        let lr = 0.05 / (1.0 + p as f64);
+        let iters = self.max_iter.max(1);
+        for _ in 0..iters {
+            for i in 0..n {
+                if !treat[i].is_finite() || !instrument[i].is_finite() {
+                    continue;
+                }
+                let mut xb = b + wz * instrument[i];
+                for j in 0..p {
+                    xb += x.get(i, j) * wx[j];
+                }
+                let h = xb.clamp(-20.0, 20.0).tanh();
+                let dhat = v * h + c;
+                let err = dhat - treat[i];
+                let dh = 1.0 - h * h;
+                v -= lr * err * h;
+                c -= lr * err;
+                let g = err * v * dh;
+                b -= lr * g;
+                wz -= lr * g * instrument[i];
+                for j in 0..p {
+                    wx[j] -= lr * g * x.get(i, j);
+                }
+            }
+        }
+        let dhat = Vector::from_iter((0..n).map(|i| {
+            let mut xb = b + wz * instrument[i];
+            for j in 0..p {
+                xb += x.get(i, j) * wx[j];
+            }
+            v * xb.clamp(-20.0, 20.0).tanh() + c
+        }));
+        let design = Matrix::from_fn(n, p + 2, |i, j| {
+            if j == 0 {
+                1.0
+            } else if j <= p {
+                x.get(i, j - 1)
+            } else {
+                dhat[i]
+            }
+        });
+        let yn = Vector::from_iter((0..n).map(|i| y[i]));
+        let mut scratch = Report::new("deepiv", "ols");
+        let sol = least_squares(&mut scratch, &design, &yn, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(p + 2));
+        for issue in scratch.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let ate = sol.as_slice().get(p + 1).copied().unwrap_or(0.0);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("DeepIv is one-hidden tanh 2SLS, not Hartford et al. DeepIV")
+                .compromise(NumericalCompromise::new(
+                    "Hartford / econml DeepIV",
+                    "SGD tanh first stage of D on [X,Z], then OLS of Y on [1,X,D̂]",
+                    "mixture density first stage, two-stage counterfactual, and the published net are omitted",
+                    "read ATE as the second-stage coefficient on D̂",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedDeepIv {
+            ate,
+            wx,
+            wz,
+            b,
+            v,
+            c,
+            coef_x: Vector::from_iter((0..p).map(|j| sol.as_slice().get(1 + j).copied().unwrap_or(0.0))),
+            intercept: sol.as_slice().first().copied().unwrap_or(0.0),
+        })
+    }
+}
+
+impl FittedDeepIv {
+    /// Second-stage structural prediction using the fitted first stage.
+    pub fn predict(&self, x: &Matrix, instrument: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let z = instrument.as_slice().get(i).copied().unwrap_or(0.0);
+            let mut xb = self.b + self.wz * z;
+            for j in 0..x.ncols().min(self.wx.len()) {
+                xb += x.get(i, j) * self.wx[j];
+            }
+            let dhat = self.v * xb.clamp(-20.0, 20.0).tanh() + self.c;
+            mu_lin(x, i, self.intercept, &self.coef_x) + self.ate * dhat
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -29365,6 +29909,40 @@ mod tests {
             fdr.value
                 .predict_cate(&xate, &Session::new("fdrp", "t"))
                 .expect("fdrp")
+                .value
+                .len(),
+            20
+        );
+        let cfd = CausalForestDml::new()
+            .fit(&xate, &dur, &grp, &Session::new("cfd", "t"))
+            .expect("cfd");
+        assert_eq!(
+            cfd.value
+                .predict_cate(&xate, &Session::new("cfdp", "t"))
+                .expect("cfdp")
+                .value
+                .len(),
+            20
+        );
+        let npd = NonParamDml::new(2.0)
+            .fit(&xate, &dur, &grp, &Session::new("npd", "t"))
+            .expect("npd");
+        assert_eq!(
+            npd.value
+                .predict_cate(&xate, &Session::new("npdp", "t"))
+                .expect("npdp")
+                .value
+                .len(),
+            20
+        );
+        let dpiv = DeepIv::new()
+            .fit(&xate, &dur, &grp, &ivz, &Session::new("dpiv", "t"))
+            .expect("dpiv");
+        assert!(dpiv.value.ate.is_finite() || dpiv.value.ate.is_nan());
+        assert_eq!(
+            dpiv.value
+                .predict(&xate, &ivz, &Session::new("dpivp", "t"))
+                .expect("dpivp")
                 .value
                 .len(),
             20
