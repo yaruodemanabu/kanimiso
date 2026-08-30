@@ -6477,6 +6477,91 @@ pub fn reconcile_ols(
     ctx.finish(out)
 }
 
+/// MinT-style weighted reconciliation (sktime `Reconciler` `mint`).
+///
+/// Bottom-level weights are the inverse of the summing-matrix column sums.
+/// Node counts are not identification `p`.
+pub fn reconcile_mint(
+    yhat: &Matrix,
+    summing: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, yhat, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, summing, None, &ctx.policy);
+    if yhat.ncols() != summing.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "reconcile_mint yhat.ncols()={} summing.nrows()={}",
+                    yhat.ncols(),
+                    summing.nrows()
+                ))
+                .build(),
+        );
+        return ctx.finish(yhat.clone());
+    }
+    let m = summing.nrows();
+    let b = summing.ncols();
+    if m == 0 || b == 0 {
+        return ctx.finish(yhat.clone());
+    }
+    let mut w = vec![0.0; b];
+    for j in 0..b {
+        let mut s = 0.0;
+        for i in 0..m {
+            s += summing.get(i, j).abs();
+        }
+        w[j] = if s > 1e-12 { 1.0 / s } else { 1.0 };
+    }
+    let mut gram = summing.gram();
+    for i in 0..b {
+        for j in 0..b {
+            let mut g = 0.0;
+            for k in 0..m {
+                g += summing.get(k, i) * w[i] * summing.get(k, j);
+            }
+            gram[(i, j)] = g;
+        }
+        gram[(i, i)] += 1e-10;
+    }
+    let mut out = Matrix::zeros(yhat.nrows(), m);
+    for h in 0..yhat.nrows() {
+        let mut z = Vector::zeros(b);
+        for j in 0..b {
+            let mut s = 0.0;
+            for i in 0..m {
+                s += summing.get(i, j) * w[j] * yhat.get(h, i);
+            }
+            z[j] = s;
+        }
+        let mut scratch = Report::new("mint", "chol");
+        let beta = match chol_solve(&mut scratch, &gram, &z, &ctx.policy) {
+            Some(v) => v,
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::CholeskyFailed)
+                        .severity(Severity::Warning)
+                        .message("MinT Cholesky failed; leaving the base forecast")
+                        .build(),
+                );
+                for i in 0..m {
+                    out.set(h, i, yhat.get(h, i));
+                }
+                continue;
+            }
+        };
+        for i in 0..m {
+            let mut s = 0.0;
+            for j in 0..b.min(beta.len()) {
+                s += summing.get(i, j) * beta[j];
+            }
+            out.set(h, i, s);
+        }
+    }
+    ctx.finish(out)
+}
+
 /// Multiple seasonal-trend LOESS (sktime `MSTL`).
 ///
 /// Second-period STL is run on the first residual. Periods are not
@@ -8140,5 +8225,10 @@ mod tests {
             .value;
         assert_eq!(rec.shape(), (2, 3));
         assert!((rec.get(0, 0) + rec.get(0, 1) - rec.get(0, 2)).abs() < 1e-8);
+        let mint = reconcile_mint(&yh, &s, &Session::new("rec", "mint"))
+            .expect("mint")
+            .value;
+        assert_eq!(mint.shape(), (2, 3));
+        assert!(mint.get(0, 0).is_finite() && mint.get(0, 2).is_finite());
     }
 }

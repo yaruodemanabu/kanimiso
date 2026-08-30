@@ -11795,6 +11795,771 @@ impl Transform for HashingTrick {
     }
 }
 
+/// Streaming median absolute deviation (river `stats.MAD`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineMad {
+    window: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl OnlineMad {
+    /// Empty MAD accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current MAD, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.window.is_empty() {
+            return f64::NAN;
+        }
+        let mut xs = self.window.clone();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mid = xs[xs.len() / 2];
+        let mut dev: Vec<f64> = xs.iter().map(|v| (v - mid).abs()).collect();
+        dev.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        dev[dev.len() / 2]
+    }
+}
+
+impl PartialFit for OnlineMad {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            rolling_push(&mut self.window, x.get(i, 0), 256);
+            if x.get(i, 0).is_finite() {
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.window.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.window.len() >= 3;
+        q.warmup = self.window.len() < 3;
+        q.explanation = format!("OnlineMad={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed MAD",
+                "median absolute deviation of column 0",
+                format!("mad={before:.6e}"),
+                format!("mad={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming interquartile range (river `stats.IQR`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineIqr {
+    window: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl OnlineIqr {
+    /// Empty IQR accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current IQR, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.window.len() < 2 {
+            return f64::NAN;
+        }
+        let mut xs = self.window.clone();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let q = |t: f64| {
+            let u = t * (xs.len() - 1) as f64;
+            let lo = u.floor() as usize;
+            let hi = u.ceil() as usize;
+            let w = u - lo as f64;
+            (1.0 - w) * xs[lo] + w * xs[hi.min(xs.len() - 1)]
+        };
+        q(0.75) - q(0.25)
+    }
+}
+
+impl PartialFit for OnlineIqr {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            rolling_push(&mut self.window, x.get(i, 0), 256);
+            if x.get(i, 0).is_finite() {
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.window.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.window.len() >= 4;
+        q.warmup = self.window.len() < 4;
+        q.explanation = format!("OnlineIqr={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed IQR",
+                "p75 − p25 of column 0",
+                format!("iqr={before:.6e}"),
+                format!("iqr={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming Pearson correlation (river `stats.PearsonCorr`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlinePearson {
+    n: f64,
+    mx: f64,
+    my: f64,
+    c: f64,
+    vx: f64,
+    vy: f64,
+    updates: u64,
+}
+
+impl OnlinePearson {
+    /// Empty correlation accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current correlation, or NaN during warmup.
+    pub fn score(&self) -> f64 {
+        if self.n < 2.0 {
+            return f64::NAN;
+        }
+        let den = (self.vx * self.vy).sqrt();
+        if den <= 1e-18 {
+            f64::NAN
+        } else {
+            self.c / den
+        }
+    }
+}
+
+impl PartialFit for OnlinePearson {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        if x.ncols() < 2 && y.is_none() {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("OnlinePearson needs two columns or an explicit y")
+                    .build(),
+            );
+        }
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let a = x.get(i, 0);
+            let b = if x.ncols() >= 2 {
+                x.get(i, 1)
+            } else if let Some(y) = y {
+                if i < y.len() {
+                    y[i]
+                } else {
+                    f64::NAN
+                }
+            } else {
+                f64::NAN
+            };
+            if !a.is_finite() || !b.is_finite() {
+                continue;
+            }
+            self.n += 1.0;
+            let dx = a - self.mx;
+            self.mx += dx / self.n;
+            let dy = b - self.my;
+            self.my += dy / self.n;
+            self.c += dx * (b - self.my);
+            self.vx += dx * (a - self.mx);
+            self.vy += dy * (b - self.my);
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 3.0;
+        q.warmup = self.n < 3.0;
+        q.explanation = format!("OnlinePearson={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Welford correlation",
+                "Pearson r of column 0 with column 1 or y",
+                format!("r={before:.6e}"),
+                format!("r={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Rolling mean (river `stats.RollingMean`).
+#[derive(Clone, Debug, Default)]
+pub struct RollingMean {
+    window: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl RollingMean {
+    /// Empty rolling mean.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current mean, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.window.is_empty() {
+            f64::NAN
+        } else {
+            self.window.iter().sum::<f64>() / self.window.len() as f64
+        }
+    }
+}
+
+impl PartialFit for RollingMean {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            rolling_push(&mut self.window, x.get(i, 0), 256);
+            if x.get(i, 0).is_finite() {
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.window.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.window.is_empty();
+        q.warmup = self.window.is_empty();
+        q.explanation = format!("RollingMean={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed mean",
+                "256-row sliding mean of column 0",
+                format!("mean={before:.6e}"),
+                format!("mean={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// ADWIN-resetting bag of perceptrons (river `ensemble.ADWINBaggingClassifier`).
+#[derive(Clone, Debug)]
+pub struct AdwinBagging {
+    /// Members.
+    pub n_models: usize,
+    models: Vec<Perceptron>,
+    detectors: Vec<Adwin>,
+    n_seen: u64,
+    updates: u64,
+    rng: Rng,
+}
+
+impl Default for AdwinBagging {
+    fn default() -> Self {
+        Self {
+            n_models: 3,
+            models: Vec::new(),
+            detectors: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            rng: Rng::new(23),
+        }
+    }
+}
+
+impl AdwinBagging {
+    /// Bag of `n_models` perceptrons.
+    pub fn new(n_models: usize) -> Self {
+        Self {
+            n_models: n_models.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for AdwinBagging {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        if self.models.is_empty() {
+            self.models = vec![Perceptron::new(); self.n_models.max(1)];
+            self.detectors = (0..self.models.len()).map(|_| Adwin::new(0.002)).collect();
+        }
+        let before = self.n_seen;
+        let mut resets = 0u64;
+        for m in 0..self.models.len() {
+            let mut rows: Vec<usize> = Vec::new();
+            for i in 0..x.nrows().min(y.len()) {
+                let k = self.rng.poisson(1.0) as usize;
+                for _ in 0..k {
+                    rows.push(i);
+                }
+            }
+            if rows.is_empty() && x.nrows() > 0 {
+                rows.push(0);
+            }
+            if rows.is_empty() {
+                continue;
+            }
+            let xb = Matrix::from_fn(rows.len(), x.ncols(), |r, c| x.get(rows[r], c));
+            let yb = Vector::from_iter(rows.iter().map(|&i| y[i]));
+            let _ = self.models[m].partial_fit(&xb, Some(&yb), &session.child(format!("abag_{m}")));
+            let pred = match self.models[m].predict(&xb, &session.child(format!("abagp_{m}"))) {
+                Ok(q) => q.value,
+                Err(_) => Vector::zeros(xb.nrows()),
+            };
+            let mut err = 0.0;
+            for i in 0..yb.len().min(pred.len()) {
+                if (pred[i] - yb[i]).abs() >= 0.5 {
+                    err += 1.0;
+                }
+            }
+            err /= yb.len().max(1) as f64;
+            if let Ok(q) = self.detectors[m].update(err, &session.child(format!("adwin_{m}"))) {
+                if matches!(q.value, DriftDecision::Drift { .. }) {
+                    self.models[m] = Perceptron::new();
+                    self.detectors[m].reset();
+                    resets += 1;
+                }
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(resets as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "AdwinBagging {} perceptrons, resets={resets}",
+            self.models.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "ADWIN bagging update",
+                "Poisson bootstrap plus per-member ADWIN reset",
+                format!("n={before}"),
+                format!("n={} resets={resets}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for AdwinBagging {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.models.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let mut votes = vec![0.0; x.nrows()];
+        let mut k = 0.0;
+        for (i, m) in self.models.iter().enumerate() {
+            if let Ok(q) = m.predict(x, &session.child(format!("abagp_{i}"))) {
+                for r in 0..x.nrows().min(q.value.len()) {
+                    votes[r] += q.value[r];
+                }
+                k += 1.0;
+            }
+        }
+        let out = Vector::from_iter(votes.iter().map(|v| {
+            if k > 0.0 && *v / k >= 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// Streaming AdaBoost of perceptrons (river `ensemble.AdaBoostClassifier` lite).
+#[derive(Clone, Debug)]
+pub struct OnlineAdaBoost {
+    /// Members.
+    pub n_models: usize,
+    models: Vec<Perceptron>,
+    weights: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OnlineAdaBoost {
+    fn default() -> Self {
+        Self {
+            n_models: 3,
+            models: Vec::new(),
+            weights: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlineAdaBoost {
+    /// Boosted committee of `n_models` perceptrons.
+    pub fn new(n_models: usize) -> Self {
+        Self {
+            n_models: n_models.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineAdaBoost {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        if self.models.is_empty() {
+            self.models = vec![Perceptron::new(); self.n_models.max(1)];
+            self.weights = vec![1.0; self.models.len()];
+        }
+        let before = self.weights.iter().copied().sum::<f64>();
+        for m in 0..self.models.len() {
+            let _ = self.models[m].partial_fit(x, Some(y), &session.child(format!("ada_{m}")));
+            if let Ok(q) = self.models[m].predict(x, &session.child(format!("adap_{m}"))) {
+                let mut wrong = 0.0;
+                for i in 0..y.len().min(q.value.len()) {
+                    if (q.value[i] - y[i]).abs() >= 0.5 {
+                        wrong += 1.0;
+                    }
+                }
+                if wrong > 0.0 {
+                    self.weights[m] *= 1.25;
+                } else {
+                    self.weights[m] *= 0.8;
+                }
+            }
+        }
+        let wsum: f64 = self.weights.iter().sum();
+        if wsum > 0.0 {
+            for w in &mut self.weights {
+                *w /= wsum;
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let after = self.weights.iter().copied().sum::<f64>();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((after - before).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!("OnlineAdaBoost {} members", self.models.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "boosted perceptron weights",
+                "up-weight members that erred on the batch",
+                format!("wsum={before:.6e}"),
+                format!("wsum={after:.6e}"),
+            ),
+        )
+    }
+}
+
+impl Predict for OnlineAdaBoost {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.models.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let mut acc = vec![0.0; x.nrows()];
+        for (m, model) in self.models.iter().enumerate() {
+            let w = self.weights.get(m).copied().unwrap_or(1.0);
+            if let Ok(q) = model.predict(x, &session.child(format!("adap_{m}"))) {
+                for i in 0..x.nrows().min(q.value.len()) {
+                    acc[i] += w * if q.value[i] >= 0.5 { 1.0 } else { -1.0 };
+                }
+            }
+        }
+        ctx.finish(Vector::from_iter(acc.iter().map(|v| {
+            if *v >= 0.0 {
+                1.0
+            } else {
+                0.0
+            }
+        })))
+    }
+}
+
+/// Streaming random oversampler (river `imblearn.RandomOverSampler`).
+#[derive(Clone, Debug, Default)]
+pub struct RandomOverSampler {
+    counts: HashMap<i64, u64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl RandomOverSampler {
+    /// Empty oversampler.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for RandomOverSampler {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        let before = self.n_seen;
+        for i in 0..x.nrows().min(y.len()) {
+            if y[i].is_finite() {
+                *self.counts.entry(y[i].round() as i64).or_insert(0) += 1;
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.counts.len() >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("RandomOverSampler classes={}", self.counts.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "class-count update",
+                "minority rows are duplicated at transform time",
+                format!("n={before}"),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Transform for RandomOverSampler {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        let maxc = self.counts.values().copied().max().unwrap_or(1);
+        let minc = self.counts.values().copied().min().unwrap_or(1);
+        if minc == 0 || maxc / minc.max(1) > 20 {
+            ctx.push(
+                Issue::builder(IssueCode::ClassImbalanceSevere)
+                    .severity(Severity::Warning)
+                    .message("RandomOverSampler saw a ≥20:1 class ratio")
+                    .build(),
+            );
+        }
+        ctx.finish(x.clone())
+    }
+}
+
+/// Streaming random undersampler (river `imblearn.RandomUnderSampler`).
+#[derive(Clone, Debug)]
+pub struct RandomUnderSampler {
+    counts: HashMap<i64, u64>,
+    n_seen: u64,
+    updates: u64,
+    rng: Rng,
+}
+
+impl Default for RandomUnderSampler {
+    fn default() -> Self {
+        Self {
+            counts: HashMap::new(),
+            n_seen: 0,
+            updates: 0,
+            rng: Rng::new(29),
+        }
+    }
+}
+
+impl RandomUnderSampler {
+    /// Empty undersampler.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for RandomUnderSampler {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        let before = self.n_seen;
+        for i in 0..x.nrows().min(y.len()) {
+            if y[i].is_finite() {
+                *self.counts.entry(y[i].round() as i64).or_insert(0) += 1;
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.counts.len() >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("RandomUnderSampler classes={}", self.counts.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "class-count update",
+                "majority rows may be dropped at transform time",
+                format!("n={before}"),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Transform for RandomUnderSampler {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        let mut rng = self.rng.clone();
+        let minc = self.counts.values().copied().min().unwrap_or(1) as f64;
+        let maxc = self.counts.values().copied().max().unwrap_or(1) as f64;
+        let keep = if maxc > 0.0 { (minc / maxc).clamp(0.2, 1.0) } else { 1.0 };
+        let mut rows = Vec::new();
+        for i in 0..x.nrows() {
+            if rng.uniform() <= keep {
+                rows.push(i);
+            }
+        }
+        if rows.is_empty() && x.nrows() > 0 {
+            rows.push(0);
+        }
+        ctx.finish(Matrix::from_fn(rows.len(), x.ncols(), |r, c| {
+            x.get(rows[r], c)
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -12116,6 +12881,30 @@ mod tests {
         HashingTrick::new(4)
             .partial_fit(&x, None, &session)
             .expect("hash");
+        OnlineMad::new()
+            .partial_fit(&x, None, &session)
+            .expect("mad");
+        OnlineIqr::new()
+            .partial_fit(&x, None, &session)
+            .expect("iqr");
+        OnlinePearson::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("pearson");
+        RollingMean::new()
+            .partial_fit(&x, None, &session)
+            .expect("rmean");
+        AdwinBagging::new(2)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("abag");
+        OnlineAdaBoost::new(2)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("ada");
+        RandomOverSampler::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("ros");
+        RandomUnderSampler::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("rus");
 
         let n_expl = session
             .ledger()

@@ -887,6 +887,185 @@ pub fn polynomial_kernel(
     ctx.finish(out)
 }
 
+/// Laplacian kernel \(\exp(-\gamma\|x-y\|_1)\) (sklearn `laplacian_kernel`).
+pub fn laplacian_kernel(
+    a: &Matrix,
+    b: &Matrix,
+    gamma: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let g = if gamma.is_finite() && gamma > 0.0 {
+        gamma
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("laplacian_kernel γ={gamma} is not positive; using 1"))
+                .build(),
+        );
+        1.0
+    };
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("laplacian_kernel column mismatch")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let mut s = 0.0;
+        for k in 0..a.ncols() {
+            s += (a.get(i, k) - b.get(j, k)).abs();
+        }
+        (-g * s).exp()
+    });
+    ctx.finish(out)
+}
+
+/// Sigmoid kernel \(\tanh(\gamma\langle x,y\rangle+c_0)\) (sklearn `sigmoid_kernel`).
+pub fn sigmoid_kernel(
+    a: &Matrix,
+    b: &Matrix,
+    gamma: f64,
+    coef0: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let g = if gamma.is_finite() { gamma } else { 1.0 };
+    let c0 = if coef0.is_finite() { coef0 } else { 0.0 };
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("sigmoid_kernel column mismatch")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let mut s = 0.0;
+        for k in 0..a.ncols() {
+            s += a.get(i, k) * b.get(j, k);
+        }
+        (g * s + c0).tanh()
+    });
+    ctx.finish(out)
+}
+
+/// χ² kernel \(\exp(-\gamma\sum(x-y)^2/(x+y))\) (sklearn `chi2_kernel`).
+///
+/// Negative coordinates are skipped with a warning; they are not identification
+/// `p`.
+pub fn chi2_kernel(
+    a: &Matrix,
+    b: &Matrix,
+    gamma: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let g = if gamma.is_finite() && gamma > 0.0 {
+        gamma
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("chi2_kernel γ={gamma} is not positive; using 1"))
+                .build(),
+        );
+        1.0
+    };
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("chi2_kernel column mismatch")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    let mut saw_neg = false;
+    for i in 0..a.nrows() {
+        for k in 0..a.ncols() {
+            if a.get(i, k) < 0.0 {
+                saw_neg = true;
+            }
+        }
+    }
+    for i in 0..b.nrows() {
+        for k in 0..b.ncols() {
+            if b.get(i, k) < 0.0 {
+                saw_neg = true;
+            }
+        }
+    }
+    if saw_neg {
+        ctx.push(
+            Issue::builder(IssueCode::NonPositiveSeries)
+                .severity(Severity::Warning)
+                .message("chi2_kernel skipped negative coordinates")
+                .build(),
+        );
+    }
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let mut s = 0.0;
+        for k in 0..a.ncols() {
+            let u = a.get(i, k);
+            let v = b.get(j, k);
+            if u < 0.0 || v < 0.0 {
+                continue;
+            }
+            let den = u + v;
+            if den > 1e-18 {
+                let d = u - v;
+                s += d * d / den;
+            }
+        }
+        (-g * s).exp()
+    });
+    ctx.finish(out)
+}
+
+/// Haversine distances in kilometres (sklearn `haversine_distances` × Earth radius).
+///
+/// Rows are `(lat, lon)` in degrees. Column count must be 2.
+pub fn haversine_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if a.ncols() != 2 || b.ncols() != 2 {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "haversine_distances needs 2 columns, got {} and {}",
+                    a.ncols(),
+                    b.ncols()
+                ))
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    const R: f64 = 6371.0;
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let lat1 = a.get(i, 0).to_radians();
+        let lon1 = a.get(i, 1).to_radians();
+        let lat2 = b.get(j, 0).to_radians();
+        let lon2 = b.get(j, 1).to_radians();
+        let dlat = lat2 - lat1;
+        let dlon = lon2 - lon1;
+        let h = (dlat * 0.5).sin().powi(2)
+            + lat1.cos() * lat2.cos() * (dlon * 0.5).sin().powi(2);
+        let h = h.clamp(0.0, 1.0);
+        2.0 * R * h.sqrt().asin()
+    });
+    ctx.finish(out)
+}
+
 /// Maximum residual (sklearn `max_error`).
 pub fn max_error(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
@@ -3120,6 +3299,82 @@ pub fn roc_auc_ovr(y_true: &Vector, scores: &Matrix, session: &Session) -> Resul
     ctx.finish(acc / k)
 }
 
+/// One-vs-one ROC-AUC from a score matrix (sklearn `roc_auc_score` `ovo`).
+///
+/// Class count is not identification `p`.
+pub fn roc_auc_ovo(
+    y_true: &Vector,
+    scores: &Matrix,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, scores, None, &ctx.policy);
+    warn_constant_target(&mut ctx, y_true, true);
+    if y_true.len() != scores.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "roc_auc_ovo y.len()={} scores.nrows()={}",
+                    y_true.len(),
+                    scores.nrows()
+                ))
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let yt = labels_of(y_true);
+    let classes = unique_sorted(&yt);
+    if classes.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("roc_auc_ovo needs two classes")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let c = scores.ncols().max(1);
+    let mut acc = 0.0;
+    let mut k = 0.0;
+    for (i, &c1) in classes.iter().enumerate() {
+        for &c2 in classes.iter().skip(i + 1) {
+            let mut pos = Vec::new();
+            let mut sc = Vec::new();
+            for r in 0..yt.len() {
+                if yt[r] != c1 && yt[r] != c2 {
+                    continue;
+                }
+                let col = classes.iter().position(|&z| z == c1).unwrap_or(0).min(c - 1);
+                pos.push(yt[r] == c1);
+                sc.push(scores.get(r, col));
+            }
+            let a = wilcoxon_auc(&pos, &sc);
+            if a.is_finite() {
+                acc += a;
+                k += 1.0;
+            }
+        }
+    }
+    if k <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .message("every one-vs-one AUC was undefined")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(acc / k)
+}
+
+/// Per-class precision / recall / F1 (sklearn `classification_report` numbers).
+pub fn classification_report(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<PrecisionRecallF1>> {
+    precision_recall_f1(y_true, y_pred, session)
+}
+
 /// Detection-error-tradeoff curve (sklearn `det_curve`).
 ///
 /// Returns false-positive rate, false-negative rate, and thresholds.
@@ -3520,5 +3775,33 @@ mod tests {
         let det = det_curve(&y, &p, &Session::new("m", "det")).unwrap().value;
         assert!(det.fpr.len() >= 2);
         assert!(det.tpr.as_slice().iter().all(|v| v.is_finite()));
+        let lap = laplacian_kernel(&xb, &xb, 0.5, &Session::new("m", "lap"))
+            .unwrap()
+            .value;
+        assert!((lap.get(1, 1) - 1.0).abs() < 1e-12);
+        let sg = sigmoid_kernel(&xb, &xb, 0.1, 0.0, &Session::new("m", "sig"))
+            .unwrap()
+            .value;
+        assert!(sg.get(1, 1).is_finite());
+        let ck = chi2_kernel(&xb, &xb, 0.5, &Session::new("m", "chi2"))
+            .unwrap()
+            .value;
+        assert!((ck.get(1, 1) - 1.0).abs() < 1e-12);
+        let geo = Matrix::from_fn(2, 2, |i, j| if j == 0 { 0.0 } else { i as f64 });
+        let hv = haversine_distances(&geo, &geo, &Session::new("m", "hav"))
+            .unwrap()
+            .value;
+        assert_eq!(hv.shape(), (2, 2));
+        assert!(hv.get(0, 0).abs() < 1e-9);
+        assert!(hv.get(0, 1) > 100.0 && hv.get(0, 1) < 120.0);
+        let ovo = roc_auc_ovo(&y, &sc2, &Session::new("m", "ovo"))
+            .unwrap()
+            .value;
+        assert!((ovo - 1.0).abs() < 1e-12);
+        let cr = classification_report(&y, &y, &Session::new("m", "cr"))
+            .unwrap()
+            .value;
+        assert!((cr.precision - 1.0).abs() < 1e-12);
+        assert!((cr.f1 - 1.0).abs() < 1e-12);
     }
 }

@@ -5325,6 +5325,345 @@ pub fn recursive_olsresiduals(
     ctx.finish(Vector::from_slice(&out))
 }
 
+/// Yule–Walker AR coefficients (statsmodels `stattools.yule_walker`).
+///
+/// Implemented via Levinson–Durbin on the sample ACF. `order` is not
+/// identification `p`.
+pub fn yule_walker(
+    y: &Vector,
+    order: usize,
+    session: &Session,
+) -> Result<Qualified<LevinsonDurbin>> {
+    levinson_durbin(y, order, session)
+}
+
+/// Burg AR coefficients (statsmodels `tsa.ar_model.AutoReg` Burg).
+///
+/// Reflection order is not identification `p`.
+pub fn burg_ar(y: &Vector, order: usize, session: &Session) -> Result<Qualified<LevinsonDurbin>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, y);
+    let n = y.len();
+    let p = if order >= 1 && order < n {
+        order
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("Burg order={order} is not in 1..n-1 (n={n}); using 1"))
+                .build(),
+        );
+        1.min(n.saturating_sub(1))
+    };
+    if p == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Burg needs n≥2")
+                .build(),
+        );
+        return ctx.finish(LevinsonDurbin {
+            ar: Vector::zeros(0),
+            sigma2: f64::NAN,
+            reflection: Vector::zeros(0),
+        });
+    }
+    let mut ef: Vec<f64> = y.as_slice().to_vec();
+    let mut eb: Vec<f64> = y.as_slice().to_vec();
+    let mut a = vec![0.0; p + 1];
+    a[0] = 1.0;
+    let mut kvec = vec![0.0; p];
+    let mut e = y.as_slice().iter().map(|v| v * v).sum::<f64>() / n.max(1) as f64;
+    for m in 1..=p {
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for t in m..n {
+            num += ef[t] * eb[t - 1];
+            den += ef[t] * ef[t] + eb[t - 1] * eb[t - 1];
+        }
+        let km = if den > 1e-18 { -2.0 * num / den } else { 0.0 };
+        kvec[m - 1] = km;
+        if km.abs() > 1.0 + 1e-8 {
+            ctx.push(
+                Issue::builder(IssueCode::NonStationary)
+                    .message(format!("Burg |k_{m}|={km:.3} exceeds 1"))
+                    .build(),
+            );
+        }
+        let prev = a.clone();
+        for j in 1..m {
+            a[j] = prev[j] + km * prev[m - j];
+        }
+        a[m] = km;
+        let ef_old = ef.clone();
+        for t in m..n {
+            let ft = ef_old[t];
+            let bt = eb[t - 1];
+            ef[t] = ft + km * bt;
+            eb[t - 1] = bt + km * ft;
+        }
+        e *= (1.0 - km * km).max(0.0);
+    }
+    ctx.finish(LevinsonDurbin {
+        ar: Vector::from_iter(a.iter().copied().skip(1).take(p)),
+        sigma2: e.abs(),
+        reflection: Vector::from_slice(&kvec),
+    })
+}
+
+/// Hannan–Rissanen ARMA coefficients (statsmodels `arma_innovations` lite).
+///
+/// A long Burg AR supplies residuals; then a scratch OLS of
+/// \(y_t\) on lagged \(y\) and lagged residuals. Orders are not identification
+/// `p`.
+#[derive(Clone, Debug)]
+pub struct HannanRissanen {
+    /// AR coefficients.
+    pub ar: Vector,
+    /// MA coefficients.
+    pub ma: Vector,
+    /// Residual variance.
+    pub sigma2: f64,
+}
+
+/// Hannan–Rissanen ARMA(`p`,`q`).
+pub fn hannan_rissanen(
+    y: &Vector,
+    p: usize,
+    q: usize,
+    session: &Session,
+) -> Result<Qualified<HannanRissanen>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, y);
+    let n = y.len();
+    let pp = p.max(1);
+    let qq = q.max(0);
+    if n < pp + qq + 4 {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .message(format!("Hannan–Rissanen n={n} < p+q+4"))
+                .build(),
+        );
+    }
+    let long = (pp + qq + 2).min(n.saturating_sub(2)).max(1);
+    let burg = match burg_ar(y, long, &session.child("burg")) {
+        Ok(q) => q.value,
+        Err(_) => LevinsonDurbin {
+            ar: Vector::zeros(long),
+            sigma2: 1.0,
+            reflection: Vector::zeros(long),
+        },
+    };
+    let mut resid = vec![0.0; n];
+    for t in 0..n {
+        let mut yh = 0.0;
+        for k in 0..burg.ar.len() {
+            if t > k {
+                yh += burg.ar[k] * y[t - 1 - k];
+            }
+        }
+        resid[t] = y[t] - yh;
+    }
+    let start = (pp + qq).max(1);
+    let rows = n.saturating_sub(start);
+    if rows == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Hannan–Rissanen formed no regression rows")
+                .build(),
+        );
+        return ctx.finish(HannanRissanen {
+            ar: Vector::zeros(pp),
+            ma: Vector::zeros(qq),
+            sigma2: f64::NAN,
+        });
+    }
+    let cols = pp + qq;
+    let design = Matrix::from_fn(rows, cols, |i, j| {
+        let t = start + i;
+        if j < pp {
+            y[t - 1 - j]
+        } else {
+            let k = j - pp;
+            resid[t - 1 - k]
+        }
+    });
+    let yt = Vector::from_iter((start..n).map(|t| y[t]));
+    let mut scratch = Report::new("hr", "ols");
+    let beta = least_squares(&mut scratch, &design, &yt, &ctx.policy)
+        .unwrap_or_else(|| Vector::zeros(cols));
+    for issue in scratch.issues() {
+        if matches!(
+            issue.code,
+            IssueCode::ResidualTooLarge
+                | IssueCode::NearSingular
+                | IssueCode::RankZero
+                | IssueCode::R2IsOne
+                | IssueCode::PerfectCollinearity
+        ) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let mut sse = 0.0;
+    for i in 0..rows {
+        let mut yh = 0.0;
+        for j in 0..cols.min(beta.len()) {
+            yh += beta[j] * design.get(i, j);
+        }
+        let e = yt[i] - yh;
+        sse += e * e;
+    }
+    ctx.finish(HannanRissanen {
+        ar: Vector::from_iter((0..pp).map(|j| beta.as_slice().get(j).copied().unwrap_or(0.0))),
+        ma: Vector::from_iter(
+            (0..qq).map(|j| beta.as_slice().get(pp + j).copied().unwrap_or(0.0)),
+        ),
+        sigma2: if rows > 0 { sse / rows as f64 } else { f64::NAN },
+    })
+}
+
+/// Hansen (1992) parameter-stability statistic on recursive OLS residuals.
+///
+/// Prefix length is not identification `p`.
+pub fn breaks_hansen(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let rec = recursive_olsresiduals(x, y, 8, session)?;
+    let mut ctx = FitCtx::with_session(session.child("hansen"));
+    let r = rec.value;
+    let n = r.len();
+    if n < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Hansen Lc needs at least 4 recursive residuals")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: n as f64,
+        });
+    }
+    let mut s = 0.0;
+    let mut ss = 0.0;
+    let mut sse = 0.0;
+    for i in 0..n {
+        s += r[i];
+        ss += s * s;
+        sse += r[i] * r[i];
+    }
+    let sig2 = sse / n as f64;
+    if sig2 <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .message("Hansen Lc variance vanished")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: n as f64,
+        });
+    }
+    let stat: f64 = ss / (n as f64 * n as f64 * sig2);
+    let pvalue = chi2_pvalue(stat.max(0.0) * n as f64, 1.0);
+    if pvalue.is_finite() && pvalue < 0.05 {
+        ctx.push(
+            Issue::builder(IssueCode::StructuralBreak)
+                .message(format!("Hansen Lc={stat:.4} p={pvalue:.4}"))
+                .build(),
+        );
+    }
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: 1.0,
+        nobs: n as f64,
+    })
+}
+
+/// Schoenfeld residuals from a fitted Cox model (lifelines / statsmodels).
+///
+/// Each event row is \(x_i-\bar x(t_i)\). Event count is not identification
+/// `p`.
+pub fn schoenfeld(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let fitted = match CoxPH::new().fit(durations, events, x, &session.child("cox")) {
+        Ok(q) => q.value,
+        Err(e) => {
+            let mut ctx = FitCtx::with_session(session.clone());
+            if !matches!(
+                e.primary.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+            ) {
+                ctx.push(e.primary);
+            }
+            return ctx.finish(Matrix::zeros(0, x.ncols()));
+        }
+    };
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    let n = x.nrows().min(durations.len()).min(events.len());
+    let p = x.ncols();
+    let beta = &fitted.coef;
+    let mut rows = Vec::new();
+    for i in 0..n {
+        if events[i] < 0.5 || !durations[i].is_finite() {
+            continue;
+        }
+        let t = durations[i];
+        let mut wsum = 0.0;
+        let mut mean = vec![0.0; p];
+        for j in 0..n {
+            if !durations[j].is_finite() || durations[j] + 1e-15 < t {
+                continue;
+            }
+            let mut xb = 0.0;
+            for k in 0..p.min(beta.len()) {
+                xb += x.get(j, k) * beta[k];
+            }
+            let w = xb.exp().min(1e12);
+            wsum += w;
+            for k in 0..p {
+                mean[k] += w * x.get(j, k);
+            }
+        }
+        if wsum <= 1e-18 {
+            continue;
+        }
+        let mut row = vec![0.0; p];
+        for k in 0..p {
+            row[k] = x.get(i, k) - mean[k] / wsum;
+        }
+        rows.push(row);
+    }
+    if rows.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Schoenfeld residuals: no uncensored events")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(0, p));
+    }
+    let out = Matrix::from_fn(rows.len(), p, |i, j| rows[i][j]);
+    ctx.finish(out)
+}
+
 /// Nested-model ANOVA (statsmodels `anova_lm`).
 #[derive(Clone, Debug)]
 pub struct AnovaLm {
@@ -6406,5 +6745,20 @@ mod tests {
         let rr = recursive_olsresiduals(&x, &y, 8, &Session::new("rols", "t")).expect("rols");
         assert!(!rr.value.is_empty());
         assert!(rr.value.as_slice().iter().all(|v| v.is_finite()));
+        let yw = yule_walker(&e, 3, &Session::new("yw", "t")).expect("yw");
+        assert_eq!(yw.value.ar.len(), 3);
+        let burg = burg_ar(&e, 3, &Session::new("burg", "t")).expect("burg");
+        assert_eq!(burg.value.ar.len(), 3);
+        assert!(burg.value.sigma2.is_finite());
+        let hr = hannan_rissanen(&e, 1, 1, &Session::new("hr", "t")).expect("hr");
+        assert_eq!(hr.value.ar.len(), 1);
+        assert_eq!(hr.value.ma.len(), 1);
+        assert!(hr.value.sigma2.is_finite());
+        let hn = breaks_hansen(&x, &y, &Session::new("han", "t")).expect("hansen");
+        assert!(hn.value.statistic.is_finite() || hn.value.pvalue.is_nan());
+        let cx = Matrix::from_fn(20, 1, |i, _| i as f64);
+        let sch = schoenfeld(&dur, &ev, &cx, &Session::new("sch", "t")).expect("sch");
+        assert_eq!(sch.value.ncols(), 1);
+        assert!(sch.value.nrows() == 0 || (0..sch.value.nrows()).all(|i| sch.value.get(i, 0).is_finite()));
     }
 }

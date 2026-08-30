@@ -6907,6 +6907,545 @@ impl Predict for FittedStsf {
     }
 }
 
+fn hstack(a: &Matrix, b: &Matrix) -> Matrix {
+    let n = a.nrows().min(b.nrows());
+    Matrix::from_fn(n, a.ncols() + b.ncols(), |i, j| {
+        if j < a.ncols() {
+            a.get(i, j)
+        } else {
+            b.get(i, j - a.ncols())
+        }
+    })
+}
+
+fn sax_symbols(row: &[f64], n_pieces: usize, alphabet: usize) -> Vec<f64> {
+    let v = Vector::from_slice(row);
+    let z = znorm(&v);
+    let k = n_pieces.max(1);
+    let a = alphabet.max(2);
+    let mut paa = vec![0.0; k];
+    let t = z.len().max(1);
+    for j in 0..k {
+        let lo = j * t / k;
+        let hi = ((j + 1) * t / k).max(lo + 1);
+        let mut s = 0.0;
+        let mut n = 0.0;
+        for u in lo..hi.min(z.len()) {
+            s += z[u];
+            n += 1.0;
+        }
+        paa[j] = if n > 0.0 { s / n } else { 0.0 };
+    }
+    paa.into_iter()
+        .map(|val| {
+            let u = 0.5 + 0.5 * crate::special::erf(val / std::f64::consts::SQRT_2);
+            ((u * a as f64).floor() as usize).min(a - 1) as f64
+        })
+        .collect()
+}
+
+/// Pairwise SAX MINDIST / Hamming (tslearn `cdist_sax`).
+///
+/// Piece / alphabet counts are not identification `p`.
+pub fn cdist_sax(
+    a: &Matrix,
+    b: &Matrix,
+    n_pieces: usize,
+    alphabet: usize,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let np = n_pieces.max(1);
+    let al = if alphabet >= 2 {
+        alphabet
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("cdist_sax alphabet={alphabet} < 2; using 2"))
+                .build(),
+        );
+        2
+    };
+    let sa: Vec<Vec<f64>> = (0..a.nrows())
+        .map(|i| sax_symbols(a.row(i).as_slice(), np, al))
+        .collect();
+    let sb: Vec<Vec<f64>> = (0..b.nrows())
+        .map(|i| sax_symbols(b.row(i).as_slice(), np, al))
+        .collect();
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let u = &sa[i];
+        let v = &sb[j];
+        let m = u.len().min(v.len()).max(1);
+        let mut d = 0.0;
+        for t in 0..u.len().min(v.len()) {
+            if (u[t] - v[t]).abs() > 0.0 {
+                d += 1.0;
+            }
+        }
+        d / m as f64
+    });
+    ctx.finish(out)
+}
+
+/// One-step canonical time warping (tslearn `ctw` lite).
+///
+/// DTW-align, OLS-scale the first series onto the second, then DTW again.
+pub fn canonical_time_warping(
+    a: &Vector,
+    b: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if a.is_empty() || b.is_empty() {
+        ctx.push(Issue::builder(IssueCode::EmptyMatrix).build());
+        return ctx.finish(f64::NAN);
+    }
+    let path = dtw_path(a.as_slice(), b.as_slice());
+    let mut sx = 0.0;
+    let mut sy = 0.0;
+    let mut sxx = 0.0;
+    let mut sxy = 0.0;
+    let mut n = 0.0;
+    for (i, j) in &path {
+        let x = a[*i];
+        let yv = b[*j];
+        if x.is_finite() && yv.is_finite() {
+            sx += x;
+            sy += yv;
+            sxx += x * x;
+            sxy += x * yv;
+            n += 1.0;
+        }
+    }
+    let (scale, intercept) = if n >= 2.0 {
+        let mx = sx / n;
+        let my = sy / n;
+        let var = sxx - n * mx * mx;
+        if var.abs() > 1e-18 {
+            let sl = (sxy - n * mx * my) / var;
+            (sl, my - sl * mx)
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::JitterInjected)
+                    .message("CTW aligned x had no variance; scale set to 1")
+                    .compromise(NumericalCompromise::new(
+                        "identifiable linear map on the DTW path",
+                        "identity scale",
+                        "the aligned query was constant",
+                        "do not read a unit scale as a unique CTW warp",
+                    ))
+                    .build(),
+            );
+            (1.0, 0.0)
+        }
+    } else {
+        (1.0, 0.0)
+    };
+    let ap = Vector::from_iter(a.as_slice().iter().map(|v| scale * *v + intercept));
+    ctx.finish(dtw_raw(ap.as_slice(), b.as_slice()))
+}
+
+/// Hydra + MultiROCKET concatenation (sktime `HydraMultiRocketClassifier` lite).
+#[derive(Clone, Debug)]
+pub struct HydraMultiRocket {
+    /// Hydra kernels.
+    pub n_kernels: usize,
+    /// Hydra groups.
+    pub n_groups: usize,
+    /// MultiROCKET kernels.
+    pub n_rocket: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for HydraMultiRocket {
+    fn default() -> Self {
+        Self {
+            n_kernels: 8,
+            n_groups: 4,
+            n_rocket: 4,
+            alpha: 0.1,
+            seed: 5,
+        }
+    }
+}
+
+impl HydraMultiRocket {
+    /// Default Hydra+MultiROCKET classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted Hydra+MultiROCKET ridge.
+#[derive(Clone, Debug)]
+pub struct FittedHydraMultiRocket {
+    hydra: Vec<(Vec<f64>, usize)>,
+    n_groups: usize,
+    rocket: MultiRocket,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for HydraMultiRocket {
+    type Fitted = FittedHydraMultiRocket;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedHydraMultiRocket>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let hydra = hydra_kernels(self.n_kernels, self.n_groups, 3, self.seed);
+        let zh = hydra_apply(x, &hydra, self.n_groups);
+        let rocket = MultiRocket {
+            n_kernels: self.n_rocket.max(1),
+            seed: self.seed.wrapping_add(1),
+        };
+        let zr = match rocket.transform(x, &session.child("mr")) {
+            Ok(q) => q.value,
+            Err(_) => Matrix::zeros(x.nrows(), self.n_rocket.max(1) * 3),
+        };
+        let z = hstack(&zh, &zr);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "hmr");
+        ctx.finish(FittedHydraMultiRocket {
+            hydra,
+            n_groups: self.n_groups.max(1),
+            rocket,
+            inner,
+        })
+    }
+}
+
+impl Predict for FittedHydraMultiRocket {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let zh = hydra_apply(x, &self.hydra, self.n_groups);
+        let zr = match self.rocket.transform(x, &session.child("mr")) {
+            Ok(q) => q.value,
+            Err(_) => Matrix::zeros(x.nrows(), self.rocket.n_kernels.max(1) * 3),
+        };
+        let z = hstack(&zh, &zr);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Path signature + ridge (sktime `SignatureRegressor` lite).
+#[derive(Clone, Debug)]
+pub struct SignatureRegressor {
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for SignatureRegressor {
+    fn default() -> Self {
+        Self { alpha: 0.1 }
+    }
+}
+
+impl SignatureRegressor {
+    /// Default signature regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted signature ridge regressor.
+#[derive(Clone, Debug)]
+pub struct FittedSignatureRegressor {
+    inner: FittedPenalized,
+}
+
+impl Fit for SignatureRegressor {
+    type Fitted = FittedSignatureRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSignatureRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let z = signature_rows(x);
+        let mut scratch = signlred::Report::new("sigreg", "ridge");
+        let design = z.with_intercept();
+        let beta = ridge_solve(&mut scratch, &design, y, self.alpha.max(0.0), &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::PerfectCollinearity
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedSignatureRegressor {
+            inner: FittedPenalized {
+                coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+                alpha: self.alpha,
+                l1_ratio: 0.0,
+            },
+        })
+    }
+}
+
+impl Predict for FittedSignatureRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = signature_rows(x);
+        self.inner.predict(&z, session)
+    }
+}
+
+fn interval_quantiles(x: &Matrix, intervals: &[Interval]) -> Matrix {
+    let p = intervals.len() * 3;
+    Matrix::from_fn(x.nrows(), p.max(1), |i, j| {
+        if intervals.is_empty() {
+            return 0.0;
+        }
+        let spec = &intervals[j / 3];
+        let qk = j % 3;
+        let a = spec.start.min(x.ncols());
+        let b = spec.end.min(x.ncols()).max(a + 1);
+        let mut v: Vec<f64> = (a..b).map(|t| x.get(i, t)).collect();
+        v.sort_by(|p, q| p.partial_cmp(q).unwrap_or(std::cmp::Ordering::Equal));
+        let tau = match qk {
+            0 => 0.25,
+            1 => 0.5,
+            _ => 0.75,
+        };
+        let t = tau * (v.len().saturating_sub(1)) as f64;
+        let lo = t.floor() as usize;
+        let hi = t.ceil() as usize;
+        let w = t - lo as f64;
+        (1.0 - w) * v[lo] + w * v[hi.min(v.len() - 1)]
+    })
+}
+
+/// Interval quantile forest/ridge (sktime `QUANT` lite).
+#[derive(Clone, Debug)]
+pub struct QuantClassifier {
+    /// Random intervals.
+    pub n_intervals: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for QuantClassifier {
+    fn default() -> Self {
+        Self {
+            n_intervals: 4,
+            alpha: 0.1,
+            seed: 21,
+        }
+    }
+}
+
+impl QuantClassifier {
+    /// Default QUANT lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted QUANT ridge.
+#[derive(Clone, Debug)]
+pub struct FittedQuantClassifier {
+    intervals: Vec<Interval>,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for QuantClassifier {
+    type Fitted = FittedQuantClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedQuantClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let mut rng = Rng::new(self.seed);
+        let tlen = x.ncols().max(1);
+        let mut iv = Vec::new();
+        for _ in 0..self.n_intervals.max(1) {
+            let a = rng.below(tlen);
+            let span = 1 + rng.below(tlen);
+            let b = (a + span).min(tlen);
+            iv.push(Interval {
+                start: a,
+                end: b.max(a + 1),
+            });
+        }
+        let z = interval_quantiles(x, &iv);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "quant");
+        ctx.finish(FittedQuantClassifier {
+            intervals: iv,
+            inner,
+        })
+    }
+}
+
+impl Predict for FittedQuantClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = interval_quantiles(x, &self.intervals);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// WEASEL+MUSE lite: two WEASEL windows voted (sktime `MUSE`).
+#[derive(Clone, Debug)]
+pub struct WeaselMuse {
+    /// Short window.
+    pub window_short: usize,
+    /// Long window.
+    pub window_long: usize,
+}
+
+impl Default for WeaselMuse {
+    fn default() -> Self {
+        Self {
+            window_short: 3,
+            window_long: 4,
+        }
+    }
+}
+
+impl WeaselMuse {
+    /// Default MUSE lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted two-window WEASEL vote.
+#[derive(Clone, Debug)]
+pub struct FittedWeaselMuse {
+    short: FittedBoss,
+    long: FittedBoss,
+}
+
+impl Fit for WeaselMuse {
+    type Fitted = FittedWeaselMuse;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedWeaselMuse>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let mut w0 = Weasel {
+            window: self.window_short.max(2),
+            word_len: 3,
+            alphabet: 4,
+            n_words: 6,
+        };
+        let mut w1 = Weasel {
+            window: self.window_long.max(2),
+            word_len: 3,
+            alphabet: 4,
+            n_words: 6,
+        };
+        let short = match w0.fit(x, y, &session.child("muse_s")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                ) {
+                    ctx.push(e.primary);
+                }
+                return ctx.finish(FittedWeaselMuse {
+                    short: FittedBoss {
+                        vocab: Vec::new(),
+                        ridge: FittedPenalized {
+                            coef: Vector::zeros(0),
+                            intercept: 0.0,
+                            alpha: 0.1,
+                            l1_ratio: 0.0,
+                        },
+                        spec: (3, 3, 4),
+                    },
+                    long: FittedBoss {
+                        vocab: Vec::new(),
+                        ridge: FittedPenalized {
+                            coef: Vector::zeros(0),
+                            intercept: 0.0,
+                            alpha: 0.1,
+                            l1_ratio: 0.0,
+                        },
+                        spec: (4, 3, 4),
+                    },
+                });
+            }
+        };
+        let long = match w1.fit(x, y, &session.child("muse_l")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                ) {
+                    ctx.push(e.primary);
+                }
+                short.clone()
+            }
+        };
+        ctx.finish(FittedWeaselMuse { short, long })
+    }
+}
+
+impl Predict for FittedWeaselMuse {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let a = self
+            .short
+            .predict(x, &session.child("s"))
+            .map(|q| q.value)
+            .unwrap_or_else(|_| Vector::zeros(x.nrows()));
+        let b = self
+            .long
+            .predict(x, &session.child("l"))
+            .map(|q| q.value)
+            .unwrap_or_else(|_| Vector::zeros(x.nrows()));
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let va = if i < a.len() { a[i] } else { 0.0 };
+            let vb = if i < b.len() { b[i] } else { 0.0 };
+            if (va + vb) * 0.5 >= 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        }));
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7515,5 +8054,51 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(stsfp.len(), 6);
+        let sx = cdist_sax(&x, &x, 4, 4, &Session::new("ts", "sax"))
+            .unwrap()
+            .value;
+        assert_eq!(sx.shape(), (6, 6));
+        assert!(sx.get(0, 0).abs() < 1e-12);
+        let ctwv = canonical_time_warping(&q0, &q0, &Session::new("ts", "ctw"))
+            .unwrap()
+            .value;
+        assert!(ctwv.is_finite() && ctwv >= 0.0);
+        let hmr = HydraMultiRocket::new()
+            .fit(&x, &yb, &Session::new("ts", "hmr"))
+            .unwrap();
+        let hmrp = hmr
+            .value
+            .predict(&x, &Session::new("ts", "hmrp"))
+            .unwrap()
+            .value;
+        assert_eq!(hmrp.len(), 6);
+        let sigr = SignatureRegressor::new()
+            .fit(&x, &yramp, &Session::new("ts", "sigr"))
+            .unwrap();
+        let sigrp = sigr
+            .value
+            .predict(&x, &Session::new("ts", "sigrp"))
+            .unwrap()
+            .value;
+        assert_eq!(sigrp.len(), 6);
+        assert!(sigrp.as_slice().iter().all(|v| v.is_finite()));
+        let qc = QuantClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "quant"))
+            .unwrap();
+        let qcp = qc
+            .value
+            .predict(&x, &Session::new("ts", "quantp"))
+            .unwrap()
+            .value;
+        assert_eq!(qcp.len(), 6);
+        let muse = WeaselMuse::new()
+            .fit(&x, &yb, &Session::new("ts", "muse"))
+            .unwrap();
+        let musep = muse
+            .value
+            .predict(&x, &Session::new("ts", "musep"))
+            .unwrap()
+            .value;
+        assert_eq!(musep.len(), 6);
     }
 }

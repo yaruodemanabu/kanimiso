@@ -3031,6 +3031,112 @@ const INVENTORY: &[Algorithm] = &[
         "river.preprocessing.FeatureHasher",
         "online",
     ),
+    a(
+        "metrics.laplacian_kernel",
+        "sklearn.metrics.pairwise.laplacian_kernel",
+        "metric",
+    ),
+    a(
+        "metrics.sigmoid_kernel",
+        "sklearn.metrics.pairwise.sigmoid_kernel",
+        "metric",
+    ),
+    a(
+        "metrics.chi2_kernel",
+        "sklearn.metrics.pairwise.chi2_kernel",
+        "metric",
+    ),
+    a(
+        "metrics.haversine_distances",
+        "sklearn.metrics.pairwise.haversine_distances",
+        "metric",
+    ),
+    a(
+        "metrics.roc_auc_ovo",
+        "sklearn.metrics.roc_auc_score",
+        "metric",
+    ),
+    a(
+        "metrics.classification_report",
+        "sklearn.metrics.classification_report",
+        "metric",
+    ),
+    a(
+        "stats.yule_walker",
+        "statsmodels.tsa.stattools.yule_walker",
+        "stats",
+    ),
+    a("stats.burg_ar", "statsmodels.tsa.ar_model.AutoReg", "stats"),
+    a(
+        "stats.hannan_rissanen",
+        "statsmodels.tsa.arima.estimators.hannan_rissanen",
+        "stats",
+    ),
+    a(
+        "stats.breaks_hansen",
+        "statsmodels.stats.diagnostic.breaks_hansen",
+        "stats",
+    ),
+    a(
+        "stats.schoenfeld",
+        "statsmodels.duration.hazard_regression",
+        "stats",
+    ),
+    a(
+        "tsa.reconcile_mint",
+        "sktime.transformations.hierarchical.reconcile",
+        "forecast",
+    ),
+    a("tslearn.cdist_sax", "tslearn.metrics.cdist_sax", "timeseries"),
+    a(
+        "tslearn.canonical_time_warping",
+        "tslearn.metrics.ctw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.HydraMultiRocket",
+        "sktime.classification.hybrid.HydraMultiRocketClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.SignatureRegressor",
+        "sktime.regression.signature.SignatureRegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.QuantClassifier",
+        "sktime.classification.interval_based.QUANTClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.WeaselMuse",
+        "sktime.classification.dictionary_based.MUSE",
+        "timeseries",
+    ),
+    a("online.OnlineMad", "river.stats.MAD", "online"),
+    a("online.OnlineIqr", "river.stats.IQR", "online"),
+    a("online.OnlinePearson", "river.stats.PearsonCorr", "online"),
+    a("online.RollingMean", "river.stats.RollingMean", "online"),
+    a(
+        "online.AdwinBagging",
+        "river.ensemble.ADWINBaggingClassifier",
+        "online",
+    ),
+    a(
+        "online.OnlineAdaBoost",
+        "river.ensemble.AdaBoostClassifier",
+        "online",
+    ),
+    a(
+        "online.RandomOverSampler",
+        "river.imblearn.RandomOverSampler",
+        "online",
+    ),
+    a(
+        "online.RandomUnderSampler",
+        "river.imblearn.RandomUnderSampler",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -3157,6 +3263,11 @@ mod tests {
             "tslearn.HydraClassifier",
             "tslearn.FreshPrinceRegressor",
             "online.OnlineIsolationForest",
+            "metrics.roc_auc_ovo",
+            "stats.burg_ar",
+            "tslearn.HydraMultiRocket",
+            "tsa.reconcile_mint",
+            "online.AdwinBagging",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
