@@ -2608,6 +2608,8 @@ pub struct PoissonHmm {
     pub max_iter: usize,
     /// Seed.
     pub seed: u64,
+    /// If true, transitions to earlier states are zeroed (hmmlearn `left_right`).
+    pub left_right: bool,
 }
 
 impl Default for PoissonHmm {
@@ -2616,6 +2618,7 @@ impl Default for PoissonHmm {
             n_states: 2,
             max_iter: 40,
             seed: 1,
+            left_right: false,
         }
     }
 }
@@ -2625,6 +2628,15 @@ impl PoissonHmm {
     pub fn new(n_states: usize) -> Self {
         Self {
             n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Left-right Poisson HMM.
+    pub fn left_right(n_states: usize) -> Self {
+        Self {
+            n_states,
+            left_right: true,
             ..Self::default()
         }
     }
@@ -2736,6 +2748,9 @@ impl FitUnsupervised for PoissonHmm {
         let mut rates = Vector::from_iter((0..k).map(|j| mean * (0.5 + j as f64)));
         let mut start = init_start(k);
         let mut trans = init_trans(k);
+        if self.left_right {
+            enforce_left_right(&mut start, &mut trans);
+        }
         let mut loglik = f64::NEG_INFINITY;
         let mut last_gamma: Vec<Vec<f64>> = Vec::new();
         for it in 0..self.max_iter.max(1) {
@@ -2783,6 +2798,9 @@ impl FitUnsupervised for PoissonHmm {
             trans = nt;
             renormalize_vec(&mut start, TRANS_FLOOR);
             renormalize_rows(&mut trans, TRANS_FLOOR);
+            if self.left_right {
+                enforce_left_right(&mut start, &mut trans);
+            }
         }
         let occup: Vec<f64> = (0..k)
             .map(|j| {
@@ -2802,6 +2820,9 @@ impl FitUnsupervised for PoissonHmm {
             })
             .collect();
         let (labels, _) = viterbi_path(&start, &trans, &log_emit);
+        if self.left_right {
+            enforce_left_right(&mut start, &mut trans);
+        }
         ctx.finish(FittedPoissonHmm {
             labels,
             start,
@@ -2811,6 +2832,9 @@ impl FitUnsupervised for PoissonHmm {
         })
     }
 }
+
+/// Left-right Poisson HMM (hmmlearn `PoissonHMM` with `params` left-right).
+pub type PoissonHmmLeftRight = PoissonHmm;
 
 fn digamma(mut x: f64) -> f64 {
     if x <= 0.0 {
@@ -3483,6 +3507,11 @@ mod tests {
             .score(&x, &Session::new("phmm", "score"))
             .expect("score");
         assert!(sc.value.is_finite());
+        let lr = PoissonHmm::left_right(2)
+            .fit(&x, &Session::new("phmm_lr", "fit"))
+            .expect("phmm_lr");
+        assert!(lr.value.trans.get(1, 0) <= 1e-8);
+        assert_eq!(lr.value.rates.len(), 2);
     }
 
     #[test]

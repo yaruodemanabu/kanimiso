@@ -261,6 +261,78 @@ impl Transform for FittedKNeighborsTransformer {
     }
 }
 
+/// Radius-neighbor graph transformer (sklearn `RadiusNeighborsTransformer`).
+///
+/// Radius is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RadiusNeighborsTransformer {
+    /// Neighbor radius (Euclidean).
+    pub radius: f64,
+}
+
+impl Default for RadiusNeighborsTransformer {
+    fn default() -> Self {
+        Self { radius: 1.0 }
+    }
+}
+
+impl RadiusNeighborsTransformer {
+    /// Graph with radius `radius`.
+    pub fn new(radius: f64) -> Self {
+        Self { radius }
+    }
+}
+
+/// Fitted radius-neighbor graph.
+#[derive(Clone, Debug)]
+pub struct FittedRadiusNeighborsTransformer {
+    x_train: Matrix,
+    radius: f64,
+}
+
+impl FitUnsupervised for RadiusNeighborsTransformer {
+    type Fitted = FittedRadiusNeighborsTransformer;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedRadiusNeighborsTransformer>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let mut radius = self.radius;
+        if !radius.is_finite() || radius < 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("radius={radius} is not a non-negative finite; using 1"))
+                    .build(),
+            );
+            radius = 1.0;
+        }
+        ctx.finish(FittedRadiusNeighborsTransformer {
+            x_train: x.clone(),
+            radius,
+        })
+    }
+}
+
+impl Transform for FittedRadiusNeighborsTransformer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let n_ref = self.x_train.nrows();
+        let r2 = self.radius * self.radius;
+        let out = Matrix::from_fn(x.nrows(), n_ref, |i, j| {
+            if sq_dist_row(&self.x_train, j, x, i) <= r2 {
+                1.0
+            } else {
+                0.0
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
 impl FitUnsupervised for NearestNeighbors {
     type Fitted = FittedNearestNeighbors;
     fn fit_unsupervised(
@@ -1469,5 +1541,17 @@ mod tests {
             .value;
         assert_eq!(graph.shape(), (8, 8));
         assert!((graph.get(0, 0) - 1.0).abs() < 1e-12);
+        let rnt = RadiusNeighborsTransformer::new(1.5)
+            .fit_unsupervised(&x, &Session::new("rnt", "fit"))
+            .expect("rnt");
+        let rg = rnt
+            .value
+            .transform(&x, &Session::new("rnt", "t"))
+            .expect("rntt")
+            .value;
+        assert_eq!(rg.shape(), (8, 8));
+        assert!((rg.get(0, 0) - 1.0).abs() < 1e-12);
+        assert!((rg.get(0, 1) - 1.0).abs() < 1e-12);
+        assert!(rg.get(0, 7).abs() < 1e-12);
     }
 }

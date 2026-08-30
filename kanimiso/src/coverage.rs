@@ -3889,6 +3889,34 @@ const INVENTORY: &[Algorithm] = &[
         "river.imblearn.HardSamplingRegressor",
         "online",
     ),
+    a(
+        "hmm.PoissonHmmLeftRight",
+        "hmmlearn.hmm.PoissonHMM",
+        "hmm",
+    ),
+    a("tsa.Figarch", "arch.univariate.FIGARCH", "forecast"),
+    a(
+        "tsa.HolidayFeatures",
+        "sktime.transformations.series.holiday.HolidayFeatures",
+        "forecast",
+    ),
+    a(
+        "neighbors.RadiusNeighborsTransformer",
+        "sklearn.neighbors.RadiusNeighborsTransformer",
+        "estimator",
+    ),
+    a(
+        "online.AmfRegressor",
+        "river.forest.AMFRegressor",
+        "online",
+    ),
+    a("online.PopularReco", "river.reco.Popular", "online"),
+    a("online.OnlineSmape", "river.metrics.SMAPE", "online"),
+    a(
+        "online.PoissonInclusion",
+        "river.feature_selection.PoissonInclusion",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4114,6 +4142,14 @@ mod tests {
             "tslearn.softdtw_alignment",
             "online.MondrianTree",
             "online.HardSamplingRegressor",
+            "hmm.PoissonHmmLeftRight",
+            "tsa.Figarch",
+            "tsa.HolidayFeatures",
+            "neighbors.RadiusNeighborsTransformer",
+            "online.AmfRegressor",
+            "online.PopularReco",
+            "online.OnlineSmape",
+            "online.PoissonInclusion",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

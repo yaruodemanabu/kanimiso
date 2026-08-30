@@ -6505,6 +6505,103 @@ impl Predict for Baseline {
     }
 }
 
+/// Item-popularity recommender (river `reco.Popular`).
+///
+/// Item-id cardinality is not identification `p`. Column 1 of `x` is the item.
+#[derive(Clone, Debug, Default)]
+pub struct PopularReco {
+    item_sum: HashMap<i64, f64>,
+    item_n: HashMap<i64, f64>,
+    global: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl PopularReco {
+    /// Empty popularity table.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for PopularReco {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no ratings"),
+            );
+        };
+        let before = self.item_n.len();
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let item = if x.ncols() > 1 {
+                x.get(i, 1).round() as i64
+            } else {
+                x.get(i, 0).round() as i64
+            };
+            *self.item_sum.entry(item).or_insert(0.0) += y[i];
+            *self.item_n.entry(item).or_insert(0.0) += 1.0;
+            self.n_seen += 1;
+            self.global += (y[i] - self.global) / self.n_seen as f64;
+        }
+        self.updates += 1;
+        let after = self.item_n.len();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((after as f64 - before as f64).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("PopularReco items={after} μ={:.4e}", self.global);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "per-item mean rating",
+                "popularity is the running mean of ratings for each item id",
+                format!("items={before}"),
+                format!("items={after}"),
+            ),
+        )
+    }
+}
+
+impl Predict for PopularReco {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.n_seen == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let item = if x.ncols() > 1 {
+                x.get(i, 1).round() as i64
+            } else {
+                x.get(i, 0).round() as i64
+            };
+            match (self.item_sum.get(&item), self.item_n.get(&item)) {
+                (Some(&s), Some(&n)) if n > 0.0 => s / n,
+                _ => self.global,
+            }
+        }));
+        ctx.finish(out)
+    }
+}
+
 /// Online k-NN regressor (river `neighbors.KNNRegressor`).
 #[derive(Clone, Debug)]
 pub struct KnnRegressor {
@@ -7614,6 +7711,57 @@ impl PartialFit for OnlineMae {
             self.updates += 1;
             self.score()
         })
+    }
+}
+
+/// Rolling symmetric MAPE (river `metrics.SMAPE`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineSmape {
+    acc: f64,
+    n: u64,
+    updates: u64,
+}
+
+impl OnlineSmape {
+    /// Empty SMAPE.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current SMAPE, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.n == 0 {
+            f64::NAN
+        } else {
+            self.acc / self.n as f64
+        }
+    }
+}
+
+impl PartialFit for OnlineSmape {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        metric_partial(
+            session,
+            "smape",
+            x,
+            y,
+            self.updates,
+            self.n,
+            |pred, truth| {
+                self.n += 1;
+                let den = pred.abs() + truth.abs();
+                if den > 1e-12 {
+                    self.acc += 2.0 * (pred - truth).abs() / den;
+                }
+                self.updates += 1;
+                self.score()
+            },
+        )
     }
 }
 
@@ -10488,6 +10636,219 @@ impl Predict for AmfClassifier {
                 })
                 .map(|(k, _)| *k as f64)
                 .unwrap_or(0.0)
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// Aggregated Mondrian Forest regressor (river `forest.AMFRegressor`).
+///
+/// Tree count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct AmfRegressor {
+    /// Trees.
+    pub n_trees: usize,
+    trees: Vec<AmfRegTree>,
+    n_seen: u64,
+    updates: u64,
+    rng: Rng,
+}
+
+#[derive(Clone, Debug)]
+struct AmfRegTree {
+    p: usize,
+    n: u64,
+    lo: Vector,
+    hi: Vector,
+    split_j: Option<usize>,
+    split_t: f64,
+    leaf_sum: f64,
+    leaf_n: f64,
+    left_sum: f64,
+    left_n: f64,
+    right_sum: f64,
+    right_n: f64,
+}
+
+impl Default for AmfRegressor {
+    fn default() -> Self {
+        Self {
+            n_trees: 4,
+            trees: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            rng: Rng::new(31),
+        }
+    }
+}
+
+impl AmfRegressor {
+    /// AMF regressor with `n_trees` Mondrian stumps.
+    pub fn new(n_trees: usize) -> Self {
+        Self {
+            n_trees: n_trees.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn mean(sum: f64, n: f64) -> f64 {
+        if n > 0.0 {
+            sum / n
+        } else {
+            0.0
+        }
+    }
+}
+
+impl PartialFit for AmfRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        if self.trees.is_empty() {
+            self.trees = (0..self.n_trees.max(1))
+                .map(|_| AmfRegTree {
+                    p: x.ncols(),
+                    n: 0,
+                    lo: Vector::filled(x.ncols(), f64::INFINITY),
+                    hi: Vector::filled(x.ncols(), f64::NEG_INFINITY),
+                    split_j: None,
+                    split_t: 0.0,
+                    leaf_sum: 0.0,
+                    leaf_n: 0.0,
+                    left_sum: 0.0,
+                    left_n: 0.0,
+                    right_sum: 0.0,
+                    right_n: 0.0,
+                })
+                .collect();
+        } else if self.trees[0].p != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.n_seen;
+        let mut splits = 0u64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            for t in &mut self.trees {
+                for j in 0..x.ncols().min(t.lo.len()) {
+                    let v = x.get(i, j);
+                    if v < t.lo[j] {
+                        t.lo[j] = v;
+                    }
+                    if v > t.hi[j] {
+                        t.hi[j] = v;
+                    }
+                }
+                t.n += 1;
+                if let Some(j) = t.split_j {
+                    let v = if j < x.ncols() { x.get(i, j) } else { 0.0 };
+                    if v <= t.split_t {
+                        t.left_sum += y[i];
+                        t.left_n += 1.0;
+                    } else {
+                        t.right_sum += y[i];
+                        t.right_n += 1.0;
+                    }
+                } else {
+                    t.leaf_sum += y[i];
+                    t.leaf_n += 1.0;
+                    if t.n >= 2 {
+                        let mut best_j = 0usize;
+                        let mut best_r = 0.0;
+                        for j in 0..t.lo.len() {
+                            let r = t.hi[j] - t.lo[j];
+                            if r > best_r {
+                                best_r = r;
+                                best_j = j;
+                            }
+                        }
+                        if best_r > 1e-12 {
+                            let u = self.rng.uniform();
+                            t.split_j = Some(best_j);
+                            t.split_t = t.lo[best_j] + u * best_r;
+                            t.left_sum = t.leaf_sum;
+                            t.left_n = t.leaf_n;
+                            t.right_sum = 0.0;
+                            t.right_n = 0.0;
+                            splits += 1;
+                        }
+                    }
+                }
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(splits as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "AMFRegressor {} stumps, {splits} new splits this batch",
+            self.trees.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Mondrian stump growth",
+                "a leaf splits on its widest feature once two targets have been seen",
+                format!("n={before}"),
+                format!("n={} splits={splits}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for AmfRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.trees.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let n_trees = self.trees.len().max(1) as f64;
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = 0.0;
+            for t in &self.trees {
+                let m = if let Some(j) = t.split_j {
+                    let v = if j < x.ncols() { x.get(i, j) } else { 0.0 };
+                    if v <= t.split_t {
+                        Self::mean(t.left_sum, t.left_n)
+                    } else {
+                        Self::mean(t.right_sum, t.right_n)
+                    }
+                } else {
+                    Self::mean(t.leaf_sum, t.leaf_n)
+                };
+                s += m;
+            }
+            s / n_trees
         }));
         ctx.finish(out)
     }
@@ -13589,6 +13950,140 @@ impl Transform for OnlineVarianceThreshold {
         }
         ctx.finish(Matrix::from_fn(x.nrows(), keep.len(), |i, j| {
             x.get(i, keep[j].min(x.ncols().saturating_sub(1)))
+        }))
+    }
+}
+
+/// Poisson-process feature inclusion (river `feature_selection.PoissonInclusion`).
+///
+/// Feature count is not identification `p`. A column is kept once a Uniform
+/// draw falls below \(1-e^{-\lambda}\).
+#[derive(Clone, Debug)]
+pub struct PoissonInclusion {
+    /// Inclusion rate \(\lambda\).
+    pub rate: f64,
+    keep: Vec<bool>,
+    n_seen: u64,
+    updates: u64,
+    rng: Rng,
+}
+
+impl Default for PoissonInclusion {
+    fn default() -> Self {
+        Self {
+            rate: 1.0,
+            keep: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            rng: Rng::new(41),
+        }
+    }
+}
+
+impl PoissonInclusion {
+    /// Inclusion rate `rate` (not identification `p`).
+    pub fn new(rate: f64) -> Self {
+        Self {
+            rate,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for PoissonInclusion {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.keep.is_empty() {
+            self.keep = vec![false; x.ncols()];
+        } else if self.keep.len() != x.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .message(format!(
+                        "PoissonInclusion saw {} columns; model has {}",
+                        x.ncols(),
+                        self.keep.len()
+                    ))
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self.keep.iter().filter(|k| **k).count();
+        let lam = if self.rate.is_finite() && self.rate > 0.0 {
+            self.rate
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("PoissonInclusion rate={}; using 1", self.rate))
+                    .build(),
+            );
+            1.0
+        };
+        let p = 1.0 - (-lam).exp();
+        for j in 0..x.ncols() {
+            if !self.keep[j] && self.rng.uniform() < p {
+                self.keep[j] = true;
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let after = self.keep.iter().filter(|k| **k).count();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((after as f64 - before as f64).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = after >= 1;
+        q.warmup = after == 0;
+        q.explanation = format!("PoissonInclusion kept={after}/{}", self.keep.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Poisson feature inclusion",
+                "each unseen column is kept with probability 1-exp(-λ)",
+                format!("kept={before}"),
+                format!("kept={after}"),
+            ),
+        )
+    }
+}
+
+impl Transform for PoissonInclusion {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.keep.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(x.clone());
+        }
+        let idx: Vec<usize> = self
+            .keep
+            .iter()
+            .enumerate()
+            .filter(|(_, k)| **k)
+            .map(|(j, _)| j)
+            .collect();
+        if idx.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::NearZeroVariance)
+                    .severity(Severity::Warning)
+                    .message("PoissonInclusion kept no columns; returning the first")
+                    .build(),
+            );
+            return ctx.finish(Matrix::from_fn(x.nrows(), 1, |i, _| x.get(i, 0)));
+        }
+        ctx.finish(Matrix::from_fn(x.nrows(), idx.len(), |i, j| {
+            x.get(i, idx[j].min(x.ncols().saturating_sub(1)))
         }))
     }
 }
@@ -18839,6 +19334,18 @@ mod tests {
         HardSamplingRegressor::new(8)
             .partial_fit(&x, Some(&y), &session)
             .expect("hsr");
+        AmfRegressor::new(2)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("amfr");
+        PopularReco::new()
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("popular");
+        OnlineSmape::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("smape");
+        PoissonInclusion::new(2.0)
+            .partial_fit(&x, None, &session)
+            .expect("poisinc");
 
         let n_expl = session
             .ledger()

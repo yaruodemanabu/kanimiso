@@ -5079,6 +5079,166 @@ impl FitSeries for GjrGarch {
     }
 }
 
+/// FIGARCH(1,d,1) lite (arch `FIGARCH`): truncated ARCH(∞) weights from \((1-L)^d\).
+///
+/// Truncation length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Figarch {
+    /// Coordinate-search iterations.
+    pub max_iter: usize,
+    /// ARCH(∞) truncation (not identification `p`).
+    pub trunc: usize,
+}
+
+impl Default for Figarch {
+    fn default() -> Self {
+        Self {
+            max_iter: 24,
+            trunc: 16,
+        }
+    }
+}
+
+impl Figarch {
+    /// Default FIGARCH settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted FIGARCH fractional-integration state.
+#[derive(Clone, Debug)]
+pub struct FittedFigarch {
+    /// ω.
+    pub omega: f64,
+    /// Fractional differencing `d ∈ (0, 1)`.
+    pub d: f64,
+    /// GARCH coefficient.
+    pub beta: f64,
+    /// In-sample conditional variances.
+    pub sigma2: Vector,
+    /// Demeaned residuals.
+    pub resid: Vector,
+}
+
+fn figarch_weights(d: f64, trunc: usize) -> Vec<f64> {
+    let mut pi = vec![0.0; trunc];
+    if trunc == 0 {
+        return pi;
+    }
+    let dd = d.clamp(1e-4, 0.999);
+    pi[0] = dd;
+    for j in 2..=trunc {
+        let jf = j as f64;
+        pi[j - 1] = pi[j - 2] * ((jf - 1.0 - dd) / jf);
+    }
+    pi
+}
+
+fn figarch_sigma2(e: &[f64], omega: f64, d: f64, beta: f64, trunc: usize) -> Vec<f64> {
+    let pi = figarch_weights(d, trunc);
+    let var0 = e.iter().map(|v| v * v).sum::<f64>() / e.len().max(1) as f64;
+    let mut s2 = vec![var0.max(omega).max(1e-12); e.len()];
+    let b = beta.clamp(0.0, 0.999);
+    for t in 1..e.len() {
+        let mut arch = 0.0;
+        let kmax = pi.len().min(t);
+        for k in 0..kmax {
+            let ek = e[t - 1 - k];
+            arch += pi[k] * ek * ek;
+        }
+        s2[t] = omega + b * s2[t - 1] + (1.0 - b) * arch;
+        if !s2[t].is_finite() || s2[t] <= 0.0 {
+            s2[t] = omega.max(1e-12);
+        }
+    }
+    s2
+}
+
+fn figarch_nll(e: &[f64], omega: f64, d: f64, beta: f64, trunc: usize) -> f64 {
+    if omega <= 0.0 || !(0.0..1.0).contains(&d) || !(0.0..1.0).contains(&beta) {
+        return f64::INFINITY;
+    }
+    let s2 = figarch_sigma2(e, omega, d, beta, trunc);
+    let mut nll = 0.0;
+    for t in 0..e.len() {
+        let v = s2[t].max(1e-12);
+        nll += 0.5 * (v.ln() + e[t] * e[t] / v);
+    }
+    nll
+}
+
+impl FitSeries for Figarch {
+    type Fitted = FittedFigarch;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedFigarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("FIGARCH QMLE needs a longer series")
+                    .metric("n", y.len() as f64)
+                    .build(),
+            );
+        }
+        let mean = y.mean();
+        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
+        let var = e.as_slice().iter().map(|v| v * v).sum::<f64>() / y.len().max(1) as f64;
+        let trunc = self.trunc.max(4);
+        let mut omega = 0.05 * var.max(1e-8);
+        let mut d = 0.4;
+        let mut beta = 0.6;
+        let mut best = figarch_nll(e.as_slice(), omega, d, beta, trunc);
+        let mut step = 0.05;
+        for it in 0..self.max_iter {
+            let mut improved = false;
+            for (i, cur) in [omega, d, beta].into_iter().enumerate() {
+                for dir in [-step, step] {
+                    let mut cand = [omega, d, beta];
+                    cand[i] = if i == 0 {
+                        (cur + dir).max(1e-8)
+                    } else {
+                        (cur + dir).clamp(1e-4, 0.999)
+                    };
+                    let nll = figarch_nll(e.as_slice(), cand[0], cand[1], cand[2], trunc);
+                    if nll < best {
+                        best = nll;
+                        omega = cand[0];
+                        d = cand[1];
+                        beta = cand[2];
+                        improved = true;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, best, None);
+            if !improved {
+                step *= 0.5;
+                if step < 1e-5 {
+                    ctx.session.converged("FIGARCH coordinate search", it as u64);
+                    break;
+                }
+            }
+        }
+        if !best.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("FIGARCH QMLE likelihood is non-finite; last finite candidate kept")
+                    .build(),
+            );
+        }
+        let sigma2 = figarch_sigma2(e.as_slice(), omega, d, beta, trunc);
+        ctx.finish(FittedFigarch {
+            omega,
+            d,
+            beta,
+            sigma2: Vector::from_iter(sigma2),
+            resid: e,
+        })
+    }
+}
+
 /// Croston intermittent-demand smoother.
 #[derive(Clone, Debug)]
 pub struct Croston {
@@ -6906,6 +7066,43 @@ impl DateTimeFeatures {
             }
         });
         ctx.finish(out)
+    }
+}
+
+/// Holiday dummy from an integer index (sktime `HolidayFeatures` lite).
+///
+/// A 1 is placed every `period` steps. Period is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct HolidayFeatures {
+    /// Holiday spacing.
+    pub period: usize,
+}
+
+impl Default for HolidayFeatures {
+    fn default() -> Self {
+        Self { period: 7 }
+    }
+}
+
+impl HolidayFeatures {
+    /// Holiday every `period` steps.
+    pub fn new(period: usize) -> Self {
+        Self {
+            period: period.max(1),
+        }
+    }
+
+    /// Map `t = 0..n-1` to a single holiday column.
+    pub fn transform(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
+        let ctx = FitCtx::with_session(session.child("transform"));
+        let p = self.period.max(1);
+        ctx.finish(Matrix::from_fn(n, 1, |t, _| {
+            if t % p == 0 {
+                1.0
+            } else {
+                0.0
+            }
+        }))
     }
 }
 
@@ -9599,6 +9796,13 @@ mod tests {
             .expect("dtf")
             .value;
         assert_eq!(cal.shape(), (20, 4));
+        let hol = HolidayFeatures::new(7)
+            .transform(20, &Session::new("hol", "t"))
+            .expect("hol")
+            .value;
+        assert_eq!(hol.shape(), (20, 1));
+        assert!((hol.get(0, 0) - 1.0).abs() < 1e-12);
+        assert!(hol.get(1, 0).abs() < 1e-12);
         let lg = LogTransformer::new()
             .transform(&ypos, &Session::new("logt", "t"))
             .expect("logt")
@@ -9685,6 +9889,16 @@ mod tests {
             .value;
         assert_eq!(harf.len(), 3);
         assert!(harf.as_slice().iter().all(|v| v.is_finite()));
+        let fig = Figarch::new()
+            .fit_series(&y, &Session::new("fig", "fit"))
+            .expect("figarch");
+        assert!(fig
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        assert!(fig.value.d > 0.0 && fig.value.d < 1.0);
         let uc = UnobservedComponents::with_seasonal(4)
             .fit_series(&y, &Session::new("uc", "fit"))
             .expect("uc");
