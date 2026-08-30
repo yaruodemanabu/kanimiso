@@ -13863,8 +13863,34 @@ pub fn survfunc_dc(
         None,
         &ctx.policy,
     );
-    if let Some(issue) = scan_finite(right.as_slice()).to_issue("right") {
-        ctx.push(issue);
+    let nans = right.as_slice().iter().filter(|v| v.is_nan()).count();
+    if nans > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .message(format!("survfunc_dc right contains {nans} NaN"))
+                .build(),
+        );
+    }
+    let n_inf = right
+        .as_slice()
+        .iter()
+        .filter(|v| v.is_infinite() && **v > 0.0)
+        .count();
+    if n_inf > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .severity(Severity::Advisory)
+                .message(format!(
+                    "survfunc_dc treats {n_inf} +∞ right endpoints as right-censoring"
+                ))
+                .compromise(NumericalCompromise::new(
+                    "finite right endpoints for every interval",
+                    "+∞ as an open right-censored interval",
+                    "right-censoring has no observed event time",
+                    "those rows contribute mass only on times strictly after L",
+                ))
+                .build(),
+        );
     }
     let n = left.len().min(right.len());
     if left.len() != right.len() {
