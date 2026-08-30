@@ -6207,6 +6207,191 @@ pub fn arma_order_select_ic(
     }
 }
 
+/// Exogenous-aware reduction (sktime `ForecastX`).
+///
+/// \(y_t \sim y_{t-1},\ldots,y_{t-p}, x_t\). Lag and exogenous counts are not
+/// passed as identification `p`.
+#[derive(Clone, Debug)]
+pub struct ForecastX {
+    /// Autoregressive window.
+    pub window: usize,
+}
+
+impl Default for ForecastX {
+    fn default() -> Self {
+        Self { window: 2 }
+    }
+}
+
+impl ForecastX {
+    /// ForecastX with lag window `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+        }
+    }
+
+    /// Fit on a series and aligned exogenous matrix.
+    pub fn fit(
+        &mut self,
+        y: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedForecastX>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let p = self.window.max(1);
+        if y.len() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message(format!(
+                        "ForecastX y.len()={} x.nrows()={}",
+                        y.len(),
+                        x.nrows()
+                    ))
+                    .build(),
+            );
+        }
+        let n = y.len().min(x.nrows());
+        if n <= p {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!("ForecastX window {p} needs n>{p} (n={n})"))
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "exogenous reduction",
+                        "n ≤ p leaves no regression rows",
+                        "lengthen the series or shorten the window",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedForecastX {
+                coef_lags: Vector::zeros(p),
+                coef_x: Vector::zeros(x.ncols()),
+                intercept: y.mean(),
+                last: y.clone(),
+                last_x: if x.nrows() > 0 {
+                    Vector::from_iter((0..x.ncols()).map(|j| x.get(x.nrows() - 1, j)))
+                } else {
+                    Vector::zeros(x.ncols())
+                },
+                window: p,
+            });
+        }
+        let q = x.ncols();
+        let m = n - p;
+        let design = Matrix::from_fn(m, 1 + p + q, |i, j| {
+            if j == 0 {
+                1.0
+            } else if j <= p {
+                y[i + j - 1]
+            } else {
+                x.get(i + p, j - 1 - p)
+            }
+        });
+        let target = Vector::from_iter((p..n).map(|t| y[t]));
+        let mut scratch = Report::new("forecastx", "ols");
+        let beta = crate::linalg::least_squares(&mut scratch, &design, &target, &ctx.policy);
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::PerfectCollinearity
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let b = beta.unwrap_or_else(|| Vector::zeros(design.ncols()));
+        let intercept = b.as_slice().first().copied().unwrap_or(0.0);
+        let coef_lags =
+            Vector::from_iter((0..p).map(|j| if 1 + j < b.len() { b[1 + j] } else { 0.0 }));
+        let coef_x = Vector::from_iter((0..q).map(|j| {
+            let idx = 1 + p + j;
+            if idx < b.len() {
+                b[idx]
+            } else {
+                0.0
+            }
+        }));
+        ctx.finish(FittedForecastX {
+            coef_lags,
+            coef_x,
+            intercept,
+            last: Vector::from_iter(y.as_slice()[n - p..n].iter().copied()),
+            last_x: Vector::from_iter((0..q).map(|j| x.get(n - 1, j))),
+            window: p,
+        })
+    }
+}
+
+/// Fitted exogenous reducer.
+#[derive(Clone, Debug)]
+pub struct FittedForecastX {
+    /// Lag coefficients (oldest first).
+    pub coef_lags: Vector,
+    /// Exogenous coefficients.
+    pub coef_x: Vector,
+    /// Intercept.
+    pub intercept: f64,
+    last: Vector,
+    last_x: Vector,
+    /// Lag order.
+    pub window: usize,
+}
+
+impl FittedForecastX {
+    /// `h`-step forecast using future exogenous rows (recycled last `x` if short).
+    pub fn forecast(
+        &self,
+        horizon: usize,
+        x_future: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        if horizon == 0 {
+            return ctx.finish(Vector::zeros(0));
+        }
+        if horizon > self.window.saturating_mul(4).max(8) {
+            ctx.push(
+                Issue::builder(IssueCode::ForecastHorizonExceedsIdentifiability)
+                    .message(format!(
+                        "ForecastX horizon {horizon} ≫ window {}",
+                        self.window
+                    ))
+                    .build(),
+            );
+        }
+        let mut hist = self.last.as_slice().to_vec();
+        let mut out = Vector::zeros(horizon);
+        for h in 0..horizon {
+            let mut s = self.intercept;
+            let start = hist.len().saturating_sub(self.window);
+            for j in 0..self.coef_lags.len().min(self.window) {
+                if start + j < hist.len() {
+                    s += self.coef_lags[j] * hist[start + j];
+                }
+            }
+            for j in 0..self.coef_x.len() {
+                let xv = if h < x_future.nrows() && j < x_future.ncols() {
+                    x_future.get(h, j)
+                } else if j < self.last_x.len() {
+                    self.last_x[j]
+                } else {
+                    0.0
+                };
+                s += self.coef_x[j] * xv;
+            }
+            out[h] = s;
+            hist.push(s);
+        }
+        ctx.finish(out)
+    }
+}
+
 /// Multiple seasonal-trend LOESS (sktime `MSTL`).
 ///
 /// Second-period STL is run on the first residual. Periods are not
@@ -7845,5 +8030,15 @@ mod tests {
             .value;
         assert_eq!(g.len(), 4);
         assert!(g[0].is_finite() && g[0] > 0.0);
+        let fx = ForecastX::new(2)
+            .fit(&y, &x, &Session::new("fx", "fit"))
+            .expect("fx");
+        let fxf = fx
+            .value
+            .forecast(3, &xf, &Session::new("fx", "fc"))
+            .expect("fxf")
+            .value;
+        assert_eq!(fxf.len(), 3);
+        assert!(fxf.as_slice().iter().all(|v| v.is_finite()));
     }
 }

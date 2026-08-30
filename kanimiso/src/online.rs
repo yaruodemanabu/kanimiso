@@ -9151,6 +9151,570 @@ impl Predict for EwMean {
     }
 }
 
+/// Degree-2 polynomial expander (river `preprocessing.PolynomialExtender`).
+///
+/// Expanded width is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct PolynomialExtender {
+    /// Polynomial degree (`1` or `2`).
+    pub degree: usize,
+    n_in: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for PolynomialExtender {
+    fn default() -> Self {
+        Self {
+            degree: 2,
+            n_in: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl PolynomialExtender {
+    /// Expander of the given degree.
+    pub fn new(degree: usize) -> Self {
+        Self {
+            degree,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for PolynomialExtender {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let deg = if self.degree == 1 || self.degree == 2 {
+            self.degree
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "PolynomialExtender.degree={} is not 1 or 2; using 2",
+                        self.degree
+                    ))
+                    .build(),
+            );
+            2
+        };
+        self.degree = deg;
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        if !self.initialized {
+            self.n_in = x.ncols();
+            self.initialized = true;
+        } else if self.n_in != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let p = x.ncols();
+        let out_p = if deg == 1 { p } else { p + p + p * (p + 1) / 2 };
+        if out_p > 64 {
+            ctx.push(
+                Issue::builder(IssueCode::PolynomialExplosion)
+                    .message(format!("PolynomialExtender maps {p} → {out_p} columns"))
+                    .compromise(NumericalCompromise::new(
+                        "identified low-order features",
+                        "degree-2 monomials including interactions",
+                        "the expanded map is wider than a small panel",
+                        "do not treat every cross-term as an identified effect",
+                    ))
+                    .build(),
+            );
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(0.0);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.initialized;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("PolynomialExtender degree={deg} on {} rows", x.nrows());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "polynomial feature map",
+                "record input width; expansion is stateless",
+                format!("n_in={}", self.n_in),
+                format!("n_in={} n={}", self.n_in, self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Transform for PolynomialExtender {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(x.clone());
+        }
+        let p = x.ncols().min(self.n_in);
+        let deg = if self.degree == 1 { 1 } else { 2 };
+        let out_p = if deg == 1 { p } else { p + p + p * (p + 1) / 2 };
+        let out = Matrix::from_fn(x.nrows(), out_p, |i, j| {
+            if j < p {
+                return x.get(i, j);
+            }
+            if j < 2 * p {
+                let v = x.get(i, j - p);
+                return v * v;
+            }
+            let mut k = j - 2 * p;
+            for a in 0..p {
+                let n_right = p - a;
+                if k < n_right {
+                    let b = a + k;
+                    return x.get(i, a) * x.get(i, b);
+                }
+                k -= n_right;
+            }
+            0.0
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Online target-mean encoder (river `preprocessing.TargetEncoder` / `stats.Mean`).
+#[derive(Clone, Debug)]
+pub struct TargetMeanEncoder {
+    maps: Vec<HashMap<i64, (f64, f64)>>,
+    global: f64,
+    global_n: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for TargetMeanEncoder {
+    fn default() -> Self {
+        Self {
+            maps: Vec::new(),
+            global: 0.0,
+            global_n: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl TargetMeanEncoder {
+    /// Empty target-mean encoder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for TargetMeanEncoder {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        if !self.initialized {
+            self.maps = vec![HashMap::new(); x.ncols()];
+            self.initialized = true;
+        } else if self.maps.len() != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.global;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            self.global_n += 1.0;
+            self.global += (y[i] - self.global) / self.global_n;
+            for j in 0..x.ncols() {
+                let v = x.get(i, j);
+                if !v.is_finite() {
+                    continue;
+                }
+                let key = v.round() as i64;
+                let e = self.maps[j].entry(key).or_insert((0.0, 0.0));
+                e.1 += 1.0;
+                e.0 += (y[i] - e.0) / e.1;
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.global - before).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!("TargetMeanEncoder global={:.6e}", self.global);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "per-level target means",
+                "Welford update of category-conditional means",
+                format!("global={before:.6e}"),
+                format!("global={:.6e}", self.global),
+            ),
+        )
+    }
+}
+
+impl Transform for TargetMeanEncoder {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(x.clone());
+        }
+        let out = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            let v = x.get(i, j);
+            if !v.is_finite() {
+                return self.global;
+            }
+            if j >= self.maps.len() {
+                return self.global;
+            }
+            self.maps[j]
+                .get(&(v.round() as i64))
+                .map(|e| e.0)
+                .unwrap_or(self.global)
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Poisson-bootstrap bag of perceptrons (river `ensemble.BaggingClassifier`).
+#[derive(Clone, Debug)]
+pub struct OnlineBagging {
+    /// Members.
+    pub n_models: usize,
+    models: Vec<Perceptron>,
+    n_seen: u64,
+    updates: u64,
+    rng: Rng,
+}
+
+impl Default for OnlineBagging {
+    fn default() -> Self {
+        Self {
+            n_models: 3,
+            models: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            rng: Rng::new(3),
+        }
+    }
+}
+
+impl OnlineBagging {
+    /// Bag of `n_models` perceptrons.
+    pub fn new(n_models: usize) -> Self {
+        Self {
+            n_models: n_models.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineBagging {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        if self.models.is_empty() {
+            self.models = vec![Perceptron::new(); self.n_models.max(1)];
+        }
+        let before = self.n_seen;
+        for m in 0..self.models.len() {
+            let mut rows: Vec<usize> = Vec::new();
+            for i in 0..x.nrows().min(y.len()) {
+                let k = self.rng.poisson(1.0) as usize;
+                for _ in 0..k {
+                    rows.push(i);
+                }
+            }
+            if rows.is_empty() && x.nrows() > 0 {
+                rows.push(0);
+            }
+            if rows.is_empty() {
+                continue;
+            }
+            let xb = Matrix::from_fn(rows.len(), x.ncols(), |r, c| x.get(rows[r], c));
+            let yb = Vector::from_iter(rows.iter().map(|&i| y[i]));
+            let _ = self.models[m].partial_fit(&xb, Some(&yb), &session.child(format!("bag_{m}")));
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "OnlineBagging {} perceptrons, Poisson bootstrap",
+            self.models.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "perceptron committee",
+                "each member sees a Poisson(1) bootstrap of the batch",
+                format!("n={before}"),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for OnlineBagging {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.models.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let mut acc = vec![0.0; x.nrows()];
+        let mut k: f64 = 0.0;
+        for (t, m) in self.models.iter().enumerate() {
+            match m.predict(x, &session.child(format!("p{t}"))) {
+                Ok(q) => {
+                    for i in 0..x.nrows().min(q.value.len()) {
+                        acc[i] += q.value[i];
+                    }
+                    k += 1.0;
+                }
+                Err(_) => {}
+            }
+        }
+        let k = k.max(1.0);
+        ctx.finish(Vector::from_iter(acc.iter().map(|v| {
+            if *v / k > 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        })))
+    }
+}
+
+/// Rolling quantile (river `stats.Quantile`).
+#[derive(Clone, Debug)]
+pub struct RollingQuantile {
+    /// Quantile in \((0, 1)\).
+    pub q: f64,
+    window: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingQuantile {
+    fn default() -> Self {
+        Self {
+            q: 0.5,
+            window: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingQuantile {
+    /// Rolling quantile `q`.
+    pub fn new(q: f64) -> Self {
+        Self {
+            q,
+            ..Self::default()
+        }
+    }
+
+    /// Current quantile, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.window.is_empty() {
+            return f64::NAN;
+        }
+        let qv = if self.q.is_finite() && self.q > 0.0 && self.q < 1.0 {
+            self.q
+        } else {
+            0.5
+        };
+        let mut xs = self.window.clone();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = (qv * (xs.len() - 1) as f64).round() as usize;
+        xs[idx.min(xs.len() - 1)]
+    }
+}
+
+impl PartialFit for RollingQuantile {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.q.is_finite() || self.q <= 0.0 || self.q >= 1.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "RollingQuantile.q={} is not in (0,1); using 0.5",
+                        self.q
+                    ))
+                    .build(),
+            );
+            self.q = 0.5;
+        }
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if v.is_finite() {
+                self.window.push(v);
+                if self.window.len() > 256 {
+                    self.window.remove(0);
+                }
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.window.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.window.len() >= 4;
+        q.warmup = self.window.len() < 4;
+        q.explanation = format!("RollingQuantile q={:.3} value={after:.6e}", self.q);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed order statistic",
+                "256-row sliding quantile",
+                format!("q={before:.6e}"),
+                format!("q={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming Hamming loss (river `metrics.Hamming`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineHamming {
+    bad: f64,
+    n: u64,
+    updates: u64,
+}
+
+impl OnlineHamming {
+    /// Empty Hamming.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current Hamming loss, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.n == 0 {
+            f64::NAN
+        } else {
+            self.bad / self.n as f64
+        }
+    }
+}
+
+impl PartialFit for OnlineHamming {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        metric_partial(
+            session,
+            "hamming",
+            x,
+            y,
+            self.updates,
+            self.n,
+            |pred, truth| {
+                self.n += 1;
+                if pred.round() != truth.round() {
+                    self.bad += 1.0;
+                }
+                self.updates += 1;
+                self.score()
+            },
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9406,6 +9970,21 @@ mod tests {
         EwMean::new(0.6)
             .partial_fit(&x, None, &session)
             .expect("ewm");
+        PolynomialExtender::new(2)
+            .partial_fit(&x, None, &session)
+            .expect("poly");
+        TargetMeanEncoder::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("tme");
+        OnlineBagging::new(2)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("obag");
+        RollingQuantile::new(0.5)
+            .partial_fit(&x, None, &session)
+            .expect("rq");
+        OnlineHamming::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("oham");
 
         let n_expl = session
             .ledger()

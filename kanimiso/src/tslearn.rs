@@ -2789,8 +2789,15 @@ pub fn msm(a: &Vector, b: &Vector, c: f64, session: &Session) -> Result<Qualifie
         ctx.push(Issue::builder(IssueCode::EmptyMatrix).build());
         return ctx.finish(f64::NAN);
     }
+    ctx.finish(msm_raw(a.as_slice(), b.as_slice(), c))
+}
+
+fn msm_raw(a: &[f64], b: &[f64], c: f64) -> f64 {
     let n = a.len();
     let m = b.len();
+    if n == 0 || m == 0 {
+        return f64::NAN;
+    }
     let mut dp = vec![0.0; n * m];
     let at = |i: usize, j: usize| i * m + j;
     dp[at(0, 0)] = (a[0] - b[0]).abs();
@@ -2808,7 +2815,7 @@ pub fn msm(a: &Vector, b: &Vector, c: f64, session: &Session) -> Result<Qualifie
             dp[at(i, j)] = mv.min(split).min(merge);
         }
     }
-    ctx.finish(dp[at(n - 1, m - 1)])
+    dp[at(n - 1, m - 1)]
 }
 
 /// Time Warp Edit distance (tslearn `twe`).
@@ -2852,8 +2859,15 @@ pub fn twe(
         ctx.push(Issue::builder(IssueCode::EmptyMatrix).build());
         return ctx.finish(f64::NAN);
     }
+    ctx.finish(twe_raw(a.as_slice(), b.as_slice(), nu, lambda))
+}
+
+fn twe_raw(a: &[f64], b: &[f64], nu: f64, lambda: f64) -> f64 {
     let n = a.len();
     let m = b.len();
+    if n == 0 || m == 0 {
+        return f64::NAN;
+    }
     let mut dp = vec![f64::INFINITY; (n + 1) * (m + 1)];
     let at = |i: usize, j: usize| i * (m + 1) + j;
     dp[at(0, 0)] = 0.0;
@@ -2878,7 +2892,42 @@ pub fn twe(
             dp[at(i, j)] = match_c.min(del).min(ins);
         }
     }
-    ctx.finish(dp[at(n, m)])
+    dp[at(n, m)]
+}
+
+/// Pairwise MSM between rows of `a` and rows of `b`.
+pub fn cdist_msm(a: &Matrix, b: &Matrix, c: f64, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let c = if c.is_finite() && c >= 0.0 { c } else { 0.1 };
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        msm_raw(a.row(i).as_slice(), b.row(j).as_slice(), c)
+    });
+    ctx.finish(out)
+}
+
+/// Pairwise TWE between rows of `a` and rows of `b`.
+pub fn cdist_twe(
+    a: &Matrix,
+    b: &Matrix,
+    nu: f64,
+    lambda: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let nu = if nu.is_finite() && nu >= 0.0 { nu } else { 0.0 };
+    let lambda = if lambda.is_finite() && lambda >= 0.0 {
+        lambda
+    } else {
+        1.0
+    };
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        twe_raw(a.row(i).as_slice(), b.row(j).as_slice(), nu, lambda)
+    });
+    ctx.finish(out)
 }
 
 /// Linear resampler of each row to `n_out` samples (tslearn `TimeSeriesResampler`).
@@ -3956,6 +4005,594 @@ impl Transform for FittedShapeletTransform {
     }
 }
 
+/// Lead–lag path signature of order 2 (sktime `SignatureTransformer` lite).
+///
+/// Each row is treated as a 2-d path \((t, x_t)\). Feature count is not
+/// identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct SignatureTransformer;
+
+impl SignatureTransformer {
+    /// Default order-2 lead–lag signature.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Transform for SignatureTransformer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t = x.ncols();
+        if t < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message("SignatureTransformer needs T≥2")
+                    .build(),
+            );
+        }
+        // S¹ (2) + S² (4)
+        let out = Matrix::from_fn(x.nrows(), 6, |i, j| {
+            if t < 2 {
+                return 0.0;
+            }
+            let mut s1 = [0.0; 2];
+            let mut s2 = [0.0; 4];
+            for k in 1..t {
+                let dt = 1.0 / (t - 1) as f64;
+                let dx = x.get(i, k) - x.get(i, k - 1);
+                let d = [dt, dx];
+                s2[0] += s1[0] * d[0];
+                s2[1] += s1[0] * d[1];
+                s2[2] += s1[1] * d[0];
+                s2[3] += s1[1] * d[1];
+                s1[0] += d[0];
+                s1[1] += d[1];
+            }
+            match j {
+                0 => s1[0],
+                1 => s1[1],
+                2 => s2[0],
+                3 => s2[1],
+                4 => s2[2],
+                _ => s2[3],
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Vote of several ROCKET+ridge members (sktime `Arsenal` lite).
+///
+/// Member / kernel counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Arsenal {
+    /// Ensemble size.
+    pub n_members: usize,
+    /// Kernels per member.
+    pub n_kernels: usize,
+    /// Kernel length.
+    pub kernel_len: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for Arsenal {
+    fn default() -> Self {
+        Self {
+            n_members: 3,
+            n_kernels: 8,
+            kernel_len: 3,
+            alpha: 0.5,
+            seed: 4,
+        }
+    }
+}
+
+impl Arsenal {
+    /// Default Arsenal lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted Arsenal vote.
+#[derive(Clone, Debug)]
+pub struct FittedArsenal {
+    members: Vec<FittedRocketClassifier>,
+}
+
+impl Fit for Arsenal {
+    type Fitted = FittedArsenal;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedArsenal>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let m = self.n_members.max(1);
+        let mut members = Vec::with_capacity(m);
+        for i in 0..m {
+            let mut clf = RocketClassifier {
+                n_kernels: self.n_kernels.max(1),
+                kernel_len: self.kernel_len.max(1),
+                alpha: self.alpha,
+                seed: self.seed.wrapping_add(i as u64 * 17),
+            };
+            match clf.fit(x, y, &session.child(format!("ars_{i}"))) {
+                Ok(q) => members.push(q.value),
+                Err(e) => {
+                    if !matches!(
+                        e.primary.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::RankZero
+                            | IssueCode::R2IsOne
+                            | IssueCode::InsufficientSample
+                    ) {
+                        ctx.push(e.primary);
+                    }
+                }
+            }
+        }
+        if members.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("Arsenal: every ROCKET member was rejected")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedArsenal { members })
+    }
+}
+
+impl Predict for FittedArsenal {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.members.is_empty() {
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let mut votes = vec![0.0; x.nrows()];
+        for (t, m) in self.members.iter().enumerate() {
+            match m.predict(x, &session.child(format!("m{t}"))) {
+                Ok(q) => {
+                    for i in 0..x.nrows().min(q.value.len()) {
+                        votes[i] += q.value[i];
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        let k = self.members.len() as f64;
+        ctx.finish(Vector::from_iter(votes.iter().map(|v| {
+            if *v / k > 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        })))
+    }
+}
+
+/// Catch22 features, random rotation, ridge (sktime `FreshPRINCE` lite).
+///
+/// Feature count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct FreshPrince {
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Rotation seed.
+    pub seed: u64,
+}
+
+impl Default for FreshPrince {
+    fn default() -> Self {
+        Self {
+            alpha: 0.1,
+            seed: 9,
+        }
+    }
+}
+
+impl FreshPrince {
+    /// Default FreshPRINCE lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted FreshPRINCE lite.
+#[derive(Clone, Debug)]
+pub struct FittedFreshPrince {
+    rot: Matrix,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+fn random_rotation(p: usize, seed: u64) -> Matrix {
+    let mut rng = Rng::new(seed);
+    let mut q = Matrix::from_fn(p, p, |_, _| rng.standard_normal());
+    for j in 0..p {
+        for k in 0..j {
+            let mut dot = 0.0;
+            for i in 0..p {
+                dot += q.get(i, j) * q.get(i, k);
+            }
+            for i in 0..p {
+                q.set(i, j, q.get(i, j) - dot * q.get(i, k));
+            }
+        }
+        let mut nrm = 0.0;
+        for i in 0..p {
+            nrm += q.get(i, j) * q.get(i, j);
+        }
+        let nrm = nrm.sqrt().max(1e-12);
+        for i in 0..p {
+            q.set(i, j, q.get(i, j) / nrm);
+        }
+    }
+    q
+}
+
+fn apply_rotation(z: &Matrix, rot: &Matrix) -> Matrix {
+    let p = z.ncols().min(rot.nrows());
+    Matrix::from_fn(z.nrows(), rot.ncols(), |i, j| {
+        let mut s = 0.0;
+        for k in 0..p.min(rot.nrows()) {
+            s += z.get(i, k) * rot.get(k, j);
+        }
+        s
+    })
+}
+
+impl Fit for FreshPrince {
+    type Fitted = FittedFreshPrince;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedFreshPrince>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let z = catch22_rows(x, session, &mut ctx);
+        let p = z.ncols().max(1);
+        let rot = random_rotation(p, self.seed);
+        let zr = apply_rotation(&z, &rot);
+        let classes: Vec<i64> = {
+            let mut c: Vec<i64> = y
+                .as_slice()
+                .iter()
+                .filter(|v| v.is_finite())
+                .map(|v| v.round() as i64)
+                .collect();
+            c.sort_unstable();
+            c.dedup();
+            c
+        };
+        let pm = Vector::from_iter(y.as_slice().iter().map(|&v| {
+            let lab = v.round() as i64;
+            if classes.len() >= 2 && lab == classes[classes.len() - 1] {
+                1.0
+            } else {
+                -1.0
+            }
+        }));
+        let mut scratch = signlred::Report::new("freshprince", "ridge");
+        let design = zr.with_intercept();
+        let beta = ridge_solve(&mut scratch, &design, &pm, self.alpha.max(0.0), &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        ctx.finish(FittedFreshPrince {
+            rot,
+            inner: crate::classification::FittedRidgeClassifier::from_penalized(
+                FittedPenalized {
+                    coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                    intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+                    alpha: self.alpha,
+                    l1_ratio: 0.0,
+                },
+                if classes.len() >= 2 {
+                    classes
+                } else {
+                    vec![0, 1]
+                },
+            ),
+        })
+    }
+}
+
+impl Predict for FittedFreshPrince {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let z = catch22_rows(x, session, &mut ctx);
+        let zr = apply_rotation(&z, &self.rot);
+        match self.inner.predict(&zr, &session.child("ridge")) {
+            Ok(q) => ctx.finish(q.value),
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::RankZero
+                ) {
+                    ctx.push(e.primary);
+                }
+                ctx.finish(Vector::zeros(x.nrows()))
+            }
+        }
+    }
+}
+
+/// Shapelet distances plus ridge (sktime `ShapeletTransformClassifier` lite).
+#[derive(Clone, Debug)]
+pub struct ShapeletTransformClassifier {
+    /// Shapelets.
+    pub n_shapelets: usize,
+    /// Shapelet length.
+    pub length: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for ShapeletTransformClassifier {
+    fn default() -> Self {
+        Self {
+            n_shapelets: 3,
+            length: 3,
+            alpha: 0.1,
+            seed: 2,
+        }
+    }
+}
+
+impl ShapeletTransformClassifier {
+    /// Default shapelet transform classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted shapelet-transform classifier.
+#[derive(Clone, Debug)]
+pub struct FittedShapeletTransformClassifier {
+    shapelets: FittedShapeletTransform,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for ShapeletTransformClassifier {
+    type Fitted = FittedShapeletTransformClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedShapeletTransformClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let st = ShapeletTransform::new(self.n_shapelets, self.length)
+            .fit_unsupervised(x, &session.child("shp"))?
+            .value;
+        let z = st.transform(x, &session.child("shpt"))?.value;
+        let classes: Vec<i64> = {
+            let mut c: Vec<i64> = y
+                .as_slice()
+                .iter()
+                .filter(|v| v.is_finite())
+                .map(|v| v.round() as i64)
+                .collect();
+            c.sort_unstable();
+            c.dedup();
+            c
+        };
+        let pm = Vector::from_iter(y.as_slice().iter().map(|&v| {
+            let lab = v.round() as i64;
+            if classes.len() >= 2 && lab == classes[classes.len() - 1] {
+                1.0
+            } else {
+                -1.0
+            }
+        }));
+        let mut scratch = signlred::Report::new("stc", "ridge");
+        let design = z.with_intercept();
+        let beta = ridge_solve(&mut scratch, &design, &pm, self.alpha.max(0.0), &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        ctx.finish(FittedShapeletTransformClassifier {
+            shapelets: st,
+            inner: crate::classification::FittedRidgeClassifier::from_penalized(
+                FittedPenalized {
+                    coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                    intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+                    alpha: self.alpha,
+                    l1_ratio: 0.0,
+                },
+                if classes.len() >= 2 {
+                    classes
+                } else {
+                    vec![0, 1]
+                },
+            ),
+        })
+    }
+}
+
+impl Predict for FittedShapeletTransformClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = self.shapelets.transform(x, &session.child("shpt"))?;
+        self.inner.predict(&z.value, session)
+    }
+}
+
+/// Soft-DTW k-means (tslearn `TimeSeriesKMeans` with soft-DTW metric).
+///
+/// Cluster count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SoftDtwKMeans {
+    /// Clusters.
+    pub n_clusters: usize,
+    /// Soft-DTW smoothness.
+    pub gamma: f64,
+    /// Assignment iterations.
+    pub max_iter: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for SoftDtwKMeans {
+    fn default() -> Self {
+        Self {
+            n_clusters: 2,
+            gamma: 0.5,
+            max_iter: 8,
+            seed: 1,
+        }
+    }
+}
+
+impl SoftDtwKMeans {
+    /// Soft-DTW k-means with `k` clusters.
+    pub fn new(n_clusters: usize) -> Self {
+        Self {
+            n_clusters,
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted soft-DTW k-means.
+#[derive(Clone, Debug)]
+pub struct FittedSoftDtwKMeans {
+    /// Centroids.
+    pub centers: Matrix,
+    /// Training labels.
+    pub labels: Vector,
+    gamma: f64,
+}
+
+impl FitUnsupervised for SoftDtwKMeans {
+    type Fitted = FittedSoftDtwKMeans;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedSoftDtwKMeans>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let n = x.nrows();
+        let k = self.n_clusters.max(1).min(n.max(1));
+        let g = if self.gamma.is_finite() && self.gamma > 0.0 {
+            self.gamma
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "SoftDtwKMeans.gamma={} is not positive; using 0.5",
+                        self.gamma
+                    ))
+                    .build(),
+            );
+            0.5
+        };
+        if n == 0 {
+            return ctx.finish(FittedSoftDtwKMeans {
+                centers: Matrix::zeros(0, x.ncols()),
+                labels: Vector::zeros(0),
+                gamma: g,
+            });
+        }
+        let mut rng = Rng::new(self.seed);
+        let seeds = rng.sample_indices(n, k);
+        let mut centers =
+            Matrix::from_fn(k, x.ncols(), |c, j| x.get(seeds[c.min(seeds.len() - 1)], j));
+        let mut labels = Vector::zeros(n);
+        for _ in 0..self.max_iter.max(1) {
+            for i in 0..n {
+                let mut best = 0usize;
+                let mut bd = f64::INFINITY;
+                for c in 0..k {
+                    let d = softdtw_raw(x.row(i).as_slice(), centers.row(c).as_slice(), g);
+                    if d < bd {
+                        bd = d;
+                        best = c;
+                    }
+                }
+                labels[i] = best as f64;
+            }
+            for c in 0..k {
+                let members: Vec<usize> = (0..n)
+                    .filter(|&i| labels[i].round() as usize == c)
+                    .collect();
+                if members.is_empty() {
+                    ctx.push(
+                        Issue::builder(IssueCode::EmptyCluster)
+                            .message(format!("soft-DTW k-means cluster {c} emptied; re-seeded"))
+                            .build(),
+                    );
+                    let r = rng.below(n);
+                    for j in 0..x.ncols() {
+                        centers.set(c, j, x.get(r, j));
+                    }
+                    continue;
+                }
+                let sub = Matrix::from_fn(members.len(), x.ncols(), |i, j| x.get(members[i], j));
+                match softdtw_barycenter(&sub, g, 4, &session.child(format!("sdb_{c}"))) {
+                    Ok(q) => {
+                        for j in 0..x.ncols().min(q.value.len()) {
+                            centers.set(c, j, q.value[j]);
+                        }
+                    }
+                    Err(_) => {
+                        for j in 0..x.ncols() {
+                            let m = members.iter().map(|&i| x.get(i, j)).sum::<f64>()
+                                / members.len() as f64;
+                            centers.set(c, j, m);
+                        }
+                    }
+                }
+            }
+        }
+        ctx.finish(FittedSoftDtwKMeans {
+            centers,
+            labels,
+            gamma: g,
+        })
+    }
+}
+
+impl Predict for FittedSoftDtwKMeans {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let y = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut best = 0usize;
+            let mut bd = f64::INFINITY;
+            for c in 0..self.centers.nrows() {
+                let d = softdtw_raw(
+                    x.row(i).as_slice(),
+                    self.centers.row(c).as_slice(),
+                    self.gamma,
+                );
+                if d < bd {
+                    bd = d;
+                    best = c;
+                }
+            }
+            best as f64
+        }));
+        ctx.finish(y)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4343,5 +4980,51 @@ mod tests {
             .value;
         assert_eq!(tsvp.len(), 6);
         assert!(tsvp.as_slice().iter().all(|v| v.is_finite()));
+        let cms = cdist_msm(&x, &x, 0.1, &Session::new("ts", "cmsm"))
+            .unwrap()
+            .value;
+        assert_eq!(cms.shape(), (6, 6));
+        assert!(cms.get(0, 0).abs() < 1e-12);
+        let ctw = cdist_twe(&x, &x, 0.0, 1.0, &Session::new("ts", "ctwe"))
+            .unwrap()
+            .value;
+        assert_eq!(ctw.shape(), (6, 6));
+        let sig = SignatureTransformer::new()
+            .transform(&x, &Session::new("ts", "sig"))
+            .unwrap()
+            .value;
+        assert_eq!(sig.ncols(), 6);
+        let ars = Arsenal::new()
+            .fit(&x, &yb, &Session::new("ts", "ars"))
+            .unwrap();
+        let arp = ars
+            .value
+            .predict(&x, &Session::new("ts", "arsp"))
+            .unwrap()
+            .value;
+        assert_eq!(arp.len(), 6);
+        let fp = FreshPrince::new()
+            .fit(&x, &yb, &Session::new("ts", "fp"))
+            .unwrap();
+        let fpp = fp
+            .value
+            .predict(&x, &Session::new("ts", "fpp"))
+            .unwrap()
+            .value;
+        assert_eq!(fpp.len(), 6);
+        let stc = ShapeletTransformClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "stc"))
+            .unwrap();
+        let stp = stc
+            .value
+            .predict(&x, &Session::new("ts", "stcp"))
+            .unwrap()
+            .value;
+        assert_eq!(stp.len(), 6);
+        let sdk = SoftDtwKMeans::new(2)
+            .fit_unsupervised(&x, &Session::new("ts", "sdk"))
+            .unwrap();
+        assert_eq!(sdk.value.labels.len(), 6);
+        assert_eq!(sdk.value.centers.nrows(), 2);
     }
 }

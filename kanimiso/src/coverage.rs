@@ -2611,6 +2611,133 @@ const INVENTORY: &[Algorithm] = &[
         "online",
     ),
     a("online.EwMean", "river.stats.EWMean", "online"),
+    a(
+        "metrics.homogeneity_score",
+        "sklearn.metrics.homogeneity_score",
+        "metric",
+    ),
+    a(
+        "metrics.completeness_score",
+        "sklearn.metrics.completeness_score",
+        "metric",
+    ),
+    a(
+        "metrics.v_measure_score",
+        "sklearn.metrics.v_measure_score",
+        "metric",
+    ),
+    a(
+        "metrics.normalized_mutual_info_score",
+        "sklearn.metrics.normalized_mutual_info_score",
+        "metric",
+    ),
+    a(
+        "metrics.adjusted_mutual_info_score",
+        "sklearn.metrics.adjusted_mutual_info_score",
+        "metric",
+    ),
+    a(
+        "metrics.fowlkes_mallows_score",
+        "sklearn.metrics.fowlkes_mallows_score",
+        "metric",
+    ),
+    a(
+        "metrics.log_cosh_error",
+        "sklearn.metrics.log_cosh",
+        "metric",
+    ),
+    a(
+        "metrics.mean_squared_log_error",
+        "sklearn.metrics.mean_squared_log_error",
+        "metric",
+    ),
+    a(
+        "metrics.root_mean_squared_error",
+        "sklearn.metrics.root_mean_squared_error",
+        "metric",
+    ),
+    a(
+        "metrics.top_k_accuracy",
+        "sklearn.metrics.top_k_accuracy_score",
+        "metric",
+    ),
+    a(
+        "stats.mcnemar",
+        "statsmodels.stats.contingency_tables.mcnemar",
+        "stats",
+    ),
+    a(
+        "stats.fisher_exact",
+        "statsmodels.stats.contingency_tables.Table2x2",
+        "stats",
+    ),
+    a(
+        "stats.anderson_darling",
+        "statsmodels.stats.diagnostic.normal_ad",
+        "stats",
+    ),
+    a(
+        "stats.lilliefors",
+        "statsmodels.stats.diagnostic.lilliefors",
+        "stats",
+    ),
+    a(
+        "tsa.ForecastX",
+        "sktime.forecasting.compose.ForecastX",
+        "forecast",
+    ),
+    a(
+        "tslearn.Arsenal",
+        "sktime.classification.kernel_based.Arsenal",
+        "timeseries",
+    ),
+    a(
+        "tslearn.FreshPrince",
+        "sktime.classification.feature_based.FreshPRINCE",
+        "timeseries",
+    ),
+    a(
+        "tslearn.ShapeletTransformClassifier",
+        "sktime.classification.shapelet_based.ShapeletTransformClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.SignatureTransformer",
+        "sktime.transformations.panel.signature_based.SignatureTransformer",
+        "timeseries",
+    ),
+    a(
+        "tslearn.SoftDtwKMeans",
+        "tslearn.clustering.TimeSeriesKMeans",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_msm",
+        "tslearn.metrics.cdist_msm",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_twe",
+        "tslearn.metrics.cdist_twe",
+        "timeseries",
+    ),
+    a(
+        "online.PolynomialExtender",
+        "river.preprocessing.PolynomialExtender",
+        "online",
+    ),
+    a(
+        "online.TargetMeanEncoder",
+        "river.preprocessing.TargetEncoder",
+        "online",
+    ),
+    a(
+        "online.OnlineBagging",
+        "river.ensemble.BaggingClassifier",
+        "online",
+    ),
+    a("online.RollingQuantile", "river.stats.Quantile", "online"),
+    a("online.OnlineHamming", "river.metrics.Hamming", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -2712,6 +2839,12 @@ mod tests {
             "tsa.acovf",
             "tslearn.MultiRocket",
             "online.OnlineRmse",
+            "metrics.v_measure_score",
+            "stats.mcnemar",
+            "tsa.ForecastX",
+            "tslearn.Arsenal",
+            "tslearn.FreshPrince",
+            "online.OnlineBagging",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

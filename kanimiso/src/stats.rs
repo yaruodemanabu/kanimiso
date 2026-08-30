@@ -5155,6 +5155,257 @@ pub fn manova(y: &Matrix, groups: &Vector, session: &Session) -> Result<Qualifie
     })
 }
 
+/// McNemar test of paired binary outcomes (statsmodels `mcnemar`).
+///
+/// Discordant-pair count is not identification `p`.
+pub fn mcnemar(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_pair(&mut ctx, y1, y2);
+    let mut b = 0.0;
+    let mut c = 0.0;
+    let mut n = 0.0;
+    for i in 0..y1.len().min(y2.len()) {
+        if !y1[i].is_finite() || !y2[i].is_finite() {
+            continue;
+        }
+        let a = y1[i] > 0.5;
+        let d = y2[i] > 0.5;
+        if !a && d {
+            b += 1.0;
+        } else if a && !d {
+            c += 1.0;
+        }
+        n += 1.0;
+    }
+    let disc = b + c;
+    if disc <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .message("McNemar has no discordant pairs; the χ² statistic is undefined")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: 0.0,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: n,
+        });
+    }
+    let stat = (b - c) * (b - c) / disc;
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: chi2_pvalue(stat, 1.0),
+        df: 1.0,
+        nobs: n,
+    })
+}
+
+/// Fisher exact test on a 2×2 table (statsmodels `fisher_exact`).
+///
+/// Cell counts are not identification `p`.
+pub fn fisher_exact(table: &Matrix, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, table, None, &ctx.policy);
+    if table.nrows() != 2 || table.ncols() != 2 {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "fisher_exact needs a 2×2 table; got {}×{}",
+                    table.nrows(),
+                    table.ncols()
+                ))
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: 0.0,
+        });
+    }
+    let a = table.get(0, 0).round().max(0.0);
+    let b = table.get(0, 1).round().max(0.0);
+    let c = table.get(1, 0).round().max(0.0);
+    let d = table.get(1, 1).round().max(0.0);
+    let n = a + b + c + d;
+    let odds = if b > 0.0 && c > 0.0 {
+        (a * d) / (b * c)
+    } else {
+        f64::INFINITY
+    };
+    let k = a + c;
+    let n1 = a + b;
+    let lo = (n1 + k - n).max(0.0);
+    let hi = n1.min(k);
+    let ln_p = |x: f64| {
+        ln_gamma(n1 + 1.0) - ln_gamma(x + 1.0) - ln_gamma(n1 - x + 1.0) + ln_gamma(n - n1 + 1.0)
+            - ln_gamma(k - x + 1.0)
+            - ln_gamma((n - n1) - (k - x) + 1.0)
+            - (ln_gamma(n + 1.0) - ln_gamma(k + 1.0) - ln_gamma(n - k + 1.0))
+    };
+    let p_obs = ln_p(a).exp();
+    let mut p = 0.0;
+    let mut x = lo;
+    while x <= hi + 1e-9 {
+        let px = ln_p(x).exp();
+        if px <= p_obs + 1e-15 {
+            p += px;
+        }
+        x += 1.0;
+    }
+    ctx.finish(HypothesisTest {
+        statistic: odds,
+        pvalue: p.clamp(0.0, 1.0),
+        df: 1.0,
+        nobs: n,
+    })
+}
+
+/// Anderson–Darling normality test after studentization (statsmodels `normal_ad`).
+pub fn anderson_darling(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, x);
+    let st = slice_stats(x.as_slice());
+    if st.count < 8 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "Anderson–Darling n={} < 8; the tail approximation is crude",
+                    st.count
+                ))
+                .build(),
+        );
+    }
+    if st.is_constant(ctx.policy.near_zero_variance) {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("Anderson–Darling of a constant sample is undefined")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "normality after studentization",
+                    "σ = 0; every z-score is 0/0",
+                    "do not report A² on a degenerate sample",
+                ))
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: st.count as f64,
+        });
+    }
+    let mut z: Vec<f64> = x
+        .as_slice()
+        .iter()
+        .filter(|v| v.is_finite())
+        .map(|v| (v - st.mean) / st.std().max(1e-12))
+        .collect();
+    z.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = z.len() as f64;
+    let mut a2 = 0.0;
+    for (i, &zi) in z.iter().enumerate() {
+        let f = norm_cdf(zi).clamp(1e-15, 1.0 - 1e-15);
+        let fr = norm_cdf(z[z.len() - 1 - i]).clamp(1e-15, 1.0 - 1e-15);
+        a2 += (2.0 * (i as f64) + 1.0) * (f.ln() + (1.0 - fr).ln());
+    }
+    a2 = -n - a2 / n;
+    let a2s = a2 * (1.0 + 0.75 / n + 2.25 / (n * n));
+    let p = if a2s < 0.2 {
+        1.0 - (-13.436 + 101.14 * a2s - 223.73 * a2s * a2s).exp()
+    } else if a2s < 0.34 {
+        1.0 - (-8.318 + 42.796 * a2s - 59.938 * a2s * a2s).exp()
+    } else if a2s < 0.6 {
+        (-0.9177 - 4.279 * a2s - 1.38 * a2s * a2s).exp()
+    } else {
+        (-1.2937 - 5.709 * a2s + 0.0186 * a2s * a2s).exp()
+    };
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .severity(Severity::Advisory)
+            .message("Anderson–Darling p uses the Stephens polynomial, not exact tables")
+            .build(),
+    );
+    ctx.finish(HypothesisTest {
+        statistic: a2,
+        pvalue: p.clamp(0.0, 1.0),
+        df: f64::NAN,
+        nobs: n,
+    })
+}
+
+/// Lilliefors normality test (KS after estimated mean/variance).
+pub fn lilliefors(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, x);
+    let st = slice_stats(x.as_slice());
+    if st.count < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message(format!("Lilliefors n={} < 4", st.count))
+                .build(),
+        );
+    }
+    if st.is_constant(ctx.policy.near_zero_variance) {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("Lilliefors of a constant sample is undefined")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "KS after studentization",
+                    "σ = 0",
+                    "do not report D on a degenerate sample",
+                ))
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: st.count as f64,
+        });
+    }
+    let mut z: Vec<f64> = x
+        .as_slice()
+        .iter()
+        .filter(|v| v.is_finite())
+        .map(|v| (v - st.mean) / st.std().max(1e-12))
+        .collect();
+    z.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = z.len() as f64;
+    let mut d: f64 = 0.0;
+    for (i, &zi) in z.iter().enumerate() {
+        let f = norm_cdf(zi);
+        let emp_hi = (i + 1) as f64 / n;
+        let emp_lo = i as f64 / n;
+        d = d.max((emp_hi - f).abs()).max((emp_lo - f).abs());
+    }
+    let dstar = d * (n.sqrt() - 0.01 + 0.85 / n.sqrt());
+    let p = (-7.01256 * dstar * dstar * (n + 2.78019) + 2.99587 * dstar * (n + 2.78019).sqrt()
+        - 0.122119
+        + 0.974598 / n.sqrt()
+        + 1.67997 / n)
+        .exp();
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .severity(Severity::Advisory)
+            .message("Lilliefors p uses a Dallal–Wilkinson style approximation")
+            .compromise(NumericalCompromise::new(
+                "Lilliefors table or Monte Carlo",
+                "closed-form KS-style tail",
+                "mean and variance were estimated from the same sample",
+                "treat p as a screening statistic",
+            ))
+            .build(),
+    );
+    ctx.finish(HypothesisTest {
+        statistic: d,
+        pvalue: p.clamp(0.0, 1.0),
+        df: f64::NAN,
+        nobs: n,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5367,5 +5618,16 @@ mod tests {
         assert!(mv.value.pillai.is_finite());
         assert!(mv.value.pillai > 0.2, "pillai={}", mv.value.pillai);
         assert_eq!(mv.value.n_groups, 2);
+        let y1 = Vector::from_iter((0..20).map(|i| if i % 3 == 0 { 1.0 } else { 0.0 }));
+        let y2 = Vector::from_iter((0..20).map(|i| if i % 2 == 0 { 1.0 } else { 0.0 }));
+        let mc = mcnemar(&y1, &y2, &Session::new("mc", "t")).expect("mc");
+        assert!(mc.value.statistic.is_finite());
+        let tab2 = Matrix::from_fn(2, 2, |i, j| if i == j { 8.0 } else { 2.0 });
+        let fe = fisher_exact(&tab2, &Session::new("fe", "t")).expect("fe");
+        assert!(fe.value.pvalue.is_finite() && fe.value.pvalue < 0.2);
+        let ad = anderson_darling(&y, &Session::new("ad", "t")).expect("ad");
+        assert!(ad.value.statistic.is_finite());
+        let lf = lilliefors(&y, &Session::new("lf", "t")).expect("lf");
+        assert!(lf.value.statistic.is_finite());
     }
 }

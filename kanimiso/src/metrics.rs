@@ -1758,6 +1758,400 @@ pub fn ndcg_score(y_true: &Vector, y_score: &Vector, session: &Session) -> Resul
     ctx.finish(dcg.value / idcg)
 }
 
+fn entropy_counts(counts: &[f64]) -> f64 {
+    let n: f64 = counts.iter().sum();
+    if n <= 0.0 {
+        return 0.0;
+    }
+    let mut h = 0.0;
+    for &c in counts {
+        if c > 0.0 {
+            let p = c / n;
+            h -= p * p.ln();
+        }
+    }
+    h
+}
+
+fn contingency(yt: &[i64], yp: &[i64]) -> (Vec<Vec<f64>>, Vec<f64>, Vec<f64>, f64) {
+    let ct = unique_sorted(yt);
+    let cp = unique_sorted(yp);
+    let mut table = vec![vec![0.0; cp.len()]; ct.len()];
+    let mut n = 0.0;
+    for i in 0..yt.len().min(yp.len()) {
+        let r = ct.iter().position(|&c| c == yt[i]);
+        let c = cp.iter().position(|&c| c == yp[i]);
+        if let (Some(r), Some(c)) = (r, c) {
+            table[r][c] += 1.0;
+            n += 1.0;
+        }
+    }
+    let mut row = vec![0.0; ct.len()];
+    let mut col = vec![0.0; cp.len()];
+    for i in 0..ct.len() {
+        for j in 0..cp.len() {
+            row[i] += table[i][j];
+            col[j] += table[i][j];
+        }
+    }
+    (table, row, col, n)
+}
+
+fn mi_from_table(table: &[Vec<f64>], row: &[f64], col: &[f64], n: f64) -> f64 {
+    if n <= 0.0 {
+        return 0.0;
+    }
+    let mut mi = 0.0;
+    for i in 0..row.len() {
+        for j in 0..col.len() {
+            let nij = table[i][j];
+            if nij <= 0.0 || row[i] <= 0.0 || col[j] <= 0.0 {
+                continue;
+            }
+            mi += (nij / n) * (n * nij / (row[i] * col[j])).ln();
+        }
+    }
+    mi
+}
+
+fn ln_comb(n: f64, k: f64) -> f64 {
+    if k < -1e-12 || k > n + 1e-12 {
+        return f64::NEG_INFINITY;
+    }
+    let k = k.clamp(0.0, n);
+    crate::special::ln_gamma(n + 1.0)
+        - crate::special::ln_gamma(k + 1.0)
+        - crate::special::ln_gamma(n - k + 1.0)
+}
+
+fn expected_mi(row: &[f64], col: &[f64], n: f64) -> f64 {
+    if n <= 0.0 {
+        return 0.0;
+    }
+    let mut emi = 0.0;
+    for &ai in row {
+        for &bj in col {
+            if ai <= 0.0 || bj <= 0.0 {
+                continue;
+            }
+            let lo = (ai + bj - n).max(1.0);
+            let hi = ai.min(bj);
+            let mut nij = lo.ceil();
+            while nij <= hi + 1e-9 {
+                let log_p = ln_comb(ai, nij) + ln_comb(n - ai, bj - nij) - ln_comb(n, bj);
+                if log_p.is_finite() {
+                    let p = log_p.exp();
+                    let term = (nij / n) * (n * nij / (ai * bj)).ln();
+                    if term.is_finite() {
+                        emi += p * term;
+                    }
+                }
+                nij += 1.0;
+            }
+        }
+    }
+    emi
+}
+
+/// Homogeneity of a clustering (sklearn `homogeneity_score`).
+pub fn homogeneity_score(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "homogeneity_score") {
+        return ctx.finish(f64::NAN);
+    }
+    inspect_classes(&mut ctx.report, y_true, &ctx.policy);
+    warn_constant_target(&mut ctx, y_true, true);
+    let yt = labels_of(y_true);
+    let yp = labels_of(y_pred);
+    let (table, row, col, n) = contingency(&yt, &yp);
+    let hc = entropy_counts(&row);
+    if hc <= 1e-18 {
+        return ctx.finish(1.0);
+    }
+    let mi = mi_from_table(&table, &row, &col, n);
+    ctx.finish((mi / hc).clamp(0.0, 1.0))
+}
+
+/// Completeness of a clustering (sklearn `completeness_score`).
+pub fn completeness_score(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "completeness_score") {
+        return ctx.finish(f64::NAN);
+    }
+    inspect_classes(&mut ctx.report, y_true, &ctx.policy);
+    warn_constant_target(&mut ctx, y_true, true);
+    let yt = labels_of(y_true);
+    let yp = labels_of(y_pred);
+    let (table, row, col, n) = contingency(&yt, &yp);
+    let hk = entropy_counts(&col);
+    if hk <= 1e-18 {
+        return ctx.finish(1.0);
+    }
+    let mi = mi_from_table(&table, &row, &col, n);
+    ctx.finish((mi / hk).clamp(0.0, 1.0))
+}
+
+/// V-measure (harmonic mean of homogeneity and completeness).
+pub fn v_measure_score(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let h = homogeneity_score(y_true, y_pred, &session.child("h"))?;
+    let c = completeness_score(y_true, y_pred, &session.child("c"))?;
+    let mut ctx = FitCtx::with_session(session.clone());
+    for issue in h.report.issues().iter().chain(c.report.issues()) {
+        if issue.code == IssueCode::MeaninglessFit {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let den = h.value + c.value;
+    ctx.finish(if den.abs() <= 1e-18 {
+        0.0
+    } else {
+        2.0 * h.value * c.value / den
+    })
+}
+
+/// Normalized mutual information (sklearn `normalized_mutual_info_score`).
+pub fn normalized_mutual_info_score(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "normalized_mutual_info_score") {
+        return ctx.finish(f64::NAN);
+    }
+    inspect_classes(&mut ctx.report, y_true, &ctx.policy);
+    warn_constant_target(&mut ctx, y_true, true);
+    let yt = labels_of(y_true);
+    let yp = labels_of(y_pred);
+    let (table, row, col, n) = contingency(&yt, &yp);
+    let hc = entropy_counts(&row);
+    let hk = entropy_counts(&col);
+    let mi = mi_from_table(&table, &row, &col, n);
+    let den = (hc * hk).sqrt();
+    if den <= 1e-18 {
+        return ctx.finish(1.0);
+    }
+    ctx.finish((mi / den).clamp(0.0, 1.0))
+}
+
+/// Adjusted mutual information (sklearn `adjusted_mutual_info_score`).
+pub fn adjusted_mutual_info_score(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "adjusted_mutual_info_score") {
+        return ctx.finish(f64::NAN);
+    }
+    inspect_classes(&mut ctx.report, y_true, &ctx.policy);
+    warn_constant_target(&mut ctx, y_true, true);
+    let yt = labels_of(y_true);
+    let yp = labels_of(y_pred);
+    let (table, row, col, n) = contingency(&yt, &yp);
+    let hc = entropy_counts(&row);
+    let hk = entropy_counts(&col);
+    let mi = mi_from_table(&table, &row, &col, n);
+    let emi = expected_mi(&row, &col, n);
+    let den = 0.5 * (hc + hk) - emi;
+    if den.abs() <= 1e-12 {
+        return ctx.finish(1.0);
+    }
+    ctx.finish(((mi - emi) / den).clamp(-1.0, 1.0))
+}
+
+/// Fowlkes–Mallows index (sklearn `fowlkes_mallows_score`).
+pub fn fowlkes_mallows_score(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "fowlkes_mallows_score") {
+        return ctx.finish(f64::NAN);
+    }
+    inspect_classes(&mut ctx.report, y_true, &ctx.policy);
+    warn_constant_target(&mut ctx, y_true, true);
+    let yt = labels_of(y_true);
+    let yp = labels_of(y_pred);
+    let (table, row, col, _) = contingency(&yt, &yp);
+    let mut tp = 0.0;
+    for r in &table {
+        for &v in r {
+            tp += comb2(v);
+        }
+    }
+    let fp: f64 = col.iter().map(|&v| comb2(v)).sum::<f64>() - tp;
+    let fn_: f64 = row.iter().map(|&v| comb2(v)).sum::<f64>() - tp;
+    let den = ((tp + fp) * (tp + fn_)).sqrt();
+    if den <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .message("Fowlkes–Mallows denominator vanished; no pair is co-clustered")
+                .build(),
+        );
+        return ctx.finish(0.0);
+    }
+    ctx.finish(tp / den)
+}
+
+/// Mean log-cosh error (sklearn `log_cosh`).
+pub fn log_cosh_error(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "log_cosh_error") {
+        return ctx.finish(f64::NAN);
+    }
+    warn_constant_target(&mut ctx, y_true, false);
+    let mut acc = 0.0;
+    let mut n = 0.0;
+    for i in 0..y_true.len().min(y_pred.len()) {
+        if !y_true[i].is_finite() || !y_pred[i].is_finite() {
+            continue;
+        }
+        let x = (y_pred[i] - y_true[i]).abs();
+        acc += x + ((-2.0 * x).exp() + 1.0).ln() - std::f64::consts::LN_2;
+        n += 1.0;
+    }
+    ctx.finish(if n > 0.0 { acc / n } else { f64::NAN })
+}
+
+/// Mean squared logarithmic error (sklearn `mean_squared_log_error`).
+pub fn mean_squared_log_error(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "mean_squared_log_error") {
+        return ctx.finish(f64::NAN);
+    }
+    warn_constant_target(&mut ctx, y_true, false);
+    let mut acc = 0.0;
+    let mut n = 0.0;
+    for i in 0..y_true.len().min(y_pred.len()) {
+        if !y_true[i].is_finite() || !y_pred[i].is_finite() {
+            continue;
+        }
+        if y_true[i] < 0.0 || y_pred[i] < 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "MSLE skipped negative pair y={}, ŷ={}",
+                        y_true[i], y_pred[i]
+                    ))
+                    .build(),
+            );
+            continue;
+        }
+        let e = (1.0 + y_true[i]).ln() - (1.0 + y_pred[i]).ln();
+        acc += e * e;
+        n += 1.0;
+    }
+    ctx.finish(if n > 0.0 { acc / n } else { f64::NAN })
+}
+
+/// Root mean squared error.
+pub fn root_mean_squared_error(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "root_mean_squared_error") {
+        return ctx.finish(f64::NAN);
+    }
+    warn_constant_target(&mut ctx, y_true, false);
+    let (_, _, _, _, sse, n) = residual_stats(y_true, y_pred);
+    ctx.finish(if n > 0 {
+        (sse / n as f64).sqrt()
+    } else {
+        f64::NAN
+    })
+}
+
+/// Top-k accuracy from a score matrix (sklearn `top_k_accuracy_score`).
+///
+/// Column `j` is the score of class `j` after labels are mapped onto
+/// `0..ncols`. `k` is not identification `p`.
+pub fn top_k_accuracy(
+    y_true: &Vector,
+    scores: &Matrix,
+    k: usize,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, scores, None, &ctx.policy);
+    warn_constant_target(&mut ctx, y_true, true);
+    if y_true.len() != scores.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "top_k_accuracy y.len()={} scores.nrows()={}",
+                    y_true.len(),
+                    scores.nrows()
+                ))
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let kk = if k >= 1 {
+        k
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("top_k_accuracy k={k} < 1; using 1"))
+                .build(),
+        );
+        1
+    };
+    let p = scores.ncols().max(1);
+    let kk = kk.min(p);
+    let mut hit = 0.0;
+    let mut n = 0.0;
+    for i in 0..y_true.len() {
+        if !y_true[i].is_finite() {
+            continue;
+        }
+        let lab = y_true[i].round() as i64;
+        let want = if lab >= 0 && (lab as usize) < p {
+            lab as usize
+        } else {
+            continue;
+        };
+        let mut idx: Vec<usize> = (0..p).collect();
+        idx.sort_by(|a, b| {
+            scores
+                .get(i, *b)
+                .partial_cmp(&scores.get(i, *a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if idx.iter().take(kk).any(|&j| j == want) {
+            hit += 1.0;
+        }
+        n += 1.0;
+    }
+    ctx.finish(if n > 0.0 { hit / n } else { f64::NAN })
+}
+
 fn bump<K: PartialEq>(xs: &mut Vec<(K, f64)>, key: K) {
     if let Some(e) = xs.iter_mut().find(|(k, _)| *k == key) {
         e.1 += 1.0;
@@ -2006,5 +2400,48 @@ mod tests {
             .unwrap()
             .value;
         assert!(dc.is_finite() && dc > 0.0);
+        let hom = homogeneity_score(&y, &y, &Session::new("m", "hom"))
+            .unwrap()
+            .value;
+        assert!((hom - 1.0).abs() < 1e-12);
+        let vm = v_measure_score(&y, &y, &Session::new("m", "vm"))
+            .unwrap()
+            .value;
+        assert!((vm - 1.0).abs() < 1e-12);
+        let nmi = normalized_mutual_info_score(&y, &y, &Session::new("m", "nmi"))
+            .unwrap()
+            .value;
+        assert!((nmi - 1.0).abs() < 1e-12);
+        let ami = adjusted_mutual_info_score(&y, &y, &Session::new("m", "ami"))
+            .unwrap()
+            .value;
+        assert!(ami > 0.5, "ami={ami}");
+        let fms = fowlkes_mallows_score(&y, &y, &Session::new("m", "fms"))
+            .unwrap()
+            .value;
+        assert!((fms - 1.0).abs() < 1e-12);
+        let lc = log_cosh_error(&y2, &h2, &Session::new("m", "lch"))
+            .unwrap()
+            .value;
+        assert!(lc.is_finite() && lc >= 0.0);
+        let msle = mean_squared_log_error(&y2, &h2, &Session::new("m", "msle"))
+            .unwrap()
+            .value;
+        assert!(msle.is_finite() && msle >= 0.0);
+        let rmse = root_mean_squared_error(&y2, &h2, &Session::new("m", "rmse"))
+            .unwrap()
+            .value;
+        assert!(rmse.is_finite() && rmse >= 0.0);
+        let sc2 = Matrix::from_fn(4, 2, |i, j| {
+            if (i < 2 && j == 0) || (i >= 2 && j == 1) {
+                0.9
+            } else {
+                0.1
+            }
+        });
+        let tk = top_k_accuracy(&y, &sc2, 1, &Session::new("m", "tk"))
+            .unwrap()
+            .value;
+        assert!((tk - 1.0).abs() < 1e-12);
     }
 }
