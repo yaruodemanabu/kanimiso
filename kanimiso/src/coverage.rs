@@ -5933,6 +5933,73 @@ const INVENTORY: &[Algorithm] = &[
         "river.linear_model.SoftmaxRegression",
         "online",
     ),
+    a("stats.CoxZph", "lifelines.statistics.proportional_hazard_test", "estimator"),
+    a(
+        "stats.IpcwCox",
+        "sksurv.linear_model.CoxPHSurvivalAnalysis",
+        "estimator",
+    ),
+    a(
+        "stats.cumulative_dynamic_auc",
+        "sksurv.metrics.cumulative_dynamic_auc",
+        "function",
+    ),
+    a(
+        "stats.CumulativeDynamicAuc",
+        "sksurv.metrics.cumulative_dynamic_auc",
+        "estimator",
+    ),
+    a(
+        "stats.brier_score_survival",
+        "sksurv.metrics.brier_score",
+        "function",
+    ),
+    a(
+        "stats.BrierScoreSurvival",
+        "sksurv.metrics.brier_score",
+        "estimator",
+    ),
+    a(
+        "stats.PiecewiseExponentialRegression",
+        "lifelines.PiecewiseExponentialRegressionFitter",
+        "estimator",
+    ),
+    a(
+        "stats.PiecewiseExponentialRegressionFitter",
+        "lifelines.PiecewiseExponentialRegressionFitter",
+        "estimator",
+    ),
+    a(
+        "online.HoeffdingTreeRegressor",
+        "river.tree.HoeffdingTreeRegressor",
+        "online",
+    ),
+    a("online.ARFRegressor", "river.forest.ARFRegressor", "online"),
+    a(
+        "online.StreamingRandomPatchesRegressor",
+        "river.ensemble.SRPRegressor",
+        "online",
+    ),
+    a(
+        "online.ExtremelyFastDecisionTreeRegressor",
+        "river.tree.ExtremelyFastDecisionTreeRegressor",
+        "online",
+    ),
+    a(
+        "online.LeveragingBaggingRegressor",
+        "river.ensemble.LeveragingBaggingRegressor",
+        "online",
+    ),
+    a(
+        "online.AdwinBaggingRegressor",
+        "river.ensemble.ADWINBaggingRegressor",
+        "online",
+    ),
+    a(
+        "tslearn.RiseClassifier",
+        "sktime.classification.interval_based.RandomIntervalSpectralForest",
+        "estimator",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6406,6 +6473,13 @@ mod tests {
             "tslearn.FreshPrinceClassifier",
             "tslearn.CanonicalIntervalForestClassifier",
             "online.SoftmaxClassifier",
+            "stats.IpcwCox",
+            "stats.cumulative_dynamic_auc",
+            "stats.PiecewiseExponentialRegression",
+            "online.HoeffdingTreeRegressor",
+            "online.LeveragingBaggingRegressor",
+            "online.AdwinBaggingRegressor",
+            "tslearn.RiseClassifier",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

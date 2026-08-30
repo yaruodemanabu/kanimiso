@@ -22605,6 +22605,648 @@ impl BreslowEstimator {
     }
 }
 
+/// Named Grambsch–Therneau PH check (lifelines / statsmodels `cox.zph`).
+#[derive(Clone, Debug, Default)]
+pub struct CoxZph;
+
+impl CoxZph {
+    /// Default Schoenfeld-vs-time test.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Correlate Schoenfeld residuals with event time.
+    pub fn test(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<HypothesisTest>> {
+        cox_zph(durations, events, x, session)
+    }
+}
+
+fn cox_grad_hess_weighted(
+    idx: &[usize],
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    beta: &Vector,
+    weight: &[f64],
+) -> (f64, Vector, Matrix) {
+    let n = idx.len();
+    let p = x.ncols();
+    let mut ll = 0.0_f64;
+    let mut grad = Vector::zeros(p);
+    let mut hess = Matrix::zeros(p, p);
+    let mut s0 = 0.0_f64;
+    let mut s1 = vec![0.0_f64; p];
+    let mut s2 = vec![0.0_f64; p * p];
+    let mut k = n;
+    while k > 0 {
+        let t = durations[idx[k - 1]];
+        let start = k;
+        while k > 0 && (durations[idx[k - 1]] - t).abs() <= 0.0 {
+            k -= 1;
+            let i = idx[k];
+            let mut xb = 0.0_f64;
+            for j in 0..p {
+                xb += x.get(i, j) * beta[j];
+            }
+            let w = xb.clamp(-20.0, 20.0).exp().max(1e-300);
+            s0 += w;
+            for j in 0..p {
+                s1[j] += w * x.get(i, j);
+            }
+            for a in 0..p {
+                for b in 0..p {
+                    s2[a * p + b] += w * x.get(i, a) * x.get(i, b);
+                }
+            }
+        }
+        for r in k..start {
+            let i = idx[r];
+            if i >= events.len() || events[i] <= 0.5 {
+                continue;
+            }
+            if s0 <= 0.0 {
+                continue;
+            }
+            let wi = if i < weight.len() && weight[i].is_finite() && weight[i] > 0.0 {
+                weight[i]
+            } else {
+                1.0
+            };
+            let mut xb = 0.0_f64;
+            for j in 0..p {
+                xb += x.get(i, j) * beta[j];
+            }
+            ll += wi * (xb - s0.ln());
+            for j in 0..p {
+                grad[j] += wi * (x.get(i, j) - s1[j] / s0);
+            }
+            for a in 0..p {
+                for b in 0..p {
+                    let v = s2[a * p + b] / s0 - (s1[a] / s0) * (s1[b] / s0);
+                    hess.set(a, b, hess.get(a, b) - wi * v);
+                }
+            }
+        }
+    }
+    (ll, grad, hess)
+}
+
+/// IPCW-weighted Breslow Cox (sksurv inverse-censoring weights).
+///
+/// Pair / weight counts are not identification `p`. Censoring KM is local
+/// ([`censoring_km`]). Inner Cholesky uses a scratch report.
+#[derive(Clone, Debug)]
+pub struct IpcwCox {
+    /// Newton iteration cap. Not identification `p`.
+    pub max_iter: usize,
+}
+
+impl Default for IpcwCox {
+    fn default() -> Self {
+        Self { max_iter: 25 }
+    }
+}
+
+impl IpcwCox {
+    /// Default IPCW Cox.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit event-weighted Breslow partial likelihood.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCoxPH>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(durations.len()).min(events.len());
+        let p = x.ncols();
+        let n_events = (0..n).filter(|&i| events[i] > 0.5).count();
+        if n_events == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("IpcwCox has no events")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "IPCW Cox coefficients",
+                        "zero events ⇒ empty weighted partial likelihood",
+                        "collect events",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedCoxPH {
+                coef: Vector::zeros(p),
+                loglik: f64::NAN,
+                n_events: 0,
+                n,
+                converged: false,
+            });
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("IpcwCox weights events by 1/Ĝ(T), not a published IPCW Cox path")
+                .compromise(NumericalCompromise::new(
+                    "IPCW / Robins–Finkelstein weighted Cox",
+                    "Breslow PL with event weights 1/Ĝ(T_i) from a local censoring KM",
+                    "risk-set weights and truncated IPCW tails are omitted",
+                    "read β as a ranking under inverse-censoring weights, not a published IPCW Cox",
+                ))
+                .build(),
+        );
+        let g_hat = censoring_km(durations, events);
+        let weight: Vec<f64> = (0..n)
+            .map(|i| {
+                if events[i] > 0.5 && durations[i].is_finite() {
+                    1.0 / censor_surv_at(&g_hat, durations[i]).max(1e-8)
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        if weight.iter().any(|w| *w > 20.0) {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("IpcwCox has large 1/Ĝ(T) weights; tails are unstable")
+                    .build(),
+            );
+        }
+        let mut idx: Vec<usize> = (0..n).collect();
+        idx.sort_by(|&a, &b| {
+            durations[a]
+                .partial_cmp(&durations[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut beta = Vector::zeros(p);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut converged = false;
+        for _it in 0..self.max_iter.max(1) {
+            let (ll, grad, hess) =
+                cox_grad_hess_weighted(&idx, durations, events, x, &beta, &weight);
+            loglik = ll;
+            if !grad.as_slice().iter().all(|v| v.is_finite()) {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("IpcwCox gradient became non-finite")
+                        .build(),
+                );
+                break;
+            }
+            if grad.norm() < 1e-7 {
+                converged = true;
+                break;
+            }
+            let mut hneg = Matrix::zeros(p, p);
+            for a in 0..p {
+                for b in 0..p {
+                    hneg.set(a, b, -hess.get(a, b));
+                }
+            }
+            let mut scratch = Report::new("ipcwcox", "newton");
+            match chol_solve(&mut scratch, hneg.inner(), &grad, &ctx.policy) {
+                Some(delta) => {
+                    for j in 0..p {
+                        beta[j] = (beta[j] - delta[j]).clamp(-20.0, 20.0);
+                    }
+                }
+                None => {
+                    ctx.push(
+                        Issue::builder(IssueCode::DidNotConverge)
+                            .message("IpcwCox information is not SPD")
+                            .build(),
+                    );
+                    break;
+                }
+            }
+        }
+        if !beta.as_slice().iter().all(|v| v.is_finite()) {
+            beta = Vector::zeros(p);
+        }
+        ctx.finish(FittedCoxPH {
+            coef: beta,
+            loglik,
+            n_events,
+            n,
+            converged,
+        })
+    }
+}
+
+/// Cumulative/dynamic AUC at a time grid (sksurv `cumulative_dynamic_auc`).
+///
+/// Time-grid width is not identification `p`. Inspect times with `y=None`.
+pub fn cumulative_dynamic_auc(
+    durations: &Vector,
+    events: &Vector,
+    scores: &Vector,
+    times: &Vector,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    let n = durations.len().min(events.len()).min(scores.len());
+    if times.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("cumulative_dynamic_auc time grid is empty")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(0));
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("cumulative_dynamic_auc is a Mann–Whitney snapshot, not Uno IPCW C/D AUC")
+            .compromise(NumericalCompromise::new(
+                "Uno / Hung–Chiang cumulative-dynamic AUC",
+                "cases T≤t,D=1 vs controls T>t with a raw score ranking",
+                "IPCW case weights and the integrated AUC are omitted",
+                "read each value as a time-slice ranking, not a published C/D AUC",
+            ))
+            .build(),
+    );
+    let out = Vector::from_iter((0..times.len()).map(|k| {
+        let t = times[k];
+        if !t.is_finite() {
+            return f64::NAN;
+        }
+        let mut cases: Vec<f64> = Vec::new();
+        let mut controls: Vec<f64> = Vec::new();
+        for i in 0..n {
+            if !durations[i].is_finite() || !scores[i].is_finite() {
+                continue;
+            }
+            if durations[i] > t + 1e-15 {
+                controls.push(scores[i]);
+            } else if events[i] > 0.5 {
+                cases.push(scores[i]);
+            }
+        }
+        if cases.is_empty() || controls.is_empty() {
+            return f64::NAN;
+        }
+        let mut conc = 0.0_f64;
+        let mut pairs = 0.0_f64;
+        for &sc in &cases {
+            for &so in &controls {
+                pairs += 1.0;
+                let d = sc - so;
+                if d.abs() <= 1e-15 {
+                    conc += 0.5;
+                } else if d > 0.0 {
+                    conc += 1.0;
+                }
+            }
+        }
+        if pairs <= 0.0 {
+            f64::NAN
+        } else {
+            conc / pairs
+        }
+    }));
+    if out.as_slice().iter().all(|v| v.is_nan()) {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("cumulative_dynamic_auc had no case/control split on the grid")
+                .build(),
+        );
+    }
+    ctx.finish(out)
+}
+
+/// Named cumulative/dynamic AUC wrapper.
+#[derive(Clone, Debug, Default)]
+pub struct CumulativeDynamicAuc;
+
+impl CumulativeDynamicAuc {
+    /// Default C/D AUC.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Score risk ranks on a time grid.
+    pub fn score(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        scores: &Vector,
+        times: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<Vector>> {
+        cumulative_dynamic_auc(durations, events, scores, times, session)
+    }
+}
+
+/// Pointwise IPCW Brier scores (sksurv `brier_score`).
+///
+/// Time-grid width is not identification `p`. Local censoring KM; does not
+/// call [`nelson_aalen`]. Inspect times with `y=None`.
+pub fn brier_score_survival(
+    durations: &Vector,
+    events: &Vector,
+    pred_surv: &Matrix,
+    times: &Vector,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    let n = durations.len().min(events.len());
+    let m = times.len();
+    if pred_surv.nrows() != n || pred_surv.ncols() != m {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("brier_score_survival pred_surv shape ≠ (n, n_times); using 0.5")
+                .build(),
+        );
+    }
+    let n_events = (0..n).filter(|&i| events[i] > 0.5).count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("brier_score_survival has no events")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "IPCW Brier scores",
+                    "zero events ⇒ every IPCW term is empty or censoring-only",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(Vector::from_iter((0..m).map(|_| f64::NAN)));
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("brier_score_survival is Graf IPCW at the supplied times, not a published IBS path")
+            .compromise(NumericalCompromise::new(
+                "Graf et al. Brier score",
+                "IPCW Brier on the given grid with a local censoring KM",
+                "the inverse-probability tail is a sketch",
+                "read each value as a calibration proxy, not a published Brier path",
+            ))
+            .build(),
+    );
+    let g_hat = censoring_km(durations, events);
+    ctx.finish(Vector::from_iter((0..m).map(|k| {
+        let t = times[k];
+        if !t.is_finite() {
+            return f64::NAN;
+        }
+        let g_t = censor_surv_at(&g_hat, t).max(1e-8);
+        let mut bs = 0.0_f64;
+        for i in 0..n {
+            if !durations[i].is_finite() {
+                continue;
+            }
+            let s = if pred_surv.nrows() == n && pred_surv.ncols() == m {
+                pred_surv.get(i, k).clamp(0.0, 1.0)
+            } else {
+                0.5
+            };
+            if durations[i] > t + 1e-15 {
+                let e = s - 1.0;
+                bs += e * e / g_t;
+            } else if events[i] > 0.5 {
+                let g_ti = censor_surv_at(&g_hat, durations[i]).max(1e-8);
+                bs += s * s / g_ti;
+            }
+        }
+        bs / n.max(1) as f64
+    })))
+}
+
+/// Named pointwise Brier wrapper.
+#[derive(Clone, Debug, Default)]
+pub struct BrierScoreSurvival;
+
+impl BrierScoreSurvival {
+    /// Default pointwise Brier.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Score predicted survivals on a time grid.
+    pub fn score(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        pred_surv: &Matrix,
+        times: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<Vector>> {
+        brier_score_survival(durations, events, pred_surv, times, session)
+    }
+}
+
+/// Piecewise-exponential PH regression (lifelines `PiecewiseExponentialRegressionFitter`).
+///
+/// Interval count is not identification `p`. Poisson log-rate
+/// \(\log\mu_{ij}=\log e_{ij}+x_i\beta+\alpha_j\) by ISTA. Inspect times via `X`.
+#[derive(Clone, Debug)]
+pub struct PiecewiseExponentialRegression {
+    /// Number of equal-width intervals. Not identification `p`.
+    pub n_cuts: usize,
+    /// ISTA steps. Not identification `p`.
+    pub max_iter: usize,
+}
+
+impl Default for PiecewiseExponentialRegression {
+    fn default() -> Self {
+        Self {
+            n_cuts: 3,
+            max_iter: 40,
+        }
+    }
+}
+
+impl PiecewiseExponentialRegression {
+    /// Default three-interval PE regression.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit \(\beta\) and interval log-hazards \(\alpha\).
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedPeRegression>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(durations.len()).min(events.len());
+        let p = x.ncols();
+        let n_events = (0..n).filter(|&i| events[i] > 0.5).count();
+        if n_events == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("PiecewiseExponentialRegression has no events")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "piecewise-exponential log-hazards",
+                        "zero events ⇒ Poisson PE likelihood is flat at λ=0",
+                        "collect events",
+                    ))
+                    .build(),
+            );
+        }
+        let k = self.n_cuts.max(1);
+        let tmax = (0..n)
+            .filter(|&i| durations[i].is_finite() && durations[i] > 0.0)
+            .map(|i| durations[i])
+            .fold(0.0_f64, f64::max);
+        let width = (tmax / k as f64).max(1e-12);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("PE regression is ISTA on stacked Poisson exposures, not lifelines PEF")
+                .compromise(NumericalCompromise::new(
+                    "piecewise-exponential PH with interval intercepts",
+                    "ISTA on μ=e·exp(xβ+α_j) over equal-width cuts",
+                    "the published Newton / interval-adaptive cuts are omitted",
+                    "read β as a relative-rate ranking, not a published PE MLE",
+                ))
+                .build(),
+        );
+        let mut beta = Vector::zeros(p);
+        let mut alpha = Vector::zeros(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let lr = 0.05_f64;
+        for _it in 0..self.max_iter.max(1) {
+            let mut gβ = Vector::zeros(p);
+            let mut gα = Vector::zeros(k);
+            let mut ll = 0.0_f64;
+            for i in 0..n {
+                if !durations[i].is_finite() || durations[i] <= 0.0 {
+                    continue;
+                }
+                let t = durations[i];
+                for j in 0..k {
+                    let lo = j as f64 * width;
+                    let hi = (j + 1) as f64 * width;
+                    if t <= lo {
+                        continue;
+                    }
+                    let e = (t.min(hi) - lo).max(0.0);
+                    if e <= 0.0 {
+                        continue;
+                    }
+                    let d = if events[i] > 0.5 && t > lo && t <= hi + 1e-15 {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    let mut xb = alpha[j];
+                    for c in 0..p {
+                        xb += x.get(i, c) * beta[c];
+                    }
+                    let mu = e * xb.clamp(-20.0, 20.0).exp();
+                    ll += d * xb - mu;
+                    let resid = d - mu;
+                    for c in 0..p {
+                        gβ[c] += resid * x.get(i, c);
+                    }
+                    gα[j] += resid;
+                }
+            }
+            loglik = ll;
+            if !gβ.as_slice().iter().all(|v| v.is_finite()) {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("PE regression gradient became non-finite")
+                        .build(),
+                );
+                break;
+            }
+            for c in 0..p {
+                beta[c] = (beta[c] + lr * gβ[c]).clamp(-20.0, 20.0);
+            }
+            for j in 0..k {
+                alpha[j] = (alpha[j] + lr * gα[j]).clamp(-20.0, 20.0);
+            }
+            if gβ.norm() + gα.norm() < 1e-6 {
+                break;
+            }
+        }
+        ctx.finish(FittedPeRegression {
+            coef: beta,
+            intercepts: alpha,
+            cuts: Vector::from_iter((1..=k).map(|j| j as f64 * width)),
+            loglik,
+        })
+    }
+}
+
+/// Fitted piecewise-exponential PH regression.
+#[derive(Clone, Debug)]
+pub struct FittedPeRegression {
+    /// Covariate log-rate slopes.
+    pub coef: Vector,
+    /// Interval log-hazards \(\alpha_j\).
+    pub intercepts: Vector,
+    /// Right endpoints of the equal-width intervals.
+    pub cuts: Vector,
+    /// Last Poisson log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedPeRegression {
+    /// Relative log-rate \(x\hat\beta\).
+    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(x.matvec(&self.coef))
+    }
+}
+
+/// Named PE regression wrapper.
+#[derive(Clone, Debug, Default)]
+pub struct PiecewiseExponentialRegressionFitter {
+    inner: PiecewiseExponentialRegression,
+}
+
+impl PiecewiseExponentialRegressionFitter {
+    /// Default three-interval PE regression.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit the Poisson PE regression.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedPeRegression>> {
+        self.inner.fit(durations, events, x, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -23614,5 +24256,26 @@ mod tests {
             .expect("brw");
         assert_eq!(brw.value.len(), 20);
         assert!(brw.value.as_slice().iter().all(|v| v.is_finite()));
+        let czph = CoxZph::new()
+            .test(&dur, &ev, &xcox, &Session::new("czph", "t"))
+            .expect("czph");
+        assert!(czph.value.statistic.is_finite() || czph.value.pvalue.is_nan());
+        let ipcx = IpcwCox::new()
+            .fit(&dur, &ev, &xcox, &Session::new("ipcx", "t"))
+            .expect("ipcx");
+        assert_eq!(ipcx.value.coef.len(), 1);
+        let cda = CumulativeDynamicAuc::new()
+            .score(&dur, &ev, &scores, &ibs_t, &Session::new("cda", "t"))
+            .expect("cda");
+        assert_eq!(cda.value.len(), 3);
+        let bss = BrierScoreSurvival::new()
+            .score(&dur, &ev, &ibs_p, &ibs_t, &Session::new("bss", "t"))
+            .expect("bss");
+        assert_eq!(bss.value.len(), 3);
+        let pere = PiecewiseExponentialRegressionFitter::new()
+            .fit(&dur, &ev, &xcox, &Session::new("pere", "t"))
+            .expect("pere");
+        assert_eq!(pere.value.coef.len(), 1);
+        assert_eq!(pere.value.intercepts.len(), 3);
     }
 }

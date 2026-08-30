@@ -35737,6 +35737,438 @@ impl Predict for SoftmaxClassifier {
     }
 }
 
+/// Named Hoeffding tree regressor (river `tree.HoeffdingTreeRegressor`).
+#[derive(Clone, Debug, Default)]
+pub struct HoeffdingTreeRegressor {
+    inner: HoeffdingRegressor,
+}
+
+impl HoeffdingTreeRegressor {
+    /// Default Hoeffding regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for HoeffdingTreeRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for HoeffdingTreeRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+/// Named ARF regressor (river `forest.ARFRegressor`).
+#[derive(Clone, Debug)]
+pub struct ARFRegressor {
+    inner: AdaptiveRandomForestRegressor,
+}
+
+impl Default for ARFRegressor {
+    fn default() -> Self {
+        Self {
+            inner: AdaptiveRandomForestRegressor::default(),
+        }
+    }
+}
+
+impl ARFRegressor {
+    /// Forest with `n_estimators` RLS leaves.
+    pub fn new(n_estimators: usize) -> Self {
+        Self {
+            inner: AdaptiveRandomForestRegressor::new(n_estimators),
+        }
+    }
+}
+
+impl PartialFit for ARFRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for ARFRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+/// Named SRP regressor (river `ensemble.SRPRegressor`).
+#[derive(Clone, Debug)]
+pub struct StreamingRandomPatchesRegressor {
+    inner: SrpRegressor,
+}
+
+impl Default for StreamingRandomPatchesRegressor {
+    fn default() -> Self {
+        Self {
+            inner: SrpRegressor::default(),
+        }
+    }
+}
+
+impl StreamingRandomPatchesRegressor {
+    /// Forest with `n_estimators` patch trees.
+    pub fn new(n_estimators: usize) -> Self {
+        Self {
+            inner: SrpRegressor::new(n_estimators),
+        }
+    }
+}
+
+impl PartialFit for StreamingRandomPatchesRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for StreamingRandomPatchesRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+/// Eager Hoeffding regressor (river `tree.ExtremelyFastDecisionTreeRegressor` lite).
+///
+/// Split-threshold / sample-count are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ExtremelyFastDecisionTreeRegressor {
+    tree: HoeffdingRegressor,
+}
+
+impl Default for ExtremelyFastDecisionTreeRegressor {
+    fn default() -> Self {
+        let mut tree = HoeffdingRegressor::new();
+        tree.min_samples = 5;
+        tree.tau = 0.15;
+        Self { tree }
+    }
+}
+
+impl ExtremelyFastDecisionTreeRegressor {
+    /// Eager VFDT regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for ExtremelyFastDecisionTreeRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let q = self.tree.partial_fit(x, y, session)?;
+        let mut ctx = FitCtx::with_session(session.child("efdtr"));
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .severity(Severity::Advisory)
+                .message("EFDT-regressor uses an eager Hoeffding bound; it does not re-evaluate splits")
+                .build(),
+        );
+        ctx.finish(q.value)
+    }
+}
+
+impl Predict for ExtremelyFastDecisionTreeRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.tree.predict(x, session)
+    }
+}
+
+/// Leveraging bagging of Hoeffding regressors (river `ensemble.LeveragingBaggingRegressor`).
+///
+/// Estimator count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct LeveragingBaggingRegressor {
+    /// Number of trees. Not identification `p`.
+    pub n_estimators: usize,
+    /// Poisson mean of the leverage weights. Not identification `p`.
+    pub w: f64,
+    trees: Vec<HoeffdingRegressor>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+    rng: Rng,
+}
+
+impl Default for LeveragingBaggingRegressor {
+    fn default() -> Self {
+        Self {
+            n_estimators: 3,
+            w: 6.0,
+            trees: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+            rng: Rng::new(29),
+        }
+    }
+}
+
+impl LeveragingBaggingRegressor {
+    /// Forest with `n_estimators` Hoeffding regressors.
+    pub fn new(n_estimators: usize) -> Self {
+        Self {
+            n_estimators: n_estimators.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for LeveragingBaggingRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        if !self.initialized {
+            self.trees = (0..self.n_estimators.max(1))
+                .map(|_| HoeffdingRegressor::new())
+                .collect();
+            self.initialized = true;
+        }
+        let mut n_updates = 0u64;
+        for i in 0..x.nrows().min(y.len()) {
+            let xi = Matrix::from_fn(1, x.ncols(), |_, j| x.get(i, j));
+            let yi = Vector::from_slice(&[y[i]]);
+            for t in 0..self.trees.len() {
+                let k = self.rng.poisson(self.w.max(0.0));
+                n_updates += k;
+                for _ in 0..k {
+                    let _ = self.trees[t].partial_fit(&xi, Some(&yi), &session.child("lbagr"));
+                }
+            }
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(n_updates as f64);
+        q.information_gain = Some(n_updates as f64);
+        q.still_identified = self.n_seen >= 15;
+        q.warmup = self.n_seen < 15;
+        q.explanation = format!(
+            "LeveragingBaggingRegressor: {} trees, {n_updates} Poisson-weighted updates",
+            self.trees.len()
+        );
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("leveraging bagging regressor still warming up")
+                    .build(),
+            );
+        }
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("{n_updates} Poisson(w={}) regressor updates", self.w),
+                "each row is replayed k~Poisson(w) times into every Hoeffding regressor",
+                "pre-batch forest",
+                "post-batch forest",
+            ),
+        )
+    }
+}
+
+impl Predict for LeveragingBaggingRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized || self.trees.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let n_t = self.trees.len() as f64;
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = 0.0_f64;
+            for t in &self.trees {
+                s += t.predict_one(x, i);
+            }
+            s / n_t.max(1.0)
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// ADWIN bagging of Hoeffding regressors (river `ensemble.ADWINBaggingRegressor`).
+///
+/// Member count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct AdwinBaggingRegressor {
+    /// Members. Not identification `p`.
+    pub n_models: usize,
+    models: Vec<HoeffdingRegressor>,
+    detectors: Vec<Adwin>,
+    n_seen: u64,
+    updates: u64,
+    rng: Rng,
+}
+
+impl Default for AdwinBaggingRegressor {
+    fn default() -> Self {
+        Self {
+            n_models: 3,
+            models: Vec::new(),
+            detectors: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            rng: Rng::new(31),
+        }
+    }
+}
+
+impl AdwinBaggingRegressor {
+    /// Bag of `n_models` Hoeffding regressors.
+    pub fn new(n_models: usize) -> Self {
+        Self {
+            n_models: n_models.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for AdwinBaggingRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        if self.models.is_empty() {
+            self.models = (0..self.n_models.max(1))
+                .map(|_| HoeffdingRegressor::new())
+                .collect();
+            self.detectors = (0..self.models.len()).map(|_| Adwin::new(0.002)).collect();
+        }
+        let before = self.n_seen;
+        let mut resets = 0u64;
+        for m in 0..self.models.len() {
+            let mut rows: Vec<usize> = Vec::new();
+            for i in 0..x.nrows().min(y.len()) {
+                let k = self.rng.poisson(1.0) as usize;
+                for _ in 0..k {
+                    rows.push(i);
+                }
+            }
+            if rows.is_empty() && x.nrows() > 0 {
+                rows.push(0);
+            }
+            if rows.is_empty() {
+                continue;
+            }
+            let xb = Matrix::from_fn(rows.len(), x.ncols(), |r, c| x.get(rows[r], c));
+            let yb = Vector::from_iter(rows.iter().map(|&i| y[i]));
+            let _ = self.models[m].partial_fit(&xb, Some(&yb), &session.child(format!("abagr_{m}")));
+            let pred = match self.models[m].predict(&xb, &session.child(format!("abagrp_{m}"))) {
+                Ok(q) => q.value,
+                Err(_) => Vector::zeros(xb.nrows()),
+            };
+            let mut err = 0.0_f64;
+            for i in 0..yb.len().min(pred.len()) {
+                err += (pred[i] - yb[i]).abs();
+            }
+            err /= yb.len().max(1) as f64;
+            if let Ok(q) = self.detectors[m].update(err, &session.child(format!("adwinr_{m}"))) {
+                if matches!(q.value, DriftDecision::Drift { .. }) {
+                    self.models[m] = HoeffdingRegressor::new();
+                    self.detectors[m].reset();
+                    resets += 1;
+                }
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(resets as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "AdwinBaggingRegressor {} trees, resets={resets}",
+            self.models.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "ADWIN bagging regressor update",
+                "Poisson bootstrap plus per-member ADWIN reset",
+                format!("n={before}"),
+                format!("n={} resets={resets}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for AdwinBaggingRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.models.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let n_t = self.models.len() as f64;
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = 0.0_f64;
+            for t in &self.models {
+                s += t.predict_one(x, i);
+            }
+            s / n_t.max(1.0)
+        }));
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -36328,6 +36760,24 @@ mod tests {
         SoftmaxClassifier::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("smc");
+        HoeffdingTreeRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("htr");
+        ARFRegressor::new(2)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("arfr");
+        StreamingRandomPatchesRegressor::new(2)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("srpr");
+        ExtremelyFastDecisionTreeRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("efdtr");
+        LeveragingBaggingRegressor::new(2)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("lbagr");
+        AdwinBaggingRegressor::new(2)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("adwinr");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
