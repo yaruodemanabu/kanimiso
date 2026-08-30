@@ -1163,6 +1163,45 @@ pub fn paired_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qua
     ctx.finish(out)
 }
 
+/// Pairwise kernel dispatcher (sklearn `pairwise_kernels`).
+///
+/// `metric` is `rbf`, `linear`, `polynomial`, `laplacian`, `sigmoid`, or
+/// `chi2`. Unknown names fall back to linear with a warning. `gamma` is not
+/// identification `p`.
+pub fn pairwise_kernels(
+    a: &Matrix,
+    b: &Matrix,
+    metric: &str,
+    gamma: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    match metric {
+        "rbf" => rbf_kernel(a, b, gamma, session),
+        "linear" => linear_kernel(a, b, session),
+        "polynomial" | "poly" => polynomial_kernel(a, b, 2, gamma, 1.0, session),
+        "laplacian" => laplacian_kernel(a, b, gamma, session),
+        "sigmoid" => sigmoid_kernel(a, b, gamma, 0.0, session),
+        "chi2" => chi2_kernel(a, b, gamma, session),
+        "additive_chi2" => additive_chi2_kernel(a, b, session),
+        other => {
+            let q = linear_kernel(a, b, session)?;
+            let mut ctx = FitCtx::with_session(session.clone());
+            for issue in q.report.issues() {
+                ctx.push(issue.clone());
+            }
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "pairwise_kernels metric={other:?} is unknown; using linear"
+                    ))
+                    .build(),
+            );
+            ctx.finish(q.value)
+        }
+    }
+}
+
 /// Maximum residual (sklearn `max_error`).
 pub fn max_error(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
@@ -3913,5 +3952,9 @@ mod tests {
             .value;
         assert_eq!(pd.len(), 8);
         assert!(pd[1].abs() < 1e-12);
+        let pwk = pairwise_kernels(&xb, &xb, "linear", 1.0, &Session::new("m", "pwk"))
+            .unwrap()
+            .value;
+        assert!(pwk.get(1, 1).is_finite());
     }
 }

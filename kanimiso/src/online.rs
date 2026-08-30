@@ -12630,6 +12630,66 @@ impl PartialFit for OnlineMean {
     }
 }
 
+/// Streaming sum (river `stats.Sum`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineSum {
+    n: u64,
+    sum: f64,
+    updates: u64,
+}
+
+impl OnlineSum {
+    /// Empty sum.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current sum.
+    pub fn score(&self) -> f64 {
+        self.sum
+    }
+}
+
+impl PartialFit for OnlineSum {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.sum;
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if v.is_finite() {
+                self.sum += v;
+                self.n += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.sum;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n);
+        q.effective_sample_size = self.n as f64;
+        q.parameter_delta_norm = Some((after - before).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n > 0;
+        q.warmup = self.n == 0;
+        q.explanation = format!("OnlineSum={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "running sum",
+                "finite entries of column 0",
+                format!("sum={before:.6e}"),
+                format!("sum={after:.6e}"),
+            ),
+        )
+    }
+}
+
 /// Streaming variance (river `stats.Var`).
 #[derive(Clone, Debug, Default)]
 pub struct OnlineVar {
@@ -13563,6 +13623,9 @@ mod tests {
         HardSamplingClassifier::new(8)
             .partial_fit(&x, Some(&yb), &session)
             .expect("hsc");
+        OnlineSum::new()
+            .partial_fit(&x, None, &session)
+            .expect("osum");
 
         let n_expl = session
             .ledger()

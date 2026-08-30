@@ -3205,6 +3205,18 @@ const INVENTORY: &[Algorithm] = &[
         "river.imblearn.HardSamplingClassifier",
         "online",
     ),
+    a(
+        "metrics.pairwise_kernels",
+        "sklearn.metrics.pairwise.pairwise_kernels",
+        "metric",
+    ),
+    a(
+        "tsa.arma2ar",
+        "statsmodels.tsa.arima_process.arma2ar",
+        "forecast",
+    ),
+    a("tslearn.cdist_erp", "tslearn.metrics.cdist_erp", "timeseries"),
+    a("online.OnlineSum", "river.stats.Sum", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -3341,6 +3353,10 @@ mod tests {
             "tsa.innovations_algo",
             "tslearn.TimeSeriesKMedoids",
             "online.OnlineGaussian",
+            "metrics.pairwise_kernels",
+            "tsa.arma2ar",
+            "tslearn.cdist_erp",
+            "online.OnlineSum",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

@@ -7469,6 +7469,60 @@ pub fn cdist_ctw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<
     ctx.finish(scaled)
 }
 
+fn erp_raw(a: &[f64], b: &[f64], g: f64) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return f64::NAN;
+    }
+    let n = a.len();
+    let m = b.len();
+    let mut dp = vec![0.0; (n + 1) * (m + 1)];
+    let at = |i: usize, j: usize| i * (m + 1) + j;
+    for i in 1..=n {
+        dp[at(i, 0)] = dp[at(i - 1, 0)] + (a[i - 1] - g).abs();
+    }
+    for j in 1..=m {
+        dp[at(0, j)] = dp[at(0, j - 1)] + (b[j - 1] - g).abs();
+    }
+    for i in 1..=n {
+        for j in 1..=m {
+            let match_c = dp[at(i - 1, j - 1)] + (a[i - 1] - b[j - 1]).abs();
+            let del = dp[at(i - 1, j)] + (a[i - 1] - g).abs();
+            let ins = dp[at(i, j - 1)] + (b[j - 1] - g).abs();
+            dp[at(i, j)] = match_c.min(del).min(ins);
+        }
+    }
+    dp[at(n, m)]
+}
+
+/// Pairwise ERP (tslearn `cdist_erp`).
+///
+/// Gap reference `g` is not identification `p`.
+pub fn cdist_erp(
+    a: &Matrix,
+    b: &Matrix,
+    g: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let g = if g.is_finite() {
+        g
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("cdist_erp g={g} is not finite; using 0"))
+                .build(),
+        );
+        0.0
+    };
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        erp_raw(a.row(i).as_slice(), b.row(j).as_slice(), g)
+    });
+    ctx.finish(out)
+}
+
 /// DTW k-medoids (tslearn `TimeSeriesKMedoids` / sktime `TimeSeriesKMedoids`).
 ///
 /// Cluster count is not identification `p`.
@@ -8283,5 +8337,10 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(kmedp.len(), 6);
+        let cer = cdist_erp(&x, &x, 0.0, &Session::new("ts", "cerp"))
+            .unwrap()
+            .value;
+        assert_eq!(cer.shape(), (6, 6));
+        assert!(cer.get(0, 0).abs() < 1e-12);
     }
 }

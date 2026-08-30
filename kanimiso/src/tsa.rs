@@ -6720,6 +6720,50 @@ pub fn arma2ma(
     ctx.finish(psi)
 }
 
+/// ARMA(\(p,q\)) to AR(\(\infty\)) coefficients (statsmodels `arma2ar`).
+///
+/// \(\pi_0=1\), \(\pi_k=\phi_k-\sum_j\theta_j\pi_{k-j}\). Orders are not
+/// identification `p`.
+pub fn arma2ar(
+    ar: &Vector,
+    ma: &Vector,
+    lags: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, ar);
+    inspect_univariate(&mut ctx, ma);
+    let m = lags.max(1);
+    if lags == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message("arma2ar lags=0; using 1")
+                .build(),
+        );
+    }
+    let mut pi = Vector::zeros(m);
+    if m > 0 {
+        pi[0] = 1.0;
+    }
+    for k in 1..m {
+        let mut s = if k - 1 < ar.len() { ar[k - 1] } else { 0.0 };
+        for j in 0..ma.len().min(k) {
+            s -= ma[j] * pi[k - 1 - j];
+        }
+        if !s.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::InvertibilityViolated)
+                    .message("arma2ar coefficient overflowed; later π set to 0")
+                    .build(),
+            );
+            s = 0.0;
+        }
+        pi[k] = s;
+    }
+    ctx.finish(pi)
+}
+
 /// Multiple seasonal-trend LOESS (sktime `MSTL`).
 ///
 /// Second-period STL is run on the first residual. Periods are not
@@ -8405,5 +8449,16 @@ mod tests {
         assert_eq!(psi.len(), 4);
         assert!((psi[0] - 1.0).abs() < 1e-12);
         assert!(psi.as_slice().iter().all(|v| v.is_finite()));
+        let pi = arma2ar(
+            &Vector::from_slice(&[0.5]),
+            &Vector::from_slice(&[0.2]),
+            4,
+            &Session::new("arma2ar", "t"),
+        )
+        .expect("arma2ar")
+        .value;
+        assert_eq!(pi.len(), 4);
+        assert!((pi[0] - 1.0).abs() < 1e-12);
+        assert!(pi.as_slice().iter().all(|v| v.is_finite()));
     }
 }
