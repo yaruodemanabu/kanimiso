@@ -4979,6 +4979,352 @@ pub fn box_pierce(x: &Vector, lags: usize, session: &Session) -> Result<Qualifie
     })
 }
 
+/// Two-sample log-rank test (lifelines / statsmodels `duration.survdiff`).
+///
+/// `events` is 1 = observed, 0 = right-censored. When more than two groups
+/// appear, the two most frequent labels are kept and a compromise is recorded.
+/// Group count is not identification `p`.
+pub fn logrank(
+    times: &Vector,
+    events: &Vector,
+    groups: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(times),
+        None,
+        &ctx.policy,
+    );
+    if times.len() != events.len() || times.len() != groups.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "logrank lengths time={} event={} group={}",
+                    times.len(),
+                    events.len(),
+                    groups.len()
+                ))
+                .build(),
+        );
+    }
+    if let Some(issue) = scan_finite(events.as_slice()).to_issue("events") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = scan_finite(groups.as_slice()).to_issue("groups") {
+        ctx.push(issue);
+    }
+    let n = times.len().min(events.len()).min(groups.len());
+    let mut counts: Vec<(i64, usize)> = Vec::new();
+    for i in 0..n {
+        if !times[i].is_finite() || !groups[i].is_finite() {
+            continue;
+        }
+        let g = groups[i].round() as i64;
+        if let Some(e) = counts.iter_mut().find(|(k, _)| *k == g) {
+            e.1 += 1;
+        } else {
+            counts.push((g, 1));
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    if counts.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("log-rank needs two groups")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: n as f64,
+        });
+    }
+    if counts.len() > 2 {
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .message("log-rank lite keeps the two most frequent groups")
+                .compromise(NumericalCompromise::new(
+                    "two-sample Mantel–Haenszel log-rank",
+                    "extra groups dropped",
+                    "the k-sample covariance form is not assembled",
+                    "do not read this as a k-sample survdiff",
+                ))
+                .build(),
+        );
+    }
+    let g0 = counts[0].0;
+    let g1 = counts[1].0;
+    let mut rows: Vec<(f64, bool, i64)> = (0..n)
+        .filter(|&i| times[i].is_finite() && groups[i].is_finite())
+        .map(|i| {
+            let g = groups[i].round() as i64;
+            (times[i], events[i] >= 0.5, g)
+        })
+        .filter(|(_, _, g)| *g == g0 || *g == g1)
+        .collect();
+    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut times_u: Vec<f64> = rows
+        .iter()
+        .filter(|(_, ev, _)| *ev)
+        .map(|(t, _, _)| *t)
+        .collect();
+    times_u.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    times_u.dedup_by(|a, b| (*a - *b).abs() <= 1e-15);
+    let mut oe = 0.0;
+    let mut var = 0.0;
+    for t in times_u {
+        let mut n0 = 0.0;
+        let mut n1 = 0.0;
+        let mut d0 = 0.0;
+        let mut d1 = 0.0;
+        for (ti, ev, g) in &rows {
+            if *ti + 1e-15 < t {
+                continue;
+            }
+            if *g == g0 {
+                n0 += 1.0;
+                if *ev && (*ti - t).abs() <= 1e-15 {
+                    d0 += 1.0;
+                }
+            } else {
+                n1 += 1.0;
+                if *ev && (*ti - t).abs() <= 1e-15 {
+                    d1 += 1.0;
+                }
+            }
+        }
+        let nn = n0 + n1;
+        let dd = d0 + d1;
+        if nn <= 0.0 || dd <= 0.0 {
+            continue;
+        }
+        oe += d0 - n0 * dd / nn;
+        if nn > 1.0 {
+            var += n0 * n1 * dd * (nn - dd) / (nn * nn * (nn - 1.0));
+        }
+    }
+    if var <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .message("log-rank variance vanished; the χ² is undefined")
+                .compromise(NumericalCompromise::new(
+                    "positive hypergeometric variance",
+                    "statistic set to NaN",
+                    "no discordant events remained after grouping",
+                    "do not treat a missing log-rank as no difference",
+                ))
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: rows.len() as f64,
+        });
+    }
+    let stat: f64 = oe * oe / var;
+    let pvalue = chi2_pvalue(stat.max(0.0), 1.0);
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: 1.0,
+        nobs: rows.len() as f64,
+    })
+}
+
+/// Alias of [`logrank`] (R `survdiff` / statsmodels duration).
+pub fn survdiff(
+    times: &Vector,
+    events: &Vector,
+    groups: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    logrank(times, events, groups, session)
+}
+
+/// Levinson–Durbin AR coefficients from a series ACF
+/// (statsmodels `tsa.stattools.levinson_durbin`).
+///
+/// `order` is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct LevinsonDurbin {
+    /// AR coefficients \(a_1,\ldots,a_p\) (the leading 1 is omitted).
+    pub ar: Vector,
+    /// Innovation variance after the last reflection.
+    pub sigma2: f64,
+    /// Reflection (PACF) coefficients.
+    pub reflection: Vector,
+}
+
+/// Levinson–Durbin recursion on the sample ACF of `y`.
+pub fn levinson_durbin(
+    y: &Vector,
+    order: usize,
+    session: &Session,
+) -> Result<Qualified<LevinsonDurbin>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, y);
+    let n = y.len();
+    let p = if order >= 1 && order < n {
+        order
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "Levinson–Durbin order={order} is not in 1..n-1 (n={n}); using 1"
+                ))
+                .build(),
+        );
+        1.min(n.saturating_sub(1))
+    };
+    if p == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Levinson–Durbin needs n≥2")
+                .build(),
+        );
+        return ctx.finish(LevinsonDurbin {
+            ar: Vector::zeros(0),
+            sigma2: f64::NAN,
+            reflection: Vector::zeros(0),
+        });
+    }
+    let rho = acf_raw(y.as_slice(), p);
+    let mut a = vec![0.0; p + 1];
+    a[0] = 1.0;
+    let mut e = if rho[0].is_finite() && rho[0].abs() > 0.0 {
+        rho[0]
+    } else {
+        1.0
+    };
+    let mut kvec = vec![0.0; p];
+    for m in 1..=p {
+        let mut num = if m < rho.len() { rho[m] } else { 0.0 };
+        for j in 1..m {
+            num += a[j] * rho[m - j];
+        }
+        let km = if e.abs() > 1e-18 { -num / e } else { 0.0 };
+        kvec[m - 1] = km;
+        if km.abs() > 1.0 + 1e-8 {
+            ctx.push(
+                Issue::builder(IssueCode::NonStationary)
+                    .message(format!(
+                        "Levinson–Durbin reflection |k_{m}|={km:.3} exceeds 1"
+                    ))
+                    .build(),
+            );
+        }
+        let prev = a.clone();
+        for j in 1..m {
+            a[j] = prev[j] + km * prev[m - j];
+        }
+        a[m] = km;
+        e *= 1.0 - km * km;
+        if e <= 1e-18 {
+            ctx.push(
+                Issue::builder(IssueCode::JitterInjected)
+                    .message("Levinson–Durbin innovation variance collapsed")
+                    .compromise(NumericalCompromise::new(
+                        "positive prediction-error variance",
+                        "recursion stopped with σ²≈0",
+                        "the series is linearly predictable at this order",
+                        "do not treat a collapsed σ² as a unique AR law",
+                    ))
+                    .build(),
+            );
+            e = e.max(0.0);
+            break;
+        }
+    }
+    ctx.finish(LevinsonDurbin {
+        ar: Vector::from_iter(a.iter().copied().skip(1).take(p)),
+        sigma2: e.abs(),
+        reflection: Vector::from_slice(&kvec),
+    })
+}
+
+/// Expanding-window one-step OLS residuals (statsmodels `RecursiveLS` resid).
+///
+/// Each prefix uses a scratch report. Prefix length is not identification `p`.
+pub fn recursive_olsresiduals(
+    x: &Matrix,
+    y: &Vector,
+    min_n: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let n = x.nrows().min(y.len());
+    let p = x.ncols() + 1;
+    let start = if min_n >= 3 {
+        min_n.max(p + 1).min(n.max(1))
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("recursive_olsresiduals min_n={min_n} < 3; using 3"))
+                .build(),
+        );
+        3.max(p + 1).min(n.max(1))
+    };
+    if n < start {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .message(format!("recursive OLS burn-in {start} > n={n}"))
+                .build(),
+        );
+    }
+    if n > 5 * p {
+        inspect_identification(&mut ctx.report, n, p, &ctx.policy);
+    }
+    let mut out = Vec::new();
+    for end in start..=n {
+        if end >= n {
+            break;
+        }
+        let xt = Matrix::from_fn(end, x.ncols(), |i, j| x.get(i, j));
+        let yt = Vector::from_iter((0..end).map(|i| y[i]));
+        let design = xt.with_intercept();
+        let mut scratch = Report::new("rols", "ols");
+        let Some(beta) = least_squares(&mut scratch, &design, &yt, &ctx.policy) else {
+            continue;
+        };
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::PerfectCollinearity
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let intercept = beta.as_slice().first().copied().unwrap_or(0.0);
+        let mut yhat = intercept;
+        for j in 0..x.ncols().min(beta.len().saturating_sub(1)) {
+            yhat += beta[j + 1] * x.get(end, j);
+        }
+        out.push(y[end] - yhat);
+    }
+    if out.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .message("no recursive OLS residual could be formed")
+                .build(),
+        );
+    }
+    ctx.finish(Vector::from_slice(&out))
+}
+
 /// Nested-model ANOVA (statsmodels `anova_lm`).
 #[derive(Clone, Debug)]
 pub struct AnovaLm {
@@ -6049,5 +6395,16 @@ mod tests {
         assert!(wd.value.df > 0.0);
         let bp = box_pierce(&e, 2, &Session::new("bp", "t")).expect("bp");
         assert!(bp.value.stat.is_finite() || bp.value.pvalue.is_nan());
+        let grp = Vector::from_iter((0..20).map(|i| if i < 10 { 0.0 } else { 1.0 }));
+        let lrt = logrank(&dur, &ev, &grp, &Session::new("lrk", "t")).expect("logrank");
+        assert!(lrt.value.statistic.is_finite() || lrt.value.pvalue.is_nan());
+        let sd = survdiff(&dur, &ev, &grp, &Session::new("sd", "t")).expect("survdiff");
+        assert!(sd.value.df > 0.0);
+        let ld = levinson_durbin(&e, 3, &Session::new("ld", "t")).expect("ld");
+        assert_eq!(ld.value.ar.len(), 3);
+        assert!(ld.value.sigma2.is_finite());
+        let rr = recursive_olsresiduals(&x, &y, 8, &Session::new("rols", "t")).expect("rols");
+        assert!(!rr.value.is_empty());
+        assert!(rr.value.as_slice().iter().all(|v| v.is_finite()));
     }
 }

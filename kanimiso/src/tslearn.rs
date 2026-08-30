@@ -2930,6 +2930,36 @@ pub fn cdist_twe(
     ctx.finish(out)
 }
 
+/// Pairwise global alignment kernel (tslearn `cdist_gak`).
+///
+/// \(\sigma\) is not identification `p`.
+pub fn cdist_gak(
+    a: &Matrix,
+    b: &Matrix,
+    sigma: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let s = if sigma.is_finite() && sigma > 0.0 {
+        sigma
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("cdist_gak σ={sigma} is not positive; using 1"))
+                .build(),
+        );
+        1.0
+    };
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let d = softdtw_raw(a.row(i).as_slice(), b.row(j).as_slice(), 0.1);
+        (-d / s).exp()
+    });
+    ctx.finish(out)
+}
+
 /// Linear resampler of each row to `n_out` samples (tslearn `TimeSeriesResampler`).
 #[derive(Clone, Debug)]
 pub struct TimeSeriesResampler {
@@ -6073,6 +6103,810 @@ impl Predict for FittedSummaryClassifier {
     }
 }
 
+fn signature_rows(x: &Matrix) -> Matrix {
+    let t = x.ncols();
+    Matrix::from_fn(x.nrows(), 6, |i, j| {
+        if t < 2 {
+            return 0.0;
+        }
+        let mut s1 = [0.0; 2];
+        let mut s2 = [0.0; 4];
+        for k in 1..t {
+            let dt = 1.0 / (t - 1) as f64;
+            let dx = x.get(i, k) - x.get(i, k - 1);
+            let d = [dt, dx];
+            s2[0] += s1[0] * d[0];
+            s2[1] += s1[0] * d[1];
+            s2[2] += s1[1] * d[0];
+            s2[3] += s1[1] * d[1];
+            s1[0] += d[0];
+            s1[1] += d[1];
+        }
+        match j {
+            0 => s1[0],
+            1 => s1[1],
+            2 => s2[0],
+            3 => s2[1],
+            4 => s2[2],
+            _ => s2[3],
+        }
+    })
+}
+
+fn hydra_apply(x: &Matrix, kernels: &[(Vec<f64>, usize)], n_groups: usize) -> Matrix {
+    let g = n_groups.max(1);
+    Matrix::from_fn(x.nrows(), g * 2, |i, j| {
+        let gid = j / 2;
+        let want_max = j % 2 == 1;
+        let mut acc_mean = 0.0;
+        let mut acc_max: f64 = 0.0;
+        let mut k = 0.0;
+        for (w, grp) in kernels {
+            if *grp != gid {
+                continue;
+            }
+            let t = x.ncols();
+            let ww = w.len().max(1);
+            let last = t.saturating_sub(ww) + 1;
+            let mut mx: f64 = 0.0;
+            for start in 0..last.max(1) {
+                let mut s = 0.0;
+                for (u, &wt) in w.iter().enumerate() {
+                    let idx = start + u;
+                    if idx < t {
+                        s += wt * x.get(i, idx);
+                    }
+                }
+                mx = mx.max(s.abs());
+            }
+            acc_mean += mx;
+            acc_max = acc_max.max(mx);
+            k += 1.0;
+        }
+        if want_max {
+            acc_max
+        } else if k > 0.0 {
+            acc_mean / k
+        } else {
+            0.0
+        }
+    })
+}
+
+fn hydra_kernels(
+    n_kernels: usize,
+    n_groups: usize,
+    width: usize,
+    seed: u64,
+) -> Vec<(Vec<f64>, usize)> {
+    let mut rng = Rng::new(seed);
+    let k = n_kernels.max(1);
+    let g = n_groups.max(1);
+    let w = width.max(1);
+    (0..k)
+        .map(|i| {
+            let weights = (0..w).map(|_| rng.standard_normal()).collect::<Vec<_>>();
+            (weights, i % g)
+        })
+        .collect()
+}
+
+/// Random grouped convolutional kernels (sktime `Hydra` transformer lite).
+///
+/// Kernel and group counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Hydra {
+    /// Kernels.
+    pub n_kernels: usize,
+    /// Groups (two pooled features each).
+    pub n_groups: usize,
+    /// Kernel width.
+    pub width: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for Hydra {
+    fn default() -> Self {
+        Self {
+            n_kernels: 8,
+            n_groups: 4,
+            width: 3,
+            seed: 5,
+        }
+    }
+}
+
+impl Hydra {
+    /// Default Hydra map.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Transform for Hydra {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message("Hydra needs T≥2")
+                    .build(),
+            );
+        }
+        let kernels = hydra_kernels(self.n_kernels, self.n_groups, self.width, self.seed);
+        ctx.finish(hydra_apply(x, &kernels, self.n_groups))
+    }
+}
+
+/// Hydra features + ridge (sktime `HydraClassifier` lite).
+#[derive(Clone, Debug)]
+pub struct HydraClassifier {
+    /// Kernels.
+    pub n_kernels: usize,
+    /// Groups.
+    pub n_groups: usize,
+    /// Kernel width.
+    pub width: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for HydraClassifier {
+    fn default() -> Self {
+        Self {
+            n_kernels: 8,
+            n_groups: 4,
+            width: 3,
+            alpha: 0.1,
+            seed: 5,
+        }
+    }
+}
+
+impl HydraClassifier {
+    /// Default Hydra classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted Hydra ridge.
+#[derive(Clone, Debug)]
+pub struct FittedHydraClassifier {
+    kernels: Vec<(Vec<f64>, usize)>,
+    n_groups: usize,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for HydraClassifier {
+    type Fitted = FittedHydraClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedHydraClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let kernels = hydra_kernels(self.n_kernels, self.n_groups, self.width, self.seed);
+        let z = hydra_apply(x, &kernels, self.n_groups);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "hydra");
+        ctx.finish(FittedHydraClassifier {
+            kernels,
+            n_groups: self.n_groups.max(1),
+            inner,
+        })
+    }
+}
+
+impl Predict for FittedHydraClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = hydra_apply(x, &self.kernels, self.n_groups);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Catch22 + rotation + ridge (sktime `FreshPRINCERegressor` lite).
+#[derive(Clone, Debug)]
+pub struct FreshPrinceRegressor {
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Rotation seed.
+    pub seed: u64,
+}
+
+impl Default for FreshPrinceRegressor {
+    fn default() -> Self {
+        Self {
+            alpha: 0.1,
+            seed: 9,
+        }
+    }
+}
+
+impl FreshPrinceRegressor {
+    /// Default FreshPRINCE regressor lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted FreshPRINCE regressor.
+#[derive(Clone, Debug)]
+pub struct FittedFreshPrinceRegressor {
+    rot: Matrix,
+    inner: FittedPenalized,
+}
+
+impl Fit for FreshPrinceRegressor {
+    type Fitted = FittedFreshPrinceRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedFreshPrinceRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let z = catch22_rows(x, session, &mut ctx);
+        let p = z.ncols().max(1);
+        let rot = random_rotation(p, self.seed);
+        let zr = apply_rotation(&z, &rot);
+        let mut scratch = signlred::Report::new("fpr", "ridge");
+        let design = zr.with_intercept();
+        let beta = ridge_solve(&mut scratch, &design, y, self.alpha.max(0.0), &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::PerfectCollinearity
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedFreshPrinceRegressor {
+            rot,
+            inner: FittedPenalized {
+                coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+                alpha: self.alpha,
+                l1_ratio: 0.0,
+            },
+        })
+    }
+}
+
+impl Predict for FittedFreshPrinceRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let z = catch22_rows(x, session, &mut ctx);
+        let zr = apply_rotation(&z, &self.rot);
+        match self.inner.predict(&zr, &session.child("ridge")) {
+            Ok(q) => ctx.finish(q.value),
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::RankZero
+                ) {
+                    ctx.push(e.primary);
+                }
+                ctx.finish(Vector::zeros(x.nrows()))
+            }
+        }
+    }
+}
+
+/// Summary statistics + ridge (sktime `SummaryRegressor` lite).
+#[derive(Clone, Debug)]
+pub struct SummaryRegressor {
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for SummaryRegressor {
+    fn default() -> Self {
+        Self { alpha: 0.1 }
+    }
+}
+
+impl SummaryRegressor {
+    /// Default summary regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted summary ridge regressor.
+#[derive(Clone, Debug)]
+pub struct FittedSummaryRegressor {
+    inner: FittedPenalized,
+}
+
+impl Fit for SummaryRegressor {
+    type Fitted = FittedSummaryRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSummaryRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let z = summary_rows(x);
+        let mut scratch = signlred::Report::new("sumreg", "ridge");
+        let design = z.with_intercept();
+        let beta = ridge_solve(&mut scratch, &design, y, self.alpha.max(0.0), &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::PerfectCollinearity
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedSummaryRegressor {
+            inner: FittedPenalized {
+                coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+                alpha: self.alpha,
+                l1_ratio: 0.0,
+            },
+        })
+    }
+}
+
+impl Predict for FittedSummaryRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = summary_rows(x);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Path signature + ridge (sktime `SignatureClassifier` lite).
+#[derive(Clone, Debug)]
+pub struct SignatureClassifier {
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for SignatureClassifier {
+    fn default() -> Self {
+        Self { alpha: 0.1 }
+    }
+}
+
+impl SignatureClassifier {
+    /// Default signature classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted signature ridge.
+#[derive(Clone, Debug)]
+pub struct FittedSignatureClassifier {
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for SignatureClassifier {
+    type Fitted = FittedSignatureClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSignatureClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let z = signature_rows(x);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "sigclf");
+        ctx.finish(FittedSignatureClassifier { inner })
+    }
+}
+
+impl Predict for FittedSignatureClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = signature_rows(x);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Diverse-representation CIF regressor (sktime `DrCIFRegressor` lite).
+#[derive(Clone, Debug)]
+pub struct DrCifRegressor {
+    /// Trees.
+    pub n_estimators: usize,
+    /// Random intervals per tree.
+    pub n_intervals: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for DrCifRegressor {
+    fn default() -> Self {
+        Self {
+            n_estimators: 6,
+            n_intervals: 3,
+            max_depth: 4,
+            seed: 11,
+        }
+    }
+}
+
+impl DrCifRegressor {
+    /// Default DrCIF regressor lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted DrCIF regressor vote.
+#[derive(Clone, Debug)]
+pub struct FittedDrCifRegressor {
+    trees: Vec<crate::tree::FittedTreeRegressor>,
+    intervals: Vec<Vec<Interval>>,
+}
+
+impl Fit for DrCifRegressor {
+    type Fitted = FittedDrCifRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedDrCifRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .message("DrCIF regressor lite uses eight interval summaries")
+                .compromise(NumericalCompromise::new(
+                    "diverse interval features",
+                    "mean/std/slope/median/IQR/energy/min/max per interval",
+                    "catch22 on short windows can be statistically vacuous",
+                    "do not treat this as the published DrCIF regressor map",
+                ))
+                .build(),
+        );
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        let mut intervals = Vec::new();
+        let tlen = x.ncols().max(1);
+        for e in 0..self.n_estimators.max(1) {
+            let mut iv = Vec::new();
+            for _ in 0..self.n_intervals.max(1) {
+                let a = rng.below(tlen);
+                let span = 1 + rng.below(tlen);
+                let b = (a + span).min(tlen);
+                iv.push(Interval {
+                    start: a,
+                    end: b.max(a + 1),
+                });
+            }
+            let feat = interval_feats_drcif(x, &iv);
+            let mut tree = crate::tree::DecisionTreeRegressor {
+                max_depth: self.max_depth,
+                seed: rng.next_u64(),
+                ..crate::tree::DecisionTreeRegressor::default()
+            };
+            match tree.fit(&feat, y, &session.child("drcifr_tree")) {
+                Ok(q) => {
+                    trees.push(q.value);
+                    intervals.push(iv);
+                }
+                Err(err) => {
+                    for issue in err.report.issues() {
+                        if !matches!(
+                            issue.code,
+                            IssueCode::ResidualTooLarge
+                                | IssueCode::NearSingular
+                                | IssueCode::RankZero
+                                | IssueCode::R2IsOne
+                                | IssueCode::MeaninglessFit
+                        ) {
+                            ctx.push(issue.clone());
+                        }
+                    }
+                }
+            }
+            ctx.session.step(e as u64, 0.0, None);
+        }
+        if trees.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("every DrCIF regressor tree failed to fit")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedDrCifRegressor { trees, intervals })
+    }
+}
+
+impl Predict for FittedDrCifRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let mut acc = Vector::zeros(x.nrows());
+        let mut k = 0.0;
+        for (tree, iv) in self.trees.iter().zip(&self.intervals) {
+            let feat = interval_feats_drcif(x, iv);
+            if let Ok(q) = tree.predict(&feat, &session.child("drcifr_pred")) {
+                for i in 0..x.nrows() {
+                    acc[i] += q.value[i];
+                }
+                k += 1.0;
+            }
+        }
+        if k > 0.0 {
+            acc = acc.scale(1.0 / k);
+        }
+        ctx.finish(acc)
+    }
+}
+
+/// Single DTW-proximity stump (sktime `ProximityTree` lite).
+#[derive(Clone, Debug)]
+pub struct ProximityTree {
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for ProximityTree {
+    fn default() -> Self {
+        Self { seed: 13 }
+    }
+}
+
+impl ProximityTree {
+    /// Default proximity tree.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted proximity stump.
+#[derive(Clone, Debug)]
+pub struct FittedProximityTree {
+    stump: Option<ProxStump>,
+    /// Majority class fallback.
+    pub default_label: f64,
+}
+
+impl Fit for ProximityTree {
+    type Fitted = FittedProximityTree;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedProximityTree>> {
+        let mut forest = ProximityForest {
+            n_trees: 1,
+            seed: self.seed,
+        };
+        let q = forest.fit(x, y, session)?;
+        Ok(q.map(|f| FittedProximityTree {
+            stump: f.trees.into_iter().next(),
+            default_label: f.default_label,
+        }))
+    }
+}
+
+impl Predict for FittedProximityTree {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let Some(t) = &self.stump else {
+            return ctx.finish(Vector::filled(x.nrows(), self.default_label));
+        };
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let row = x.row(i);
+            let dl = dtw_raw(row.as_slice(), t.left.as_slice());
+            let dr = dtw_raw(row.as_slice(), t.right.as_slice());
+            if dl <= dr {
+                t.left_lab
+            } else {
+                t.right_lab
+            }
+        }));
+        ctx.finish(out)
+    }
+}
+
+fn supervised_intervals(
+    x: &Matrix,
+    y: &Vector,
+    n_intervals: usize,
+    rng: &mut Rng,
+) -> Vec<Interval> {
+    let tlen = x.ncols().max(1);
+    let want = n_intervals.max(1);
+    let mut scored: Vec<(f64, Interval)> = Vec::new();
+    for _ in 0..(want * 8).max(8) {
+        let a = rng.below(tlen);
+        let span = 1 + rng.below(tlen);
+        let b = (a + span).min(tlen).max(a + 1);
+        let mut m0 = 0.0;
+        let mut m1 = 0.0;
+        let mut n0 = 0.0;
+        let mut n1 = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let mut mu = 0.0;
+            for t in a..b {
+                mu += x.get(i, t);
+            }
+            mu /= (b - a) as f64;
+            if y[i] >= 0.5 {
+                m1 += mu;
+                n1 += 1.0;
+            } else {
+                m0 += mu;
+                n0 += 1.0;
+            }
+        }
+        let gap = if n0 > 0.0 && n1 > 0.0 {
+            (m1 / n1 - m0 / n0).abs()
+        } else {
+            0.0
+        };
+        scored.push((gap, Interval { start: a, end: b }));
+    }
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(want);
+    scored.into_iter().map(|(_, iv)| iv).collect()
+}
+
+/// Supervised time-series forest (sktime `SupervisedTimeSeriesForest` lite).
+///
+/// Intervals are ranked by class-mean gap. Interval count is not identification
+/// `p`.
+#[derive(Clone, Debug)]
+pub struct Stsf {
+    /// Trees.
+    pub n_estimators: usize,
+    /// Supervised intervals per tree.
+    pub n_intervals: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for Stsf {
+    fn default() -> Self {
+        Self {
+            n_estimators: 6,
+            n_intervals: 3,
+            max_depth: 4,
+            seed: 17,
+        }
+    }
+}
+
+impl Stsf {
+    /// Default STSF lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted STSF vote.
+#[derive(Clone, Debug)]
+pub struct FittedStsf {
+    trees: Vec<crate::tree::FittedTreeClassifier>,
+    intervals: Vec<Vec<Interval>>,
+    /// Sorted class labels.
+    pub classes: Vec<i64>,
+}
+
+impl Fit for Stsf {
+    type Fitted = FittedStsf;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedStsf>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let classes: Vec<i64> = counts.iter().map(|(k, _)| *k).collect();
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        let mut intervals = Vec::new();
+        for e in 0..self.n_estimators.max(1) {
+            let iv = supervised_intervals(x, y, self.n_intervals, &mut rng);
+            let feat = interval_feats(x, &iv);
+            let mut tree = crate::tree::DecisionTreeClassifier {
+                max_depth: self.max_depth,
+                seed: rng.next_u64(),
+                ..crate::tree::DecisionTreeClassifier::default()
+            };
+            match tree.fit(&feat, y, &session.child("stsf_tree")) {
+                Ok(q) => {
+                    trees.push(q.value);
+                    intervals.push(iv);
+                }
+                Err(err) => {
+                    for issue in err.report.issues() {
+                        if !matches!(
+                            issue.code,
+                            IssueCode::ResidualTooLarge
+                                | IssueCode::NearSingular
+                                | IssueCode::RankZero
+                                | IssueCode::R2IsOne
+                                | IssueCode::MeaninglessFit
+                        ) {
+                            ctx.push(issue.clone());
+                        }
+                    }
+                }
+            }
+            ctx.session.step(e as u64, 0.0, None);
+        }
+        if trees.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("every STSF tree failed to fit")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedStsf {
+            trees,
+            intervals,
+            classes,
+        })
+    }
+}
+
+impl Predict for FittedStsf {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let mut votes = vec![BTreeMap::<i64, usize>::new(); x.nrows()];
+        for (tree, iv) in self.trees.iter().zip(&self.intervals) {
+            let feat = interval_feats(x, iv);
+            match tree.predict(&feat, &session.child("stsf_pred")) {
+                Ok(q) => {
+                    for i in 0..x.nrows() {
+                        let lab = q.value[i].round() as i64;
+                        *votes[i].entry(lab).or_insert(0) += 1;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        let out = Vector::from_iter(votes.iter().map(|m| {
+            m.iter()
+                .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(k, _)| *k as f64)
+                .unwrap_or(self.classes.first().copied().unwrap_or(0) as f64)
+        }));
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6606,5 +7440,80 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(sump.len(), 6);
+        let cg = cdist_gak(&x, &x, 1.0, &Session::new("ts", "cgak"))
+            .unwrap()
+            .value;
+        assert_eq!(cg.shape(), (6, 6));
+        assert!(cg.get(0, 0).is_finite());
+        let hy = Hydra::new()
+            .transform(&x, &Session::new("ts", "hydra"))
+            .unwrap()
+            .value;
+        assert_eq!(hy.nrows(), 6);
+        assert_eq!(hy.ncols(), 8);
+        let hyc = HydraClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "hyc"))
+            .unwrap();
+        let hyp = hyc
+            .value
+            .predict(&x, &Session::new("ts", "hycp"))
+            .unwrap()
+            .value;
+        assert_eq!(hyp.len(), 6);
+        let fpr = FreshPrinceRegressor::new()
+            .fit(&x, &yramp, &Session::new("ts", "fpr"))
+            .unwrap();
+        let fprp = fpr
+            .value
+            .predict(&x, &Session::new("ts", "fprp"))
+            .unwrap()
+            .value;
+        assert_eq!(fprp.len(), 6);
+        assert!(fprp.as_slice().iter().all(|v| v.is_finite()));
+        let sumr = SummaryRegressor::new()
+            .fit(&x, &yramp, &Session::new("ts", "sumr"))
+            .unwrap();
+        let sumrp = sumr
+            .value
+            .predict(&x, &Session::new("ts", "sumrp"))
+            .unwrap()
+            .value;
+        assert_eq!(sumrp.len(), 6);
+        let sigc = SignatureClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "sigc"))
+            .unwrap();
+        let sigp = sigc
+            .value
+            .predict(&x, &Session::new("ts", "sigcp"))
+            .unwrap()
+            .value;
+        assert_eq!(sigp.len(), 6);
+        let drr = DrCifRegressor::new()
+            .fit(&x, &yramp, &Session::new("ts", "drr"))
+            .unwrap();
+        let drrp = drr
+            .value
+            .predict(&x, &Session::new("ts", "drrp"))
+            .unwrap()
+            .value;
+        assert_eq!(drrp.len(), 6);
+        let pt = ProximityTree::new()
+            .fit(&x, &yb, &Session::new("ts", "pt"))
+            .unwrap();
+        let ptp = pt
+            .value
+            .predict(&x, &Session::new("ts", "ptp"))
+            .unwrap()
+            .value;
+        assert_eq!(ptp.len(), 6);
+        let stsf = Stsf::new()
+            .fit(&x, &yb, &Session::new("ts", "stsf"))
+            .unwrap();
+        let stsfp = stsf
+            .value
+            .predict(&x, &Session::new("ts", "stsfp"))
+            .unwrap()
+            .value;
+        assert_eq!(stsfp.len(), 6);
     }
 }

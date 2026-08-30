@@ -658,6 +658,235 @@ pub fn pairwise_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Q
     ctx.finish(out)
 }
 
+/// Pairwise Euclidean distances (sklearn `euclidean_distances`).
+///
+/// Row counts are not identification `p`.
+pub fn euclidean_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    pairwise_distances(a, b, session)
+}
+
+/// Pairwise Manhattan distances (sklearn `manhattan_distances`).
+pub fn manhattan_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "manhattan_distances a.ncols()={} b.ncols()={}",
+                    a.ncols(),
+                    b.ncols()
+                ))
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let mut s = 0.0;
+        for k in 0..a.ncols() {
+            s += (a.get(i, k) - b.get(j, k)).abs();
+        }
+        s
+    });
+    ctx.finish(out)
+}
+
+/// Cosine similarity matrix (sklearn `cosine_similarity`).
+///
+/// A zero-norm row is recorded as a numerical compromise and contributes 0.
+pub fn cosine_similarity(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "cosine_similarity a.ncols()={} b.ncols()={}",
+                    a.ncols(),
+                    b.ncols()
+                ))
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    let na = (0..a.nrows())
+        .map(|i| {
+            let mut s = 0.0;
+            for k in 0..a.ncols() {
+                let v = a.get(i, k);
+                s += v * v;
+            }
+            s.sqrt()
+        })
+        .collect::<Vec<_>>();
+    let nb = (0..b.nrows())
+        .map(|j| {
+            let mut s = 0.0;
+            for k in 0..b.ncols() {
+                let v = b.get(j, k);
+                s += v * v;
+            }
+            s.sqrt()
+        })
+        .collect::<Vec<_>>();
+    if na.iter().any(|v| *v <= 1e-18) || nb.iter().any(|v| *v <= 1e-18) {
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .message("cosine_similarity saw a zero-norm row; that entry is 0")
+                .compromise(NumericalCompromise::new(
+                    "unit-length rows",
+                    "zero-norm cosine set to 0",
+                    "the inner product is undefined after L2 normalisation",
+                    "do not read a zero as orthogonal when a row vanished",
+                ))
+                .build(),
+        );
+    }
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        if na[i] <= 1e-18 || nb[j] <= 1e-18 {
+            return 0.0;
+        }
+        let mut s = 0.0;
+        for k in 0..a.ncols() {
+            s += a.get(i, k) * b.get(j, k);
+        }
+        s / (na[i] * nb[j])
+    });
+    ctx.finish(out)
+}
+
+/// RBF kernel \(K_{ij}=\exp(-\gamma\|x_i-y_j\|^2)\) (sklearn `rbf_kernel`).
+///
+/// \(\gamma\) is not identification `p`.
+pub fn rbf_kernel(
+    a: &Matrix,
+    b: &Matrix,
+    gamma: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let g = if gamma.is_finite() && gamma > 0.0 {
+        gamma
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("rbf_kernel γ={gamma} is not positive; using 1"))
+                .build(),
+        );
+        1.0
+    };
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "rbf_kernel a.ncols()={} b.ncols()={}",
+                    a.ncols(),
+                    b.ncols()
+                ))
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let mut s = 0.0;
+        for k in 0..a.ncols() {
+            let d = a.get(i, k) - b.get(j, k);
+            s += d * d;
+        }
+        (-g * s).exp()
+    });
+    ctx.finish(out)
+}
+
+/// Linear kernel \(K=XY^\top\) (sklearn `linear_kernel`).
+pub fn linear_kernel(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "linear_kernel a.ncols()={} b.ncols()={}",
+                    a.ncols(),
+                    b.ncols()
+                ))
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let mut s = 0.0;
+        for k in 0..a.ncols() {
+            s += a.get(i, k) * b.get(j, k);
+        }
+        s
+    });
+    ctx.finish(out)
+}
+
+/// Polynomial kernel \((γ\langle x,y\rangle+c_0)^d\) (sklearn `polynomial_kernel`).
+///
+/// Degree is not identification `p`.
+pub fn polynomial_kernel(
+    a: &Matrix,
+    b: &Matrix,
+    degree: usize,
+    gamma: f64,
+    coef0: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let d = if degree >= 1 {
+        degree
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("polynomial_kernel degree={degree} < 1; using 1"))
+                .build(),
+        );
+        1
+    };
+    let g = if gamma.is_finite() {
+        gamma
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "polynomial_kernel γ={gamma} is not finite; using 1"
+                ))
+                .build(),
+        );
+        1.0
+    };
+    let c0 = if coef0.is_finite() { coef0 } else { 0.0 };
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("polynomial_kernel column mismatch")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let mut s = 0.0;
+        for k in 0..a.ncols() {
+            s += a.get(i, k) * b.get(j, k);
+        }
+        (g * s + c0).powi(d as i32)
+    });
+    ctx.finish(out)
+}
+
 /// Maximum residual (sklearn `max_error`).
 pub fn max_error(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
@@ -2770,6 +2999,144 @@ pub fn d2_pinball_score(
     ctx.finish(1.0 - s_m / s_n)
 }
 
+/// Root mean squared logarithmic error (sklearn `root_mean_squared_log_error`).
+pub fn root_mean_squared_log_error(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let q = mean_squared_log_error(y_true, y_pred, session)?;
+    let v = if q.value.is_finite() && q.value >= 0.0 {
+        q.value.sqrt()
+    } else {
+        f64::NAN
+    };
+    Ok(q.map(|_| v))
+}
+
+/// Pinball loss under the sklearn `mean_pinball_loss` name.
+pub fn mean_pinball_loss(
+    y_true: &Vector,
+    y_pred: &Vector,
+    tau: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    pinball_loss(y_true, y_pred, tau, session)
+}
+
+fn wilcoxon_auc(pos: &[bool], scores: &[f64]) -> f64 {
+    let n = pos.len().min(scores.len());
+    let mut pairs: Vec<(f64, bool)> = (0..n)
+        .filter(|&i| scores[i].is_finite())
+        .map(|i| (scores[i], pos[i]))
+        .collect();
+    if pairs.is_empty() {
+        return f64::NAN;
+    }
+    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let m = pairs.len();
+    let mut ranks = vec![0.0; m];
+    let mut i = 0;
+    while i < m {
+        let mut j = i + 1;
+        while j < m && (pairs[j].0 - pairs[i].0).abs() <= 0.0 {
+            j += 1;
+        }
+        let mean_rank = (i + 1 + j) as f64 / 2.0;
+        for r in ranks.iter_mut().take(j).skip(i) {
+            *r = mean_rank;
+        }
+        i = j;
+    }
+    let mut n_pos = 0.0;
+    let mut n_neg = 0.0;
+    let mut sum_pos = 0.0;
+    for k in 0..m {
+        if pairs[k].1 {
+            n_pos += 1.0;
+            sum_pos += ranks[k];
+        } else {
+            n_neg += 1.0;
+        }
+    }
+    if n_pos <= 0.0 || n_neg <= 0.0 {
+        return f64::NAN;
+    }
+    (sum_pos - n_pos * (n_pos + 1.0) / 2.0) / (n_pos * n_neg)
+}
+
+/// One-vs-rest ROC-AUC from a score matrix (sklearn `roc_auc_score` `ovr`).
+///
+/// Column `j` is the score of class `j` after labels are mapped onto
+/// `0..ncols`. Class count is not identification `p`.
+pub fn roc_auc_ovr(y_true: &Vector, scores: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, scores, None, &ctx.policy);
+    warn_constant_target(&mut ctx, y_true, true);
+    if y_true.len() != scores.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "roc_auc_ovr y.len()={} scores.nrows()={}",
+                    y_true.len(),
+                    scores.nrows()
+                ))
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let yt = labels_of(y_true);
+    let classes = unique_sorted(&yt);
+    let c = scores.ncols().max(1);
+    if classes.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("roc_auc_ovr needs two classes after filtering")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let mut acc = 0.0;
+    let mut k = 0.0;
+    for (j, &lab) in classes.iter().enumerate() {
+        let col = if j < c { j } else { c - 1 };
+        let pos: Vec<bool> = yt.iter().map(|&v| v == lab).collect();
+        let sc: Vec<f64> = (0..scores.nrows()).map(|i| scores.get(i, col)).collect();
+        let a = wilcoxon_auc(&pos, &sc);
+        if a.is_finite() {
+            acc += a;
+            k += 1.0;
+        }
+    }
+    if k <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .message("every one-vs-rest AUC was undefined")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(acc / k)
+}
+
+/// Detection-error-tradeoff curve (sklearn `det_curve`).
+///
+/// Returns false-positive rate, false-negative rate, and thresholds.
+pub fn det_curve(
+    y_true: &Vector,
+    scores: &Vector,
+    session: &Session,
+) -> Result<Qualified<RocCurve>> {
+    let roc = roc_curve(y_true, scores, session)?;
+    let fnr = Vector::from_iter(roc.value.tpr.as_slice().iter().map(|t| 1.0 - *t));
+    Ok(roc.map(|r| RocCurve {
+        fpr: r.fpr,
+        tpr: fnr,
+        thresholds: r.thresholds,
+    }))
+}
+
 fn bump<K: PartialEq>(xs: &mut Vec<(K, f64)>, key: K) {
     if let Some(e) = xs.iter_mut().find(|(k, _)| *k == key) {
         e.1 += 1.0;
@@ -3114,5 +3481,44 @@ mod tests {
             .value;
         assert_eq!(mlcm.shape(), (3, 4));
         assert!((mlcm.get(0, 3) - 1.0).abs() < 1e-12);
+        let ed = euclidean_distances(&xb, &xb, &Session::new("m", "eu"))
+            .unwrap()
+            .value;
+        assert!(ed.get(0, 0).abs() < 1e-12);
+        let md = manhattan_distances(&xb, &xb, &Session::new("m", "man"))
+            .unwrap()
+            .value;
+        assert!(md.get(0, 0).abs() < 1e-12);
+        let cs = cosine_similarity(&xb, &xb, &Session::new("m", "cos"))
+            .unwrap()
+            .value;
+        assert!((cs.get(0, 0) - 1.0).abs() < 1e-9);
+        let rk = rbf_kernel(&xb, &xb, 0.5, &Session::new("m", "rbf"))
+            .unwrap()
+            .value;
+        assert!((rk.get(0, 0) - 1.0).abs() < 1e-12);
+        let lk = linear_kernel(&xb, &xb, &Session::new("m", "lin"))
+            .unwrap()
+            .value;
+        assert!(lk.get(0, 0).is_finite());
+        let pk = polynomial_kernel(&xb, &xb, 2, 1.0, 1.0, &Session::new("m", "poly"))
+            .unwrap()
+            .value;
+        assert!(pk.get(0, 0).is_finite());
+        let rmsle = root_mean_squared_log_error(&y2, &h2, &Session::new("m", "rmsle"))
+            .unwrap()
+            .value;
+        assert!(rmsle.is_finite() && rmsle >= 0.0);
+        let mpl = mean_pinball_loss(&y2, &h2, 0.5, &Session::new("m", "mpl"))
+            .unwrap()
+            .value;
+        assert!(mpl >= 0.0);
+        let ovr = roc_auc_ovr(&y, &sc2, &Session::new("m", "ovr"))
+            .unwrap()
+            .value;
+        assert!((ovr - 1.0).abs() < 1e-12);
+        let det = det_curve(&y, &p, &Session::new("m", "det")).unwrap().value;
+        assert!(det.fpr.len() >= 2);
+        assert!(det.tpr.as_slice().iter().all(|v| v.is_finite()));
     }
 }

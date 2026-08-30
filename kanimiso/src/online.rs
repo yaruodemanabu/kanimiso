@@ -10926,6 +10926,875 @@ impl Transform for OnlineBinarizer {
     }
 }
 
+/// Streaming isolation forest (river `anomaly.HalfSpaceTrees` / isolation forest).
+///
+/// Tree count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct OnlineIsolationForest {
+    /// Trees.
+    pub n_trees: usize,
+    /// Depth.
+    pub max_depth: usize,
+    trees: Vec<Vec<(usize, f64)>>,
+    masses: Vec<HashMap<u32, u64>>,
+    mins: Vector,
+    maxs: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+    rng: Rng,
+}
+
+impl Default for OnlineIsolationForest {
+    fn default() -> Self {
+        Self {
+            n_trees: 4,
+            max_depth: 4,
+            trees: Vec::new(),
+            masses: Vec::new(),
+            mins: Vector::zeros(0),
+            maxs: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+            rng: Rng::new(19),
+        }
+    }
+}
+
+impl OnlineIsolationForest {
+    /// Isolation ensemble with `n_trees` trees of depth `max_depth`.
+    pub fn new(n_trees: usize, max_depth: usize) -> Self {
+        Self {
+            n_trees: n_trees.max(1),
+            max_depth: max_depth.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn grow(&mut self, p: usize) {
+        self.trees.clear();
+        self.masses.clear();
+        for _ in 0..self.n_trees.max(1) {
+            let mut cuts = Vec::new();
+            for _ in 0..self.max_depth.max(1) {
+                let j = if p == 0 { 0 } else { self.rng.below(p) };
+                let lo = if j < self.mins.len() {
+                    self.mins[j]
+                } else {
+                    0.0
+                };
+                let hi = if j < self.maxs.len() {
+                    self.maxs[j]
+                } else {
+                    1.0
+                };
+                let thr = if hi > lo {
+                    self.rng.uniform_range(lo, hi)
+                } else {
+                    lo
+                };
+                cuts.push((j, thr));
+            }
+            self.trees.push(cuts);
+            self.masses.push(HashMap::new());
+        }
+    }
+
+    fn path_key(cuts: &[(usize, f64)], x: &Matrix, i: usize) -> (u32, usize) {
+        let mut key: u32 = 0;
+        let mut depth = 0usize;
+        for (bit, (j, thr)) in cuts.iter().enumerate() {
+            let v = if *j < x.ncols() { x.get(i, *j) } else { 0.0 };
+            if v > *thr {
+                key |= 1 << bit;
+            }
+            depth = bit + 1;
+        }
+        (key, depth)
+    }
+
+    /// Mean isolation score in \([0, 1]\); higher is more anomalous.
+    pub fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.trees.is_empty() || self.n_seen == 0 {
+            return 0.5;
+        }
+        let mut s = 0.0;
+        for (cuts, mass) in self.trees.iter().zip(&self.masses) {
+            let (key, depth) = Self::path_key(cuts, x, i);
+            let m = *mass.get(&key).unwrap_or(&0);
+            let c = (self.n_seen as f64).ln().max(1.0);
+            let path = depth as f64 + if m > 1 { (m as f64).ln() } else { 0.0 };
+            s += 2.0_f64.powf(-path / c);
+        }
+        s / self.trees.len() as f64
+    }
+}
+
+impl PartialFit for OnlineIsolationForest {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            self.mins = Vector::from_iter((0..x.ncols()).map(|j| {
+                (0..x.nrows())
+                    .map(|i| x.get(i, j))
+                    .fold(f64::INFINITY, f64::min)
+            }));
+            self.maxs = Vector::from_iter((0..x.ncols()).map(|j| {
+                (0..x.nrows())
+                    .map(|i| x.get(i, j))
+                    .fold(f64::NEG_INFINITY, f64::max)
+            }));
+            self.grow(x.ncols());
+            self.initialized = true;
+        } else if self.mins.len() != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.n_seen;
+        for i in 0..x.nrows() {
+            for (cuts, mass) in self.trees.iter().zip(self.masses.iter_mut()) {
+                let (key, _) = Self::path_key(cuts, x, i);
+                *mass.entry(key).or_insert(0) += 1;
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = if x.nrows() > 0 {
+            self.score_row(x, 0)
+        } else {
+            0.5
+        };
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(0.0);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 4;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!("OnlineIsolationForest score={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "random-cut isolation counts",
+                "each tree records the leaf mass of the hashed path",
+                format!("n={before}"),
+                format!("n={} score={after:.6e}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for OnlineIsolationForest {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.score_row(x, i)),
+        ))
+    }
+}
+
+fn rolling_push(window: &mut Vec<f64>, v: f64, cap: usize) {
+    if !v.is_finite() {
+        return;
+    }
+    window.push(v);
+    if window.len() > cap {
+        window.remove(0);
+    }
+}
+
+/// Rolling minimum (river `stats.RollingMin`).
+#[derive(Clone, Debug, Default)]
+pub struct RollingMin {
+    window: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl RollingMin {
+    /// Empty rolling min.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current min, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        self.window
+            .iter()
+            .copied()
+            .fold(f64::NAN, |a, b| if a.is_nan() { b } else { a.min(b) })
+    }
+}
+
+impl PartialFit for RollingMin {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            rolling_push(&mut self.window, x.get(i, 0), 256);
+            if x.get(i, 0).is_finite() {
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.window.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.window.is_empty();
+        q.warmup = self.window.is_empty();
+        q.explanation = format!("RollingMin={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed minimum",
+                "256-row sliding min of column 0",
+                format!("min={before:.6e}"),
+                format!("min={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Rolling maximum (river `stats.RollingMax`).
+#[derive(Clone, Debug, Default)]
+pub struct RollingMax {
+    window: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl RollingMax {
+    /// Empty rolling max.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current max, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        self.window
+            .iter()
+            .copied()
+            .fold(f64::NAN, |a, b| if a.is_nan() { b } else { a.max(b) })
+    }
+}
+
+impl PartialFit for RollingMax {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            rolling_push(&mut self.window, x.get(i, 0), 256);
+            if x.get(i, 0).is_finite() {
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.window.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.window.is_empty();
+        q.warmup = self.window.is_empty();
+        q.explanation = format!("RollingMax={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed maximum",
+                "256-row sliding max of column 0",
+                format!("max={before:.6e}"),
+                format!("max={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming skewness (river `stats.Skew`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineSkew {
+    n: f64,
+    mean: f64,
+    m2: f64,
+    m3: f64,
+    updates: u64,
+}
+
+impl OnlineSkew {
+    /// Empty skewness accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current skewness, or NaN during warmup.
+    pub fn score(&self) -> f64 {
+        if self.n < 3.0 || self.m2 <= 1e-18 {
+            f64::NAN
+        } else {
+            self.n.sqrt() * self.m3 / self.m2.powf(1.5)
+        }
+    }
+}
+
+impl PartialFit for OnlineSkew {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            self.n += 1.0;
+            let n1 = self.n - 1.0;
+            let delta = v - self.mean;
+            let delta_n = delta / self.n;
+            let term1 = delta * delta_n * n1;
+            self.mean += delta_n;
+            self.m3 += term1 * delta_n * (self.n - 2.0) - 3.0 * delta_n * self.m2;
+            self.m2 += term1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 3.0;
+        q.warmup = self.n < 3.0;
+        q.explanation = format!("OnlineSkew={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Welford third moment",
+                "skewness from central moments of column 0",
+                format!("skew={before:.6e}"),
+                format!("skew={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming excess kurtosis (river `stats.Kurtosis`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineKurtosis {
+    n: f64,
+    mean: f64,
+    m2: f64,
+    m3: f64,
+    m4: f64,
+    updates: u64,
+}
+
+impl OnlineKurtosis {
+    /// Empty kurtosis accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current excess kurtosis, or NaN during warmup.
+    pub fn score(&self) -> f64 {
+        if self.n < 4.0 || self.m2 <= 1e-18 {
+            f64::NAN
+        } else {
+            self.n * self.m4 / (self.m2 * self.m2) - 3.0
+        }
+    }
+}
+
+impl PartialFit for OnlineKurtosis {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            self.n += 1.0;
+            let n1 = self.n - 1.0;
+            let delta = v - self.mean;
+            let delta_n = delta / self.n;
+            let delta_n2 = delta_n * delta_n;
+            let term1 = delta * delta_n * n1;
+            self.mean += delta_n;
+            self.m4 += term1 * delta_n2 * (self.n * self.n - 3.0 * self.n + 3.0)
+                + 6.0 * delta_n2 * self.m2
+                - 4.0 * delta_n * self.m3;
+            self.m3 += term1 * delta_n * (self.n - 2.0) - 3.0 * delta_n * self.m2;
+            self.m2 += term1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 4.0;
+        q.warmup = self.n < 4.0;
+        q.explanation = format!("OnlineKurtosis={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Welford fourth moment",
+                "excess kurtosis from central moments of column 0",
+                format!("kurt={before:.6e}"),
+                format!("kurt={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming Shannon entropy of rounded values (river `stats.Entropy`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineEntropy {
+    counts: HashMap<i64, u64>,
+    n: u64,
+    updates: u64,
+}
+
+impl OnlineEntropy {
+    /// Empty entropy accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current entropy in nats, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.n == 0 {
+            return f64::NAN;
+        }
+        let tot = self.n as f64;
+        let mut h = 0.0;
+        for c in self.counts.values() {
+            let p = *c as f64 / tot;
+            if p > 0.0 {
+                h -= p * p.ln();
+            }
+        }
+        h
+    }
+}
+
+impl PartialFit for OnlineEntropy {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            let key = v.round() as i64;
+            *self.counts.entry(key).or_insert(0) += 1;
+            self.n += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n);
+        q.effective_sample_size = self.n as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.counts.len() >= 2;
+        q.warmup = self.n < 2;
+        q.explanation = format!("OnlineEntropy={after:.6e} bins={}", self.counts.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "histogram entropy",
+                "Shannon entropy of rounded column-0 values",
+                format!("H={before:.6e}"),
+                format!("H={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Periodic sine/cosine map (river-style calendar / Fourier features).
+///
+/// Period is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Periodic {
+    /// Period of the cycle.
+    pub period: f64,
+    p: usize,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for Periodic {
+    fn default() -> Self {
+        Self {
+            period: 12.0,
+            p: 0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl Periodic {
+    /// Periodic map with period `period`.
+    pub fn new(period: f64) -> Self {
+        Self {
+            period,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for Periodic {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.period.is_finite() || self.period <= 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "Periodic.period={} is not positive; using 1",
+                        self.period
+                    ))
+                    .build(),
+            );
+            self.period = 1.0;
+        }
+        if self.p == 0 {
+            self.p = x.ncols();
+        } else if self.p != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.n_seen;
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(0.0);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = true;
+        q.warmup = false;
+        q.explanation = format!("Periodic period={:.6e}", self.period);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "sin/cos period map",
+                "each column becomes a 2-d Fourier pair",
+                format!("n={before}"),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Transform for Periodic {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        let per = if self.period.is_finite() && self.period > 0.0 {
+            self.period
+        } else {
+            1.0
+        };
+        let tau = std::f64::consts::TAU;
+        ctx.finish(Matrix::from_fn(x.nrows(), x.ncols() * 2, |i, j| {
+            let col = j / 2;
+            let v = x.get(i, col);
+            let ang = tau * v / per;
+            if j % 2 == 0 {
+                ang.sin()
+            } else {
+                ang.cos()
+            }
+        }))
+    }
+}
+
+/// Streaming pairwise covariance (river `stats.Cov`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineCovariance {
+    n: f64,
+    mx: f64,
+    my: f64,
+    c: f64,
+    updates: u64,
+}
+
+impl OnlineCovariance {
+    /// Empty covariance accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current covariance, or NaN during warmup.
+    pub fn score(&self) -> f64 {
+        if self.n < 2.0 {
+            f64::NAN
+        } else {
+            self.c / (self.n - 1.0)
+        }
+    }
+}
+
+impl PartialFit for OnlineCovariance {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        if x.ncols() < 2 && y.is_none() {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("OnlineCovariance needs two columns or an explicit y")
+                    .build(),
+            );
+        }
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let a = x.get(i, 0);
+            let b = if x.ncols() >= 2 {
+                x.get(i, 1)
+            } else if let Some(y) = y {
+                if i < y.len() {
+                    y[i]
+                } else {
+                    f64::NAN
+                }
+            } else {
+                f64::NAN
+            };
+            if !a.is_finite() || !b.is_finite() {
+                continue;
+            }
+            self.n += 1.0;
+            let dx = a - self.mx;
+            self.mx += dx / self.n;
+            self.my += (b - self.my) / self.n;
+            self.c += dx * (b - self.my);
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 2.0;
+        q.warmup = self.n < 2.0;
+        q.explanation = format!("OnlineCovariance={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Welford covariance",
+                "pairwise covariance of column 0 with column 1 or y",
+                format!("cov={before:.6e}"),
+                format!("cov={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Hashing trick (river `preprocessing.FeatureHasher` / sklearn `FeatureHasher`).
+///
+/// Output width is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct HashingTrick {
+    /// Hash-bin count.
+    pub n_features: usize,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for HashingTrick {
+    fn default() -> Self {
+        Self {
+            n_features: 8,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl HashingTrick {
+    /// Hasher with `n_features` bins.
+    pub fn new(n_features: usize) -> Self {
+        Self {
+            n_features: n_features.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn bin(j: usize, n: usize) -> (usize, f64) {
+        let h = (j as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let sign = if (h >> 1) & 1 == 0 { 1.0 } else { -1.0 };
+        ((h as usize) % n.max(1), sign)
+    }
+}
+
+impl PartialFit for HashingTrick {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.n_features == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("HashingTrick n_features=0; using 1")
+                    .build(),
+            );
+            self.n_features = 1;
+        }
+        let before = self.n_seen;
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(0.0);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = true;
+        q.warmup = false;
+        q.explanation = format!("HashingTrick bins={}", self.n_features);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "signed hash projection",
+                "each input column is folded into a fixed bag of bins",
+                format!("n={before}"),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Transform for HashingTrick {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        let m = self.n_features.max(1);
+        let mut out = Matrix::zeros(x.nrows(), m);
+        for i in 0..x.nrows() {
+            for j in 0..x.ncols() {
+                let (b, s) = Self::bin(j, m);
+                out.set(i, b, out.get(i, b) + s * x.get(i, j));
+            }
+        }
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11220,6 +12089,33 @@ mod tests {
         OnlineBinarizer::new(0.0)
             .partial_fit(&x, None, &session)
             .expect("obin");
+        OnlineIsolationForest::new(3, 3)
+            .partial_fit(&x, None, &session)
+            .expect("oif");
+        RollingMin::new()
+            .partial_fit(&x, None, &session)
+            .expect("rmin");
+        RollingMax::new()
+            .partial_fit(&x, None, &session)
+            .expect("rmax");
+        OnlineSkew::new()
+            .partial_fit(&x, None, &session)
+            .expect("skew");
+        OnlineKurtosis::new()
+            .partial_fit(&x, None, &session)
+            .expect("kurt");
+        OnlineEntropy::new()
+            .partial_fit(&x, None, &session)
+            .expect("ent");
+        Periodic::new(12.0)
+            .partial_fit(&x, None, &session)
+            .expect("per");
+        OnlineCovariance::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("ocov");
+        HashingTrick::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("hash");
 
         let n_expl = session
             .ledger()

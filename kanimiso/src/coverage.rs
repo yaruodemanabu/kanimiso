@@ -2903,6 +2903,134 @@ const INVENTORY: &[Algorithm] = &[
         "river.preprocessing.Binarizer",
         "online",
     ),
+    a(
+        "metrics.euclidean_distances",
+        "sklearn.metrics.pairwise.euclidean_distances",
+        "metric",
+    ),
+    a(
+        "metrics.manhattan_distances",
+        "sklearn.metrics.pairwise.manhattan_distances",
+        "metric",
+    ),
+    a(
+        "metrics.cosine_similarity",
+        "sklearn.metrics.pairwise.cosine_similarity",
+        "metric",
+    ),
+    a(
+        "metrics.rbf_kernel",
+        "sklearn.metrics.pairwise.rbf_kernel",
+        "metric",
+    ),
+    a(
+        "metrics.linear_kernel",
+        "sklearn.metrics.pairwise.linear_kernel",
+        "metric",
+    ),
+    a(
+        "metrics.polynomial_kernel",
+        "sklearn.metrics.pairwise.polynomial_kernel",
+        "metric",
+    ),
+    a(
+        "metrics.root_mean_squared_log_error",
+        "sklearn.metrics.root_mean_squared_log_error",
+        "metric",
+    ),
+    a(
+        "metrics.mean_pinball_loss",
+        "sklearn.metrics.mean_pinball_loss",
+        "metric",
+    ),
+    a(
+        "metrics.roc_auc_ovr",
+        "sklearn.metrics.roc_auc_score",
+        "metric",
+    ),
+    a("metrics.det_curve", "sklearn.metrics.det_curve", "metric"),
+    a(
+        "stats.logrank",
+        "statsmodels.duration.survfunc.survdiff",
+        "stats",
+    ),
+    a(
+        "stats.survdiff",
+        "statsmodels.duration.survfunc.survdiff",
+        "stats",
+    ),
+    a(
+        "stats.levinson_durbin",
+        "statsmodels.tsa.stattools.levinson_durbin",
+        "stats",
+    ),
+    a(
+        "stats.recursive_olsresiduals",
+        "statsmodels.regression.recursive_ls.RecursiveLS",
+        "stats",
+    ),
+    a(
+        "tslearn.cdist_gak",
+        "tslearn.metrics.cdist_gak",
+        "timeseries",
+    ),
+    a(
+        "tslearn.Hydra",
+        "sktime.transformations.panel.hydra.Hydra",
+        "timeseries",
+    ),
+    a(
+        "tslearn.HydraClassifier",
+        "sktime.classification.hybrid.HydraClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.FreshPrinceRegressor",
+        "sktime.regression.feature_based.FreshPRINCERegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.SummaryRegressor",
+        "sktime.regression.feature_based.SummaryRegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.SignatureClassifier",
+        "sktime.classification.feature_based.SignatureClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.DrCifRegressor",
+        "sktime.regression.interval_based.DrCIFRegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.ProximityTree",
+        "sktime.classification.distance_based.ProximityTree",
+        "timeseries",
+    ),
+    a(
+        "tslearn.Stsf",
+        "sktime.classification.interval_based.SupervisedTimeSeriesForest",
+        "timeseries",
+    ),
+    a(
+        "online.OnlineIsolationForest",
+        "river.anomaly.HalfSpaceTrees",
+        "online",
+    ),
+    a("online.RollingMin", "river.stats.RollingMin", "online"),
+    a("online.RollingMax", "river.stats.RollingMax", "online"),
+    a("online.OnlineSkew", "river.stats.Skew", "online"),
+    a("online.OnlineKurtosis", "river.stats.Kurtosis", "online"),
+    a("online.OnlineEntropy", "river.stats.Entropy", "online"),
+    a("online.Periodic", "river.preprocessing.TargetAgg", "online"),
+    a("online.OnlineCovariance", "river.stats.Cov", "online"),
+    a(
+        "online.HashingTrick",
+        "river.preprocessing.FeatureHasher",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -3024,6 +3152,11 @@ mod tests {
             "tslearn.Rise",
             "tslearn.ElasticEnsemble",
             "online.AmfClassifier",
+            "metrics.roc_auc_ovr",
+            "stats.logrank",
+            "tslearn.HydraClassifier",
+            "tslearn.FreshPrinceRegressor",
+            "online.OnlineIsolationForest",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
