@@ -25015,6 +25015,852 @@ impl EntropyBalancing {
     }
 }
 
+fn standardize_design(x: &Matrix) -> Matrix {
+    let (n, p) = x.shape();
+    let mut mean = vec![0.0; p];
+    let mut std = vec![1.0; p];
+    for j in 0..p {
+        let mut s = 0.0_f64;
+        let mut c = 0.0_f64;
+        for i in 0..n {
+            if x.get(i, j).is_finite() {
+                s += x.get(i, j);
+                c += 1.0;
+            }
+        }
+        mean[j] = if c > 0.0 { s / c } else { 0.0 };
+        let mut v = 0.0_f64;
+        for i in 0..n {
+            if x.get(i, j).is_finite() {
+                let d = x.get(i, j) - mean[j];
+                v += d * d;
+            }
+        }
+        std[j] = if c > 1.0 {
+            (v / (c - 1.0)).sqrt()
+        } else {
+            1.0
+        };
+        if !std[j].is_finite() || std[j] < 1e-12 {
+            std[j] = 1.0;
+        }
+    }
+    Matrix::from_fn(n, p, |i, j| (x.get(i, j) - mean[j]) / std[j])
+}
+
+fn slice_labels(y: &Vector, n_slices: usize) -> Vec<usize> {
+    let n = y.len();
+    let mut order: Vec<usize> = (0..n).filter(|&i| y[i].is_finite()).collect();
+    order.sort_by(|&a, &b| y[a].partial_cmp(&y[b]).unwrap_or(std::cmp::Ordering::Equal));
+    let h = n_slices.max(2);
+    let mut lab = vec![0usize; n];
+    let m = order.len().max(1);
+    for (r, &i) in order.iter().enumerate() {
+        let s = (r * h) / m;
+        lab[i] = if s >= h { h - 1 } else { s };
+    }
+    lab
+}
+
+fn largest_eigs(ctx: &mut FitCtx, m: &Mat<f64>, k: usize, abs_order: bool) -> Matrix {
+    let p = m.nrows();
+    let kk = k.max(1).min(p.max(1));
+    let mut scratch = Report::new("dimred", "eig");
+    let Some((vals, vecs)) = crate::linalg::symmetric_eigen(&mut scratch, m, &ctx.policy) else {
+        return Matrix::zeros(p, kk);
+    };
+    for issue in scratch.issues() {
+        if skip_aborting_inner(issue) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let mut pairs: Vec<(f64, usize)> = vals
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(i, v)| (if abs_order { v.abs() } else { v }, i))
+        .collect();
+    pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    Matrix::from_fn(p, kk, |i, c| {
+        let idx = pairs.get(c).map(|p| p.1).unwrap_or(0);
+        if i < vecs.nrows() && idx < vecs.ncols() {
+            vecs[(i, idx)]
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Sliced inverse regression (Li 1991; statsmodels `SlicedInverseRegression`).
+///
+/// Slice count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SlicedInverseRegression {
+    /// Number of response slices. Not identification `p`.
+    pub n_slices: usize,
+    /// Number of directions.
+    pub n_components: usize,
+}
+
+impl Default for SlicedInverseRegression {
+    fn default() -> Self {
+        Self {
+            n_slices: 4,
+            n_components: 1,
+        }
+    }
+}
+
+impl SlicedInverseRegression {
+    /// SIR with `h` slices onto `k` directions.
+    pub fn new(n_slices: usize, n_components: usize) -> Self {
+        Self {
+            n_slices,
+            n_components,
+        }
+    }
+}
+
+/// Fitted SIR directions.
+#[derive(Clone, Debug)]
+pub struct FittedSir {
+    /// \(p \times k\) eigenvectors of the slice-mean covariance.
+    pub directions: Matrix,
+    /// Standardised scores \(Z\hat\beta\).
+    pub embedding: Matrix,
+}
+
+impl Fit for SlicedInverseRegression {
+    type Fitted = FittedSir;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSir>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let n = x.nrows().min(y.len());
+        let p = x.ncols();
+        let k = self.n_components.max(1).min(p.max(1));
+        let z = standardize_design(x);
+        let lab = slice_labels(y, self.n_slices);
+        let h = lab.iter().copied().max().unwrap_or(0) + 1;
+        let mut means = vec![vec![0.0; p]; h];
+        let mut nh = vec![0.0; h];
+        for i in 0..n {
+            let s = lab[i];
+            nh[s] += 1.0;
+            for j in 0..p {
+                means[s][j] += z.get(i, j);
+            }
+        }
+        for s in 0..h {
+            if nh[s] > 0.0 {
+                for j in 0..p {
+                    means[s][j] /= nh[s];
+                }
+            }
+        }
+        let nf = n.max(1) as f64;
+        let m = Mat::<f64>::from_fn(p, p, |a, b| {
+            let mut s = 0.0;
+            for sl in 0..h {
+                s += (nh[sl] / nf) * means[sl][a] * means[sl][b];
+            }
+            s
+        });
+        let directions = largest_eigs(&mut ctx, &m, k, false);
+        let embedding = Matrix::from_fn(n, k, |i, c| {
+            let mut s = 0.0;
+            for j in 0..p {
+                s += z.get(i, j) * directions.get(j, c);
+            }
+            s
+        });
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SlicedInverseRegression uses standardised slice means, not Li's χ² tests")
+                .compromise(NumericalCompromise::new(
+                    "Li SIR",
+                    "eigenvectors of the weighted slice-mean covariance of standardised X",
+                    "sliced χ² tests and the unpublished SIR-II kernel are omitted",
+                    "read the directions as a slice-mean sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedSir {
+            directions,
+            embedding,
+        })
+    }
+}
+
+/// Sliced average variance estimation (Cook–Weisberg; statsmodels `SAVE`).
+///
+/// Slice count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SlicedAverageVariance {
+    /// Number of response slices. Not identification `p`.
+    pub n_slices: usize,
+    /// Number of directions.
+    pub n_components: usize,
+}
+
+impl Default for SlicedAverageVariance {
+    fn default() -> Self {
+        Self {
+            n_slices: 4,
+            n_components: 1,
+        }
+    }
+}
+
+impl SlicedAverageVariance {
+    /// SAVE with `h` slices onto `k` directions.
+    pub fn new(n_slices: usize, n_components: usize) -> Self {
+        Self {
+            n_slices,
+            n_components,
+        }
+    }
+}
+
+/// Named SAVE spelling.
+pub type Save = SlicedAverageVariance;
+
+/// Fitted SAVE directions.
+#[derive(Clone, Debug)]
+pub struct FittedSave {
+    /// \(p \times k\) eigenvectors of \(\sum \pi_h (I-\Sigma_h)^2\).
+    pub directions: Matrix,
+    /// Standardised scores.
+    pub embedding: Matrix,
+}
+
+impl Fit for SlicedAverageVariance {
+    type Fitted = FittedSave;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSave>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let n = x.nrows().min(y.len());
+        let p = x.ncols();
+        let k = self.n_components.max(1).min(p.max(1));
+        let z = standardize_design(x);
+        let lab = slice_labels(y, self.n_slices);
+        let h = lab.iter().copied().max().unwrap_or(0) + 1;
+        let mut means = vec![vec![0.0; p]; h];
+        let mut nh = vec![0.0; h];
+        for i in 0..n {
+            let s = lab[i];
+            nh[s] += 1.0;
+            for j in 0..p {
+                means[s][j] += z.get(i, j);
+            }
+        }
+        for s in 0..h {
+            if nh[s] > 0.0 {
+                for j in 0..p {
+                    means[s][j] /= nh[s];
+                }
+            }
+        }
+        let nf = n.max(1) as f64;
+        let mut ims = vec![vec![0.0; p * p]; h];
+        let mut ims_ok = vec![false; h];
+        for sl in 0..h {
+            if nh[sl] < 2.0 {
+                continue;
+            }
+            ims_ok[sl] = true;
+            for a in 0..p {
+                for b in 0..p {
+                    let mut cab = 0.0;
+                    for i in 0..n {
+                        if lab[i] != sl {
+                            continue;
+                        }
+                        cab += (z.get(i, a) - means[sl][a]) * (z.get(i, b) - means[sl][b]);
+                    }
+                    cab /= nh[sl] - 1.0;
+                    let ia = if a == b { 1.0 } else { 0.0 };
+                    ims[sl][a * p + b] = ia - cab;
+                }
+            }
+        }
+        let m = Mat::<f64>::from_fn(p, p, |a, b| {
+            let mut acc = 0.0;
+            for sl in 0..h {
+                if !ims_ok[sl] {
+                    continue;
+                }
+                let mut s = 0.0;
+                for t in 0..p {
+                    s += ims[sl][a * p + t] * ims[sl][t * p + b];
+                }
+                acc += (nh[sl] / nf) * s;
+            }
+            acc
+        });
+        let directions = largest_eigs(&mut ctx, &m, k, false);
+        let embedding = Matrix::from_fn(n, k, |i, c| {
+            let mut s = 0.0;
+            for j in 0..p {
+                s += z.get(i, j) * directions.get(j, c);
+            }
+            s
+        });
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SlicedAverageVariance is Σ_h π_h (I−Σ_h)², not Cook's kernel SAVE")
+                .compromise(NumericalCompromise::new(
+                    "Cook–Weisberg SAVE",
+                    "weighted average of squared (I − slice covariance)",
+                    "the published kernel / SIR-II hybrid is omitted",
+                    "read the directions as a slice-variance sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedSave {
+            directions,
+            embedding,
+        })
+    }
+}
+
+/// Principal Hessian directions (Li PHD; statsmodels `PrincipalHessianDirections`).
+///
+/// The average residual Hessian \(\frac{1}{n}\sum (y_i-\bar y)\,x_i x_i^\top\)
+/// is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct PrincipalHessianDirections {
+    /// Number of directions.
+    pub n_components: usize,
+}
+
+impl Default for PrincipalHessianDirections {
+    fn default() -> Self {
+        Self { n_components: 1 }
+    }
+}
+
+impl PrincipalHessianDirections {
+    /// PHD onto `k` directions.
+    pub fn new(n_components: usize) -> Self {
+        Self { n_components }
+    }
+}
+
+/// Named PHD spelling.
+pub type Phd = PrincipalHessianDirections;
+
+/// Fitted PHD directions.
+#[derive(Clone, Debug)]
+pub struct FittedPhd {
+    /// \(p \times k\) eigenvectors of the residual Hessian.
+    pub directions: Matrix,
+    /// Standardised scores.
+    pub embedding: Matrix,
+}
+
+impl Fit for PrincipalHessianDirections {
+    type Fitted = FittedPhd;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedPhd>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let n = x.nrows().min(y.len());
+        let p = x.ncols();
+        let k = self.n_components.max(1).min(p.max(1));
+        let z = standardize_design(x);
+        let mut ybar = 0.0_f64;
+        let mut c = 0.0_f64;
+        for i in 0..n {
+            if y[i].is_finite() {
+                ybar += y[i];
+                c += 1.0;
+            }
+        }
+        if c > 0.0 {
+            ybar /= c;
+        }
+        let nf = n.max(1) as f64;
+        let m = Mat::<f64>::from_fn(p, p, |a, b| {
+            let mut s = 0.0;
+            for i in 0..n {
+                if !y[i].is_finite() {
+                    continue;
+                }
+                s += (y[i] - ybar) * z.get(i, a) * z.get(i, b);
+            }
+            s / nf
+        });
+        let directions = largest_eigs(&mut ctx, &m, k, true);
+        let embedding = Matrix::from_fn(n, k, |i, c| {
+            let mut s = 0.0;
+            for j in 0..p {
+                s += z.get(i, j) * directions.get(j, c);
+            }
+            s
+        });
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("PrincipalHessianDirections is the residual outer-product Hessian")
+                .compromise(NumericalCompromise::new(
+                    "Li PHD",
+                    "eigenvectors of n⁻¹ Σ (y−ȳ) xxᵀ on standardised X",
+                    "the published Stein-estimate / r-based PHD variants are omitted",
+                    "read the directions as a Hessian sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedPhd {
+            directions,
+            embedding,
+        })
+    }
+}
+
+/// Horvitz–Thompson / Hájek weighted mean (statsmodels `survey` lite).
+///
+/// `pi` are inclusion probabilities. Weight count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct HorvitzThompson;
+
+/// HT total and Hájek mean.
+#[derive(Clone, Debug)]
+pub struct FittedHorvitzThompson {
+    /// \(\sum y_i/\pi_i\).
+    pub total: f64,
+    /// Hájek \(\sum (y_i/\pi_i) / \sum (1/\pi_i)\).
+    pub mean: f64,
+    /// Conservative with-replacement variance of the total.
+    pub var_total: f64,
+}
+
+impl HorvitzThompson {
+    /// Default HT estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Estimate the total and Hájek mean from inclusion probabilities.
+    pub fn fit(
+        &self,
+        y: &Vector,
+        pi: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedHorvitzThompson>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_series_as_target(&mut ctx, y);
+        if pi.len() != y.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "HorvitzThompson pi.len()={} ≠ y.len()={}",
+                        pi.len(),
+                        y.len()
+                    ))
+                    .build(),
+            );
+        }
+        let n = y.len().min(pi.len());
+        let mut total = 0.0_f64;
+        let mut sw = 0.0_f64;
+        let mut var = 0.0_f64;
+        let mut used = 0usize;
+        for i in 0..n {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let p = pi.as_slice().get(i).copied().unwrap_or(f64::NAN);
+            if !p.is_finite() || p <= 0.0 || p > 1.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::InvalidWeight)
+                        .severity(Severity::Warning)
+                        .message(format!(
+                            "HorvitzThompson π[{i}]={p:.6e} is not in (0, 1]; skipped"
+                        ))
+                        .build(),
+                );
+                continue;
+            }
+            let w = 1.0 / p;
+            total += w * y[i];
+            sw += w;
+            var += (1.0 - p) * w * w * y[i] * y[i];
+            used += 1;
+        }
+        if used == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("HorvitzThompson has no valid (y, π) pairs")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "HT total",
+                        "every inclusion probability was invalid",
+                        "pass π_i ∈ (0, 1]",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedHorvitzThompson {
+                total: f64::NAN,
+                mean: f64::NAN,
+                var_total: f64::NAN,
+            });
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("HorvitzThompson uses the with-replacement variance sketch")
+                .compromise(NumericalCompromise::new(
+                    "design-based HT with joint-inclusion SE",
+                    "Hájek mean plus Σ (1−π) y²/π²",
+                    "π_ij second-order inclusion probabilities are omitted",
+                    "read the SE as a conservative sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedHorvitzThompson {
+            total,
+            mean: if sw > 0.0 { total / sw } else { f64::NAN },
+            var_total: var,
+        })
+    }
+}
+
+/// Iterative proportional fitting / raking (survey calibration).
+///
+/// Margin count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct Raking;
+
+/// Calibrated weights.
+#[derive(Clone, Debug)]
+pub struct FittedRaking {
+    /// Raked weights.
+    pub weights: Vector,
+    /// Weighted column totals after IPF.
+    pub margins: Vector,
+}
+
+impl Raking {
+    /// Default raker.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Calibrate `base` (or ones) so \(X^\top w\) matches `targets`.
+    ///
+    /// `indicators` are non-negative category / dummy columns. Sequential IPF
+    /// scales each column in turn.
+    pub fn fit(
+        &self,
+        indicators: &Matrix,
+        targets: &Vector,
+        base: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<FittedRaking>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, indicators, None, &ctx.policy);
+        let n = indicators.nrows();
+        let k = indicators.ncols();
+        if targets.len() != k {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "Raking targets.len()={} ≠ indicators.ncols()={k}",
+                        targets.len()
+                    ))
+                    .build(),
+            );
+        }
+        let mut w = match base {
+            Some(b) if b.len() == n => b.clone(),
+            Some(b) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DimensionMismatch)
+                        .severity(Severity::Warning)
+                        .message(format!("Raking base.len()={} ≠ n={n}", b.len()))
+                        .build(),
+                );
+                Vector::filled(n, 1.0)
+            }
+            None => Vector::filled(n, 1.0),
+        };
+        for i in 0..n {
+            if !w[i].is_finite() || w[i] < 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::InvalidWeight)
+                        .severity(Severity::Warning)
+                        .message(format!("Raking base[{i}]={:.6e} clamped to 0", w[i]))
+                        .build(),
+                );
+                w[i] = 0.0;
+            }
+        }
+        for _ in 0..40 {
+            for j in 0..k {
+                let tgt = targets.as_slice().get(j).copied().unwrap_or(0.0);
+                if !tgt.is_finite() || tgt <= 0.0 {
+                    continue;
+                }
+                let mut cur = 0.0_f64;
+                for i in 0..n {
+                    let d = indicators.get(i, j);
+                    if d.is_finite() && d > 0.0 {
+                        cur += w[i] * d;
+                    }
+                }
+                if cur <= 1e-15 {
+                    continue;
+                }
+                let scale = tgt / cur;
+                for i in 0..n {
+                    let d = indicators.get(i, j);
+                    if d.is_finite() && d > 0.0 {
+                        w[i] *= scale;
+                    }
+                }
+            }
+        }
+        let margins = Vector::from_iter((0..k).map(|j| {
+            let mut s = 0.0;
+            for i in 0..n {
+                let d = indicators.get(i, j);
+                if d.is_finite() {
+                    s += w[i] * d;
+                }
+            }
+            s
+        }));
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Raking is sequential IPF, not generalised raking / GREG")
+                .compromise(NumericalCompromise::new(
+                    "calibration raking / GREG",
+                    "iterative proportional fitting of dummy margins",
+                    "distance-to-base constraints and design-based SE are omitted",
+                    "read the weights as IPF calibration, not a published rake",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedRaking {
+            weights: w,
+            margins,
+        })
+    }
+}
+
+/// Post-stratification to known stratum population sizes.
+///
+/// Stratum count is not identification `p`. `pop_sizes[i]` is \(N_h\) for the
+/// stratum of row `i`.
+#[derive(Clone, Debug, Default)]
+pub struct PostStratification;
+
+/// Post-stratified mean.
+#[derive(Clone, Debug)]
+pub struct FittedPostStratification {
+    /// \(\sum w'_i y_i / \sum w'_i\).
+    pub mean: f64,
+    /// Calibrated weights.
+    pub weights: Vector,
+}
+
+impl PostStratification {
+    /// Default post-stratifier.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Scale base weights so each stratum totals \(N_h\).
+    pub fn fit(
+        &self,
+        y: &Vector,
+        strata: &Vector,
+        pop_sizes: &Vector,
+        base: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<FittedPostStratification>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_series_as_target(&mut ctx, y);
+        let n = y.len().min(strata.len()).min(pop_sizes.len());
+        let mut w = match base {
+            Some(b) if b.len() >= n => Vector::from_iter((0..n).map(|i| b[i])),
+            _ => Vector::filled(n, 1.0),
+        };
+        let mut sw: BTreeMap<i64, f64> = BTreeMap::new();
+        let mut nh: BTreeMap<i64, f64> = BTreeMap::new();
+        for i in 0..n {
+            if !strata[i].is_finite() {
+                continue;
+            }
+            let h = strata[i].round() as i64;
+            *sw.entry(h).or_insert(0.0) += if w[i].is_finite() && w[i] > 0.0 {
+                w[i]
+            } else {
+                0.0
+            };
+            nh.insert(h, pop_sizes[i]);
+        }
+        for i in 0..n {
+            if !strata[i].is_finite() {
+                w[i] = 0.0;
+                continue;
+            }
+            let h = strata[i].round() as i64;
+            let den = sw.get(&h).copied().unwrap_or(0.0);
+            let pop = nh.get(&h).copied().unwrap_or(f64::NAN);
+            if den <= 1e-15 || !pop.is_finite() || pop <= 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::InvalidWeight)
+                        .severity(Severity::Warning)
+                        .message(format!(
+                            "PostStratification stratum {h} has no mass or N_h={pop:.6e}"
+                        ))
+                        .build(),
+                );
+                w[i] = 0.0;
+            } else {
+                w[i] *= pop / den;
+            }
+        }
+        let mut num = 0.0_f64;
+        let mut den = 0.0_f64;
+        for i in 0..n {
+            if y[i].is_finite() && w[i].is_finite() && w[i] > 0.0 {
+                num += w[i] * y[i];
+                den += w[i];
+            }
+        }
+        if den <= 1e-15 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("PostStratification left no positive weight")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "post-stratified mean",
+                        "every stratum failed calibration",
+                        "pass positive N_h and overlapping sample strata",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("PostStratification is N_h / n_h^w scaling, not a survey jackknife")
+                .compromise(NumericalCompromise::new(
+                    "post-stratified survey mean",
+                    "stratum weight calibration to known N_h",
+                    "design-based variance and finite-population corrections are omitted",
+                    "read the mean as a calibrated Hajek sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedPostStratification {
+            mean: if den > 1e-15 { num / den } else { f64::NAN },
+            weights: w,
+        })
+    }
+}
+
+/// Design-weighted OLS (statsmodels `survey.SurveyModel` / WLS lite).
+///
+/// Weight count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct SurveyWls;
+
+/// Weighted slopes.
+#[derive(Clone, Debug)]
+pub struct FittedSurveyWls {
+    /// Slopes (no intercept column).
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+}
+
+impl SurveyWls {
+    /// Default survey WLS.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// \(\hat\beta = (X^\top W X)^{-1} X^\top W y\) via a \(\sqrt{w}\) transform.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        weights: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSurveyWls>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(weights.len());
+        let p = x.ncols();
+        if weights.len() != y.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "SurveyWls weights.len()={} ≠ y.len()={}",
+                        weights.len(),
+                        y.len()
+                    ))
+                    .build(),
+            );
+        }
+        let xw = Matrix::from_fn(n, p + 1, |i, j| {
+            let ww = weights.as_slice().get(i).copied().unwrap_or(0.0);
+            let s = if ww.is_finite() && ww > 0.0 {
+                ww.sqrt()
+            } else {
+                0.0
+            };
+            if j == 0 {
+                s
+            } else {
+                s * x.get(i, j - 1)
+            }
+        });
+        let yw = Vector::from_iter((0..n).map(|i| {
+            let ww = weights.as_slice().get(i).copied().unwrap_or(0.0);
+            let s = if ww.is_finite() && ww > 0.0 {
+                ww.sqrt()
+            } else {
+                0.0
+            };
+            s * y[i]
+        }));
+        let mut scratch = Report::new("survey-wls", "lstsq");
+        let sol = least_squares(&mut scratch, &xw, &yw, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(p + 1));
+        for issue in scratch.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SurveyWls is √w OLS, not a linearised survey sandwich")
+                .compromise(NumericalCompromise::new(
+                    "survey-weighted regression",
+                    "square-root-weight OLS",
+                    "PSU / stratum sandwich SE and finite-population corrections are omitted",
+                    "read β as a weighted slope, not a published svy:reg",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedSurveyWls {
+            coef: Vector::from_iter((1..sol.len()).map(|j| sol[j])),
+            intercept: sol.as_slice().first().copied().unwrap_or(0.0),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -26116,5 +26962,52 @@ mod tests {
             .expect("ebal");
         assert!(ebal.value.att.is_finite());
         assert_eq!(ebal.value.weights.len(), 20);
+        let sir = SlicedInverseRegression::new(4, 1)
+            .fit(&xate, &dur, &Session::new("sir", "t"))
+            .expect("sir");
+        assert_eq!(sir.value.embedding.nrows(), 20);
+        assert!(sir.value.directions.get(0, 0).is_finite());
+        let sav = SlicedAverageVariance::new(4, 1)
+            .fit(&xate, &dur, &Session::new("save", "t"))
+            .expect("save");
+        assert_eq!(sav.value.embedding.nrows(), 20);
+        let phd = PrincipalHessianDirections::new(1)
+            .fit(&xate, &dur, &Session::new("phd", "t"))
+            .expect("phd");
+        assert_eq!(phd.value.embedding.nrows(), 20);
+        let pi = Vector::filled(20, 0.5);
+        let ht = HorvitzThompson::new()
+            .fit(&dur, &pi, &Session::new("ht", "t"))
+            .expect("ht");
+        assert!(ht.value.total.is_finite());
+        assert!(ht.value.mean.is_finite());
+        let dummies = Matrix::from_fn(20, 2, |i, j| {
+            if j == 0 {
+                if grp[i] < 0.5 {
+                    1.0
+                } else {
+                    0.0
+                }
+            } else if grp[i] >= 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        });
+        let tgt = Vector::from_iter([10.0, 10.0]);
+        let rake = Raking::new()
+            .fit(&dummies, &tgt, None, &Session::new("rake", "t"))
+            .expect("rake");
+        assert_eq!(rake.value.weights.len(), 20);
+        let pop = Vector::from_iter((0..20).map(|i| if grp[i] < 0.5 { 12.0 } else { 8.0 }));
+        let pstr = PostStratification::new()
+            .fit(&dur, &grp, &pop, None, &Session::new("pstr", "t"))
+            .expect("pstr");
+        assert!(pstr.value.mean.is_finite());
+        let wsvy = Vector::from_iter((0..20).map(|i| 1.0 + grp[i]));
+        let svy = SurveyWls::new()
+            .fit(&xate, &dur, &wsvy, &Session::new("svy", "t"))
+            .expect("svy");
+        assert!(svy.value.coef[0].is_finite());
     }
 }

@@ -6190,6 +6190,87 @@ const INVENTORY: &[Algorithm] = &[
         "online",
     ),
     a("online.PriorClassifier", "river.dummy.Prior", "online"),
+    a(
+        "manifold.HessianLle",
+        "sklearn.manifold.LocallyLinearEmbedding",
+        "manifold",
+    ),
+    a(
+        "manifold.ModifiedLle",
+        "sklearn.manifold.LocallyLinearEmbedding",
+        "manifold",
+    ),
+    a(
+        "manifold.Ltsa",
+        "sklearn.manifold.LocallyLinearEmbedding",
+        "manifold",
+    ),
+    a(
+        "stats.SlicedInverseRegression",
+        "statsmodels.regression.dimred.SlicedInverseRegression",
+        "estimator",
+    ),
+    a(
+        "stats.SlicedAverageVariance",
+        "statsmodels.regression.dimred.SAVE",
+        "estimator",
+    ),
+    a(
+        "stats.PrincipalHessianDirections",
+        "statsmodels.regression.dimred.PrincipalHessianDirections",
+        "estimator",
+    ),
+    a(
+        "stats.HorvitzThompson",
+        "statsmodels.stats.weightstats.DescrStatsW",
+        "stats",
+    ),
+    a("stats.Raking", "statsmodels.stats.weightstats.DescrStatsW", "stats"),
+    a(
+        "stats.PostStratification",
+        "statsmodels.stats.weightstats.DescrStatsW",
+        "stats",
+    ),
+    a(
+        "stats.SurveyWls",
+        "statsmodels.regression.linear_model.WLS",
+        "estimator",
+    ),
+    a(
+        "tslearn.DisjointCnnClassifier",
+        "sktime.classification.deep_learning.disjoint_cnn.DisjointCNNClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.McdcnnClassifier",
+        "sktime.classification.deep_learning.mcdcnn.MCDCNNClassifier",
+        "timeseries",
+    ),
+    a(
+        "tslearn.PatchTstClassifier",
+        "sktime.classification.deep_learning.PatchTSTClassifier",
+        "timeseries",
+    ),
+    a(
+        "tsa.NbeatsForecaster",
+        "sktime.forecasting.nbeats.NBEATSForecaster",
+        "forecast",
+    ),
+    a(
+        "tsa.NhitsForecaster",
+        "sktime.forecasting.nhits.NHiTSForecaster",
+        "forecast",
+    ),
+    a(
+        "tsa.DeepArForecaster",
+        "sktime.forecasting.deepar.DeepARForecaster",
+        "forecast",
+    ),
+    a(
+        "panel.BorusyakJaravelSpiess",
+        "statsmodels.treatment.api",
+        "estimator",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6689,6 +6770,14 @@ mod tests {
             "panel.EventStudy",
             "panel.CallawaySantanna",
             "online.PaRegressor",
+            "manifold.HessianLle",
+            "stats.SlicedInverseRegression",
+            "stats.HorvitzThompson",
+            "tslearn.DisjointCnnClassifier",
+            "tsa.NbeatsForecaster",
+            "panel.BorusyakJaravelSpiess",
+            "tslearn.PatchTstClassifier",
+            "tsa.NhitsForecaster",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

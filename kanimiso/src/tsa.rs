@@ -16750,6 +16750,565 @@ impl FitSeries for ThresholdAr {
     }
 }
 
+/// Interpretable N-BEATS residual stacks (Oreshkin et al. / sktime `NBEATSForecaster` lite).
+///
+/// Trend polynomial degree and seasonal harmonic count are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct NbeatsForecaster {
+    /// Polynomial degree of the trend block.
+    pub trend_degree: usize,
+    /// Seasonal period.
+    pub period: usize,
+    /// Fourier harmonics. Not identification `p`.
+    pub n_harmonics: usize,
+}
+
+impl Default for NbeatsForecaster {
+    fn default() -> Self {
+        Self {
+            trend_degree: 2,
+            period: 4,
+            n_harmonics: 1,
+        }
+    }
+}
+
+impl NbeatsForecaster {
+    /// Interpretable N-BEATS with polynomial trend and Fourier seasonality.
+    pub fn new(trend_degree: usize, period: usize, n_harmonics: usize) -> Self {
+        Self {
+            trend_degree,
+            period,
+            n_harmonics,
+        }
+    }
+}
+
+/// Fitted N-BEATS residual blocks.
+#[derive(Clone, Debug)]
+pub struct FittedNbeats {
+    n: usize,
+    trend_degree: usize,
+    period: usize,
+    n_harmonics: usize,
+    trend: Vector,
+    seasonal: Vector,
+    level: f64,
+}
+
+impl FittedNbeats {
+    /// Sum of trend, seasonal, and leftover-level forecasts.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let n = self.n.max(1) as f64;
+        let per = self.period.max(2) as f64;
+        let out = Vector::from_iter((0..h).map(|k| {
+            let t = self.n as f64 + k as f64;
+            let u = t / n;
+            let mut yhat = self.level;
+            let mut pow = 1.0_f64;
+            for d in 0..=self.trend_degree {
+                if d < self.trend.len() {
+                    yhat += self.trend[d] * pow;
+                }
+                pow *= u;
+            }
+            for hrm in 1..=self.n_harmonics.max(1) {
+                let ang = 2.0 * std::f64::consts::PI * hrm as f64 * t / per;
+                let b = 2 * (hrm - 1);
+                if b < self.seasonal.len() {
+                    yhat += self.seasonal[b] * ang.sin();
+                }
+                if b + 1 < self.seasonal.len() {
+                    yhat += self.seasonal[b + 1] * ang.cos();
+                }
+            }
+            yhat
+        }));
+        ctx.finish(out)
+    }
+}
+
+impl FitSeries for NbeatsForecaster {
+    type Fitted = FittedNbeats;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedNbeats>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        if n < 3 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .message("NbeatsForecaster needs n≥3")
+                    .build(),
+            );
+            return ctx.finish(FittedNbeats {
+                n,
+                trend_degree: self.trend_degree,
+                period: self.period.max(2),
+                n_harmonics: self.n_harmonics.max(1),
+                trend: Vector::zeros(self.trend_degree + 1),
+                seasonal: Vector::zeros(2 * self.n_harmonics.max(1)),
+                level: y.as_slice().last().copied().unwrap_or(0.0),
+            });
+        }
+        let deg = self.trend_degree.max(1);
+        let nf = n as f64;
+        let trend_x = Matrix::from_fn(n, deg + 1, |t, d| {
+            let u = t as f64 / nf;
+            let mut p = 1.0_f64;
+            for _ in 0..d {
+                p *= u;
+            }
+            p
+        });
+        let mut scratch = Report::new("nbeats", "trend");
+        let trend = least_squares(&mut scratch, &trend_x, y, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(deg + 1));
+        let mut resid = Vector::from_iter((0..n).map(|t| {
+            let u = t as f64 / nf;
+            let mut yhat = 0.0;
+            let mut p = 1.0_f64;
+            for d in 0..=deg {
+                if d < trend.len() {
+                    yhat += trend[d] * p;
+                }
+                p *= u;
+            }
+            y[t] - yhat
+        }));
+        let hrm = self.n_harmonics.max(1);
+        let per = self.period.max(2) as f64;
+        let seas_x = Matrix::from_fn(n, 2 * hrm, |t, j| {
+            let k = j / 2 + 1;
+            let ang = 2.0 * std::f64::consts::PI * k as f64 * t as f64 / per;
+            if j % 2 == 0 {
+                ang.sin()
+            } else {
+                ang.cos()
+            }
+        });
+        let mut scratch2 = Report::new("nbeats", "seas");
+        let seasonal = least_squares(&mut scratch2, &seas_x, &resid, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(2 * hrm));
+        for t in 0..n {
+            let mut yhat = 0.0;
+            for j in 0..2 * hrm {
+                let k = j / 2 + 1;
+                let ang = 2.0 * std::f64::consts::PI * k as f64 * t as f64 / per;
+                let b = if j % 2 == 0 { ang.sin() } else { ang.cos() };
+                if j < seasonal.len() {
+                    yhat += seasonal[j] * b;
+                }
+            }
+            resid[t] -= yhat;
+        }
+        let mut level = 0.0_f64;
+        let mut c = 0.0_f64;
+        for t in 0..n {
+            if resid[t].is_finite() {
+                level += resid[t];
+                c += 1.0;
+            }
+        }
+        if c > 0.0 {
+            level /= c;
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("NbeatsForecaster is residual polynomial + Fourier, not generic N-BEATS FC stacks")
+                .compromise(NumericalCompromise::new(
+                    "Oreshkin N-BEATS",
+                    "interpretable trend then seasonal residual blocks",
+                    "doubly residual FC stacks and the published basis expansion are omitted",
+                    "read the path as an interpretable N-BEATS sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedNbeats {
+            n,
+            trend_degree: deg,
+            period: self.period.max(2),
+            n_harmonics: hrm,
+            trend,
+            seasonal,
+            level,
+        })
+    }
+}
+
+/// Hierarchical interpolation (Challu et al. N-HiTS / sktime `NHiTSForecaster` lite).
+///
+/// Pooling rates are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct NhitsForecaster {
+    /// Coarse-to-fine pooling widths. Not identification `p`.
+    pub scales: Vec<usize>,
+}
+
+impl Default for NhitsForecaster {
+    fn default() -> Self {
+        Self {
+            scales: vec![4, 2, 1],
+        }
+    }
+}
+
+impl NhitsForecaster {
+    /// N-HiTS with the given pooling rates.
+    pub fn new(scales: Vec<usize>) -> Self {
+        Self { scales }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct NhitsBlock {
+    scale: usize,
+    intercept: f64,
+    slope: f64,
+    pooled_n: usize,
+}
+
+/// Fitted multi-rate interpolation stacks.
+#[derive(Clone, Debug)]
+pub struct FittedNhits {
+    blocks: Vec<NhitsBlock>,
+}
+
+impl FittedNhits {
+    /// Sum of linearly interpolated per-scale forecasts.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let out = Vector::from_iter((0..h).map(|k| {
+            let mut yhat = 0.0;
+            for b in &self.blocks {
+                let t = b.pooled_n as f64 + (k as f64) / (b.scale.max(1) as f64);
+                yhat += b.intercept + b.slope * t;
+            }
+            yhat
+        }));
+        ctx.finish(out)
+    }
+}
+
+impl FitSeries for NhitsForecaster {
+    type Fitted = FittedNhits;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedNhits>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        let mut resid: Vec<f64> = y.as_slice().to_vec();
+        let mut blocks = Vec::new();
+        let scales: Vec<usize> = if self.scales.is_empty() {
+            vec![4, 2, 1]
+        } else {
+            self.scales.clone()
+        };
+        for &s0 in &scales {
+            let s = s0.max(1);
+            let m = (n / s).max(1);
+            if m < 2 {
+                continue;
+            }
+            let pooled = Vector::from_iter((0..m).map(|j| {
+                let a = j * s;
+                let b = ((j + 1) * s).min(n);
+                let mut acc = 0.0_f64;
+                let mut c = 0.0_f64;
+                for t in a..b {
+                    if resid[t].is_finite() {
+                        acc += resid[t];
+                        c += 1.0;
+                    }
+                }
+                if c > 0.0 {
+                    acc / c
+                } else {
+                    0.0
+                }
+            }));
+            let design = Matrix::from_fn(m, 2, |t, j| if j == 0 { 1.0 } else { t as f64 });
+            let mut scratch = Report::new("nhits", "scale");
+            let sol = least_squares(&mut scratch, &design, &pooled, &ctx.policy)
+                .unwrap_or_else(|| Vector::from_iter([0.0, 0.0]));
+            let intercept = sol.as_slice().first().copied().unwrap_or(0.0);
+            let slope = sol.as_slice().get(1).copied().unwrap_or(0.0);
+            for t in 0..n {
+                let u = t as f64 / s as f64;
+                resid[t] -= intercept + slope * u;
+            }
+            blocks.push(NhitsBlock {
+                scale: s,
+                intercept,
+                slope,
+                pooled_n: m,
+            });
+        }
+        if blocks.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("NhitsForecaster grew no interpolation blocks")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "N-HiTS forecast",
+                        "every pooling rate left fewer than two bins",
+                        "use a longer series or smaller scales",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("NhitsForecaster is multi-rate linear interpolation, not the published MLP")
+                .compromise(NumericalCompromise::new(
+                    "N-HiTS hierarchical interpolation",
+                    "coarse-to-fine pooled linear trends with residual stacking",
+                    "the published MLP blocks and expressiveness ratios are omitted",
+                    "read the path as a multi-rate sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedNhits { blocks })
+    }
+}
+
+/// Gaussian autoregressive DeepAR-lite (Salinas et al. / sktime `DeepARForecaster`).
+///
+/// Hidden width is not identification `p`. Forecasts the mean path, not samples.
+#[derive(Clone, Debug)]
+pub struct DeepArForecaster {
+    /// Lag order. Not identification `p`.
+    pub lags: usize,
+    /// Hidden tanh units. Not identification `p`.
+    pub hidden: usize,
+    /// SGD steps.
+    pub max_iter: usize,
+    /// Learning rate.
+    pub eta: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for DeepArForecaster {
+    fn default() -> Self {
+        Self {
+            lags: 2,
+            hidden: 4,
+            max_iter: 80,
+            eta: 0.05,
+            seed: 7,
+        }
+    }
+}
+
+impl DeepArForecaster {
+    /// Default DeepAR-lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted Gaussian mean-path DeepAR.
+#[derive(Clone, Debug)]
+pub struct FittedDeepAr {
+    lags: usize,
+    w: Matrix,
+    b: Vector,
+    w_out: Vector,
+    b_out: f64,
+    /// Residual Gaussian scale.
+    pub sigma: f64,
+    last: Vector,
+}
+
+impl FittedDeepAr {
+    fn hidden(&self, feat: &[f64]) -> Vector {
+        let h = self.b.len();
+        Vector::from_iter((0..h).map(|u| {
+            let mut s = self.b[u];
+            for j in 0..feat.len().min(self.w.ncols()) {
+                s += self.w.get(u, j) * feat[j];
+            }
+            s.tanh()
+        }))
+    }
+
+    fn mu(&self, feat: &[f64]) -> f64 {
+        let h = self.hidden(feat);
+        let mut s = self.b_out;
+        for u in 0..h.len().min(self.w_out.len()) {
+            s += self.w_out[u] * h[u];
+        }
+        s
+    }
+
+    /// Recursive mean-path forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let p = self.lags.max(1);
+        let mut hist: Vec<f64> = self.last.as_slice().to_vec();
+        let mut out = Vec::with_capacity(h);
+        for k in 0..h {
+            let mut feat = vec![0.0; p + 1];
+            for j in 0..p {
+                let ix = hist.len().saturating_sub(p - j);
+                feat[j] = hist.get(ix).copied().unwrap_or(0.0);
+            }
+            feat[p] = (hist.len() + k) as f64 / (hist.len().max(1) as f64);
+            let yhat = self.mu(&feat);
+            out.push(yhat);
+            hist.push(yhat);
+        }
+        ctx.finish(Vector::from_iter(out))
+    }
+}
+
+impl FitSeries for DeepArForecaster {
+    type Fitted = FittedDeepAr;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedDeepAr>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        let p = self.lags.max(1);
+        let h = self.hidden.max(1);
+        if n <= p + 1 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .message("DeepArForecaster needs n > lags+1")
+                    .build(),
+            );
+            return ctx.finish(FittedDeepAr {
+                lags: p,
+                w: Matrix::zeros(h, p + 1),
+                b: Vector::zeros(h),
+                w_out: Vector::zeros(h),
+                b_out: y.as_slice().last().copied().unwrap_or(0.0),
+                sigma: 1.0,
+                last: Vector::from_iter(y.as_slice().iter().copied().rev().take(p).rev()),
+            });
+        }
+        let mut rng = Rng::new(self.seed);
+        let scale = (h as f64).sqrt().recip();
+        let mut w = Matrix::from_fn(h, p + 1, |_, _| rng.standard_normal() * scale);
+        let mut b = Vector::from_iter((0..h).map(|_| rng.standard_normal() * 0.01));
+        let mut w_out = Vector::from_iter((0..h).map(|_| rng.standard_normal() * scale));
+        let mut b_out = 0.0_f64;
+        let eta = if self.eta.is_finite() && self.eta > 0.0 {
+            self.eta
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "DeepArForecaster η={:.6e} is not a finite >0; using 0.05",
+                        self.eta
+                    ))
+                    .build(),
+            );
+            0.05
+        };
+        let nf = n as f64;
+        for _ in 0..self.max_iter.max(1) {
+            for t in p..n {
+                if !y[t].is_finite() {
+                    continue;
+                }
+                let mut feat = vec![0.0; p + 1];
+                let mut ok = true;
+                for j in 0..p {
+                    let v = y[t - p + j];
+                    if !v.is_finite() {
+                        ok = false;
+                    }
+                    feat[j] = v;
+                }
+                if !ok {
+                    continue;
+                }
+                feat[p] = t as f64 / nf;
+                let hid = Vector::from_iter((0..h).map(|u| {
+                    let mut s = b[u];
+                    for j in 0..p + 1 {
+                        s += w.get(u, j) * feat[j];
+                    }
+                    s.tanh()
+                }));
+                let mut mu = b_out;
+                for u in 0..h {
+                    mu += w_out[u] * hid[u];
+                }
+                let err = mu - y[t];
+                if !err.is_finite() {
+                    continue;
+                }
+                b_out -= eta * err;
+                for u in 0..h {
+                    w_out[u] -= eta * err * hid[u];
+                    let dt = err * w_out[u] * (1.0 - hid[u] * hid[u]);
+                    b[u] -= eta * dt;
+                    for j in 0..p + 1 {
+                        w.set(u, j, w.get(u, j) - eta * dt * feat[j]);
+                    }
+                }
+            }
+        }
+        let mut sse = 0.0_f64;
+        let mut c = 0.0_f64;
+        for t in p..n {
+            if !y[t].is_finite() {
+                continue;
+            }
+            let mut feat = vec![0.0; p + 1];
+            for j in 0..p {
+                feat[j] = y[t - p + j];
+            }
+            feat[p] = t as f64 / nf;
+            let hid = Vector::from_iter((0..h).map(|u| {
+                let mut s = b[u];
+                for j in 0..p + 1 {
+                    s += w.get(u, j) * feat[j];
+                }
+                s.tanh()
+            }));
+            let mut mu = b_out;
+            for u in 0..h {
+                mu += w_out[u] * hid[u];
+            }
+            if mu.is_finite() {
+                let e = y[t] - mu;
+                sse += e * e;
+                c += 1.0;
+            }
+        }
+        let sigma = if c > 1.0 {
+            (sse / (c - 1.0)).sqrt()
+        } else {
+            1.0
+        };
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("DeepArForecaster is a tanh AR mean path, not an LSTM DeepAR")
+                .compromise(NumericalCompromise::new(
+                    "Salinas DeepAR",
+                    "one-hidden tanh map of lags plus time, trained by SGD on MSE",
+                    "RNN/LSTM cells, student-t likelihood, and Monte Carlo paths are omitted",
+                    "read σ as residual scale and the forecast as the mean path",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedDeepAr {
+            lags: p,
+            w,
+            b,
+            w_out,
+            b_out,
+            sigma,
+            last: Vector::from_iter((n - p..n).map(|i| y[i])),
+        })
+    }
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -18018,5 +18577,33 @@ impl FitSeries for ThresholdAr {
             .expect("tarp");
         assert_eq!(tarp.value.len(), 2);
         assert!(tarp.value.as_slice().iter().all(|v| v.is_finite()));
+        let nb = NbeatsForecaster::new(2, 4, 1)
+            .fit_series(&y, &Session::new("nbt", "t"))
+            .expect("nbt");
+        let nbp = nb
+            .value
+            .forecast(3, &Session::new("nbtp", "t"))
+            .expect("nbtp");
+        assert_eq!(nbp.value.len(), 3);
+        assert!(nbp.value.as_slice().iter().all(|v| v.is_finite()));
+        let nh = NhitsForecaster::new(vec![4, 2, 1])
+            .fit_series(&y, &Session::new("nhi", "t"))
+            .expect("nhi");
+        let nhp = nh
+            .value
+            .forecast(4, &Session::new("nhip", "t"))
+            .expect("nhip");
+        assert_eq!(nhp.value.len(), 4);
+        assert!(nhp.value.as_slice().iter().all(|v| v.is_finite()));
+        let dar = DeepArForecaster::new()
+            .fit_series(&y, &Session::new("dar", "t"))
+            .expect("dar");
+        let darp = dar
+            .value
+            .forecast(2, &Session::new("darp", "t"))
+            .expect("darp");
+        assert_eq!(darp.value.len(), 2);
+        assert!(darp.value.as_slice().iter().all(|v| v.is_finite()));
+        assert!(dar.value.sigma.is_finite());
     }
 }

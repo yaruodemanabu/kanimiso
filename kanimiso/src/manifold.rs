@@ -6,13 +6,13 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linalg::symmetric_eigen;
+use crate::linalg::{symmetric_eigen, thin_svd};
 use crate::traits::{FitUnsupervised, Transform};
 use crate::validate::inspect_xy;
 use faer::linalg::solvers::Solve;
 use faer::{Mat, Side};
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, NumericalCompromise, Qualified, Result};
+use signlred::{Issue, IssueCode, NumericalCompromise, Qualified, Report, Result, Severity};
 
 fn sq_dist(x: &Matrix, i: usize, j: usize) -> f64 {
     let mut s = 0.0;
@@ -585,6 +585,461 @@ impl FitUnsupervised for LocallyLinearEmbedding {
     }
 }
 
+fn local_tangent_scores(
+    x: &Matrix,
+    nbrs: &[usize],
+    d: usize,
+    policy: &signlred::Policy,
+) -> Option<Matrix> {
+    let k = nbrs.len();
+    let p = x.ncols();
+    if k == 0 || p == 0 {
+        return None;
+    }
+    let mut mean = vec![0.0; p];
+    for &i in nbrs {
+        for c in 0..p {
+            mean[c] += x.get(i, c);
+        }
+    }
+    let kf = k as f64;
+    for c in 0..p {
+        mean[c] /= kf;
+    }
+    let z = Matrix::from_fn(k, p, |a, c| x.get(nbrs[a], c) - mean[c]);
+    let mut scratch = Report::new("lle", "tangent");
+    let svd = thin_svd(&mut scratch, &z, policy)?;
+    let r = d.max(1).min(svd.v.ncols()).min(svd.singular_values.len());
+    Some(Matrix::from_fn(k, r, |a, c| {
+        let mut s = 0.0;
+        for j in 0..p.min(svd.v.nrows()) {
+            s += z.get(a, j) * svd.v[(j, c)];
+        }
+        s
+    }))
+}
+
+fn orthonormalize_columns(a: &mut Matrix) {
+    let (k, q) = a.shape();
+    for j in 0..q {
+        for i in 0..j {
+            let mut dot = 0.0;
+            for r in 0..k {
+                dot += a.get(r, j) * a.get(r, i);
+            }
+            for r in 0..k {
+                a.set(r, j, a.get(r, j) - dot * a.get(r, i));
+            }
+        }
+        let mut nrm = 0.0_f64;
+        for r in 0..k {
+            nrm += a.get(r, j) * a.get(r, j);
+        }
+        nrm = nrm.sqrt();
+        if nrm < 1e-12 {
+            continue;
+        }
+        for r in 0..k {
+            a.set(r, j, a.get(r, j) / nrm);
+        }
+    }
+}
+
+fn embed_smallest_eigs(
+    ctx: &mut FitCtx,
+    m: &Mat<f64>,
+    n: usize,
+    n_components: usize,
+) -> Matrix {
+    let k = n_components.max(1);
+    let Some((vals, vecs)) = symmetric_eigen(&mut ctx.report, m, &ctx.policy) else {
+        return Matrix::zeros(n, k);
+    };
+    let mut pairs: Vec<(f64, usize)> = vals
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(i, v)| (v, i))
+        .collect();
+    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut out = Matrix::zeros(n, k);
+    let start = if pairs.len() > 1 { 1 } else { 0 };
+    for (c, &(_, idx)) in pairs.iter().skip(start).take(k).enumerate() {
+        for i in 0..n.min(vecs.nrows()) {
+            out.set(i, c, vecs[(i, idx)]);
+        }
+    }
+    out
+}
+
+/// Hessian eigenmaps (Donoho–Grimes; sklearn `LocallyLinearEmbedding(method="hessian")`).
+///
+/// Neighbor / Hessian-monomial counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct HessianLle {
+    /// Neighbors per point (expanded to the quadratic design width when needed).
+    pub n_neighbors: usize,
+    /// Embedding dimension.
+    pub n_components: usize,
+}
+
+impl Default for HessianLle {
+    fn default() -> Self {
+        Self {
+            n_neighbors: 6,
+            n_components: 2,
+        }
+    }
+}
+
+impl HessianLle {
+    /// Hessian LLE with `k` neighbors onto `d` coordinates.
+    pub fn new(n_neighbors: usize, n_components: usize) -> Self {
+        Self {
+            n_neighbors,
+            n_components,
+        }
+    }
+}
+
+impl FitUnsupervised for HessianLle {
+    type Fitted = FittedEmbedding;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedEmbedding>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let n = x.nrows();
+        let d = self.n_components.max(1);
+        let n_quad = d * (d + 1) / 2;
+        let need = (1 + d + n_quad).max(self.n_neighbors.max(1));
+        if need > self.n_neighbors {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "HessianLle expanded n_neighbors {} → {need} so the local Hessian design fits",
+                        self.n_neighbors
+                    ))
+                    .build(),
+            );
+        }
+        let g = knn_graph(x, need);
+        let mut m = Mat::<f64>::zeros(n, n);
+        let mut used = 0u64;
+        for i in 0..n {
+            let nbrs = &g[i];
+            let k = nbrs.len();
+            if k < 1 + d {
+                continue;
+            }
+            let Some(u) = local_tangent_scores(x, nbrs, d, &ctx.policy) else {
+                continue;
+            };
+            let dd = u.ncols();
+            let nq = dd * (dd + 1) / 2;
+            let n_lin = 1 + dd;
+            let mut yi = Matrix::from_fn(k, n_lin + nq, |a, c| {
+                if c == 0 {
+                    1.0
+                } else if c <= dd {
+                    u.get(a, c - 1)
+                } else {
+                    let q = c - n_lin;
+                    let mut acc = 0usize;
+                    for p0 in 0..dd {
+                        for p1 in p0..dd {
+                            if acc == q {
+                                return u.get(a, p0) * u.get(a, p1);
+                            }
+                            acc += 1;
+                        }
+                    }
+                    0.0
+                }
+            });
+            orthonormalize_columns(&mut yi);
+            for a in 0..k {
+                for b in 0..k {
+                    let mut s = 0.0;
+                    for q in 0..nq {
+                        s += yi.get(a, n_lin + q) * yi.get(b, n_lin + q);
+                    }
+                    m[(nbrs[a], nbrs[b])] += s;
+                }
+            }
+            used += 1;
+        }
+        if used == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("HessianLle built no local Hessian operators")
+                    .meaninglessness(signlred::Meaninglessness::vacuous(
+                        "Hessian eigenmaps",
+                        "every neighborhood failed the local SVD",
+                        "use more neighbors or a less degenerate sample",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("HessianLle is a Gram–Schmidt Hessian sketch, not sklearn's exact eigenmaps")
+                .compromise(NumericalCompromise::new(
+                    "Donoho–Grimes Hessian eigenmaps",
+                    "local PCA plus orthonormalized quadratic monomials",
+                    "the published null-space / SVD Hessian estimator is omitted",
+                    "read the map as a Hessian-alignment sketch",
+                ))
+                .build(),
+        );
+        let out = embed_smallest_eigs(&mut ctx, &m, n, d);
+        ctx.finish(FittedEmbedding {
+            embedding: out,
+            stress: f64::NAN,
+        })
+    }
+}
+
+/// Modified locally linear embedding (Zhang–Wang; sklearn `method="modified"`).
+///
+/// Uses the local Gram null space rather than \(G^{-1}\mathbf{1}\). Neighbor
+/// count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ModifiedLle {
+    /// Neighbors per point.
+    pub n_neighbors: usize,
+    /// Embedding dimension.
+    pub n_components: usize,
+}
+
+impl Default for ModifiedLle {
+    fn default() -> Self {
+        Self {
+            n_neighbors: 5,
+            n_components: 2,
+        }
+    }
+}
+
+impl ModifiedLle {
+    /// Modified LLE with `k` neighbors onto `d` coordinates.
+    pub fn new(n_neighbors: usize, n_components: usize) -> Self {
+        Self {
+            n_neighbors,
+            n_components,
+        }
+    }
+}
+
+impl FitUnsupervised for ModifiedLle {
+    type Fitted = FittedEmbedding;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedEmbedding>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let n = x.nrows();
+        let p = x.ncols();
+        let d = self.n_components.max(1);
+        let g = knn_graph(x, self.n_neighbors);
+        let mut w = vec![vec![0.0; n]; n];
+        for i in 0..n {
+            let nbrs = &g[i];
+            let k = nbrs.len();
+            if k == 0 {
+                continue;
+            }
+            let z = Matrix::from_fn(k, p, |a, c| x.get(nbrs[a], c) - x.get(i, c));
+            let mut gram = Mat::<f64>::zeros(k, k);
+            for a in 0..k {
+                for b in 0..=a {
+                    let mut s = 0.0;
+                    for c in 0..p {
+                        s += z.get(a, c) * z.get(b, c);
+                    }
+                    gram[(a, b)] = s;
+                    gram[(b, a)] = s;
+                }
+                gram[(a, a)] += 1e-8;
+            }
+            let mut scratch = Report::new("mlle", "gram");
+            let wt = match symmetric_eigen(&mut scratch, &gram, &ctx.policy) {
+                Some((vals, vecs)) => {
+                    let mut pairs: Vec<(f64, usize)> = vals
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .map(|(i, v)| (v, i))
+                        .collect();
+                    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                    let sdim = k.saturating_sub(d).max(1).min(pairs.len());
+                    let mut raw = vec![0.0; k];
+                    for &(_, idx) in pairs.iter().take(sdim) {
+                        let mut ones = 0.0;
+                        for a in 0..k.min(vecs.nrows()) {
+                            ones += vecs[(a, idx)];
+                        }
+                        for a in 0..k.min(vecs.nrows()) {
+                            raw[a] += vecs[(a, idx)] * ones;
+                        }
+                    }
+                    Vector::from_iter(raw)
+                }
+                None => Vector::filled(k, 1.0 / k as f64),
+            };
+            let s: f64 = wt.as_slice().iter().sum();
+            let scale = if s.abs() > 1e-15 {
+                1.0 / s
+            } else {
+                1.0 / k as f64
+            };
+            for (a, &j) in nbrs.iter().enumerate() {
+                w[i][j] = wt[a] * scale;
+            }
+        }
+        let m = Mat::<f64>::from_fn(n, n, |a, b| {
+            let mut s = 0.0;
+            for i in 0..n {
+                let ia = if a == i { 1.0 } else { 0.0 } - w[i][a];
+                let ib = if b == i { 1.0 } else { 0.0 } - w[i][b];
+                s += ia * ib;
+            }
+            s
+        });
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("ModifiedLle projects ones onto the local Gram null space")
+                .compromise(NumericalCompromise::new(
+                    "Zhang–Wang modified LLE",
+                    "null-space projection of the constant vector",
+                    "Householder regularization of multiple weight vectors is omitted",
+                    "read the map as a null-space LLE sketch",
+                ))
+                .build(),
+        );
+        let out = embed_smallest_eigs(&mut ctx, &m, n, d);
+        ctx.finish(FittedEmbedding {
+            embedding: out,
+            stress: f64::NAN,
+        })
+    }
+}
+
+/// Local tangent space alignment (Zhang–Zha; sklearn `LocallyLinearEmbedding(method="ltsa")`).
+///
+/// Neighbor count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Ltsa {
+    /// Neighbors per point.
+    pub n_neighbors: usize,
+    /// Embedding dimension.
+    pub n_components: usize,
+}
+
+impl Default for Ltsa {
+    fn default() -> Self {
+        Self {
+            n_neighbors: 5,
+            n_components: 2,
+        }
+    }
+}
+
+impl Ltsa {
+    /// LTSA with `k` neighbors onto `d` coordinates.
+    pub fn new(n_neighbors: usize, n_components: usize) -> Self {
+        Self {
+            n_neighbors,
+            n_components,
+        }
+    }
+}
+
+impl FitUnsupervised for Ltsa {
+    type Fitted = FittedEmbedding;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedEmbedding>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let n = x.nrows();
+        let d = self.n_components.max(1);
+        let g = knn_graph(x, self.n_neighbors);
+        let mut b = Mat::<f64>::zeros(n, n);
+        let mut used = 0u64;
+        for i in 0..n {
+            let nbrs = &g[i];
+            let k = nbrs.len();
+            if k < 2 {
+                continue;
+            }
+            let Some(u) = local_tangent_scores(x, nbrs, d, &ctx.policy) else {
+                continue;
+            };
+            let dd = u.ncols();
+            let kf = (k as f64).sqrt();
+            let mut gi = Matrix::from_fn(k, 1 + dd, |a, c| {
+                if c == 0 {
+                    1.0 / kf
+                } else {
+                    u.get(a, c - 1)
+                }
+            });
+            orthonormalize_columns(&mut gi);
+            let q = gi.ncols();
+            for a in 0..k {
+                for c in 0..k {
+                    let mut proj = 0.0;
+                    for j in 0..q {
+                        proj += gi.get(a, j) * gi.get(c, j);
+                    }
+                    let w = if a == c { 1.0 } else { 0.0 } - proj;
+                    b[(nbrs[a], nbrs[c])] += w;
+                }
+            }
+            used += 1;
+        }
+        if used == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("Ltsa aligned no local tangent spaces")
+                    .meaninglessness(signlred::Meaninglessness::vacuous(
+                        "LTSA embedding",
+                        "every neighborhood failed the local SVD",
+                        "use more neighbors or a less degenerate sample",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Ltsa is local-PCA alignment, not the published Zhang–Zha solver")
+                .compromise(NumericalCompromise::new(
+                    "Zhang–Zha LTSA",
+                    "I−GGᵀ assembly of local tangent frames",
+                    "the published orthogonal Procrustes alignment is omitted",
+                    "read the map as a tangent-alignment sketch",
+                ))
+                .build(),
+        );
+        let out = embed_smallest_eigs(&mut ctx, &b, n, d);
+        ctx.finish(FittedEmbedding {
+            embedding: out,
+            stress: f64::NAN,
+        })
+    }
+}
+
 /// Exact t-SNE for small `n` (student-t affinities, early exaggeration).
 #[derive(Clone, Debug)]
 pub struct TSNE {
@@ -907,5 +1362,23 @@ mod tests {
             .to_row_major()
             .iter()
             .all(|v| v.is_finite()));
+        let hl = HessianLle::new(5, 2)
+            .fit_unsupervised(&x, &Session::new("man", "hlle"))
+            .unwrap();
+        assert_eq!(hl.value.embedding.shape(), (10, 2));
+        assert!(hl
+            .value
+            .embedding
+            .to_row_major()
+            .iter()
+            .all(|v| v.is_finite()));
+        let ml = ModifiedLle::new(3, 2)
+            .fit_unsupervised(&x, &Session::new("man", "mlle"))
+            .unwrap();
+        assert_eq!(ml.value.embedding.shape(), (10, 2));
+        let lt = Ltsa::new(3, 2)
+            .fit_unsupervised(&x, &Session::new("man", "ltsa"))
+            .unwrap();
+        assert_eq!(lt.value.embedding.shape(), (10, 2));
     }
 }

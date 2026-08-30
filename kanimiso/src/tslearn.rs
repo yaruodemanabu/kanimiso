@@ -15657,6 +15657,418 @@ impl Fit for TdeClassifier {
     }
 }
 
+fn disjoint_spans(t: usize, n_blocks: usize) -> Vec<(usize, usize)> {
+    let b = n_blocks.max(1).min(t.max(1));
+    let w = (t / b).max(1);
+    let mut spans = Vec::new();
+    let mut start = 0;
+    for i in 0..b {
+        let end = if i + 1 == b { t } else { (start + w).min(t) };
+        if end > start {
+            spans.push((start, end));
+        }
+        start = end;
+    }
+    if spans.is_empty() {
+        spans.push((0, t.max(1)));
+    }
+    spans
+}
+
+fn conv_block_maxpool(x: &Matrix, start: usize, end: usize, kernels: &[Vec<f64>]) -> Matrix {
+    let width = end.saturating_sub(start);
+    Matrix::from_fn(x.nrows(), kernels.len().max(1), |i, k| {
+        if kernels.is_empty() {
+            return 0.0;
+        }
+        let w = &kernels[k];
+        if w.is_empty() || width < w.len() {
+            return 0.0;
+        }
+        let mut acc_max = f64::NEG_INFINITY;
+        for t in start..=end - w.len() {
+            let mut s = 0.0;
+            for u in 0..w.len() {
+                s += w[u] * x.get(i, t + u);
+            }
+            if s > acc_max {
+                acc_max = s;
+            }
+        }
+        if acc_max.is_finite() {
+            acc_max
+        } else {
+            0.0
+        }
+    })
+}
+
+fn hstack_blocks(blocks: &[Matrix]) -> Matrix {
+    if blocks.is_empty() {
+        return Matrix::zeros(0, 0);
+    }
+    let n = blocks[0].nrows();
+    let p: usize = blocks.iter().map(|b| b.ncols()).sum();
+    let mut out = Matrix::zeros(n, p.max(1));
+    let mut off = 0;
+    for b in blocks {
+        for j in 0..b.ncols() {
+            for i in 0..n.min(b.nrows()) {
+                out.set(i, off + j, b.get(i, j));
+            }
+        }
+        off += b.ncols();
+    }
+    out
+}
+
+/// Disjoint temporal CNN (sktime `DisjointCNNClassifier` lite).
+///
+/// Shared kernels are applied independently on contiguous blocks, then
+/// concatenated. Block count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct DisjointCnnClassifier {
+    /// Contiguous blocks. Not identification `p`.
+    pub n_blocks: usize,
+    /// Kernels per block.
+    pub n_kernels: usize,
+    /// Kernel width inside each block.
+    pub width: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for DisjointCnnClassifier {
+    fn default() -> Self {
+        Self {
+            n_blocks: 2,
+            n_kernels: 3,
+            width: 2,
+            alpha: 0.1,
+            seed: 17,
+        }
+    }
+}
+
+impl DisjointCnnClassifier {
+    /// Default disjoint-CNN classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted disjoint-CNN ridge.
+#[derive(Clone, Debug)]
+pub struct FittedDisjointCnnClassifier {
+    kernels: Vec<Vec<f64>>,
+    n_blocks: usize,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for DisjointCnnClassifier {
+    type Fitted = FittedDisjointCnnClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedDisjointCnnClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let t = x.ncols();
+        let spans = disjoint_spans(t, self.n_blocks);
+        let w = self.width.max(1);
+        if spans.iter().any(|&(a, b)| b.saturating_sub(a) < w) {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!(
+                        "DisjointCnnClassifier width={w} exceeds a block of T={t}"
+                    ))
+                    .build(),
+            );
+        }
+        let mut rng = Rng::new(self.seed);
+        let kernels: Vec<Vec<f64>> = (0..self.n_kernels.max(1))
+            .map(|_| (0..w).map(|_| rng.standard_normal()).collect())
+            .collect();
+        let blocks: Vec<Matrix> = spans
+            .iter()
+            .map(|&(a, b)| conv_block_maxpool(x, a, b, &kernels))
+            .collect();
+        let z = hstack_blocks(&blocks);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "disjoint-cnn");
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("DisjointCnnClassifier is shared-kernel block conv + ridge")
+                .compromise(NumericalCompromise::new(
+                    "sktime DisjointCNN",
+                    "max-pooled convolution on disjoint temporal blocks",
+                    "learned filters, batch-norm, and the published head are omitted",
+                    "read scores as a block-conv sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedDisjointCnnClassifier {
+            kernels,
+            n_blocks: spans.len().max(1),
+            inner,
+        })
+    }
+}
+
+impl Predict for FittedDisjointCnnClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let spans = disjoint_spans(x.ncols(), self.n_blocks);
+        let blocks: Vec<Matrix> = spans
+            .iter()
+            .map(|&(a, b)| conv_block_maxpool(x, a, b, &self.kernels))
+            .collect();
+        let z = hstack_blocks(&blocks);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Multi-channel deep CNN (sktime `MCDCNNClassifier` lite).
+///
+/// Each channel is a contiguous block with its **own** kernel bank, then the
+/// pooled maps are concatenated. Channel count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct McdcnnClassifier {
+    /// Channels (contiguous splits). Not identification `p`.
+    pub n_channels: usize,
+    /// Kernels per channel.
+    pub n_kernels: usize,
+    /// Kernel width.
+    pub width: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for McdcnnClassifier {
+    fn default() -> Self {
+        Self {
+            n_channels: 2,
+            n_kernels: 3,
+            width: 2,
+            alpha: 0.1,
+            seed: 19,
+        }
+    }
+}
+
+impl McdcnnClassifier {
+    /// Default MCDCNN-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted per-channel CNN ridge.
+#[derive(Clone, Debug)]
+pub struct FittedMcdcnnClassifier {
+    banks: Vec<Vec<Vec<f64>>>,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for McdcnnClassifier {
+    type Fitted = FittedMcdcnnClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMcdcnnClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let spans = disjoint_spans(x.ncols(), self.n_channels);
+        let w = self.width.max(1);
+        let mut rng = Rng::new(self.seed);
+        let mut banks = Vec::new();
+        let mut blocks = Vec::new();
+        for &(a, b) in &spans {
+            let kernels: Vec<Vec<f64>> = (0..self.n_kernels.max(1))
+                .map(|_| (0..w).map(|_| rng.standard_normal()).collect())
+                .collect();
+            blocks.push(conv_block_maxpool(x, a, b, &kernels));
+            banks.push(kernels);
+        }
+        let z = hstack_blocks(&blocks);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "mcdcnn");
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("McdcnnClassifier is independent per-channel conv + ridge")
+                .compromise(NumericalCompromise::new(
+                    "sktime MCDCNN",
+                    "separate kernel banks on contiguous channels",
+                    "the published MLP fusion stack is omitted",
+                    "read scores as a multi-channel conv sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedMcdcnnClassifier { banks, inner })
+    }
+}
+
+impl Predict for FittedMcdcnnClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let spans = disjoint_spans(x.ncols(), self.banks.len().max(1));
+        let mut blocks = Vec::new();
+        for (i, &(a, b)) in spans.iter().enumerate() {
+            let kernels = self.banks.get(i).map(Vec::as_slice).unwrap_or(&[]);
+            blocks.push(conv_block_maxpool(x, a, b, kernels));
+        }
+        let z = hstack_blocks(&blocks);
+        self.inner.predict(&z, session)
+    }
+}
+
+fn patch_embed(x: &Matrix, patch_len: usize, stride: usize) -> Matrix {
+    let t = x.ncols();
+    let pl = patch_len.max(1).min(t.max(1));
+    let st = stride.max(1);
+    let n_patches = if t >= pl {
+        1 + (t - pl) / st
+    } else {
+        1
+    };
+    // Each patch contributes values + mean + std.
+    let width = n_patches * (pl + 2);
+    Matrix::from_fn(x.nrows(), width.max(1), |i, j| {
+        let pidx = j / (pl + 2);
+        let off = j % (pl + 2);
+        let start = pidx * st;
+        if start >= t {
+            return 0.0;
+        }
+        if off < pl {
+            let tix = start + off;
+            if tix < t {
+                x.get(i, tix)
+            } else {
+                0.0
+            }
+        } else {
+            let end = (start + pl).min(t);
+            let len = end.saturating_sub(start).max(1) as f64;
+            let mut s = 0.0_f64;
+            for u in start..end {
+                s += x.get(i, u);
+            }
+            let mu = s / len;
+            if off == pl {
+                mu
+            } else {
+                let mut v = 0.0_f64;
+                for u in start..end {
+                    let d = x.get(i, u) - mu;
+                    v += d * d;
+                }
+                (v / len).sqrt()
+            }
+        }
+    })
+}
+
+/// Patch embedding + ridge (sktime / Nie et al. `PatchTST` lite).
+///
+/// Patch / stride counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct PatchTstClassifier {
+    /// Patch length. Not identification `p`.
+    pub patch_len: usize,
+    /// Stride.
+    pub stride: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for PatchTstClassifier {
+    fn default() -> Self {
+        Self {
+            patch_len: 2,
+            stride: 2,
+            alpha: 0.1,
+        }
+    }
+}
+
+impl PatchTstClassifier {
+    /// Default PatchTST-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted patch-embedding ridge.
+#[derive(Clone, Debug)]
+pub struct FittedPatchTstClassifier {
+    patch_len: usize,
+    stride: usize,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for PatchTstClassifier {
+    type Fitted = FittedPatchTstClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPatchTstClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        if self.patch_len > x.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!(
+                        "PatchTstClassifier patch_len={} > T={}",
+                        self.patch_len,
+                        x.ncols()
+                    ))
+                    .build(),
+            );
+        }
+        let z = patch_embed(x, self.patch_len, self.stride);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "patchtst");
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("PatchTstClassifier is patch mean/std flatten + ridge, not a Transformer")
+                .compromise(NumericalCompromise::new(
+                    "PatchTST attention encoder",
+                    "non-overlapping patch values plus mean/std, then ridge",
+                    "channel-independence attention and positional encodings are omitted",
+                    "read scores as a patch sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedPatchTstClassifier {
+            patch_len: self.patch_len.max(1),
+            stride: self.stride.max(1),
+            inner,
+        })
+    }
+}
+
+impl Predict for FittedPatchTstClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = patch_embed(x, self.patch_len, self.stride);
+        self.inner.predict(&z, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -16181,6 +16593,39 @@ mod tests {
         assert_eq!(
             tdec.value
                 .predict(&x, &Session::new("ts", "tdecp"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let dj = DisjointCnnClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "dj"))
+            .unwrap();
+        assert_eq!(
+            dj.value
+                .predict(&x, &Session::new("ts", "djp"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let mcd = McdcnnClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "mcd"))
+            .unwrap();
+        assert_eq!(
+            mcd.value
+                .predict(&x, &Session::new("ts", "mcdp"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let pts = PatchTstClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "pts"))
+            .unwrap();
+        assert_eq!(
+            pts.value
+                .predict(&x, &Session::new("ts", "ptsp"))
                 .unwrap()
                 .value
                 .len(),

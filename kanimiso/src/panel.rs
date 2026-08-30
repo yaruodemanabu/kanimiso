@@ -3325,6 +3325,153 @@ impl StaggeredDid {
     }
 }
 
+/// Borusyak–Jaravel–Spiess imputation DiD.
+///
+/// Entity / calendar counts are not identification `p`. Two-way FE for \(Y(0)\)
+/// is fit on not-yet / never-treated rows only, then treated residuals are
+/// averaged.
+#[derive(Clone, Debug, Default)]
+pub struct BorusyakJaravelSpiess;
+
+/// Imputation ATT.
+#[derive(Clone, Debug)]
+pub struct FittedBorusyak {
+    /// Mean treated residual after imputed \(Y(0)\).
+    pub att: f64,
+    /// Number of treated-post residuals.
+    pub n_treated: usize,
+}
+
+impl BorusyakJaravelSpiess {
+    /// Default imputation DiD.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Impute untreated potential outcomes from two-way FE on untreated rows.
+    ///
+    /// `groups` are entity codes. `first_treat` is the first treated calendar
+    /// time (`NaN` = never treated).
+    pub fn fit(
+        &self,
+        y: &Vector,
+        times: &Vector,
+        first_treat: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedBorusyak>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let n = y
+            .len()
+            .min(times.len())
+            .min(first_treat.len())
+            .min(groups.len());
+        let x1 = Matrix::from_fn(n, 1, |i, _| times[i]);
+        inspect_xy(&mut ctx.report, &x1, Some(y), &ctx.policy);
+        let untreated: Vec<usize> = (0..n)
+            .filter(|&i| {
+                y[i].is_finite()
+                    && times[i].is_finite()
+                    && groups[i].is_finite()
+                    && (!first_treat[i].is_finite() || times[i] + 1e-12 < first_treat[i])
+            })
+            .collect();
+        if untreated.len() < 4 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("BorusyakJaravelSpiess needs ≥4 untreated rows for two-way FE")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "imputation ATT",
+                        "Y(0) two-way FE is unidentified without untreated cells",
+                        "keep a never-treated or pre-treatment window",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedBorusyak {
+                att: f64::NAN,
+                n_treated: 0,
+            });
+        }
+        let mut a: BTreeMap<i64, f64> = BTreeMap::new();
+        let mut b: BTreeMap<i64, f64> = BTreeMap::new();
+        for _ in 0..20 {
+            let mut gsum: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
+            for &i in &untreated {
+                let g = groups[i].round() as i64;
+                let t = times[i].round() as i64;
+                let adj = y[i] - b.get(&t).copied().unwrap_or(0.0);
+                let e = gsum.entry(g).or_insert((0.0, 0.0));
+                e.0 += adj;
+                e.1 += 1.0;
+            }
+            a.clear();
+            for (g, (s, c)) in gsum {
+                if c > 0.0 {
+                    a.insert(g, s / c);
+                }
+            }
+            let mut tb: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
+            for &i in &untreated {
+                let g = groups[i].round() as i64;
+                let t = times[i].round() as i64;
+                let adj = y[i] - a.get(&g).copied().unwrap_or(0.0);
+                let e = tb.entry(t).or_insert((0.0, 0.0));
+                e.0 += adj;
+                e.1 += 1.0;
+            }
+            b.clear();
+            for (t, (s, c)) in tb {
+                if c > 0.0 {
+                    b.insert(t, s / c);
+                }
+            }
+        }
+        let mut att = 0.0_f64;
+        let mut nt = 0usize;
+        for i in 0..n {
+            if !y[i].is_finite() || !times[i].is_finite() || !groups[i].is_finite() {
+                continue;
+            }
+            if !first_treat[i].is_finite() || times[i] + 1e-12 < first_treat[i] {
+                continue;
+            }
+            let g = groups[i].round() as i64;
+            let t = times[i].round() as i64;
+            let y0 = a.get(&g).copied().unwrap_or(0.0) + b.get(&t).copied().unwrap_or(0.0);
+            att += y[i] - y0;
+            nt += 1;
+        }
+        if nt == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("BorusyakJaravelSpiess has no treated-post residuals")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "imputation ATT",
+                        "no row is treated at or after first_treat",
+                        "mark a treated cohort with post periods",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("BorusyakJaravelSpiess is alternating two-way FE, not the published estimator")
+                .compromise(NumericalCompromise::new(
+                    "BJS imputation DiD",
+                    "entity + time means on untreated rows, then treated residuals",
+                    "cohort-robust SE and the published residualisation formula are omitted",
+                    "read ATT as an imputed gap, not a published BJS estimate",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedBorusyak {
+            att: if nt > 0 { att / nt as f64 } else { f64::NAN },
+            n_treated: nt,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3518,5 +3665,9 @@ mod tests {
             .fit(&y, &time, &first, &Session::new("sdid", "fit"))
             .expect("sdid");
         assert!(sdid.value.att.is_finite() || sdid.value.att.is_nan());
+        let bjs = BorusyakJaravelSpiess::new()
+            .fit(&y, &time, &first, &g, &Session::new("bjs", "fit"))
+            .expect("bjs");
+        assert!(bjs.value.att.is_finite() || bjs.value.att.is_nan());
     }
 }
