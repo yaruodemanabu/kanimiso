@@ -4244,6 +4244,35 @@ const INVENTORY: &[Algorithm] = &[
         "online",
     ),
     a("online.HillSketch", "scipy.stats.genpareto", "online"),
+    a(
+        "stats.plackett_copula",
+        "statsmodels.distributions.copula.PlackettCopula",
+        "stats",
+    ),
+    a(
+        "stats.amh_copula",
+        "statsmodels.distributions.copula.AliMikhailHaqCopula",
+        "stats",
+    ),
+    a("tsa.ndiffs", "pmdarima.arima.ndiffs", "forecast"),
+    a("tsa.ocsb", "pmdarima.arima.OCSBTest", "forecast"),
+    a("tsa.nsdiffs", "pmdarima.arima.nsdiffs", "forecast"),
+    a("tsa.Qgarch", "arch.univariate.QGARCH", "forecast"),
+    a("tsa.Tarch", "arch.univariate.TARCH", "forecast"),
+    a("tslearn.shape_dtw", "tslearn.metrics.shape_dtw", "timeseries"),
+    a("tslearn.gak", "tslearn.metrics.gak", "timeseries"),
+    a(
+        "glm.TruncatedPoisson",
+        "statsmodels.discrete.count_model.TruncatedPoisson",
+        "estimator",
+    ),
+    a("online.OnlineAbsMax", "river.stats.AbsMax", "online"),
+    a("online.OnlineShift", "river.stats.Shift", "online"),
+    a(
+        "online.MultinomialProba",
+        "river.proba.Multinomial",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4527,6 +4556,10 @@ mod tests {
             "tsa.Igarch",
             "tslearn.wdtw",
             "online.OnlineSpearman",
+            "stats.plackett_copula",
+            "tsa.ndiffs",
+            "tsa.Qgarch",
+            "glm.TruncatedPoisson",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

@@ -182,6 +182,74 @@ pub fn ddtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>>
     ctx.finish(dtw_raw(&da, &db))
 }
 
+fn shape_desc(s: &[f64]) -> Vec<f64> {
+    let n = s.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut d = vec![0.0; n];
+    for i in 0..n {
+        let lo = i.saturating_sub(1);
+        let hi = (i + 1).min(n - 1);
+        d[i] = s[hi] - s[lo];
+    }
+    d
+}
+
+/// Shape DTW: DTW on local first differences (tslearn / Zhao `shape_dtw`).
+pub fn shape_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("shape_dtw.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("shape_dtw.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("shape DTW on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(dtw_raw(&shape_desc(a.as_slice()), &shape_desc(b.as_slice())))
+}
+
+/// Global alignment kernel between two series (tslearn `gak`).
+///
+/// Bandwidth \(\sigma\) is not identification `p`.
+pub fn gak(a: &Vector, b: &Vector, sigma: f64, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("gak.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("gak.b") {
+        ctx.push(issue);
+    }
+    let s = if sigma.is_finite() && sigma > 0.0 {
+        sigma
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("gak σ={sigma} is not positive; using 1"))
+                .build(),
+        );
+        1.0
+    };
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("GAK on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let d = softdtw_raw(a.as_slice(), b.as_slice(), 0.1);
+    ctx.finish((-d / s).exp())
+}
+
 fn embed_series(s: &[f64], d: usize) -> Matrix {
     let d = d.max(1);
     let n = s.len().saturating_sub(d - 1).max(1);
@@ -9781,6 +9849,12 @@ mod tests {
         assert!(dd.abs() < 1e-12, "ddtw={dd}");
         let er = eros(&a, &a, &Session::new("ts", "eros")).unwrap().value;
         assert!(er > 0.9, "eros={er}");
+        let sh = shape_dtw(&a, &a, &Session::new("ts", "sdtw2"))
+            .unwrap()
+            .value;
+        assert!(sh.abs() < 1e-12, "shape_dtw={sh}");
+        let gk = gak(&a, &a, 1.0, &Session::new("ts", "gak")).unwrap().value;
+        assert!(gk.is_finite() && gk > 0.0);
     }
 
     #[test]

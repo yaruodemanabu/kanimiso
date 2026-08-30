@@ -1220,6 +1220,7 @@ impl FittedOrderedProbit {
             for j in 0..self.coef.len().min(x.ncols()) {
                 xb += self.coef[j] * x.get(i, j);
             }
+            xb = xb.clamp(-12.0, 12.0);
             let mut best = 0usize;
             let mut bp = f64::NEG_INFINITY;
             for c in 0..k {
@@ -3199,6 +3200,144 @@ impl Fit for GeneralizedPoisson {
     }
 }
 
+/// Zero-truncated Poisson GLM (statsmodels `TruncatedPoisson`, log link).
+///
+/// Mean is \(\mu/(1-e^{-\mu})\). Zeros abort as a vacuous truncated sample.
+#[derive(Clone, Debug)]
+pub struct TruncatedPoisson {
+    /// Max IRLS iterations.
+    pub max_iter: usize,
+    /// Prepend an intercept.
+    pub fit_intercept: bool,
+}
+
+impl Default for TruncatedPoisson {
+    fn default() -> Self {
+        Self {
+            max_iter: 40,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl TruncatedPoisson {
+    /// Default zero-truncated Poisson.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for TruncatedPoisson {
+    type Fitted = FittedGlm;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let mut n_zero = 0usize;
+        for (i, &yi) in y.as_slice().iter().enumerate() {
+            if yi < 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .message(format!("TruncatedPoisson y[{i}]={yi} < 0"))
+                        .build(),
+                );
+                break;
+            }
+            if yi < 0.5 {
+                n_zero += 1;
+            }
+        }
+        if n_zero > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateDistribution)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "TruncatedPoisson saw {n_zero} zeros; those rows are dropped"
+                    ))
+                    .build(),
+            );
+        }
+        let keep: Vec<usize> = (0..y.len()).filter(|&i| y[i] >= 0.5).collect();
+        if keep.len() < 4 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .message("TruncatedPoisson needs at least 4 positive counts")
+                    .build(),
+            );
+            return ctx.finish(FittedGlm {
+                coef: Vector::zeros(x.ncols()),
+                intercept: y.mean().max(1.0).ln(),
+                dispersion: 1.0,
+            });
+        }
+        let xs = Matrix::from_fn(keep.len(), x.ncols(), |i, j| x.get(keep[i], j));
+        let ys = Vector::from_iter(keep.iter().map(|&i| y[i]));
+        let design = if self.fit_intercept {
+            xs.with_intercept()
+        } else {
+            xs
+        };
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let mut beta = Vector::zeros(design.ncols());
+        beta[0] = ys.mean().max(1.0).ln();
+        let mut converged = false;
+        for it in 0..self.max_iter.max(1) {
+            let mut xw = Matrix::zeros(design.nrows(), design.ncols());
+            let mut z = Vector::zeros(ys.len());
+            for i in 0..ys.len() {
+                let mut eta = 0.0;
+                for j in 0..design.ncols() {
+                    eta += design.get(i, j) * beta[j];
+                }
+                eta = eta.clamp(-8.0, 8.0);
+                let mu = eta.exp().max(1e-8);
+                let surv = (1.0 - (-mu).exp()).max(1e-8);
+                let mt = (mu / surv).max(1e-8);
+                let w = (mt).max(1e-8);
+                let sw = w.sqrt();
+                z[i] = (eta + (ys[i] - mt) / mt.max(1e-8)) * sw;
+                for j in 0..design.ncols() {
+                    xw.set(i, j, design.get(i, j) * sw);
+                }
+            }
+            let mut scratch = signlred::Report::new("trunc_pois", "irls");
+            let Some(next) = least_squares(&mut scratch, &xw, &z, &ctx.policy) else {
+                break;
+            };
+            for issue in scratch.issues() {
+                if issue.code == IssueCode::ResidualTooLarge {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            let d = next.sub(&beta).norm();
+            beta = next;
+            ctx.session.step(it as u64, d, None);
+            if d < 1e-8 {
+                ctx.session.converged("truncated Poisson IRLS", it as u64);
+                converged = true;
+                break;
+            }
+        }
+        if !converged {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("truncated Poisson IRLS did not meet the tolerance")
+                    .build(),
+            );
+        }
+        let (intercept, coef) = if self.fit_intercept {
+            (beta[0], Vector::from_iter((1..beta.len()).map(|j| beta[j])))
+        } else {
+            (0.0, beta)
+        };
+        ctx.finish(FittedGlm {
+            coef,
+            intercept,
+            dispersion: 1.0,
+        })
+    }
+}
+
 /// Negative-binomial-P GLM: \(\mathrm{Var}=\mu+\alpha\mu^{P}\) with a log link.
 ///
 /// \(P=1\) is NB1, \(P=2\) is NB2. Inner IRLS residual issues are not promoted.
@@ -3589,5 +3728,10 @@ mod tests {
             .expect("nbp");
         assert!(nbp.value.coef[0].is_finite());
         assert!(nbp.value.dispersion.is_finite());
+        let tp = TruncatedPoisson::new()
+            .fit(&x, &yg, &Session::new("tp", "fit"))
+            .expect("tp");
+        assert!(tp.value.coef[0].is_finite());
+        assert!(tp.value.intercept.is_finite());
     }
 }

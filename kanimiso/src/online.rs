@@ -13952,6 +13952,248 @@ impl PartialFit for HillSketch {
     }
 }
 
+/// Expanding max-abs (river `stats.AbsMax`).
+#[derive(Clone, Debug)]
+pub struct OnlineAbsMax {
+    peak: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OnlineAbsMax {
+    fn default() -> Self {
+        Self {
+            peak: 0.0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlineAbsMax {
+    /// Empty max-abs tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current max |x|, or NaN before the first finite value.
+    pub fn score(&self) -> f64 {
+        if self.n_seen == 0 {
+            f64::NAN
+        } else {
+            self.peak
+        }
+    }
+}
+
+impl PartialFit for OnlineAbsMax {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0).abs();
+            if !v.is_finite() {
+                continue;
+            }
+            if v > self.peak {
+                self.peak = v;
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 1;
+        q.explanation = format!("OnlineAbsMax={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "expanding max-abs",
+                "running maximum of |column 0|",
+                format!("absmax={before:.6e}"),
+                format!("absmax={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// One-step lag / shift (river `stats.Shift`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineShift {
+    last: Option<f64>,
+    delayed: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl OnlineShift {
+    /// Empty lag-1 shift.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Previous finite value, or NaN during warmup.
+    pub fn score(&self) -> f64 {
+        if self.n_seen < 2 {
+            f64::NAN
+        } else {
+            self.delayed
+        }
+    }
+}
+
+impl PartialFit for OnlineShift {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            if let Some(prev) = self.last {
+                self.delayed = prev;
+            }
+            self.last = Some(v);
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen.saturating_sub(1) as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("OnlineShift={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "lag-1 shift",
+                "emit the previous finite column-0 value",
+                format!("lag={before:.6e}"),
+                format!("lag={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming multinomial probabilities (river `proba.Multinomial`).
+///
+/// Class count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct MultinomialProba {
+    counts: HashMap<i64, f64>,
+    total: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl MultinomialProba {
+    /// Empty class counter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Probability of the most frequent class, or NaN before the first label.
+    pub fn score(&self) -> f64 {
+        if self.total <= 0.0 {
+            f64::NAN
+        } else {
+            self.counts.values().copied().fold(0.0, f64::max) / self.total
+        }
+    }
+
+    /// \(\hat p(c)\) for integer class `c`.
+    pub fn pmf(&self, c: i64) -> f64 {
+        if self.total <= 0.0 {
+            f64::NAN
+        } else {
+            self.counts.get(&c).copied().unwrap_or(0.0) / self.total
+        }
+    }
+}
+
+impl PartialFit for MultinomialProba {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let before = self.score();
+        let fallback = Vector::from_iter((0..x.nrows()).map(|i| x.get(i, 0)));
+        let labels = y.unwrap_or(&fallback);
+        for i in 0..x.nrows().min(labels.len()) {
+            let v = labels[i];
+            if !v.is_finite() {
+                continue;
+            }
+            let k = v.round() as i64;
+            *self.counts.entry(k).or_insert(0.0) += 1.0;
+            self.total += 1.0;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.total;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 1;
+        q.explanation = format!(
+            "MultinomialProba n_class={} pmax={after:.6e}",
+            self.counts.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "multinomial class probabilities",
+                "increment integer-label counts; class count is not p",
+                format!("pmax={before:.6e}"),
+                format!("pmax={after:.6e}"),
+            ),
+        )
+    }
+}
+
 /// Rolling mean (river `stats.RollingMean`).
 #[derive(Clone, Debug, Default)]
 pub struct RollingMean {
@@ -22581,6 +22823,15 @@ mod tests {
         HillSketch::new(6)
             .partial_fit(&x, None, &session)
             .expect("hill");
+        OnlineAbsMax::new()
+            .partial_fit(&x, None, &session)
+            .expect("oabs");
+        OnlineShift::new()
+            .partial_fit(&x, None, &session)
+            .expect("oshift");
+        MultinomialProba::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("mproba");
 
         let n_expl = session
             .ledger()

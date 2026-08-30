@@ -10092,6 +10092,149 @@ pub fn joe_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualifi
     })
 }
 
+/// Fitted Plackett copula (statsmodels `PlackettCopula`).
+#[derive(Clone, Debug)]
+pub struct PlackettCopula {
+    /// Odds-ratio dependence \(\theta > 0\).
+    pub theta: f64,
+    /// Copula log-likelihood.
+    pub loglik: f64,
+}
+
+fn plackett_ll(u: &[f64], v: &[f64], theta: f64) -> f64 {
+    if theta <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let mut ll = 0.0;
+    for i in 0..u.len() {
+        let s = 1.0 + (theta - 1.0) * (u[i] + v[i]);
+        let disc = s * s - 4.0 * theta * (theta - 1.0) * u[i] * v[i];
+        if disc <= 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        let dens = theta * (1.0 + (theta - 1.0) * (u[i] + v[i] - 2.0 * u[i] * v[i]))
+            / disc.powf(1.5);
+        if !dens.is_finite() || dens <= 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        ll += dens.ln();
+    }
+    ll
+}
+
+/// Fit a bivariate Plackett copula by a \(\theta\) grid on ranks.
+///
+/// Pair count is not identification `p`.
+pub fn plackett_copula(
+    y1: &Vector,
+    y2: &Vector,
+    session: &Session,
+) -> Result<Qualified<PlackettCopula>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let n = y1.len().min(y2.len());
+    let x = Matrix::from_fn(n, 2, |i, j| if j == 0 { y1[i] } else { y2[i] });
+    inspect_xy(&mut ctx.report, &x, None, &ctx.policy);
+    let (u, v) = copula_uv(y1, y2);
+    if u.len() < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Plackett copula needs n≥4 pairs")
+                .build(),
+        );
+        return ctx.finish(PlackettCopula {
+            theta: 1.0,
+            loglik: f64::NAN,
+        });
+    }
+    let mut best_th = 2.0_f64;
+    let mut best_ll = f64::NEG_INFINITY;
+    for step in 0..10 {
+        let th = 0.3 + 0.5 * step as f64;
+        let ll = plackett_ll(&u, &v, th);
+        if ll > best_ll {
+            best_ll = ll;
+            best_th = th;
+        }
+    }
+    ctx.finish(PlackettCopula {
+        theta: best_th,
+        loglik: best_ll,
+    })
+}
+
+/// Fitted Ali–Mikhail–Haq copula (statsmodels `AliMikhailHaqCopula`).
+#[derive(Clone, Debug)]
+pub struct AmhCopula {
+    /// Dependence \(\theta \in [-1, 1)\).
+    pub theta: f64,
+    /// Copula log-likelihood.
+    pub loglik: f64,
+}
+
+fn amh_ll(u: &[f64], v: &[f64], theta: f64) -> f64 {
+    if !(theta > -1.0 && theta < 1.0) {
+        return f64::NEG_INFINITY;
+    }
+    let mut ll = 0.0;
+    for i in 0..u.len() {
+        let den = 1.0 - theta * (1.0 - u[i]) * (1.0 - v[i]);
+        if den.abs() < 1e-12 {
+            return f64::NEG_INFINITY;
+        }
+        let dens = (1.0
+            - theta
+            + 2.0 * theta * u[i] * v[i]
+            + theta * (1.0 - u[i] - v[i] + u[i] * v[i]))
+            / den.powi(3);
+        if !dens.is_finite() || dens <= 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        ll += dens.ln();
+    }
+    ll
+}
+
+/// Fit a bivariate AMH copula by a \(\theta\) grid on ranks.
+///
+/// Pair count is not identification `p`.
+pub fn amh_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<AmhCopula>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let n = y1.len().min(y2.len());
+    let x = Matrix::from_fn(n, 2, |i, j| if j == 0 { y1[i] } else { y2[i] });
+    inspect_xy(&mut ctx.report, &x, None, &ctx.policy);
+    let (u, v) = copula_uv(y1, y2);
+    if u.len() < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("AMH copula needs n≥4 pairs")
+                .build(),
+        );
+        return ctx.finish(AmhCopula {
+            theta: 0.0,
+            loglik: f64::NAN,
+        });
+    }
+    let mut best_th = 0.2_f64;
+    let mut best_ll = f64::NEG_INFINITY;
+    for step in 0..9 {
+        let th = -0.8 + 0.18 * step as f64;
+        if th.abs() >= 0.99 {
+            continue;
+        }
+        let ll = amh_ll(&u, &v, th);
+        if ll > best_ll {
+            best_ll = ll;
+            best_th = th;
+        }
+    }
+    ctx.finish(AmhCopula {
+        theta: best_th,
+        loglik: best_ll,
+    })
+}
+
 /// Univariate GAM-lite: cubic truncated-power spline + ridge (statsmodels `GLMGam`).
 ///
 /// Knot count is not identification `p`.
@@ -10852,6 +10995,10 @@ mod tests {
         let joe = joe_copula(&y, &y2c, &Session::new("joe", "t")).expect("joe");
         assert!(joe.value.theta >= 1.0);
         assert!(joe.value.loglik.is_finite() || joe.value.loglik.is_infinite());
+        let pl = plackett_copula(&y, &y2c, &Session::new("plack", "t")).expect("plack");
+        assert!(pl.value.theta > 0.0);
+        let amh = amh_copula(&y, &y2c, &Session::new("amh", "t")).expect("amh");
+        assert!(amh.value.theta > -1.0 && amh.value.theta < 1.0);
         let gam = UnivariateGam::new(3)
             .fit(&xs, &ys, &Session::new("gam", "t"))
             .expect("gam");

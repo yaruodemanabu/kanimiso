@@ -7256,6 +7256,279 @@ impl FitSeries for ComponentGarch {
     }
 }
 
+/// Quadratic GARCH (Sentana): \(h_t=\omega+\alpha\varepsilon_{t-1}^2+\gamma\varepsilon_{t-1}+\beta h_{t-1}\).
+#[derive(Clone, Debug)]
+pub struct Qgarch {
+    /// Coordinate-search iterations.
+    pub max_iter: usize,
+}
+
+impl Default for Qgarch {
+    fn default() -> Self {
+        Self { max_iter: 24 }
+    }
+}
+
+impl Qgarch {
+    /// Default QGARCH settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted QGARCH variances.
+#[derive(Clone, Debug)]
+pub struct FittedQgarch {
+    /// ω.
+    pub omega: f64,
+    /// ARCH coefficient.
+    pub alpha: f64,
+    /// Linear shock.
+    pub gamma: f64,
+    /// GARCH coefficient.
+    pub beta: f64,
+    /// Conditional variances.
+    pub sigma2: Vector,
+    /// Demeaned residuals.
+    pub resid: Vector,
+}
+
+fn qgarch_sigma2(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64) -> Vec<f64> {
+    let var0 = e.iter().map(|v| v * v).sum::<f64>() / e.len().max(1) as f64;
+    let mut s2 = vec![var0.max(omega).max(1e-12); e.len()];
+    for t in 1..e.len() {
+        s2[t] = omega + alpha * e[t - 1] * e[t - 1] + gamma * e[t - 1] + beta * s2[t - 1];
+        if !s2[t].is_finite() || s2[t] <= 0.0 {
+            s2[t] = omega.max(1e-12);
+        }
+    }
+    s2
+}
+
+fn qgarch_nll(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64) -> f64 {
+    if omega <= 0.0 || alpha < 0.0 || beta < 0.0 || alpha + beta >= 0.999 {
+        return f64::INFINITY;
+    }
+    let s2 = qgarch_sigma2(e, omega, alpha, gamma, beta);
+    let mut nll = 0.0;
+    for t in 0..e.len() {
+        let v = s2[t].max(1e-12);
+        nll += 0.5 * (v.ln() + e[t] * e[t] / v);
+    }
+    nll
+}
+
+impl FitSeries for Qgarch {
+    type Fitted = FittedQgarch;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedQgarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("QGARCH QMLE needs a longer series")
+                    .build(),
+            );
+        }
+        let mean = y.mean();
+        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
+        let var = e.as_slice().iter().map(|v| v * v).sum::<f64>() / y.len().max(1) as f64;
+        let mut omega = 0.05 * var.max(1e-8);
+        let mut alpha = 0.05;
+        let mut gamma = 0.0;
+        let mut beta = 0.80;
+        let mut best = qgarch_nll(e.as_slice(), omega, alpha, gamma, beta);
+        let mut step = 0.04;
+        for it in 0..self.max_iter {
+            let mut improved = false;
+            for (i, cur) in [omega, alpha, gamma, beta].into_iter().enumerate() {
+                for dir in [-step, step] {
+                    let mut cand = [omega, alpha, gamma, beta];
+                    cand[i] = if i == 2 {
+                        cur + dir
+                    } else {
+                        (cur + dir).max(1e-8)
+                    };
+                    let nll = qgarch_nll(e.as_slice(), cand[0], cand[1], cand[2], cand[3]);
+                    if nll < best {
+                        best = nll;
+                        omega = cand[0];
+                        alpha = cand[1];
+                        gamma = cand[2];
+                        beta = cand[3];
+                        improved = true;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, best, None);
+            if !improved {
+                step *= 0.5;
+                if step < 1e-5 {
+                    ctx.session.converged("QGARCH coordinate search", it as u64);
+                    break;
+                }
+            }
+        }
+        if !best.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("QGARCH QMLE likelihood is non-finite")
+                    .build(),
+            );
+        }
+        let sigma2 = qgarch_sigma2(e.as_slice(), omega, alpha, gamma, beta);
+        ctx.finish(FittedQgarch {
+            omega,
+            alpha,
+            gamma,
+            beta,
+            sigma2: Vector::from_iter(sigma2),
+            resid: e,
+        })
+    }
+}
+
+/// Threshold ARCH on the scale (Zakoian `TARCH`).
+///
+/// \(\sigma_t=\omega+\alpha|\varepsilon_{t-1}|+\gamma|\varepsilon_{t-1}|I_{\varepsilon<0}+\beta\sigma_{t-1}\).
+#[derive(Clone, Debug)]
+pub struct Tarch {
+    /// Coordinate-search iterations.
+    pub max_iter: usize,
+}
+
+impl Default for Tarch {
+    fn default() -> Self {
+        Self { max_iter: 24 }
+    }
+}
+
+impl Tarch {
+    /// Default TARCH settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted TARCH scales.
+#[derive(Clone, Debug)]
+pub struct FittedTarch {
+    /// ω.
+    pub omega: f64,
+    /// Symmetric ARCH.
+    pub alpha: f64,
+    /// Threshold.
+    pub gamma: f64,
+    /// Persistence of \(\sigma\).
+    pub beta: f64,
+    /// Conditional variances \(\sigma_t^2\).
+    pub sigma2: Vector,
+    /// Demeaned residuals.
+    pub resid: Vector,
+}
+
+fn tarch_sigma(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64) -> Vec<f64> {
+    let var0 = e.iter().map(|v| v * v).sum::<f64>() / e.len().max(1) as f64;
+    let mut s = vec![var0.max(1e-12).sqrt(); e.len()];
+    for t in 1..e.len() {
+        let ae = e[t - 1].abs();
+        let ind = if e[t - 1] < 0.0 { 1.0 } else { 0.0 };
+        s[t] = omega + alpha * ae + gamma * ae * ind + beta * s[t - 1];
+        if !s[t].is_finite() || s[t] <= 0.0 {
+            s[t] = omega.max(1e-8);
+        }
+    }
+    s
+}
+
+fn tarch_nll(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64) -> f64 {
+    if omega <= 0.0 || alpha < 0.0 || beta < 0.0 {
+        return f64::INFINITY;
+    }
+    let s = tarch_sigma(e, omega, alpha, gamma, beta);
+    let mut nll = 0.0;
+    for t in 0..e.len() {
+        let v = (s[t] * s[t]).max(1e-12);
+        nll += 0.5 * (v.ln() + e[t] * e[t] / v);
+    }
+    nll
+}
+
+impl FitSeries for Tarch {
+    type Fitted = FittedTarch;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedTarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("TARCH QMLE needs a longer series")
+                    .build(),
+            );
+        }
+        let mean = y.mean();
+        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
+        let sd = e
+            .as_slice()
+            .iter()
+            .map(|v| v * v)
+            .sum::<f64>()
+            / y.len().max(1) as f64;
+        let mut omega = 0.05 * sd.max(1e-8).sqrt();
+        let mut alpha = 0.05;
+        let mut gamma = 0.05;
+        let mut beta = 0.80;
+        let mut best = tarch_nll(e.as_slice(), omega, alpha, gamma, beta);
+        let mut step = 0.04;
+        for it in 0..self.max_iter {
+            let mut improved = false;
+            for (i, cur) in [omega, alpha, gamma, beta].into_iter().enumerate() {
+                for dir in [-step, step] {
+                    let mut cand = [omega, alpha, gamma, beta];
+                    cand[i] = (cur + dir).max(1e-8);
+                    let nll = tarch_nll(e.as_slice(), cand[0], cand[1], cand[2], cand[3]);
+                    if nll < best {
+                        best = nll;
+                        omega = cand[0];
+                        alpha = cand[1];
+                        gamma = cand[2];
+                        beta = cand[3];
+                        improved = true;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, best, None);
+            if !improved {
+                step *= 0.5;
+                if step < 1e-5 {
+                    ctx.session.converged("TARCH coordinate search", it as u64);
+                    break;
+                }
+            }
+        }
+        if !best.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("TARCH QMLE likelihood is non-finite")
+                    .build(),
+            );
+        }
+        let sig = tarch_sigma(e.as_slice(), omega, alpha, gamma, beta);
+        ctx.finish(FittedTarch {
+            omega,
+            alpha,
+            gamma,
+            beta,
+            sigma2: Vector::from_iter(sig.iter().map(|s| s * s)),
+            resid: e,
+        })
+    }
+}
+
 /// DCC-GARCH lite on a multivariate residual matrix (Engle).
 ///
 /// Series count is not identification `p`.
@@ -9756,6 +10029,109 @@ impl FitSeries for SmoothTrend {
         };
         ctx.finish(FittedSmoothTrend { trend, last_slope })
     }
+}
+
+/// KPSS/ADF-style integration order (pmdarima / sktime `ndiffs`).
+///
+/// Lag count is not identification `p`. Returns `0` or `1`.
+pub fn ndiffs(y: &Vector, session: &Session) -> Result<Qualified<usize>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    if y.len() < 6 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("ndiffs needs n≥6")
+                .build(),
+        );
+        return ctx.finish(0);
+    }
+    let n = y.len();
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for t in 1..n {
+        if y[t].is_finite() && y[t - 1].is_finite() {
+            num += y[t] * y[t - 1];
+            den += y[t - 1] * y[t - 1];
+        }
+    }
+    let rho = if den > 1e-18 { num / den } else { 0.0 };
+    if rho > 0.92 {
+        ctx.push(
+            Issue::builder(IssueCode::NonStationary)
+                .severity(Severity::Warning)
+                .message(format!("ndiffs AR(1) ρ={rho:.4} suggests a unit root"))
+                .metric("rho", rho)
+                .build(),
+        );
+        ctx.finish(1)
+    } else {
+        ctx.finish(0)
+    }
+}
+
+/// Osborn–Chui–Smith–Birchenhall seasonal unit-root regression (sktime `nsdiffs`).
+///
+/// Period is not identification `p`.
+pub fn ocsb(y: &Vector, period: usize, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let s = period.max(2);
+    if y.len() < 2 * s + 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSeasonalCycles)
+                .severity(Severity::Warning)
+                .message(format!("OCSB needs more than two cycles of period {s}"))
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let mut rows = Vec::new();
+    for t in (s + 1)..y.len() {
+        if ![y[t], y[t - 1], y[t - s], y[t - 1 - s]]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            continue;
+        }
+        let dys = y[t] - y[t - s];
+        let ylag = y[t - s];
+        let dylag = y[t - 1] - y[t - 1 - s];
+        rows.push((dys, ylag, dylag));
+    }
+    if rows.len() < 8 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("OCSB regression has too few seasonal differences")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let m = Matrix::from_fn(rows.len(), 3, |i, j| match j {
+        0 => 1.0,
+        1 => rows[i].1,
+        _ => rows[i].2,
+    });
+    let z = Vector::from_iter(rows.iter().map(|r| r.0));
+    let mut scratch = Report::new("ocsb", "ols");
+    let coef = least_squares(&mut scratch, &m, &z, &ctx.policy)
+        .unwrap_or_else(|| Vector::from_slice(&[0.0, 0.0, 0.0]));
+    ctx.finish(coef.as_slice().get(1).copied().unwrap_or(0.0))
+}
+
+/// Seasonal integration order from an OCSB coefficient (sktime `nsdiffs`).
+///
+/// Period is not identification `p`.
+pub fn nsdiffs(y: &Vector, period: usize, session: &Session) -> Result<Qualified<usize>> {
+    let q = ocsb(y, period, session)?;
+    let mut ctx = FitCtx::with_session(session.child("nsdiffs"));
+    let d = if q.value.is_finite() && q.value.abs() < 0.15 {
+        1
+    } else {
+        0
+    };
+    ctx.finish(d)
 }
 
 /// Autoregressive OLS `y_t = c + φ₁ y_{t-1} + ⋯ + φ_p y_{t-p}` (statsmodels `AutoReg`).
@@ -14042,5 +14418,29 @@ mod tests {
                 .len(),
             3
         );
+        let nd = ndiffs(&y, &Session::new("nd", "t")).expect("nd");
+        assert!(nd.value <= 1);
+        let oc = ocsb(&y, 4, &Session::new("ocsb", "t")).expect("ocsb");
+        assert!(oc.value.is_finite() || oc.value.is_nan());
+        let nsd = nsdiffs(&y, 4, &Session::new("nsd", "t")).expect("nsd");
+        assert!(nsd.value <= 1);
+        let qg = Qgarch::new()
+            .fit_series(&y, &Session::new("qg", "fit"))
+            .expect("qg");
+        assert!(qg
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        let ta = Tarch::new()
+            .fit_series(&y, &Session::new("tarch", "fit"))
+            .expect("tarch");
+        assert!(ta
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
     }
 }
