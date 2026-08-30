@@ -50,16 +50,6 @@ fn push_nonfinite_mat(ctx: &mut FitCtx, m: &Matrix, what: &str) {
     }
 }
 
-fn push_nonfinite_vec(ctx: &mut FitCtx, v: &Vector, what: &str) {
-    if v.as_slice().iter().any(|z| !z.is_finite()) {
-        ctx.push(
-            Issue::builder(IssueCode::NonFiniteOutput)
-                .message(format!("{what} contains NaN/Inf"))
-                .build(),
-        );
-    }
-}
-
 fn components_exceed_rank(requested: usize, rank: usize) -> Issue {
     Issue::builder(IssueCode::ComponentsExceedRank)
         .message(format!(
@@ -233,17 +223,24 @@ impl FitUnsupervised for Pca {
                     .build(),
             );
         }
-        let kappa = svd.condition_number();
-        if !kappa.is_finite() || kappa > ctx.policy.condition_number_warn {
-            ctx.push(
-                Issue::builder(IssueCode::IllConditioned)
-                    .message(format!("PCA singular-value condition κ={kappa:.4e}"))
-                    .metric("condition_number", kappa)
-                    .build(),
-            );
-        }
         let k_req = self.n_components.max(1);
         let k = k_req.min(rank.max(1)).min(svd.singular_values.len()).min(p);
+        // κ of the *retained* spectrum only. The full thin SVD of a rank-deficient
+        // matrix has σ_min = 0 ⇒ κ = ∞; Policy would rewrite that IllConditioned
+        // metric into a fatal NearSingular and abort a perfectly valid PCA.
+        if k >= 2 {
+            let smax = svd.singular_values[0];
+            let smin = svd.singular_values[k - 1];
+            let kappa = if smin > 0.0 { smax / smin } else { f64::NAN };
+            if kappa.is_finite() && kappa > ctx.policy.condition_number_warn {
+                ctx.push(
+                    Issue::builder(IssueCode::IllConditioned)
+                        .message(format!("PCA retained-spectrum condition κ={kappa:.4e}"))
+                        .metric("condition_number", kappa)
+                        .build(),
+                );
+            }
+        }
         if k_req > rank {
             ctx.push(components_exceed_rank(k_req, rank));
             ctx.push(

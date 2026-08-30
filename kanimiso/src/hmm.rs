@@ -896,7 +896,7 @@ impl FittedMultinomialHmm {
         seed: u64,
         session: &Session,
     ) -> Result<Qualified<HmmSample>> {
-        let mut ctx = FitCtx::with_session(session.child("sample"));
+        let ctx = FitCtx::with_session(session.child("sample"));
         let n_sym = self.emission.ncols();
         let s = self.n_states.max(1);
         if n == 0 {
@@ -1194,7 +1194,7 @@ impl FittedGmmHmm {
         seed: u64,
         session: &Session,
     ) -> Result<Qualified<HmmSample>> {
-        let mut ctx = FitCtx::with_session(session.child("sample"));
+        let ctx = FitCtx::with_session(session.child("sample"));
         let d = self.means.ncols();
         let s = self.n_states.max(1);
         let nm = self.n_mix.max(1);

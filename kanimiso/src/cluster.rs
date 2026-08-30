@@ -15,7 +15,7 @@ use crate::validate::{inspect_identification, inspect_xy};
 use faer::Mat;
 use ojizou_san::{IncrementalExplain, Session};
 use signlred::{
-    IncrementalQuality, Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result,
+    IncrementalQuality, Issue, IssueCode, Meaninglessness, Qualified, Result,
 };
 
 const COV_FLOOR: f64 = 1e-6;
@@ -810,9 +810,8 @@ impl FitUnsupervised for StreamKMeans {
             .clone()
             .unwrap_or_else(|| Matrix::zeros(self.k, x.ncols()));
         let (labels, counts, inertia) = assign_lloyd(x, &centers);
-        ctx.finish(finish_centroid_fit(
-            &mut ctx, x, centers, labels, counts, inertia, 1,
-        ))
+        let fitted = finish_centroid_fit(&mut ctx, x, centers, labels, counts, inertia, 1);
+        ctx.finish(fitted)
     }
 }
 
