@@ -755,6 +755,190 @@ impl FitSeries for AutoArima {
     }
 }
 
+/// Hold-out grid over SES and small ARIMA orders (sktime `ForecastingGridSearchCV`).
+///
+/// Candidate count is not identification `p`. Inner residual-kind failures are
+/// not promoted.
+#[derive(Clone, Debug)]
+pub struct ForecastingGridSearchCV {
+    /// Hold-out horizon used to score candidates.
+    pub fh: usize,
+}
+
+impl Default for ForecastingGridSearchCV {
+    fn default() -> Self {
+        Self { fh: 4 }
+    }
+}
+
+impl ForecastingGridSearchCV {
+    /// Grid search with hold-out horizon `fh`.
+    pub fn new(fh: usize) -> Self {
+        Self { fh: fh.max(1) }
+    }
+}
+
+/// Selected SES or ARIMA member and the hold-out scores.
+#[derive(Clone, Debug)]
+pub struct FittedForecastingGridSearch {
+    /// Winning specification label.
+    pub best_name: String,
+    /// Hold-out MAE of the winner.
+    pub best_mae: f64,
+    /// `(name, mae)` for every successful candidate.
+    pub scores: Vec<(String, f64)>,
+    /// Fitted SES when that family won.
+    pub ses: Option<FittedSimpleExpSmoothing>,
+    /// Fitted ARIMA when that family won.
+    pub arima: Option<FittedArima>,
+}
+
+impl FittedForecastingGridSearch {
+    /// `h`-step forecast from the winning member (refit on the full series).
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        if let Some(s) = &self.ses {
+            return s.forecast(h, session);
+        }
+        if let Some(a) = &self.arima {
+            return a.forecast(h, session);
+        }
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(Vector::zeros(h))
+    }
+}
+
+fn holdout_mae(actual: &[f64], pred: &[f64]) -> f64 {
+    let n = actual.len().min(pred.len());
+    if n == 0 {
+        return f64::INFINITY;
+    }
+    let mut s: f64 = 0.0;
+    for i in 0..n {
+        s += (actual[i] - pred[i]).abs();
+    }
+    s / n as f64
+}
+
+impl FitSeries for ForecastingGridSearchCV {
+    type Fitted = FittedForecastingGridSearch;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedForecastingGridSearch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let h = self.fh.max(1).min(y.len().saturating_sub(4).max(1));
+        if y.len() <= h + 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "ForecastingGridSearchCV n={} is short for fh={h}",
+                        y.len()
+                    ))
+                    .build(),
+            );
+        }
+        let split = y.len().saturating_sub(h);
+        let train = Vector::from_iter(y.as_slice().iter().take(split).copied());
+        let hold = &y.as_slice()[split.min(y.len())..];
+        let mut scores = Vec::new();
+        let mut best_name = "ses_0.3".to_string();
+        let mut best_mae = f64::INFINITY;
+        for &a in &[0.1, 0.3, 0.5, 0.8] {
+            match SimpleExpSmoothing::new(Some(a)).fit_series(&train, &session.child("ses")) {
+                Ok(q) => match q.value.forecast(h, &session.child("ses_fc")) {
+                    Ok(fc) => {
+                        let mae = holdout_mae(hold, fc.value.as_slice());
+                        let name = format!("ses_{a}");
+                        scores.push((name.clone(), mae));
+                        if mae < best_mae {
+                            best_mae = mae;
+                            best_name = name;
+                        }
+                    }
+                    Err(_) => {}
+                },
+                Err(e) => {
+                    if !matches!(
+                        e.primary.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::RankZero
+                            | IssueCode::R2IsOne
+                    ) {
+                        ctx.push(e.primary);
+                    }
+                }
+            }
+        }
+        for (p, d, q) in [(1, 0, 0), (0, 1, 0), (1, 1, 0), (1, 0, 1)] {
+            match Arima::new(p, d, q).fit_series(&train, &session.child("arima")) {
+                Ok(fit) => match fit.value.forecast(h, &session.child("arima_fc")) {
+                    Ok(fc) => {
+                        let mae = holdout_mae(hold, fc.value.as_slice());
+                        let name = format!("arima_{p}{d}{q}");
+                        scores.push((name.clone(), mae));
+                        if mae < best_mae {
+                            best_mae = mae;
+                            best_name = name;
+                        }
+                    }
+                    Err(_) => {}
+                },
+                Err(e) => {
+                    if !matches!(
+                        e.primary.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::RankZero
+                            | IssueCode::R2IsOne
+                    ) {
+                        ctx.push(e.primary);
+                    }
+                }
+            }
+        }
+        let mut ses = None;
+        let mut arima = None;
+        if best_name.starts_with("ses_") {
+            if let Ok(q) = SimpleExpSmoothing::new(None).fit_series(y, &session.child("refit_ses"))
+            {
+                ses = Some(q.value);
+            }
+        } else if best_name.starts_with("arima_") {
+            let mut spec = if best_name.contains("101") {
+                Arima::new(1, 0, 1)
+            } else if best_name.contains("110") {
+                Arima::new(1, 1, 0)
+            } else if best_name.contains("010") {
+                Arima::new(0, 1, 0)
+            } else {
+                Arima::new(1, 0, 0)
+            };
+            if let Ok(q) = spec.fit_series(y, &session.child("refit_arima")) {
+                arima = Some(q.value);
+            }
+        }
+        if ses.is_none() && arima.is_none() {
+            if let Ok(q) = SimpleExpSmoothing::new(Some(0.3)).fit_series(y, &session.child("fb")) {
+                ses = Some(q.value);
+                if best_mae.is_infinite() {
+                    best_name = "ses_0.3".into();
+                }
+            }
+        }
+        ctx.finish(FittedForecastingGridSearch {
+            best_name,
+            best_mae,
+            scores,
+            ses,
+            arima,
+        })
+    }
+}
+
 /// Average of Holt–Winters and ARIMA(1,0,1) forecasts (sktime `EnsembleForecaster`).
 #[derive(Clone, Debug)]
 pub struct EnsembleForecaster {
@@ -1311,6 +1495,266 @@ impl FitSeries for Tbats {
     }
 }
 
+fn boxcox_apply(v: f64, lam: f64) -> f64 {
+    let x = v.max(1e-12);
+    if lam.abs() < 1e-12 {
+        x.ln()
+    } else {
+        (x.powf(lam) - 1.0) / lam
+    }
+}
+
+fn boxcox_inv(z: f64, lam: f64) -> f64 {
+    if lam.abs() < 1e-12 {
+        z.exp()
+    } else {
+        (lam * z + 1.0).max(1e-12).powf(1.0 / lam)
+    }
+}
+
+fn arma11_from_resid(e: &[f64]) -> (f64, f64) {
+    let n = e.len();
+    if n < 4 {
+        return (0.0, 0.0);
+    }
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for t in 1..n {
+        num += e[t] * e[t - 1];
+        den += e[t - 1] * e[t - 1];
+    }
+    let phi = if den > 1e-18 {
+        (num / den).clamp(-0.99, 0.99)
+    } else {
+        0.0
+    };
+    let mut u = vec![0.0; n];
+    for t in 1..n {
+        u[t] = e[t] - phi * e[t - 1];
+    }
+    let mut n2 = 0.0;
+    let mut d2 = 0.0;
+    for t in 2..n {
+        n2 += u[t] * u[t - 1];
+        d2 += u[t - 1] * u[t - 1];
+    }
+    let theta = if d2 > 1e-18 {
+        (n2 / d2).clamp(-0.99, 0.99)
+    } else {
+        0.0
+    };
+    (phi, theta)
+}
+
+/// TBATS with a Box–Cox grid, Fourier seasonality, and ARMA(1,1) errors.
+///
+/// This is closer to De Livera–Hyndman–Snyder than [`Tbats`] (log + AR(1)).
+/// Harmonic count is not identification `p`. λ is chosen by profile Gaussian
+/// likelihood including the Box–Cox Jacobian.
+#[derive(Clone, Debug)]
+pub struct TbatsFull {
+    /// Seasonal period.
+    pub period: usize,
+    /// Fourier harmonics.
+    pub harmonics: usize,
+}
+
+impl Default for TbatsFull {
+    fn default() -> Self {
+        Self {
+            period: 4,
+            harmonics: 2,
+        }
+    }
+}
+
+impl TbatsFull {
+    /// TBATS with the given period.
+    pub fn new(period: usize) -> Self {
+        Self {
+            period: period.max(2),
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted Box–Cox + Fourier + ARMA(1,1) TBATS.
+#[derive(Clone, Debug)]
+pub struct FittedTbatsFull {
+    /// OLS coefficients on `[1, t, sin, cos, …]`.
+    pub coef: Vector,
+    /// AR(1) residual coefficient.
+    pub phi: f64,
+    /// MA(1) residual coefficient.
+    pub theta: f64,
+    /// Last residual (Box–Cox scale).
+    pub last_resid: f64,
+    /// Last innovation.
+    pub last_innov: f64,
+    /// Selected Box–Cox λ.
+    pub lambda: f64,
+    /// Period.
+    pub period: usize,
+    /// Harmonics.
+    pub harmonics: usize,
+    /// Training length.
+    pub n: usize,
+}
+
+impl FittedTbatsFull {
+    fn design_row(&self, t: usize, p: usize) -> Vector {
+        let mut v = Vector::zeros(p);
+        v[0] = 1.0;
+        if p > 1 {
+            v[1] = t as f64;
+        }
+        let per = self.period.max(2) as f64;
+        let mut k = 2usize;
+        for h in 1..=self.harmonics {
+            if k < p {
+                v[k] = (2.0 * std::f64::consts::PI * h as f64 * t as f64 / per).cos();
+                k += 1;
+            }
+            if k < p {
+                v[k] = (2.0 * std::f64::consts::PI * h as f64 * t as f64 / per).sin();
+                k += 1;
+            }
+        }
+        v
+    }
+
+    /// `h`-step forecast on the original scale.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let p = self.coef.len();
+        let mut e = self.last_resid;
+        let mut innov = self.last_innov;
+        let y = Vector::from_iter((0..h).map(|s| {
+            let t = self.n + s;
+            let row = self.design_row(t, p);
+            let mut mu = 0.0;
+            for j in 0..p {
+                mu += self.coef[j] * row[j];
+            }
+            let next_e = self.phi * e + self.theta * innov;
+            innov = 0.0;
+            e = next_e;
+            boxcox_inv(mu + e, self.lambda)
+        }));
+        ctx.finish(y)
+    }
+}
+
+impl FitSeries for TbatsFull {
+    type Fitted = FittedTbatsFull;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedTbatsFull>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let period = self.period.max(2);
+        if y.len() < 2 * period {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSeasonalCycles)
+                    .severity(Severity::Warning)
+                    .message(format!("TBATS-full n={} < 2s with s={period}", y.len()))
+                    .build(),
+            );
+        }
+        if y.as_slice().iter().any(|&v| v <= 0.0) {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .message("TBATS-full Box–Cox requires a strictly positive series")
+                    .build(),
+            );
+        }
+        let h = self.harmonics.max(1);
+        let p = 2 + 2 * h;
+        let n = y.len();
+        let mut best_ll = f64::NEG_INFINITY;
+        let mut best = FittedTbatsFull {
+            coef: Vector::zeros(p),
+            phi: 0.0,
+            theta: 0.0,
+            last_resid: 0.0,
+            last_innov: 0.0,
+            lambda: 0.0,
+            period,
+            harmonics: h,
+            n,
+        };
+        for i in 0..=8 {
+            let lam = -1.0 + 0.5 * i as f64;
+            let z = Vector::from_iter(y.as_slice().iter().map(|&v| boxcox_apply(v, lam)));
+            let x = Matrix::from_fn(n, p, |t, j| {
+                FittedTbatsFull {
+                    coef: Vector::zeros(p),
+                    phi: 0.0,
+                    theta: 0.0,
+                    last_resid: 0.0,
+                    last_innov: 0.0,
+                    lambda: lam,
+                    period,
+                    harmonics: h,
+                    n,
+                }
+                .design_row(t, p)[j]
+            });
+            let Some(coef) = statistical_ols(&mut ctx, &x, &z) else {
+                continue;
+            };
+            let fit = x.matvec(&coef);
+            let resid: Vec<f64> = (0..n).map(|t| z[t] - fit[t]).collect();
+            let (phi, theta) = arma11_from_resid(&resid);
+            let mut sse: f64 = 0.0;
+            let mut innov = 0.0;
+            for t in 0..n {
+                let pred_e = if t == 0 {
+                    0.0
+                } else {
+                    phi * resid[t - 1] + theta * innov
+                };
+                innov = resid[t] - pred_e;
+                sse += innov * innov;
+            }
+            let s2 = (sse / n.max(1) as f64).max(1e-12);
+            let mut jac = 0.0;
+            for &v in y.as_slice() {
+                jac += (v.max(1e-12)).ln();
+            }
+            let ll = -0.5 * n as f64 * s2.ln() + (lam - 1.0) * jac;
+            if ll > best_ll {
+                best_ll = ll;
+                best = FittedTbatsFull {
+                    coef,
+                    phi,
+                    theta,
+                    last_resid: resid.last().copied().unwrap_or(0.0),
+                    last_innov: innov,
+                    lambda: lam,
+                    period,
+                    harmonics: h,
+                    n,
+                };
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(Severity::Advisory)
+                .message(format!(
+                    "TBATS-full selected λ={:.3e} by a coarse Box–Cox grid; ARMA is CSS(1,1)",
+                    best.lambda
+                ))
+                .compromise(NumericalCompromise::new(
+                    "full TBATS MLE (Box–Cox + trigonometric + ARMA)",
+                    "profile-likelihood λ grid plus Hannan–Rissanen ARMA(1,1)",
+                    "the seasonal states are Fourier OLS, not the De Livera damped trig form",
+                    "do not treat this as the tbats R package MLE",
+                ))
+                .build(),
+        );
+        ctx.finish(best)
+    }
+}
+
 /// Log-target ARIMA (sktime `TransformedTargetForecaster`).
 #[derive(Clone, Debug, Default)]
 pub struct TransformedTargetForecaster;
@@ -1814,6 +2258,244 @@ impl FittedSvar {
         session: &Session,
     ) -> Result<Qualified<VarImpulseResponse>> {
         self.reduced.impulse_response(horizon, session)
+    }
+}
+
+fn var_psi(reduced: &FittedVar, horizon: usize) -> Vec<Matrix> {
+    let k = reduced.k;
+    let p = reduced.lags.max(1);
+    let h = horizon.max(1);
+    let mut psi = vec![Matrix::zeros(k, k); h + 1];
+    for i in 0..k {
+        psi[0].set(i, i, 1.0);
+    }
+    for hor in 1..=h {
+        for lag in 1..=p.min(hor) {
+            for eq in 0..k {
+                for var in 0..k {
+                    let a = reduced.coef.get(1 + (lag - 1) * k + var, eq);
+                    for sh in 0..k {
+                        let v = psi[hor].get(eq, sh) + a * psi[hor - lag].get(var, sh);
+                        psi[hor].set(eq, sh, v);
+                    }
+                }
+            }
+        }
+    }
+    psi
+}
+
+fn irf_from_impact(psi: &[Matrix], impact: &Matrix, sigma: Matrix) -> VarImpulseResponse {
+    let k = impact.nrows();
+    let mut irf = Vec::with_capacity(psi.len());
+    let mut mse = vec![0.0; k];
+    let mut fevd = Vec::with_capacity(psi.len());
+    let mut acc_sq = Matrix::zeros(k, k);
+    for psi_h in psi {
+        let th = Matrix::from_fn(k, k, |i, j| {
+            let mut v = 0.0;
+            for r in 0..k {
+                v += psi_h.get(i, r) * impact.get(r, j);
+            }
+            v
+        });
+        for i in 0..k {
+            for j in 0..k {
+                let s = th.get(i, j);
+                acc_sq.set(i, j, acc_sq.get(i, j) + s * s);
+                mse[i] += s * s;
+            }
+        }
+        let decomp = Matrix::from_fn(k, k, |i, j| {
+            if mse[i] > 1e-18 {
+                acc_sq.get(i, j) / mse[i]
+            } else {
+                0.0
+            }
+        });
+        irf.push(th);
+        fevd.push(decomp);
+    }
+    VarImpulseResponse { irf, fevd, sigma }
+}
+
+/// Estimated recursive A/B SVAR: \(A u_t = B \varepsilon_t\).
+///
+/// `A` is unit lower-triangular from residual regressions (not the Cholesky
+/// factor of \(\Sigma_u\)). `B` is diagonal residual scale. This is still a
+/// recursive identification; free A and B without extra restrictions are not
+/// jointly identified.
+#[derive(Clone, Debug)]
+pub struct SvarAb {
+    /// VAR order.
+    pub lags: usize,
+}
+
+impl Default for SvarAb {
+    fn default() -> Self {
+        Self { lags: 1 }
+    }
+}
+
+impl SvarAb {
+    /// A/B SVAR(`lags`).
+    pub fn new(lags: usize) -> Self {
+        Self { lags }
+    }
+
+    /// Fit the reduced-form VAR and estimate recursive A, B from residuals.
+    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedSvarAb>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let q = match Var::new(self.lags).fit(y, &session.child("var")) {
+            Ok(q) => q,
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                ) {
+                    ctx.push(e.primary);
+                }
+                let k = y.ncols();
+                return ctx.finish(FittedSvarAb {
+                    reduced: FittedVar {
+                        lags: self.lags.max(1),
+                        k,
+                        coef: Matrix::zeros(1, k),
+                        intercepts: Vector::zeros(k),
+                        resid: Matrix::zeros(0, k),
+                        last: Matrix::zeros(self.lags.max(1), k),
+                    },
+                    a0: Matrix::from_fn(k, k, |i, j| if i == j { 1.0 } else { 0.0 }),
+                    b: Matrix::from_fn(k, k, |i, j| if i == j { 1.0 } else { 0.0 }),
+                });
+            }
+        };
+        for issue in q.report.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let k = q.value.k;
+        let (t_res, _) = q.value.resid.shape();
+        let mut a0 = Matrix::from_fn(k, k, |i, j| if i == j { 1.0 } else { 0.0 });
+        let mut b = Matrix::zeros(k, k);
+        if t_res > 0 && k > 0 {
+            let u0 = Vector::from_iter((0..t_res).map(|i| q.value.resid.get(i, 0)));
+            let mut sse0 = 0.0;
+            for i in 0..t_res {
+                sse0 += u0[i] * u0[i];
+            }
+            b.set(0, 0, (sse0 / t_res as f64).max(1e-18).sqrt());
+            for i in 1..k {
+                let target = Vector::from_iter((0..t_res).map(|t| q.value.resid.get(t, i)));
+                let design = Matrix::from_fn(t_res, i, |t, j| q.value.resid.get(t, j));
+                let mut scratch = Report::new("svarab", "a0");
+                if let Some(coef) =
+                    crate::linalg::least_squares(&mut scratch, &design, &target, &ctx.policy)
+                {
+                    for j in 0..i {
+                        a0.set(i, j, -coef[j]);
+                    }
+                    let fit = design.matvec(&coef);
+                    let mut sse = 0.0;
+                    for t in 0..t_res {
+                        let e = target[t] - fit[t];
+                        sse += e * e;
+                    }
+                    b.set(i, i, (sse / t_res as f64).max(1e-18).sqrt());
+                } else {
+                    let mut sse = 0.0;
+                    for t in 0..t_res {
+                        sse += target[t] * target[t];
+                    }
+                    b.set(i, i, (sse / t_res as f64).max(1e-18).sqrt());
+                }
+            }
+        } else {
+            for i in 0..k {
+                b.set(i, i, 1.0);
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message(
+                    "SVAR-AB estimates a recursive A0 from residual OLS, not a free A/B system",
+                )
+                .compromise(NumericalCompromise::new(
+                    "over-identified A/B SVAR with exclusion restrictions",
+                    "unit-lower-triangular A from residual regressions and diagonal B",
+                    "free A and B are not jointly identified without extra restrictions",
+                    "do not read off-diagonal A entries as unrestricted structural parameters",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedSvarAb {
+            reduced: q.value,
+            a0,
+            b,
+        })
+    }
+}
+
+/// Fitted recursive A/B SVAR.
+#[derive(Clone, Debug)]
+pub struct FittedSvarAb {
+    /// Reduced-form VAR.
+    pub reduced: FittedVar,
+    /// Estimated contemporaneous \(A\) (unit lower triangular).
+    pub a0: Matrix,
+    /// Diagonal structural-shock scale \(B\).
+    pub b: Matrix,
+}
+
+impl FittedSvarAb {
+    /// Structural IRF / FEVD via \(P = A^{-1} B\).
+    pub fn structural_irf(
+        &self,
+        horizon: usize,
+        session: &Session,
+    ) -> Result<Qualified<VarImpulseResponse>> {
+        let ctx = FitCtx::with_session(session.child("irf"));
+        let k = self.reduced.k;
+        let mut impact = Matrix::zeros(k, k);
+        for j in 0..k {
+            for i in 0..k {
+                let mut s = self.b.get(i, j);
+                for p in 0..i {
+                    s -= self.a0.get(i, p) * impact.get(p, j);
+                }
+                let d = self.a0.get(i, i);
+                impact.set(i, j, if d.abs() > 1e-18 { s / d } else { s });
+            }
+        }
+        let (t_res, _) = self.reduced.resid.shape();
+        let mut sigma = Matrix::zeros(k, k);
+        if t_res > 0 {
+            for a in 0..k {
+                for b in 0..=a {
+                    let mut s = 0.0;
+                    for i in 0..t_res {
+                        s += self.reduced.resid.get(i, a) * self.reduced.resid.get(i, b);
+                    }
+                    let v = s / t_res as f64;
+                    sigma.set(a, b, v);
+                    sigma.set(b, a, v);
+                }
+            }
+        }
+        let psi = var_psi(&self.reduced, horizon);
+        ctx.finish(irf_from_impact(&psi, &impact, sigma))
     }
 }
 
@@ -6179,5 +6861,34 @@ mod tests {
             .structural_irf(2, &Session::new("svar", "irf"))
             .expect("sirf");
         assert!(!sir.value.irf.is_empty());
+        let sab = SvarAb::new(1)
+            .fit(&y2, &Session::new("svarab", "fit"))
+            .expect("svarab");
+        assert_eq!(sab.value.a0.nrows(), 2);
+        let sabi = sab
+            .value
+            .structural_irf(2, &Session::new("svarab", "irf"))
+            .expect("sabi");
+        assert!(!sabi.value.irf.is_empty());
+        let tb = TbatsFull::new(4)
+            .fit_series(&ypos, &Session::new("tbatsf", "fit"))
+            .expect("tbatsf");
+        let tbf = tb
+            .value
+            .forecast(3, &Session::new("tbatsf", "fc"))
+            .expect("tbatsff")
+            .value;
+        assert_eq!(tbf.len(), 3);
+        assert!(tbf.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let fgs = ForecastingGridSearchCV::new(4)
+            .fit_series(&y, &Session::new("fgs", "fit"))
+            .expect("fgs");
+        assert!(!fgs.value.best_name.is_empty());
+        let fgf = fgs
+            .value
+            .forecast(3, &Session::new("fgs", "fc"))
+            .expect("fgsf")
+            .value;
+        assert_eq!(fgf.len(), 3);
     }
 }

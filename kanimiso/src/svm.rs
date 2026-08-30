@@ -565,6 +565,15 @@ impl FittedSvc {
             }
         }))
     }
+
+    /// Signed decision scores \(f(x)=\sum_i \alpha_i y_i K(x_i,x)+b\).
+    pub fn decision_function(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("decision_function"));
+        predict_shape_guard(&mut ctx, x, self.x_train.ncols());
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.score_row(x, i)),
+        ))
+    }
 }
 
 impl Predict for FittedSvc {
@@ -1548,6 +1557,298 @@ impl Fit for NuSvcSmo {
     }
 }
 
+/// Schölkopf ν-SVR dual: \(\beta_i=\alpha_i-\alpha_i^\star\in[-1/n,1/n]\),
+/// \(\sum\beta=0\), \(\sum|\beta|=\nu\).
+///
+/// Same-sign SMO pairs keep both equalities. [`NuSvr`] remains the Chang–Lin
+/// C-reduction and records that compromise. \(\varepsilon\) is recovered from
+/// free support vectors, not supplied as an input.
+fn nu_svr_smo_fit(
+    ctx: &mut FitCtx,
+    k: &[Vec<f64>],
+    y: &[f64],
+    nu: f64,
+    max_iter: usize,
+) -> (Vec<f64>, f64, f64, bool) {
+    let n = y.len();
+    let u = 1.0 / n.max(1) as f64;
+    let nu = nu.clamp(1e-6, 1.0);
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&i, &j| y[i].partial_cmp(&y[j]).unwrap_or(std::cmp::Ordering::Equal));
+    let mut beta = vec![0.0; n];
+    let half = 0.5 * nu;
+    let mut left = half;
+    for &i in &order {
+        if left <= 1e-15 {
+            break;
+        }
+        let take = left.min(u);
+        beta[i] = -take;
+        left -= take;
+    }
+    let mut right = half;
+    for &i in order.iter().rev() {
+        if right <= 1e-15 {
+            break;
+        }
+        if beta[i].abs() > 1e-15 {
+            continue;
+        }
+        let take = right.min(u);
+        beta[i] = take;
+        right -= take;
+    }
+    if left > 1e-8 || right > 1e-8 {
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .message("ν-SVR SMO init clips |β_i| to 1/n; ∑|β| may miss ν")
+                .compromise(NumericalCompromise::new(
+                    "ν-SVR start with ∑|β|=ν and |β_i|≤1/n",
+                    "clipped two-sided uniform start",
+                    "the box 1/n can make ∑|β|=ν infeasible",
+                    "reduce ν or collect a larger sample",
+                ))
+                .build(),
+        );
+    }
+    let mut rng = Rng::new(19);
+    let mut stalled = false;
+    for pass in 0..max_iter.max(1) {
+        let mut changed = 0usize;
+        for i in 0..n {
+            if beta[i].abs() <= 1e-15 {
+                continue;
+            }
+            let same: Vec<usize> = (0..n)
+                .filter(|&j| j != i && beta[j] * beta[i] > 1e-15)
+                .collect();
+            if same.is_empty() {
+                continue;
+            }
+            let mut fi = 0.0;
+            for t in 0..n {
+                fi += beta[t] * k[t][i];
+            }
+            let mut j = same[rng.below(same.len())];
+            let mut best = 0.0;
+            for &cand in &same {
+                let mut fc = 0.0;
+                for t in 0..n {
+                    fc += beta[t] * k[t][cand];
+                }
+                let gap = ((fi - y[i]) - (fc - y[cand])).abs();
+                if gap > best {
+                    best = gap;
+                    j = cand;
+                }
+            }
+            let mut fj = 0.0;
+            for t in 0..n {
+                fj += beta[t] * k[t][j];
+            }
+            let eta = 2.0 * k[i][j] - k[i][i] - k[j][j];
+            if eta >= -1e-15 {
+                continue;
+            }
+            let gi = fi - y[i];
+            let gj = fj - y[j];
+            let t_star = (gi - gj) / eta;
+            let bi = beta[i];
+            let bj = beta[j];
+            let sign = if bi > 0.0 { 1.0 } else { -1.0 };
+            let mut lo = (-bi).max(bj - u);
+            let mut hi = (u - bi).min(bj);
+            if sign > 0.0 {
+                lo = lo.max(-bi + 1e-15);
+                hi = hi.min(bj - 1e-15);
+            } else {
+                lo = lo.max(-u - bi);
+                hi = hi.min(-bj);
+            }
+            if hi - lo <= 1e-15 {
+                continue;
+            }
+            let t = t_star.clamp(lo, hi);
+            if t.abs() < 1e-15 {
+                continue;
+            }
+            beta[i] = (bi + t).clamp(-u, u);
+            beta[j] = (bj - t).clamp(-u, u);
+            changed += 1;
+        }
+        ctx.session.step(pass as u64, changed as f64, None);
+        if changed == 0 && pass > 0 {
+            ctx.session
+                .converged("ν-SVR SMO found no same-sign pair updates", pass as u64);
+            stalled = true;
+            break;
+        }
+    }
+    let mut pos_s = 0.0;
+    let mut np = 0.0;
+    let mut neg_s = 0.0;
+    let mut nn = 0.0;
+    for i in 0..n {
+        if beta[i].abs() > 1e-12 && beta[i].abs() < u - 1e-12 {
+            let mut f = 0.0;
+            for t in 0..n {
+                f += beta[t] * k[t][i];
+            }
+            let s = y[i] - f;
+            if beta[i] > 0.0 {
+                pos_s += s;
+                np += 1.0;
+            } else {
+                neg_s += s;
+                nn += 1.0;
+            }
+        }
+    }
+    let (b, eps) = if np > 0.0 && nn > 0.0 {
+        let sp = pos_s / np;
+        let sn = neg_s / nn;
+        (0.5 * (sp + sn), 0.5 * (sp - sn).abs())
+    } else if np > 0.0 {
+        (pos_s / np, 0.0)
+    } else if nn > 0.0 {
+        (neg_s / nn, 0.0)
+    } else {
+        let mut acc = 0.0;
+        let mut m = 0.0;
+        for i in 0..n {
+            if beta[i].abs() > 1e-12 {
+                let mut f = 0.0;
+                for t in 0..n {
+                    f += beta[t] * k[t][i];
+                }
+                acc += y[i] - f;
+                m += 1.0;
+            }
+        }
+        (if m > 0.0 { acc / m } else { 0.0 }, 0.0)
+    };
+    (beta, b, eps, stalled)
+}
+
+/// ν-SVR that solves the Schölkopf dual (`|β_i| ≤ 1/n`, `∑β = 0`, `∑|β| = ν`).
+///
+/// [`NuSvr`] remains the Chang–Lin C-reduction and records that compromise.
+#[derive(Clone, Debug)]
+pub struct NuSvrSmo {
+    /// Tube-error fraction \(\nu \in (0, 1]\).
+    pub nu: f64,
+    /// RBF \(\gamma\).
+    pub gamma: f64,
+    /// Kernel.
+    pub kernel: Kernel,
+    /// SMO passes.
+    pub max_iter: usize,
+}
+
+impl Default for NuSvrSmo {
+    fn default() -> Self {
+        Self {
+            nu: 0.5,
+            gamma: 1.0,
+            kernel: Kernel::Linear,
+            max_iter: 400,
+        }
+    }
+}
+
+impl NuSvrSmo {
+    /// Default true ν-SVR (`ν = 0.5`).
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for NuSvrSmo {
+    type Fitted = FittedSvr;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSvr>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows();
+        let nu = if self.nu.is_finite() && self.nu > 0.0 && self.nu <= 1.0 {
+            self.nu
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "NuSvrSmo ν={} is not in (0, 1]; using 0.5",
+                        self.nu
+                    ))
+                    .build(),
+            );
+            0.5
+        };
+        if !self.gamma.is_finite() || self.gamma <= 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "NuSvrSmo γ={} is not positive; using 1",
+                        self.gamma
+                    ))
+                    .build(),
+            );
+        }
+        let k = gram(self.kernel, self.gamma.max(1e-12), x);
+        inspect_kernel_pd(&mut ctx, &k);
+        let (beta, b, eps, ok) = nu_svr_smo_fit(&mut ctx, &k, y.as_slice(), nu, self.max_iter);
+        if !ok {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("ν-SVR SMO did not stall within max_iter")
+                    .build(),
+            );
+        }
+        let sum_b: f64 = beta.iter().sum();
+        let sum_abs: f64 = beta.iter().map(|v| v.abs()).sum();
+        if sum_b.abs() > 0.15 || (sum_abs - nu).abs() > 0.15 {
+            ctx.push(
+                Issue::builder(IssueCode::JitterInjected)
+                    .message(format!(
+                        "ν-SVR SMO constraints residual: ∑β={sum_b:.4e}, ∑|β|={sum_abs:.4e} (ν={nu:.4e})"
+                    ))
+                    .compromise(NumericalCompromise::new(
+                        "exact ν-SVR dual equalities",
+                        "same-sign SMO with a clipped start",
+                        "the box 1/n can make ∑|β|=ν infeasible",
+                        "do not read the tube fraction as exactly ν",
+                    ))
+                    .build(),
+            );
+        }
+        if eps <= 1e-12 && n >= 4 {
+            ctx.push(
+                Issue::builder(IssueCode::JitterInjected)
+                    .severity(Severity::Advisory)
+                    .message("ν-SVR recovered ε≈0; the tube collapsed to an interpolant")
+                    .compromise(NumericalCompromise::new(
+                        "positive ε-tube from free support vectors",
+                        "no free SV or identical +/− scores",
+                        "ε is unidentified from the dual box",
+                        "increase n or ν so some |β_i| sit strictly inside (0, 1/n)",
+                    ))
+                    .build(),
+            );
+        }
+        let fitted = FittedSvr {
+            x_train: x.clone(),
+            dual: Vector::from_slice(&beta),
+            intercept: b,
+            kernel: self.kernel,
+            gamma: self.gamma.max(1e-12),
+        };
+        let pred = fitted.predict_vec(x);
+        diagnose_constant_predictions(&mut ctx, &pred, y);
+        ctx.finish(fitted)
+    }
+}
+
 /// Linear SGD one-class SVM (sklearn `SGDOneClassSVM`).
 ///
 /// Primal step: if \(w^\top x < \rho\) the point is a margin violator and \(w\)
@@ -1886,5 +2187,32 @@ mod tests {
             "nu-smo acc={}",
             accuracy(&pred2, &y)
         );
+        let scores = smo
+            .value
+            .decision_function(&x, &Session::new("nusvcsmo", "df"))
+            .unwrap()
+            .value;
+        assert_eq!(scores.len(), x.nrows());
+        assert!(scores.as_slice().iter().all(|v| v.is_finite()));
+        let svr_smo = NuSvrSmo {
+            nu: 0.4,
+            kernel: Kernel::Linear,
+            max_iter: 200,
+            ..NuSvrSmo::default()
+        }
+        .fit(&xr, &yr, &Session::new("nusvrsmo", "fit"))
+        .expect("nusvrsmo");
+        let hat2 = svr_smo
+            .value
+            .predict(&xr, &Session::new("nusvrsmo", "p"))
+            .unwrap()
+            .value;
+        assert!(hat2.as_slice().iter().all(|v| v.is_finite()));
+        let mut sse = 0.0;
+        for i in 0..yr.len() {
+            let e = hat2[i] - yr[i];
+            sse += e * e;
+        }
+        assert!(sse < 80.0, "nu-svr smo sse={sse}");
     }
 }

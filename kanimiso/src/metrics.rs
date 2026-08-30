@@ -1128,6 +1128,102 @@ pub fn pinball_loss(
     ctx.finish(if n > 0.0 { s / n } else { f64::NAN })
 }
 
+/// Reliability-diagram bins (sklearn `calibration_curve`).
+#[derive(Clone, Debug)]
+pub struct CalibrationCurve {
+    /// Fraction of positives in each occupied bin.
+    pub prob_true: Vector,
+    /// Mean predicted probability in each occupied bin.
+    pub prob_pred: Vector,
+    /// Occupancy of each occupied bin.
+    pub counts: Vector,
+}
+
+/// Equal-width calibration curve on \([0,1]\) predicted probabilities.
+///
+/// Bin count is not identification `p`. A constant score or a single occupied
+/// bin cannot show miscalibration across the score range.
+pub fn calibration_curve(
+    y_true: &Vector,
+    prob: &Vector,
+    n_bins: usize,
+    session: &Session,
+) -> Result<Qualified<CalibrationCurve>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, prob, "calibration_curve") {
+        return ctx.finish(CalibrationCurve {
+            prob_true: Vector::zeros(0),
+            prob_pred: Vector::zeros(0),
+            counts: Vector::zeros(0),
+        });
+    }
+    warn_constant_target(&mut ctx, y_true, true);
+    let bins = n_bins.max(2);
+    if n_bins < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("calibration_curve n_bins={n_bins} < 2; using 2"))
+                .build(),
+        );
+    }
+    let mut sum_y = vec![0.0; bins];
+    let mut sum_p = vec![0.0; bins];
+    let mut cnt = vec![0.0; bins];
+    let mut out_of_range = 0usize;
+    for i in 0..y_true.len() {
+        let p = prob[i];
+        if !p.is_finite() || !y_true[i].is_finite() {
+            continue;
+        }
+        if p < 0.0 || p > 1.0 {
+            out_of_range += 1;
+        }
+        let pc = p.clamp(0.0, 1.0);
+        let mut b = (pc * bins as f64).floor() as usize;
+        if b >= bins {
+            b = bins - 1;
+        }
+        sum_y[b] += y_true[i];
+        sum_p[b] += pc;
+        cnt[b] += 1.0;
+    }
+    if out_of_range > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "{out_of_range} predicted probabilities were outside [0,1] and were clipped"
+                ))
+                .build(),
+        );
+    }
+    let mut pt = Vec::new();
+    let mut pp = Vec::new();
+    let mut cc = Vec::new();
+    for b in 0..bins {
+        if cnt[b] <= 0.0 {
+            continue;
+        }
+        pt.push(sum_y[b] / cnt[b]);
+        pp.push(sum_p[b] / cnt[b]);
+        cc.push(cnt[b]);
+    }
+    if pt.len() <= 1 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("calibration curve occupied fewer than two bins")
+                .build(),
+        );
+    }
+    ctx.finish(CalibrationCurve {
+        prob_true: Vector::from_slice(&pt),
+        prob_pred: Vector::from_slice(&pp),
+        counts: Vector::from_slice(&cc),
+    })
+}
+
 fn bump<K: PartialEq>(xs: &mut Vec<(K, f64)>, key: K) {
     if let Some(e) = xs.iter_mut().find(|(k, _)| *k == key) {
         e.1 += 1.0;
@@ -1300,5 +1396,10 @@ mod tests {
             .unwrap()
             .value;
         assert!(pb >= 0.0);
+        let cal = calibration_curve(&y, &p, 4, &Session::new("m", "cal"))
+            .unwrap()
+            .value;
+        assert!(cal.prob_true.len() >= 2);
+        assert_eq!(cal.prob_true.len(), cal.prob_pred.len());
     }
 }

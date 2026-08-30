@@ -4531,6 +4531,182 @@ pub fn ols_influence(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualif
     })
 }
 
+/// Two-sample mean comparison (statsmodels `CompareMeans`).
+#[derive(Clone, Debug)]
+pub struct CompareMeansResult {
+    /// Sample mean of the first group.
+    pub mean_a: f64,
+    /// Sample mean of the second group.
+    pub mean_b: f64,
+    /// `mean_a − mean_b`.
+    pub diff: f64,
+    /// Welch (or pooled) *t*.
+    pub statistic: f64,
+    /// Two-sided *p*.
+    pub pvalue: f64,
+    /// Degrees of freedom.
+    pub df: f64,
+}
+
+/// Compare two independent samples with a Welch *t* test.
+pub fn compare_means(
+    a: &Vector,
+    b: &Vector,
+    session: &Session,
+) -> Result<Qualified<CompareMeansResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let q = ttest_ind(a, b, true, &session.child("ttest"))?;
+    for issue in q.report.issues() {
+        ctx.push(issue.clone());
+    }
+    let sa = slice_stats(a.as_slice());
+    let sb = slice_stats(b.as_slice());
+    ctx.finish(CompareMeansResult {
+        mean_a: sa.mean,
+        mean_b: sb.mean,
+        diff: sa.mean - sb.mean,
+        statistic: q.value.statistic,
+        pvalue: q.value.pvalue,
+        df: q.value.df,
+    })
+}
+
+/// Nested-model ANOVA (statsmodels `anova_lm`).
+#[derive(Clone, Debug)]
+pub struct AnovaLm {
+    /// Extra-sum-of-squares *F*.
+    pub f_stat: f64,
+    /// Upper-tail *F* p-value.
+    pub pvalue: f64,
+    /// Numerator degrees of freedom (`p_full − p_restricted`).
+    pub df_num: f64,
+    /// Residual degrees of freedom of the unrestricted model.
+    pub df_den: f64,
+    /// Restricted residual sum of squares.
+    pub ss_restricted: f64,
+    /// Unrestricted residual sum of squares.
+    pub ss_full: f64,
+}
+
+fn ols_sse(x: &Matrix, y: &Vector, policy: &signlred::Policy) -> (f64, usize) {
+    let mut scratch = Report::new("anova_lm", "ols");
+    let beta = least_squares(&mut scratch, x, y, policy);
+    let p = x.ncols();
+    let Some(b) = beta else {
+        let mut sse = 0.0;
+        let m = y.mean();
+        for &v in y.as_slice() {
+            if v.is_finite() {
+                let e = v - m;
+                sse += e * e;
+            }
+        }
+        return (sse, 1);
+    };
+    let fit = x.matvec(&b);
+    let mut sse = 0.0;
+    for i in 0..y.len() {
+        let e = y[i] - fit[i];
+        sse += e * e;
+    }
+    (sse, p)
+}
+
+/// Compare a restricted linear model to an unrestricted one.
+///
+/// Column counts are identification `p` only when `n` is large enough for the
+/// usual OLS gate. Residual-kind inner failures are not promoted.
+pub fn anova_lm(
+    y: &Vector,
+    x_restricted: &Matrix,
+    x_full: &Matrix,
+    session: &Session,
+) -> Result<Qualified<AnovaLm>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x_full, Some(y), &ctx.policy);
+    inspect_xy(&mut ctx.report, x_restricted, None, &ctx.policy);
+    let n = y.len().min(x_full.nrows()).min(x_restricted.nrows());
+    if x_full.nrows() != y.len() || x_restricted.nrows() != y.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("anova_lm: design rows ≠ y length")
+                .build(),
+        );
+    }
+    if n >= 5 * x_full.ncols().max(1) {
+        inspect_identification(&mut ctx.report, n, x_full.ncols(), &ctx.policy);
+    }
+    let (ss_r, p_r) = ols_sse(x_restricted, y, &ctx.policy);
+    let (ss_u, p_u) = ols_sse(x_full, y, &ctx.policy);
+    if p_u <= p_r {
+        ctx.push(
+            Issue::builder(IssueCode::UnidentifiedModel)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "anova_lm unrestricted has {p_u} columns ≤ restricted {p_r}"
+                ))
+                .build(),
+        );
+        return ctx.finish(AnovaLm {
+            f_stat: f64::NAN,
+            pvalue: f64::NAN,
+            df_num: 0.0,
+            df_den: (n as f64 - p_u as f64).max(0.0),
+            ss_restricted: ss_r,
+            ss_full: ss_u,
+        });
+    }
+    let df_num = (p_u - p_r) as f64;
+    let df_den = n as f64 - p_u as f64;
+    if df_den <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::DegreesOfFreedomNonPositive)
+                .message("anova_lm residual df ≤ 0")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "nested-model F",
+                    "the unrestricted model has no residual degrees of freedom",
+                    "reduce columns or collect more rows",
+                ))
+                .build(),
+        );
+        return ctx.finish(AnovaLm {
+            f_stat: f64::NAN,
+            pvalue: f64::NAN,
+            df_num,
+            df_den,
+            ss_restricted: ss_r,
+            ss_full: ss_u,
+        });
+    }
+    let extra = ss_r - ss_u;
+    if extra < -1e-8 * ss_r.abs().max(1.0) {
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .severity(Severity::Warning)
+                .message("restricted SSE is smaller than unrestricted; F is set to 0")
+                .build(),
+        );
+    }
+    let f = if extra > 0.0 && ss_u > 1e-18 {
+        (extra / df_num) / (ss_u / df_den)
+    } else {
+        0.0
+    };
+    let pvalue = if f.is_finite() && f > 0.0 {
+        f_pvalue(f, df_num, df_den)
+    } else {
+        1.0
+    };
+    ctx.finish(AnovaLm {
+        f_stat: f,
+        pvalue,
+        df_num,
+        df_den,
+        ss_restricted: ss_r,
+        ss_full: ss_u,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4709,5 +4885,15 @@ mod tests {
         let did = difference_in_differences(&ydid, &treat, &post, &Session::new("did", "t"))
             .expect("did");
         assert!((did.value.att - 1.5).abs() < 0.3, "att={}", did.value.att);
+        let a = Vector::from_iter((0..12).map(|i| 0.2 * i as f64));
+        let b = Vector::from_iter((0..12).map(|i| 3.0 + 0.2 * i as f64));
+        let cm = compare_means(&a, &b, &Session::new("cm", "t")).expect("cm");
+        assert!(cm.value.diff < 0.0);
+        assert!(cm.value.pvalue < 0.05);
+        let yr = Vector::from_iter((0..24).map(|i| 1.0 + 2.0 * i as f64 + 0.1 * ((i % 3) as f64)));
+        let xr = Matrix::from_fn(24, 1, |_, _| 1.0);
+        let xf = Matrix::from_fn(24, 2, |i, j| if j == 0 { 1.0 } else { i as f64 });
+        let alm = anova_lm(&yr, &xr, &xf, &Session::new("anlm", "t")).expect("anlm");
+        assert!(alm.value.f_stat > 10.0, "F={}", alm.value.f_stat);
     }
 }

@@ -2266,6 +2266,88 @@ const INVENTORY: &[Algorithm] = &[
         "sklearn.linear_model.QuantileRegressor",
         "estimator",
     ),
+    a("svm.NuSvrSmo", "sklearn.svm.NuSVR", "estimator"),
+    a(
+        "svm.decision_function",
+        "sklearn.svm.SVC.decision_function",
+        "function",
+    ),
+    a(
+        "model_selection.HalvingGridSearchCV",
+        "sklearn.model_selection.HalvingGridSearchCV",
+        "estimator",
+    ),
+    a(
+        "model_selection.HalvingRandomSearchCV",
+        "sklearn.model_selection.HalvingRandomSearchCV",
+        "estimator",
+    ),
+    a(
+        "model_selection.ExpandingWindowSplitter",
+        "sktime.forecasting.model_selection.ExpandingWindowSplitter",
+        "splitter",
+    ),
+    a(
+        "metrics.calibration_curve",
+        "sklearn.calibration.calibration_curve",
+        "metric",
+    ),
+    a(
+        "compose.FrozenEstimator",
+        "sklearn.frozen.FrozenEstimator",
+        "estimator",
+    ),
+    a(
+        "tsa.TbatsFull",
+        "sktime.forecasting.tbats.TBATS",
+        "forecast",
+    ),
+    a(
+        "tsa.SvarAb",
+        "statsmodels.tsa.vector_ar.svar_model.SVAR",
+        "forecast",
+    ),
+    a(
+        "tsa.ForecastingGridSearchCV",
+        "sktime.forecasting.model_selection.ForecastingGridSearchCV",
+        "forecast",
+    ),
+    a(
+        "glm.NegativeBinomialP",
+        "statsmodels.discrete.count_model.NegativeBinomialP",
+        "estimator",
+    ),
+    a(
+        "stats.compare_means",
+        "statsmodels.stats.weightstats.CompareMeans",
+        "stats",
+    ),
+    a(
+        "stats.anova_lm",
+        "statsmodels.stats.anova.anova_lm",
+        "stats",
+    ),
+    a("iv.TwoStepGmm", "linearmodels.iv.model.IVGMM", "estimator"),
+    a(
+        "tslearn.KNeighborsTimeSeriesRegressor",
+        "tslearn.neighbors.KNeighborsTimeSeriesRegressor",
+        "timeseries",
+    ),
+    a(
+        "tslearn.ShapeletTransform",
+        "tslearn.shapelets.ShapeletModel",
+        "timeseries",
+    ),
+    a(
+        "online.HoeffdingAdaptiveTreeRegressor",
+        "river.tree.HoeffdingAdaptiveTreeRegressor",
+        "online",
+    ),
+    a(
+        "online.OnlineOrdinalEncoder",
+        "river.preprocessing.OrdinalEncoder",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -2339,6 +2421,12 @@ mod tests {
             "online.HoeffdingRegressor",
             "tslearn.matrix_profile",
             "iv.IvGmm",
+            "svm.NuSvrSmo",
+            "model_selection.HalvingGridSearchCV",
+            "metrics.calibration_curve",
+            "tsa.TbatsFull",
+            "tsa.SvarAb",
+            "online.HoeffdingAdaptiveTreeRegressor",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

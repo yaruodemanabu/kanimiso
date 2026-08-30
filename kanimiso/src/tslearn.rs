@@ -2991,6 +2991,203 @@ impl Predict for FittedShapelets {
     }
 }
 
+/// DTW k-NN regressor (tslearn `KNeighborsTimeSeriesRegressor`).
+///
+/// Neighbour count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct KNeighborsTimeSeriesRegressor {
+    /// Neighbourhood size.
+    pub n_neighbors: usize,
+}
+
+impl Default for KNeighborsTimeSeriesRegressor {
+    fn default() -> Self {
+        Self { n_neighbors: 3 }
+    }
+}
+
+impl KNeighborsTimeSeriesRegressor {
+    /// `k`-NN DTW regressor.
+    pub fn new(n_neighbors: usize) -> Self {
+        Self {
+            n_neighbors: n_neighbors.max(1),
+        }
+    }
+}
+
+/// Fitted DTW neighbour store for regression.
+#[derive(Clone, Debug)]
+pub struct FittedKnnTsRegressor {
+    x_train: Matrix,
+    y_train: Vector,
+    k: usize,
+}
+
+impl Fit for KNeighborsTimeSeriesRegressor {
+    type Fitted = FittedKnnTsRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedKnnTsRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        ctx.finish(FittedKnnTsRegressor {
+            x_train: x.clone(),
+            y_train: y.clone(),
+            k: self.n_neighbors.max(1),
+        })
+    }
+}
+
+impl Predict for FittedKnnTsRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let k = self.k.min(self.x_train.nrows().max(1));
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let a = x.row(i);
+            let mut dist: Vec<(f64, f64)> = (0..self.x_train.nrows())
+                .map(|t| {
+                    let d = dtw_raw(a.as_slice(), self.x_train.row(t).as_slice());
+                    (d, self.y_train[t])
+                })
+                .collect();
+            dist.sort_by(|p, q| p.0.partial_cmp(&q.0).unwrap_or(std::cmp::Ordering::Equal));
+            let take = k.min(dist.len());
+            if take == 0 {
+                return 0.0;
+            }
+            let mut s = 0.0;
+            for item in dist.iter().take(take) {
+                s += item.1;
+            }
+            s / take as f64
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// Unsupervised random-shapelet feature map (tslearn `ShapeletModel` transform).
+///
+/// Shapelet count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ShapeletTransform {
+    /// Number of random shapelets.
+    pub n_shapelets: usize,
+    /// Shapelet length.
+    pub length: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for ShapeletTransform {
+    fn default() -> Self {
+        Self {
+            n_shapelets: 4,
+            length: 4,
+            seed: 5,
+        }
+    }
+}
+
+impl ShapeletTransform {
+    /// `k` shapelets of length `length`.
+    pub fn new(n_shapelets: usize, length: usize) -> Self {
+        Self {
+            n_shapelets: n_shapelets.max(1),
+            length: length.max(2),
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted shapelet dictionary.
+#[derive(Clone, Debug)]
+pub struct FittedShapeletTransform {
+    /// Shapelets (`k` × `L`).
+    pub shapelets: Matrix,
+}
+
+impl FitUnsupervised for ShapeletTransform {
+    type Fitted = FittedShapeletTransform;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedShapeletTransform>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let l = self.length.min(x.ncols().max(2)).max(2);
+        if x.ncols() < l {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .severity(Severity::Warning)
+                    .message(format!("ShapeletTransform length={l} > T={}", x.ncols()))
+                    .build(),
+            );
+        }
+        let k = self.n_shapelets.max(1);
+        let slen = l.min(x.ncols().max(1));
+        let mut shapelets = Matrix::zeros(k, slen);
+        let mut rng = Rng::new(self.seed | 11);
+        if x.nrows() > 0 && x.ncols() >= slen {
+            for s in 0..k {
+                let row = rng.below(x.nrows());
+                let start = if x.ncols() > slen {
+                    rng.below(x.ncols() - slen + 1)
+                } else {
+                    0
+                };
+                for u in 0..slen {
+                    shapelets.set(s, u, x.get(row, start + u));
+                }
+            }
+        }
+        let mut identical = true;
+        if k >= 2 && slen > 0 {
+            for s in 1..k {
+                for u in 0..slen {
+                    if (shapelets.get(s, u) - shapelets.get(0, u)).abs() > 1e-12 {
+                        identical = false;
+                    }
+                }
+            }
+        } else {
+            identical = false;
+        }
+        if identical {
+            ctx.push(
+                Issue::builder(IssueCode::JitterInjected)
+                    .severity(Severity::Warning)
+                    .message("ShapeletTransform sampled identical windows")
+                    .compromise(NumericalCompromise::new(
+                        "diverse shapelet dictionary",
+                        "repeated random subsequences",
+                        "min-distance features are collinear",
+                        "increase seed diversity or series length",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(FittedShapeletTransform { shapelets })
+    }
+}
+
+impl Transform for FittedShapeletTransform {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let k = self.shapelets.nrows();
+        let feat = Matrix::from_fn(x.nrows(), k, |i, s| {
+            min_shapelet_dist(x, i, &self.shapelets, s)
+        });
+        ctx.finish(feat)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3278,5 +3475,25 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(hp.len(), 6);
+        let knnr = KNeighborsTimeSeriesRegressor::new(2)
+            .fit(&x, &yr, &Session::new("ts", "knnr"))
+            .unwrap();
+        let knp = knnr
+            .value
+            .predict(&x, &Session::new("ts", "knnrp"))
+            .unwrap()
+            .value;
+        assert_eq!(knp.len(), 6);
+        assert!(knp.as_slice().iter().all(|v| v.is_finite()));
+        let st = ShapeletTransform::new(3, 3)
+            .fit_unsupervised(&x, &Session::new("ts", "sht"))
+            .unwrap();
+        let z = st
+            .value
+            .transform(&x, &Session::new("ts", "shtt"))
+            .unwrap()
+            .value;
+        assert_eq!(z.nrows(), 6);
+        assert_eq!(z.ncols(), 3);
     }
 }

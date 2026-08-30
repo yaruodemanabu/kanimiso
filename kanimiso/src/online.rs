@@ -1340,6 +1340,14 @@ impl HoeffdingRegressor {
         Self::default()
     }
 
+    fn reset(&mut self) {
+        if self.n_features > 0 {
+            self.root = HrNode::Leaf(HrLeaf::new(0, self.n_features));
+        }
+        self.n_seen = 0;
+        self.last_split = None;
+    }
+
     fn predict_one(&self, x: &Matrix, i: usize) -> f64 {
         let mut node = &self.root;
         loop {
@@ -1687,6 +1695,166 @@ impl Transform for OnlineOneHotEncoder {
             match self.maps[col].get(&(v.round() as i64)) {
                 Some(&s) if s == slot => 1.0,
                 _ => 0.0,
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Online ordinal encoder (river `preprocessing.OrdinalEncoder`).
+///
+/// New categories after the first update raise
+/// [`IssueCode::FeatureSpaceChangedOnline`] as a warning (the default Error
+/// would abort a valid stream).
+#[derive(Clone, Debug)]
+pub struct OnlineOrdinalEncoder {
+    /// Cap on distinct codes per column.
+    pub max_categories: usize,
+    maps: Vec<HashMap<i64, usize>>,
+    n_features: usize,
+    initialized: bool,
+    updates: u64,
+    n_seen: u64,
+    new_cats: u64,
+}
+
+impl Default for OnlineOrdinalEncoder {
+    fn default() -> Self {
+        Self {
+            max_categories: 16,
+            maps: Vec::new(),
+            n_features: 0,
+            initialized: false,
+            updates: 0,
+            n_seen: 0,
+            new_cats: 0,
+        }
+    }
+}
+
+impl OnlineOrdinalEncoder {
+    /// Encoder with `max_categories` codes per column.
+    pub fn new(max_categories: usize) -> Self {
+        Self {
+            max_categories: max_categories.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineOrdinalEncoder {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        if !self.initialized {
+            self.n_features = x.ncols();
+            self.maps = vec![HashMap::new(); x.ncols()];
+            self.initialized = true;
+        } else if x.ncols() != self.n_features {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let mut added = 0u64;
+        for j in 0..x.ncols() {
+            for i in 0..x.nrows() {
+                let v = x.get(i, j);
+                if !v.is_finite() {
+                    continue;
+                }
+                let key = v.round() as i64;
+                if self.maps[j].contains_key(&key) {
+                    continue;
+                }
+                if self.maps[j].len() >= self.max_categories {
+                    ctx.push(
+                        Issue::builder(IssueCode::InvalidWeight)
+                            .severity(Severity::Warning)
+                            .message(format!(
+                                "OnlineOrdinalEncoder column {j} exceeded max_categories={}",
+                                self.max_categories
+                            ))
+                            .build(),
+                    );
+                    continue;
+                }
+                let slot = self.maps[j].len();
+                self.maps[j].insert(key, slot);
+                added += 1;
+                if self.updates > 0 {
+                    ctx.push(
+                        Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                            .severity(Severity::Warning)
+                            .message(format!("new ordinal category {key} on column {j}"))
+                            .build(),
+                    );
+                }
+            }
+        }
+        self.new_cats += added;
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(added as f64);
+        q.information_gain = Some((added as f64).max(1.0 / self.n_seen.max(1) as f64));
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!(
+            "online ordinal encoder added {added} codes on {} rows",
+            x.nrows()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "integer codes per column",
+                "first-seen category → 0..K−1 with a fixed cap",
+                "previous ordinal maps",
+                "updated ordinal maps",
+            ),
+        )
+    }
+}
+
+impl Transform for OnlineOrdinalEncoder {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), x.ncols()));
+        }
+        let out = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            if j >= self.maps.len() {
+                return -1.0;
+            }
+            let v = x.get(i, j);
+            if !v.is_finite() {
+                return -1.0;
+            }
+            match self.maps[j].get(&(v.round() as i64)) {
+                Some(&s) => s as f64,
+                None => -1.0,
             }
         });
         ctx.finish(out)
@@ -5012,6 +5180,126 @@ impl Predict for HoeffdingAdaptiveTree {
     }
 }
 
+/// Hoeffding adaptive tree regressor (river `HoeffdingAdaptiveTreeRegressor`).
+///
+/// ADWIN watches absolute residual; a cut resets the tree.
+#[derive(Clone, Debug)]
+pub struct HoeffdingAdaptiveTreeRegressor {
+    tree: HoeffdingRegressor,
+    detector: Adwin,
+    n_seen: u64,
+    updates: u64,
+    resets: u64,
+}
+
+impl Default for HoeffdingAdaptiveTreeRegressor {
+    fn default() -> Self {
+        Self {
+            tree: HoeffdingRegressor::new(),
+            detector: Adwin::new(0.002),
+            n_seen: 0,
+            updates: 0,
+            resets: 0,
+        }
+    }
+}
+
+impl HoeffdingAdaptiveTreeRegressor {
+    /// Default HAT regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for HoeffdingAdaptiveTreeRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let q = self.tree.partial_fit(x, y, &session.child("tree"))?;
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            return finish_explain(ctx, q.value);
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        let mut drift = 0u64;
+        for i in 0..x.nrows().min(y.len()) {
+            let pred = self.tree.predict_one(x, i);
+            let err = (pred - y[i]).abs();
+            match self.detector.update(err, &session.child("adwin")) {
+                Ok(d) => {
+                    if matches!(d.value, DriftDecision::Drift { .. }) {
+                        self.tree.reset();
+                        self.detector.reset();
+                        self.resets += 1;
+                        drift += 1;
+                        ctx.push(
+                            Issue::builder(IssueCode::ConceptDriftDetected)
+                                .message("HAT-regressor reset the tree after an ADWIN cut")
+                                .build(),
+                        );
+                    }
+                }
+                Err(_) => {
+                    self.tree.reset();
+                    self.detector.reset();
+                    self.resets += 1;
+                    drift += 1;
+                    ctx.push(
+                        Issue::builder(IssueCode::ConceptDriftDetected)
+                            .message("HAT-regressor reset after ADWIN reported drift as an error")
+                            .build(),
+                    );
+                }
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut iq = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        iq.effective_sample_size = self.n_seen as f64;
+        iq.parameter_delta_norm =
+            Some(drift as f64 + q.value.quality.parameter_delta_norm.unwrap_or(0.0));
+        iq.information_gain = Some(drift as f64 + q.value.quality.information_gain.unwrap_or(0.0));
+        iq.still_identified = self.n_seen >= 15;
+        iq.warmup = self.n_seen < 15;
+        iq.explanation = format!(
+            "HAT-regressor: VFDT update then ADWIN on |residual|; {drift} resets (total {})",
+            self.resets
+        );
+        if iq.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(iq.clone())
+                    .message("HAT-regressor is still warming up")
+                    .build(),
+            );
+        }
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                iq,
+                if drift > 0 {
+                    "tree reset after drift"
+                } else {
+                    "leaf means updated; no drift"
+                },
+                "Hoeffding variance-reduction plus ADWIN on absolute residual",
+                "pre-batch HAT-regressor",
+                "post-batch HAT-regressor",
+            ),
+        )
+    }
+}
+
+impl Predict for HoeffdingAdaptiveTreeRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.tree.predict(x, session)
+    }
+}
+
 /// Streaming Random Patches: Hoeffding trees on random feature subsets.
 #[derive(Clone, Debug)]
 pub struct StreamingRandomPatches {
@@ -6984,6 +7272,12 @@ mod tests {
         OnlineOneHotEncoder::new(4)
             .partial_fit(&x, None, &session)
             .expect("ohe");
+        HoeffdingAdaptiveTreeRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("hatr");
+        OnlineOrdinalEncoder::new(8)
+            .partial_fit(&x, None, &session)
+            .expect("ord");
 
         let n_expl = session
             .ledger()

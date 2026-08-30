@@ -10,7 +10,7 @@ use crate::linear_model::{FittedLinear, LinearRegression};
 use crate::traits::{Fit, Predict, Transform};
 use crate::validate::inspect_xy;
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Qualified, Result};
+use signlred::{Issue, IssueCode, NumericalCompromise, Qualified, Result, Severity};
 
 pub use crate::ensemble::{
     BaggingClassifier, BaggingRegressor, FittedBaggingClassifier, FittedBaggingRegressor,
@@ -395,6 +395,60 @@ impl Fit for ColumnTransformer {
     }
 }
 
+/// sklearn `FrozenEstimator`: `fit` is a documented no-op.
+///
+/// Coefficients are never re-estimated. A call that looks like a refit is
+/// recorded so nobody treats the returned model as having seen the new `(X,y)`.
+#[derive(Clone, Debug)]
+pub struct FrozenEstimator {
+    /// Already-fitted linear model that will be returned unchanged.
+    pub inner: FittedLinear,
+}
+
+impl FrozenEstimator {
+    /// Freeze an already-fitted linear model.
+    pub fn new(inner: FittedLinear) -> Self {
+        Self { inner }
+    }
+}
+
+impl Fit for FrozenEstimator {
+    type Fitted = FittedLinear;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLinear>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .severity(Severity::Advisory)
+                .message("FrozenEstimator.fit is a no-op; coefficients are not re-estimated")
+                .compromise(NumericalCompromise::new(
+                    "a refit on the supplied (X, y)",
+                    "the previously stored FittedLinear",
+                    "fit is defined to ignore the new sample",
+                    "do not report this as a model trained on the current design",
+                ))
+                .build(),
+        );
+        if x.ncols() != self.inner.coef.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message(format!(
+                        "FrozenEstimator inner has {} slopes but X is n×{}",
+                        self.inner.coef.len(),
+                        x.ncols()
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(self.inner.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +507,26 @@ mod tests {
             .value;
         assert_eq!(z.ncols(), 3);
         assert!((z.column(0).mean()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn frozen_estimator_does_not_refit() {
+        let x = Matrix::from_fn(12, 1, |i, _| i as f64);
+        let y = Vector::from_iter((0..12).map(|i| 1.0 + 2.0 * i as f64));
+        let fitted = LinearRegression::new()
+            .fit(&x, &y, &Session::new("fr", "ols"))
+            .unwrap()
+            .value;
+        let slope = fitted.coef[0];
+        let y2 = Vector::from_iter((0..12).map(|i| 100.0 - i as f64));
+        let q = FrozenEstimator::new(fitted)
+            .fit(&x, &y2, &Session::new("fr", "fit"))
+            .unwrap();
+        assert!((q.value.coef[0] - slope).abs() < 1e-12);
+        assert!(q
+            .report
+            .issues()
+            .iter()
+            .any(|i| i.code == IssueCode::JitterInjected));
     }
 }

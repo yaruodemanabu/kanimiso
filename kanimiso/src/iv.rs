@@ -409,6 +409,308 @@ pub struct FittedIvGmm {
     pub first_stage_f: f64,
 }
 
+/// Two-step IV-GMM with a heteroskedastic weight (Hansen *J* on the second step).
+///
+/// The first step is identity-weighted 2SLS. The second uses
+/// \(W=(Z'\Omega Z)^{-1}\) with \(\Omega=\mathrm{diag}(e_i^2)\). The
+/// Windmeijer (2005) finite-sample variance correction is **not** applied.
+#[derive(Clone, Debug, Default)]
+pub struct TwoStepGmm {
+    /// Include an intercept in both stages.
+    pub fit_intercept: bool,
+}
+
+impl TwoStepGmm {
+    /// Default two-step IV-GMM.
+    pub fn new() -> Self {
+        Self {
+            fit_intercept: true,
+        }
+    }
+
+    /// Fit `y` on `x` using instruments `z`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        z: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedTwoStepGmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let first = match (IvGmm {
+            fit_intercept: self.fit_intercept,
+        })
+        .fit(x, y, z, &session.child("step1"))
+        {
+            Ok(q) => q,
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                ) {
+                    ctx.push(e.primary);
+                }
+                return ctx.finish(FittedTwoStepGmm {
+                    coef: Vector::zeros(x.ncols()),
+                    intercept: 0.0,
+                    hansen_j: f64::NAN,
+                    hansen_p: f64::NAN,
+                    df_overid: 0,
+                    first_stage_f: f64::NAN,
+                    windmeijer_applied: false,
+                });
+            }
+        };
+        for issue in first.report.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::PValueUnreliable
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let zdes = if self.fit_intercept {
+            z.with_intercept()
+        } else {
+            z.clone()
+        };
+        let xdes = if self.fit_intercept {
+            x.with_intercept()
+        } else {
+            x.clone()
+        };
+        let mut pred = x.matvec(&first.value.coef);
+        for i in 0..pred.len() {
+            pred[i] += first.value.intercept;
+        }
+        let e = Vector::from_iter(y.as_slice().iter().zip(pred.as_slice()).map(|(a, b)| a - b));
+        let kz = zdes.ncols();
+        let p = xdes.ncols();
+        let n = y.len().min(zdes.nrows()).min(xdes.nrows());
+        let mut s = Mat::<f64>::zeros(kz, kz);
+        for a in 0..kz {
+            for b in 0..=a {
+                let mut acc = 0.0;
+                for i in 0..n {
+                    let wi = e[i] * e[i];
+                    acc += zdes.get(i, a) * wi * zdes.get(i, b);
+                }
+                s[(a, b)] = acc;
+                s[(b, a)] = acc;
+            }
+        }
+        for i in 0..kz {
+            s[(i, i)] += 1e-10;
+        }
+        let mut g = Matrix::zeros(kz, p);
+        for a in 0..kz {
+            for b in 0..p {
+                let mut acc = 0.0;
+                for i in 0..n {
+                    acc += zdes.get(i, a) * xdes.get(i, b);
+                }
+                g.set(a, b, acc);
+            }
+        }
+        let mut zy = Vector::zeros(kz);
+        for a in 0..kz {
+            let mut acc = 0.0;
+            for i in 0..n {
+                acc += zdes.get(i, a) * y[i];
+            }
+            zy[a] = acc;
+        }
+        let mut wg = Matrix::zeros(kz, p);
+        let mut wzy = Vector::zeros(kz);
+        let mut w_ok = true;
+        for j in 0..p {
+            let col = Vector::from_iter((0..kz).map(|i| g.get(i, j)));
+            let mut scratch = signlred::Report::new("gmm2", "w");
+            match chol_solve(&mut scratch, &s, &col, &ctx.policy) {
+                Some(sol) => {
+                    for i in 0..kz {
+                        wg.set(i, j, sol[i]);
+                    }
+                }
+                None => {
+                    w_ok = false;
+                }
+            }
+        }
+        {
+            let mut scratch = signlred::Report::new("gmm2", "wy");
+            match chol_solve(&mut scratch, &s, &zy, &ctx.policy) {
+                Some(sol) => wzy = sol,
+                None => w_ok = false,
+            }
+        }
+        let (coef, intercept, hansen_j, hansen_p) = if w_ok {
+            let xtwx = Matrix::from_fn(p, p, |i, j| {
+                let mut acc = 0.0;
+                for r in 0..kz {
+                    acc += g.get(r, i) * wg.get(r, j);
+                }
+                acc
+            });
+            let xtwy = Vector::from_iter((0..p).map(|i| {
+                let mut acc = 0.0;
+                for r in 0..kz {
+                    acc += g.get(r, i) * wzy[r];
+                }
+                acc
+            }));
+            let mut gram = Mat::<f64>::zeros(p, p);
+            for i in 0..p {
+                for j in 0..p {
+                    gram[(i, j)] = xtwx.get(i, j);
+                }
+            }
+            for i in 0..p {
+                gram[(i, i)] += 1e-12;
+            }
+            let mut scratch = signlred::Report::new("gmm2", "beta");
+            let beta = chol_solve(&mut scratch, &gram, &xtwy, &ctx.policy).unwrap_or_else(|| {
+                let mut b = Vector::zeros(p);
+                b[0] = y.mean();
+                b
+            });
+            let (intercept, coef) = if self.fit_intercept {
+                (
+                    beta.as_slice().first().copied().unwrap_or(0.0),
+                    Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                )
+            } else {
+                (0.0, beta.clone())
+            };
+            let mut pred2 = x.matvec(&coef);
+            for i in 0..pred2.len() {
+                pred2[i] += intercept;
+            }
+            let e2 = Vector::from_iter(
+                y.as_slice()
+                    .iter()
+                    .zip(pred2.as_slice())
+                    .map(|(a, b)| a - b),
+            );
+            let mut ze = Vector::zeros(kz);
+            for a in 0..kz {
+                let mut acc = 0.0;
+                for i in 0..n {
+                    acc += zdes.get(i, a) * e2[i];
+                }
+                ze[a] = acc;
+            }
+            let mut s2 = Mat::<f64>::zeros(kz, kz);
+            for a in 0..kz {
+                for b in 0..=a {
+                    let mut acc = 0.0;
+                    for i in 0..n {
+                        let wi = e2[i] * e2[i];
+                        acc += zdes.get(i, a) * wi * zdes.get(i, b);
+                    }
+                    s2[(a, b)] = acc;
+                    s2[(b, a)] = acc;
+                }
+            }
+            for i in 0..kz {
+                s2[(i, i)] += 1e-10;
+            }
+            let mut scratch = signlred::Report::new("gmm2", "j");
+            let jstat = if let Some(wz) = chol_solve(&mut scratch, &s2, &ze, &ctx.policy) {
+                let mut acc = 0.0;
+                for i in 0..kz {
+                    acc += ze[i] * wz[i];
+                }
+                acc / n.max(1) as f64
+            } else {
+                f64::NAN
+            };
+            let df = first.value.df_overid;
+            let jp = if jstat.is_finite() && df > 0 {
+                chi2_pvalue(jstat.max(0.0), df as f64)
+            } else {
+                f64::NAN
+            };
+            (coef, intercept, jstat, jp)
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::CholeskyFailed)
+                    .severity(Severity::Warning)
+                    .message("two-step GMM weight was not SPD; returning the first-step point")
+                    .compromise(NumericalCompromise::new(
+                        "heteroskedastic two-step GMM",
+                        "one-step 2SLS coefficients",
+                        "Z'ΩZ was not positive definite at working precision",
+                        "do not read Hansen J as a two-step statistic",
+                    ))
+                    .build(),
+            );
+            (
+                first.value.coef.clone(),
+                first.value.intercept,
+                first.value.hansen_j,
+                first.value.hansen_p,
+            )
+        };
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(Severity::Advisory)
+                .message("two-step GMM does not apply the Windmeijer (2005) variance correction")
+                .compromise(NumericalCompromise::new(
+                    "Windmeijer-corrected two-step GMM SEs",
+                    "Hansen J from the second-step weight only",
+                    "the finite-sample correction to Var(β̂) is omitted",
+                    "treat p-values as first-order asymptotic",
+                ))
+                .build(),
+        );
+        if first.value.df_overid == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::CausalClaimUnidentified)
+                    .severity(Severity::Advisory)
+                    .message("two-step GMM is just-identified; Hansen J is unidentified")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedTwoStepGmm {
+            coef,
+            intercept,
+            hansen_j,
+            hansen_p,
+            df_overid: first.value.df_overid,
+            first_stage_f: first.value.first_stage_f,
+            windmeijer_applied: false,
+        })
+    }
+}
+
+/// Fitted two-step IV-GMM.
+#[derive(Clone, Debug)]
+pub struct FittedTwoStepGmm {
+    /// Structural slopes.
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+    /// Second-step Hansen *J*.
+    pub hansen_j: f64,
+    /// χ² p-value of *J*.
+    pub hansen_p: f64,
+    /// Overidentification degrees of freedom.
+    pub df_overid: usize,
+    /// Smallest first-stage *F*.
+    pub first_stage_f: f64,
+    /// Always `false`: Windmeijer correction is not implemented.
+    pub windmeijer_applied: bool,
+}
+
 /// Limited-information maximum likelihood (k-class).
 ///
 /// Just-identified designs reduce to 2SLS. A single endogenous column uses
@@ -1338,5 +1640,11 @@ mod tests {
         assert!(gmm.value.coef[0].is_finite());
         assert_eq!(gmm.value.df_overid, 1);
         assert!(gmm.value.hansen_j.is_finite());
+        let gmm2 = TwoStepGmm::new()
+            .fit(&xiv, &yiv, &ziv, &Session::new("gmm2", "fit"))
+            .expect("gmm2");
+        assert!(gmm2.value.coef[0].is_finite());
+        assert!(!gmm2.value.windmeijer_applied);
+        assert_eq!(gmm2.value.df_overid, 1);
     }
 }

@@ -1325,6 +1325,248 @@ impl Fit for RandomizedSearchCV {
     }
 }
 
+/// Successive-halving grid search over Ridge `alpha`.
+///
+/// Resource is a growing training prefix. Candidate count is not identification
+/// `p`. Inner Ridge residual issues are not promoted.
+#[derive(Clone, Debug)]
+pub struct HalvingGridSearchCV {
+    /// Candidate penalties.
+    pub alphas: Vec<f64>,
+    /// Reduction factor \(\eta \ge 2\).
+    pub factor: usize,
+    /// Smallest training prefix.
+    pub min_resources: usize,
+}
+
+impl Default for HalvingGridSearchCV {
+    fn default() -> Self {
+        Self {
+            alphas: vec![0.01, 0.1, 1.0, 10.0],
+            factor: 2,
+            min_resources: 8,
+        }
+    }
+}
+
+impl HalvingGridSearchCV {
+    /// Halving search over the given `alpha` values.
+    pub fn new(alphas: Vec<f64>) -> Self {
+        Self {
+            alphas,
+            ..Self::default()
+        }
+    }
+}
+
+fn score_ridge_prefix(
+    x: &Matrix,
+    y: &Vector,
+    alpha: f64,
+    n_train: usize,
+    session: &Session,
+) -> Option<f64> {
+    let n = x.nrows().min(y.len());
+    let n_tr = n_train.max(2).min(n.saturating_sub(1).max(2));
+    if n_tr >= n {
+        return None;
+    }
+    let xt = take_rows(x, &(0..n_tr).collect::<Vec<_>>());
+    let yt = take_vec(y, &(0..n_tr).collect::<Vec<_>>());
+    let xv = take_rows(x, &(n_tr..n).collect::<Vec<_>>());
+    let yv = take_vec(y, &(n_tr..n).collect::<Vec<_>>());
+    let fitted = Ridge::new(alpha).fit(&xt, &yt, &session.child("halving_fit"));
+    match fitted {
+        Ok(q) => match q.value.predict(&xv, &session.child("halving_p")) {
+            Ok(p) => r2(&yv, &p.value, &session.child("halving_r2"))
+                .ok()
+                .map(|s| s.value)
+                .filter(|v| v.is_finite()),
+            Err(_) => None,
+        },
+        Err(_) => None,
+    }
+}
+
+impl Fit for HalvingGridSearchCV {
+    type Fitted = FittedGridSearchCV;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedGridSearchCV>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let eta = self.factor.max(2);
+        if self.factor < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "HalvingGridSearchCV.factor={} < 2; using 2",
+                        self.factor
+                    ))
+                    .build(),
+            );
+        }
+        let n = x.nrows().min(y.len());
+        let mut resource = self.min_resources.max(4).min(n.saturating_sub(1).max(4));
+        let mut candidates = self.alphas.clone();
+        if candidates.is_empty() {
+            candidates.push(1.0);
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("HalvingGridSearchCV had an empty grid; using α=1")
+                    .build(),
+            );
+        }
+        let mut scores = Vec::new();
+        let mut best_alpha = candidates[0];
+        let mut best_score = f64::NEG_INFINITY;
+        while candidates.len() > 1 && resource < n {
+            let mut ranked: Vec<(f64, f64)> = Vec::new();
+            for &alpha in &candidates {
+                let mean = score_ridge_prefix(x, y, alpha, resource, session).unwrap_or(f64::NAN);
+                ranked.push((alpha, mean));
+                if mean.is_finite() && mean > best_score {
+                    best_score = mean;
+                    best_alpha = alpha;
+                }
+            }
+            ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let keep = (candidates.len() / eta).max(1);
+            candidates = ranked.iter().take(keep).map(|(a, _)| *a).collect();
+            scores = ranked;
+            let next = resource.saturating_mul(eta);
+            if next <= resource {
+                break;
+            }
+            resource = next.min(n.saturating_sub(1).max(resource));
+        }
+        if let Some(&alpha) = candidates.first() {
+            if let Some(s) = score_ridge_prefix(x, y, alpha, n.saturating_sub(1).max(2), session) {
+                if s > best_score {
+                    best_score = s;
+                    best_alpha = alpha;
+                }
+            } else {
+                best_alpha = alpha;
+            }
+        }
+        let fitted = match Ridge::new(best_alpha).fit(x, y, &session.child("halving_refit")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                FittedPenalized {
+                    coef: Vector::zeros(x.ncols()),
+                    intercept: y.mean(),
+                    alpha: best_alpha,
+                    l1_ratio: 0.0,
+                }
+            }
+        };
+        ctx.finish(FittedGridSearchCV {
+            best_alpha,
+            best_score,
+            scores,
+            fitted,
+        })
+    }
+}
+
+/// Successive-halving randomized search over a log-uniform Ridge `alpha`.
+#[derive(Clone, Debug)]
+pub struct HalvingRandomSearchCV {
+    /// Number of random `alpha` draws at the first rung.
+    pub n_candidates: usize,
+    /// Inclusive log10 lower bound.
+    pub alpha_log_low: f64,
+    /// Inclusive log10 upper bound.
+    pub alpha_log_high: f64,
+    /// Reduction factor.
+    pub factor: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for HalvingRandomSearchCV {
+    fn default() -> Self {
+        Self {
+            n_candidates: 8,
+            alpha_log_low: -2.0,
+            alpha_log_high: 1.0,
+            factor: 2,
+            seed: 5,
+        }
+    }
+}
+
+impl HalvingRandomSearchCV {
+    /// `n_candidates` log-uniform Ridge penalties.
+    pub fn new(n_candidates: usize) -> Self {
+        Self {
+            n_candidates: n_candidates.max(2),
+            ..Self::default()
+        }
+    }
+}
+
+impl Fit for HalvingRandomSearchCV {
+    type Fitted = FittedGridSearchCV;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedGridSearchCV>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        if self.n_candidates < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("HalvingRandomSearchCV.n_candidates < 2; using 2")
+                    .build(),
+            );
+        }
+        let mut rng = Rng::new(self.seed);
+        let lo = self.alpha_log_low.min(self.alpha_log_high);
+        let hi = self.alpha_log_low.max(self.alpha_log_high);
+        let n_c = self.n_candidates.max(2);
+        let alphas: Vec<f64> = (0..n_c)
+            .map(|_| 10.0_f64.powf(lo + (hi - lo) * rng.uniform()))
+            .collect();
+        let mut inner = HalvingGridSearchCV {
+            alphas,
+            factor: self.factor.max(2),
+            min_resources: 8,
+        };
+        match inner.fit(x, y, session) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    ctx.push(issue.clone());
+                }
+                ctx.finish(q.value)
+            }
+            Err(e) => {
+                ctx.push(e.primary);
+                ctx.finish(FittedGridSearchCV {
+                    best_alpha: 1.0,
+                    best_score: f64::NAN,
+                    scores: Vec::new(),
+                    fitted: FittedPenalized {
+                        coef: Vector::zeros(x.ncols()),
+                        intercept: y.mean(),
+                        alpha: 1.0,
+                        l1_ratio: 0.0,
+                    },
+                })
+            }
+        }
+    }
+}
+
 /// Discrete grid search over Ridge `alpha` using K-fold R².
 #[derive(Clone, Debug)]
 pub struct GridSearchRidge {
@@ -2725,6 +2967,79 @@ impl SlidingWindowSplitter {
     }
 }
 
+/// Expanding training window (sktime `ExpandingWindowSplitter`).
+///
+/// Train is `[0, t)`, test is `[t, t+fh)`. Initial window length is not
+/// identification `p`.
+#[derive(Clone, Debug)]
+pub struct ExpandingWindowSplitter {
+    /// First training length.
+    pub initial_window: usize,
+    /// Forecast horizon (test length).
+    pub fh: usize,
+    /// Step between consecutive origins.
+    pub step: usize,
+}
+
+impl Default for ExpandingWindowSplitter {
+    fn default() -> Self {
+        Self {
+            initial_window: 8,
+            fh: 1,
+            step: 1,
+        }
+    }
+}
+
+impl ExpandingWindowSplitter {
+    /// Expanding window starting at `initial_window` with horizon `fh`.
+    pub fn new(initial_window: usize, fh: usize) -> Self {
+        Self {
+            initial_window,
+            fh,
+            step: 1,
+        }
+    }
+
+    /// Materialize causal expanding windows for `n` rows.
+    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let w0 = self.initial_window.max(2);
+        let h = self.fh.max(1);
+        let step = self.step.max(1);
+        if self.initial_window < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!(
+                        "ExpandingWindowSplitter.initial_window={} < 2",
+                        self.initial_window
+                    ))
+                    .build(),
+            );
+        }
+        let mut folds = Vec::new();
+        let mut origin = w0;
+        while origin + h <= n {
+            folds.push(Split {
+                train: (0..origin).collect(),
+                test: (origin..origin + h).collect(),
+            });
+            origin += step;
+        }
+        if folds.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "ExpandingWindowSplitter produced no folds for n={n} initial={w0} fh={h}"
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(folds)
+    }
+}
+
 /// Fit a column standardizer on **all** rows of `X` and transform them.
 ///
 /// This is the helper that documents the leakage anti-pattern. The scale is
@@ -2996,6 +3311,21 @@ mod tests {
             .value;
         assert!(!sl.is_empty());
         assert!(sl[0].train.iter().max().unwrap() < sl[0].test.iter().min().unwrap());
+        let ew = ExpandingWindowSplitter::new(8, 2)
+            .split(24, &Session::new("ms", "ew"))
+            .unwrap()
+            .value;
+        assert!(!ew.is_empty());
+        assert_eq!(ew[0].train[0], 0);
+        assert!(ew[0].train.len() < ew.last().unwrap().train.len());
+        let hg = HalvingGridSearchCV::new(vec![0.01, 0.1, 1.0, 10.0])
+            .fit(&x, &y, &Session::new("ms", "hgs"))
+            .unwrap();
+        assert!(hg.value.best_alpha.is_finite());
+        let hr = HalvingRandomSearchCV::new(6)
+            .fit(&x, &y, &Session::new("ms", "hrs"))
+            .unwrap();
+        assert!(hr.value.best_alpha.is_finite());
         let lc = learning_curve(&x, &y, &[0.5, 1.0], 3, &Session::new("ms", "lc")).unwrap();
         assert_eq!(lc.value.train_scores.len(), 2);
         assert!(lc

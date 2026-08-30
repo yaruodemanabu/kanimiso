@@ -2820,6 +2820,171 @@ impl Fit for GeneralizedPoisson {
     }
 }
 
+/// Negative-binomial-P GLM: \(\mathrm{Var}=\mu+\alpha\mu^{P}\) with a log link.
+///
+/// \(P=1\) is NB1, \(P=2\) is NB2. Inner IRLS residual issues are not promoted.
+#[derive(Clone, Debug)]
+pub struct NegativeBinomialP {
+    /// Power \(P\) on the mean in the variance function.
+    pub power: f64,
+    /// Fixed \(\alpha\). `None` ⇒ moment estimate.
+    pub alpha: Option<f64>,
+    /// Max IRLS iterations.
+    pub max_iter: usize,
+    /// Prepend an intercept.
+    pub fit_intercept: bool,
+}
+
+impl Default for NegativeBinomialP {
+    fn default() -> Self {
+        Self {
+            power: 2.0,
+            alpha: None,
+            max_iter: 40,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl NegativeBinomialP {
+    /// NB-P with the given variance power.
+    pub fn new(power: f64) -> Self {
+        Self {
+            power,
+            ..Self::default()
+        }
+    }
+}
+
+impl Fit for NegativeBinomialP {
+    type Fitted = FittedGlm;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        for (i, &yi) in y.as_slice().iter().enumerate() {
+            if yi < 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .message(format!("NegativeBinomialP y[{i}]={yi} < 0"))
+                        .build(),
+                );
+                break;
+            }
+        }
+        if ctx.report.contains(IssueCode::ConstantTarget)
+            || ctx.report.contains(IssueCode::EmptyMatrix)
+        {
+            return ctx.finish(FittedGlm {
+                coef: Vector::zeros(x.ncols()),
+                intercept: y.mean().max(1e-8).ln(),
+                dispersion: f64::NAN,
+            });
+        }
+        let mut pwr = self.power;
+        if !pwr.is_finite() || pwr < 1.0 || pwr > 2.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "NegativeBinomialP P={pwr} is not in [1,2]; using 2"
+                    ))
+                    .build(),
+            );
+            pwr = 2.0;
+        }
+        let design = if self.fit_intercept {
+            x.with_intercept()
+        } else {
+            x.clone()
+        };
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let mut beta = Vector::zeros(design.ncols());
+        beta[0] = y.mean().max(1e-6).ln();
+        let mut alpha: f64 = self.alpha.unwrap_or(0.0).max(0.0);
+        let mut converged = false;
+        for it in 0..self.max_iter.max(1) {
+            let mut xs = Matrix::zeros(design.nrows(), design.ncols());
+            let mut z = Vector::zeros(y.len());
+            let mut mus = Vector::zeros(y.len());
+            for i in 0..y.len() {
+                let mut eta = 0.0;
+                for j in 0..design.ncols() {
+                    eta += design.get(i, j) * beta[j];
+                }
+                let mu = eta.clamp(-20.0, 20.0).exp().max(1e-12);
+                mus[i] = mu;
+                let v = (mu + alpha * mu.powf(pwr)).max(1e-12);
+                let w = (mu * mu / v).max(1e-12);
+                let sw = w.sqrt();
+                z[i] = (eta + (y[i] - mu) / mu) * sw;
+                for j in 0..design.ncols() {
+                    xs.set(i, j, design.get(i, j) * sw);
+                }
+            }
+            if self.alpha.is_none() {
+                let mut num = 0.0;
+                let mut den = 0.0;
+                for i in 0..y.len() {
+                    let mu = mus[i];
+                    let e = y[i] - mu;
+                    num += e * e - mu;
+                    den += mu.powf(pwr);
+                }
+                alpha = (num / den.max(1e-12)).max(0.0);
+            }
+            let mut scratch = signlred::Report::new("nbp", "irls");
+            let Some(next) = least_squares(&mut scratch, &xs, &z, &ctx.policy) else {
+                break;
+            };
+            for issue in scratch.issues() {
+                if issue.code == IssueCode::ResidualTooLarge {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            let d = next.sub(&beta).norm();
+            beta = next;
+            ctx.session.step(it as u64, d, Some(alpha));
+            if d < 1e-8 {
+                ctx.session.converged("NB-P IRLS", it as u64);
+                converged = true;
+                break;
+            }
+        }
+        if !converged {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("NB-P IRLS did not meet the tolerance")
+                    .build(),
+            );
+        }
+        if alpha <= 1e-12 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateDistribution)
+                    .severity(Severity::Advisory)
+                    .message("NB-P α≈0; the fit collapsed to a Poisson GLM")
+                    .compromise(NumericalCompromise::new(
+                        "overdispersed NB-P",
+                        "moment α floor at 0",
+                        "the sample variance is not larger than the mean",
+                        "coefficients are Poisson IRLS, not a genuine NB-P MLE",
+                    ))
+                    .build(),
+            );
+        }
+        let (intercept, coef) = if self.fit_intercept {
+            (beta[0], Vector::from_iter((1..beta.len()).map(|j| beta[j])))
+        } else {
+            (0.0, beta)
+        };
+        ctx.finish(FittedGlm {
+            coef,
+            intercept,
+            dispersion: alpha,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3010,5 +3175,10 @@ mod tests {
             .expect("gp");
         assert!(gp.value.coef[0].is_finite());
         assert!(gp.value.dispersion >= 0.0);
+        let nbp = NegativeBinomialP::new(1.5)
+            .fit(&x, &yg, &Session::new("nbp", "fit"))
+            .expect("nbp");
+        assert!(nbp.value.coef[0].is_finite());
+        assert!(nbp.value.dispersion.is_finite());
     }
 }
