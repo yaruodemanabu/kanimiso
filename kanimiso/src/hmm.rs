@@ -114,6 +114,37 @@ fn renormalize_vec(v: &mut Vector, floor: f64) {
     }
 }
 
+/// Zero backward transitions and pin `π` to state 0 (hmmlearn `left_right`).
+///
+/// Forbidden cells stay exactly zero; they are not re-floored.
+fn enforce_left_right(start: &mut Vector, trans: &mut Matrix) {
+    let k = trans.nrows().min(trans.ncols());
+    for i in 0..k {
+        for j in 0..k {
+            if j < i {
+                trans.set(i, j, 0.0);
+            }
+        }
+        let mut s = 0.0;
+        for j in i..k {
+            s += trans.get(i, j).max(0.0);
+        }
+        if s > 0.0 {
+            for j in i..k {
+                trans.set(i, j, trans.get(i, j).max(0.0) / s);
+            }
+        } else if i < k {
+            trans.set(i, i, 1.0);
+        }
+    }
+    if !start.is_empty() {
+        start[0] = 1.0;
+        for j in 1..start.len() {
+            start[j] = 0.0;
+        }
+    }
+}
+
 fn log_diag_gauss(x: &Matrix, t: usize, mean: &Matrix, state: usize, var: &Matrix) -> f64 {
     let d = x.ncols().min(mean.ncols()).min(var.ncols());
     let mut s = 0.0;
@@ -672,20 +703,7 @@ impl FitUnsupervised for GaussianHmm {
         let mut start = init_start(k);
         let mut trans = init_trans(k);
         if self.left_right {
-            for i in 0..k {
-                for j in 0..k {
-                    if j < i {
-                        trans.set(i, j, 0.0);
-                    }
-                }
-            }
-            renormalize_rows(&mut trans, TRANS_FLOOR);
-            if k > 1 {
-                for j in 1..k {
-                    start[j] = 0.0;
-                }
-                renormalize_vec(&mut start, TRANS_FLOOR);
-            }
+            enforce_left_right(&mut start, &mut trans);
         }
         let mut loglik = f64::NEG_INFINITY;
         let mut last_gamma: Vec<Vec<f64>> = Vec::new();
@@ -730,21 +748,13 @@ impl FitUnsupervised for GaussianHmm {
                     }
                 }
                 if self.left_right {
-                    for i in 0..k {
-                        for j in 0..k {
-                            if j < i {
-                                trans.set(i, j, 0.0);
-                            }
-                        }
-                    }
+                    enforce_left_right(&mut start, &mut trans);
+                } else {
+                    renormalize_rows(&mut trans, TRANS_FLOOR);
                 }
-                renormalize_rows(&mut trans, TRANS_FLOOR);
             }
             if self.left_right && k > 1 {
-                for j in 1..k {
-                    start[j] = 0.0;
-                }
-                renormalize_vec(&mut start, TRANS_FLOOR);
+                enforce_left_right(&mut start, &mut trans);
             }
             // Means / variances.
             for j in 0..k {
@@ -830,6 +840,9 @@ impl FitUnsupervised for GaussianHmm {
                     .message("Viterbi path contains NaN/Inf")
                     .build(),
             );
+        }
+        if self.left_right {
+            enforce_left_right(&mut start, &mut trans);
         }
         ctx.finish(FittedGaussianHmm {
             labels,
