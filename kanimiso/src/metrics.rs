@@ -3492,7 +3492,7 @@ mod tests {
         let cs = cosine_similarity(&xb, &xb, &Session::new("m", "cos"))
             .unwrap()
             .value;
-        assert!((cs.get(0, 0) - 1.0).abs() < 1e-9);
+        assert!((cs.get(1, 1) - 1.0).abs() < 1e-9);
         let rk = rbf_kernel(&xb, &xb, 0.5, &Session::new("m", "rbf"))
             .unwrap()
             .value;
