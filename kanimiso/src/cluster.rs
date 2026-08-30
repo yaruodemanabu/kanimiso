@@ -1,0 +1,1981 @@
+//! Clustering: k-means, mini-batch / STREAM k-means, DBSCAN, agglomerative,
+//! Gaussian mixtures, spectral clustering, and affinity propagation.
+//!
+//! Every estimator talks to [`FitCtx`], inspects the design with
+//! [`inspect_xy`] / [`inspect_identification`], and records empty-cluster,
+//! degeneracy, rank, NaN, and meaningless-fit issues. Linear algebra goes
+//! through [`crate::linalg`] or [`Matrix::inner`].
+
+use crate::context::FitCtx;
+use crate::data::{Matrix, Vector};
+use crate::linalg::symmetric_eigen;
+use crate::rng::Rng;
+use crate::traits::{FitUnsupervised, PartialFit, Predict};
+use crate::validate::{inspect_identification, inspect_xy};
+use faer::Mat;
+use ojizou_san::{IncrementalExplain, Session};
+use signlred::{
+    IncrementalQuality, Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result,
+};
+
+const COV_FLOOR: f64 = 1e-6;
+const EMPTY_RESEED_TOL: f64 = 1e-15;
+
+/// Squared Euclidean distance between row `i` of `x` and row `c` of `centers`.
+fn sq_dist_rc(x: &Matrix, i: usize, centers: &Matrix, c: usize) -> f64 {
+    let p = x.ncols().min(centers.ncols());
+    let mut s = 0.0;
+    for j in 0..p {
+        let d = x.get(i, j) - centers.get(c, j);
+        s += d * d;
+    }
+    s
+}
+
+/// Squared Euclidean distance between two rows of the same matrix.
+fn sq_dist_rows(x: &Matrix, a: usize, b: usize) -> f64 {
+    let p = x.ncols();
+    let mut s = 0.0;
+    for j in 0..p {
+        let d = x.get(a, j) - x.get(b, j);
+        s += d * d;
+    }
+    s
+}
+
+/// Copy row `r` of `src` into row `d` of `dst`.
+fn copy_row(dst: &mut Matrix, d: usize, src: &Matrix, r: usize) {
+    let p = dst.ncols().min(src.ncols());
+    for j in 0..p {
+        dst.set(d, j, src.get(r, j));
+    }
+}
+
+/// True when every row equals the first row at working precision.
+fn all_rows_identical(x: &Matrix, tol: f64) -> bool {
+    let (n, p) = x.shape();
+    if n <= 1 {
+        return true;
+    }
+    for i in 1..n {
+        for j in 0..p {
+            if (x.get(i, j) - x.get(0, j)).abs() > tol {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// k-means++ seed (Arthur & Vassilvitskii).
+fn kmeans_plus_plus(x: &Matrix, k: usize, rng: &mut Rng) -> Matrix {
+    let (n, p) = x.shape();
+    let k = k.max(1).min(n.max(1));
+    let mut centers = Matrix::zeros(k, p);
+    if n == 0 || p == 0 {
+        return centers;
+    }
+    copy_row(&mut centers, 0, x, rng.below(n));
+    let mut d2 = vec![f64::INFINITY; n];
+    for c in 1..k {
+        for i in 0..n {
+            let d = sq_dist_rc(x, i, &centers, c - 1);
+            if d < d2[i] {
+                d2[i] = d;
+            }
+        }
+        let sum: f64 = d2.iter().copied().filter(|v| v.is_finite()).sum();
+        if !sum.is_finite() || sum <= 0.0 {
+            copy_row(&mut centers, c, x, rng.below(n));
+            continue;
+        }
+        let mut tick = rng.uniform() * sum;
+        let mut chosen = n - 1;
+        for i in 0..n {
+            tick -= d2[i].max(0.0);
+            if tick <= 0.0 {
+                chosen = i;
+                break;
+            }
+        }
+        copy_row(&mut centers, c, x, chosen);
+    }
+    centers
+}
+
+/// Nearest-centroid assignment. Returns `(labels, counts, inertia)`.
+fn assign_lloyd(x: &Matrix, centers: &Matrix) -> (Vector, Vec<usize>, f64) {
+    let n = x.nrows();
+    let k = centers.nrows();
+    let mut labels = Vector::zeros(n);
+    let mut counts = vec![0usize; k.max(1)];
+    let mut inertia = 0.0;
+    if n == 0 || k == 0 {
+        return (labels, counts, 0.0);
+    }
+    for i in 0..n {
+        let mut best = 0usize;
+        let mut best_d = f64::INFINITY;
+        for c in 0..k {
+            let d = sq_dist_rc(x, i, centers, c);
+            if d < best_d {
+                best_d = d;
+                best = c;
+            }
+        }
+        labels[i] = best as f64;
+        counts[best] += 1;
+        inertia += best_d;
+    }
+    (labels, counts, inertia)
+}
+
+/// Mean of assigned rows; empty clusters keep their previous center.
+fn update_means(x: &Matrix, labels: &Vector, centers: &mut Matrix, counts: &[usize]) {
+    let (n, p) = x.shape();
+    let k = centers.nrows();
+    let mut acc = Matrix::zeros(k, p);
+    for i in 0..n {
+        let c = labels[i] as usize;
+        if c >= k {
+            continue;
+        }
+        for j in 0..p {
+            acc.set(c, j, acc.get(c, j) + x.get(i, j));
+        }
+    }
+    for c in 0..k {
+        if counts[c] == 0 {
+            continue;
+        }
+        let inv = 1.0 / counts[c] as f64;
+        for j in 0..p {
+            centers.set(c, j, acc.get(c, j) * inv);
+        }
+    }
+}
+
+/// Re-seed every empty centroid from a distant observation and warn.
+fn reseed_empty(
+    ctx: &mut FitCtx,
+    x: &Matrix,
+    centers: &mut Matrix,
+    counts: &[usize],
+    rng: &mut Rng,
+) {
+    let (n, k) = (x.nrows(), centers.nrows());
+    if n == 0 || k == 0 {
+        return;
+    }
+    for c in 0..k {
+        if counts[c] > 0 {
+            continue;
+        }
+        ctx.push(
+            Issue::builder(IssueCode::EmptyCluster)
+                .message(format!(
+                    "cluster {c} received 0 points; re-seeding from a distant row"
+                ))
+                .metric("cluster", c as f64)
+                .build(),
+        );
+        let mut best_i = rng.below(n);
+        let mut best_d = -1.0;
+        for i in 0..n {
+            let mut dmin = f64::INFINITY;
+            for j in 0..k {
+                if counts[j] == 0 {
+                    continue;
+                }
+                let d = sq_dist_rc(x, i, centers, j);
+                if d < dmin {
+                    dmin = d;
+                }
+            }
+            if !dmin.is_finite() {
+                dmin = 0.0;
+            }
+            if dmin > best_d {
+                best_d = dmin;
+                best_i = i;
+            }
+        }
+        copy_row(centers, c, x, best_i);
+    }
+}
+
+fn push_if_nonfinite_vec(ctx: &mut FitCtx, v: &Vector, what: &str) {
+    if v.as_slice().iter().any(|z| !z.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteOutput)
+                .message(format!("{what} contains NaN/Inf"))
+                .build(),
+        );
+    }
+}
+
+fn push_if_nonfinite_mat(ctx: &mut FitCtx, m: &Matrix, what: &str) {
+    for j in 0..m.ncols() {
+        for i in 0..m.nrows() {
+            if !m.get(i, j).is_finite() {
+                ctx.push(
+                    Issue::builder(IssueCode::NonFiniteOutput)
+                        .message(format!("{what} contains NaN/Inf"))
+                        .build(),
+                );
+                return;
+            }
+        }
+    }
+}
+
+fn degenerate_cluster_issue(why: impl Into<String>) -> Issue {
+    Issue::builder(IssueCode::DegenerateClusters)
+        .message(why)
+        .meaninglessness(Meaninglessness::vacuous(
+            "cluster labels",
+            "every observation is the same point; a k-way partition is not identified",
+            "do not interpret centroids or cluster ids; collect variation first",
+        ))
+        .build()
+}
+
+/// Lloyd iteration with empty-cluster re-seeding. Returns labels, inertia, iters.
+fn run_lloyd(
+    ctx: &mut FitCtx,
+    x: &Matrix,
+    mut centers: Matrix,
+    max_iter: usize,
+    rng: &mut Rng,
+) -> (Matrix, Vector, Vec<usize>, f64, usize) {
+    let mut last_labels = Vector::zeros(x.nrows());
+    let mut last_counts = vec![0usize; centers.nrows().max(1)];
+    let mut last_inertia = f64::INFINITY;
+    let mut used = 0usize;
+    for it in 0..max_iter.max(1) {
+        used = it + 1;
+        let (labels, counts, inertia) = assign_lloyd(x, &centers);
+        reseed_empty(ctx, x, &mut centers, &counts, rng);
+        update_means(x, &labels, &mut centers, &counts);
+        let mut moved = false;
+        if last_labels.len() == labels.len() {
+            for i in 0..labels.len() {
+                if (last_labels[i] - labels[i]).abs() > 0.0 {
+                    moved = true;
+                    break;
+                }
+            }
+        } else {
+            moved = true;
+        }
+        last_labels = labels;
+        last_counts = counts;
+        last_inertia = inertia;
+        if !moved && it > 0 {
+            ctx.session.converged("lloyd_assignment_stable", it as u64);
+            break;
+        }
+        if it + 1 == max_iter.max(1) {
+            ctx.push(
+                Issue::builder(IssueCode::MaxIterReached)
+                    .message(format!("Lloyd iteration cap {max_iter} reached"))
+                    .metric("max_iter", max_iter as f64)
+                    .build(),
+            );
+        }
+    }
+    (centers, last_labels, last_counts, last_inertia, used)
+}
+
+fn unique_label_count(labels: &Vector) -> usize {
+    let mut seen: Vec<i64> = Vec::new();
+    for &v in labels.as_slice() {
+        if !v.is_finite() {
+            continue;
+        }
+        let k = v.round() as i64;
+        if !seen.contains(&k) {
+            seen.push(k);
+        }
+    }
+    seen.len()
+}
+
+fn finish_centroid_fit(
+    ctx: &mut FitCtx,
+    x: &Matrix,
+    centers: Matrix,
+    labels: Vector,
+    counts: Vec<usize>,
+    inertia: f64,
+    n_iter: usize,
+) -> FittedKMeans {
+    if all_rows_identical(x, EMPTY_RESEED_TOL) && x.nrows() > 0 {
+        ctx.push(degenerate_cluster_issue(
+            "all rows are identical at working precision",
+        ));
+    } else if unique_label_count(&labels) <= 1 && x.nrows() > 1 && centers.nrows() > 1 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateClusters)
+                .message("assignment collapsed to a single cluster")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "k-way labels",
+                    "only one cluster is occupied; k is not identified",
+                    "reduce k or change initialization",
+                ))
+                .build(),
+        );
+    }
+    push_if_nonfinite_vec(ctx, &labels, "labels");
+    push_if_nonfinite_mat(ctx, &centers, "centroids");
+    if !inertia.is_finite() {
+        ctx.push(
+            Issue::builder(IssueCode::LossIsNan)
+                .message("k-means inertia is not finite")
+                .build(),
+        );
+    }
+    let count_v = Vector::from_iter(counts.iter().map(|c| *c as f64));
+    FittedKMeans {
+        labels,
+        centroids: centers,
+        inertia,
+        n_iter,
+        counts: count_v,
+    }
+}
+
+fn empty_kmeans(k: usize, p: usize, n: usize) -> FittedKMeans {
+    FittedKMeans {
+        labels: Vector::zeros(n),
+        centroids: Matrix::zeros(k, p),
+        inertia: f64::NAN,
+        n_iter: 0,
+        counts: Vector::zeros(k),
+    }
+}
+
+fn dummy_explain(update: u64, batch: usize, n_seen: u64) -> IncrementalExplain {
+    IncrementalExplain::from_quality(
+        IncrementalQuality::new(update, batch, n_seen),
+        "nothing",
+        "the update was rejected",
+        "invalid",
+        "invalid",
+    )
+}
+
+fn logsumexp(xs: &[f64]) -> f64 {
+    let m = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if !m.is_finite() {
+        return m;
+    }
+    let mut s = 0.0;
+    for &v in xs {
+        s += (v - m).exp();
+    }
+    m + s.ln()
+}
+
+/// Batch k-means with k-means++ initialization and Lloyd updates.
+#[derive(Clone, Debug)]
+pub struct KMeans {
+    /// Number of clusters.
+    pub k: usize,
+    /// Lloyd iteration cap per restart.
+    pub max_iter: usize,
+    /// PRNG seed.
+    pub seed: u64,
+    /// Independent k-means++ restarts; the lowest-inertia run is kept.
+    pub n_init: usize,
+}
+
+impl Default for KMeans {
+    fn default() -> Self {
+        Self {
+            k: 8,
+            max_iter: 300,
+            seed: 0,
+            n_init: 4,
+        }
+    }
+}
+
+impl KMeans {
+    /// `k` clusters with default iteration / restart policy.
+    pub fn new(k: usize) -> Self {
+        Self {
+            k,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias for [`FitUnsupervised::fit_unsupervised`].
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKMeans>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted centroid model (k-means family).
+#[derive(Clone, Debug)]
+pub struct FittedKMeans {
+    /// Cluster id per row (`0 .. k-1` as `f64`).
+    pub labels: Vector,
+    /// `k` × `p` matrix of centroids.
+    pub centroids: Matrix,
+    /// Within-cluster sum of squared Euclidean distances.
+    pub inertia: f64,
+    /// Lloyd iterations used by the winning restart.
+    pub n_iter: usize,
+    /// Occupancy of each centroid.
+    pub counts: Vector,
+}
+
+impl Predict for FittedKMeans {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.ncols() != self.centroids.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message(format!(
+                        "predict X is n×{} but centroids are k×{}",
+                        x.ncols(),
+                        self.centroids.ncols()
+                    ))
+                    .build(),
+            );
+        }
+        let (labels, _, _) = assign_lloyd(x, &self.centroids);
+        ctx.finish(labels)
+    }
+}
+
+impl FitUnsupervised for KMeans {
+    type Fitted = FittedKMeans;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKMeans>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), self.k.max(1), &ctx.policy);
+        if x.nrows() == 0 || x.ncols() == 0 {
+            return ctx.finish(empty_kmeans(self.k, x.ncols(), x.nrows()));
+        }
+        if self.k == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("k-means requires k ≥ 1")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "cluster labels",
+                        "zero clusters is not a partition of the sample",
+                        "set k ≥ 1",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(empty_kmeans(0, x.ncols(), x.nrows()));
+        }
+        let k = self.k.min(x.nrows());
+        if k < self.k {
+            ctx.push(
+                Issue::builder(IssueCode::Overparameterized)
+                    .message(format!("requested k={} > n={}; clamping", self.k, x.nrows()))
+                    .metric("k", self.k as f64)
+                    .metric("n", x.nrows() as f64)
+                    .build(),
+            );
+        }
+        if all_rows_identical(x, ctx.policy.near_zero_variance) {
+            ctx.push(degenerate_cluster_issue(
+                "all observations are the same vector; k-means centroids are not identified",
+            ));
+        }
+        let n_init = self.n_init.max(1);
+        let mut best: Option<(f64, Matrix, Vector, Vec<usize>, usize)> = None;
+        for r in 0..n_init {
+            let mut rng = Rng::new(self.seed.wrapping_add(r as u64 * 17 + 1));
+            let init = kmeans_plus_plus(x, k, &mut rng);
+            let (centers, labels, counts, inertia, n_iter) =
+                run_lloyd(&mut ctx, x, init, self.max_iter, &mut rng);
+            let better = match &best {
+                None => true,
+                Some((b, _, _, _, _)) => inertia.is_finite() && inertia < *b,
+            };
+            if better {
+                best = Some((inertia, centers, labels, counts, n_iter));
+            }
+        }
+        let (inertia, centers, labels, counts, n_iter) =
+            best.unwrap_or_else(|| (f64::NAN, Matrix::zeros(k, x.ncols()), Vector::zeros(x.nrows()), vec![0; k], 0));
+        let fitted = finish_centroid_fit(&mut ctx, x, centers, labels, counts, inertia, n_iter);
+        ctx.finish(fitted)
+    }
+}
+
+/// Mini-batch k-means with mandatory incremental explainability.
+#[derive(Clone, Debug)]
+pub struct MiniBatchKMeans {
+    /// Number of clusters.
+    pub k: usize,
+    /// Passes over sampled mini-batches when using [`FitUnsupervised`].
+    pub max_iter: usize,
+    /// PRNG seed.
+    pub seed: u64,
+    /// Mini-batch length.
+    pub batch_size: usize,
+    centroids: Option<Matrix>,
+    counts: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for MiniBatchKMeans {
+    fn default() -> Self {
+        Self {
+            k: 8,
+            max_iter: 100,
+            seed: 0,
+            batch_size: 32,
+            centroids: None,
+            counts: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl MiniBatchKMeans {
+    /// `k` clusters.
+    pub fn new(k: usize) -> Self {
+        Self {
+            k,
+            ..Self::default()
+        }
+    }
+
+    /// Current centroids, if initialized.
+    pub fn centroids(&self) -> Option<&Matrix> {
+        self.centroids.as_ref()
+    }
+
+    fn take_batch(x: &Matrix, idx: &[usize]) -> Matrix {
+        let p = x.ncols();
+        Matrix::from_fn(idx.len(), p, |i, j| x.get(idx[i], j))
+    }
+
+    fn apply_batch(
+        &mut self,
+        ctx: &mut FitCtx,
+        batch: &Matrix,
+    ) -> (Vector, f64, f64, Vec<(String, f64)>) {
+        let k = self.k.max(1);
+        let p = batch.ncols();
+        if !self.initialized || self.centroids.as_ref().map(|c| c.ncols()) != Some(p) {
+            if self.initialized && self.centroids.as_ref().map(|c| c.ncols()) != Some(p) {
+                ctx.push(
+                    Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                        .message("mini-batch k-means saw a different column count")
+                        .build(),
+                );
+            }
+            let mut rng = Rng::new(self.seed.wrapping_add(self.updates + 1));
+            let kk = k.min(batch.nrows().max(1));
+            self.centroids = Some(kmeans_plus_plus(batch, kk, &mut rng));
+            if kk < k {
+                let mut padded = Matrix::zeros(k, p);
+                if let Some(c) = &self.centroids {
+                    for i in 0..c.nrows() {
+                        copy_row(&mut padded, i, c, i);
+                    }
+                    for i in c.nrows()..k {
+                        copy_row(&mut padded, i, batch, rng.below(batch.nrows().max(1)));
+                    }
+                }
+                self.centroids = Some(padded);
+            }
+            self.counts = vec![0.0; k];
+            self.initialized = true;
+        }
+        let mut centers = self.centroids.clone().unwrap_or_else(|| Matrix::zeros(k, p));
+        let before = centers.clone();
+        let (labels, _, inertia_before) = assign_lloyd(batch, &centers);
+        let mut moved = Vec::new();
+        for i in 0..batch.nrows() {
+            let c = labels[i] as usize;
+            if c >= k {
+                continue;
+            }
+            self.counts[c] += 1.0;
+            let eta = 1.0 / self.counts[c];
+            for j in 0..p {
+                let v = (1.0 - eta) * centers.get(c, j) + eta * batch.get(i, j);
+                centers.set(c, j, v);
+            }
+        }
+        for c in 0..k {
+            let mut d2 = 0.0;
+            for j in 0..p {
+                let d = centers.get(c, j) - before.get(c, j);
+                d2 += d * d;
+            }
+            moved.push((format!("centroid[{c}]"), d2.sqrt()));
+        }
+        let (_, _, inertia_after) = assign_lloyd(batch, &centers);
+        self.centroids = Some(centers);
+        self.n_seen += batch.nrows() as u64;
+        self.updates += 1;
+        (labels, inertia_before, inertia_after, moved)
+    }
+}
+
+impl FitUnsupervised for MiniBatchKMeans {
+    type Fitted = FittedKMeans;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKMeans>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), self.k.max(1), &ctx.policy);
+        if x.nrows() == 0 || x.ncols() == 0 {
+            return ctx.finish(empty_kmeans(self.k, x.ncols(), x.nrows()));
+        }
+        let mut rng = Rng::new(self.seed);
+        let bs = self.batch_size.max(1).min(x.nrows());
+        for _ in 0..self.max_iter.max(1) {
+            let idx = rng.sample_indices(x.nrows(), bs);
+            let batch = Self::take_batch(x, &idx);
+            let _ = self.apply_batch(&mut ctx, &batch);
+        }
+        let centers = self
+            .centroids
+            .clone()
+            .unwrap_or_else(|| Matrix::zeros(self.k, x.ncols()));
+        let (labels, counts, inertia) = assign_lloyd(x, &centers);
+        let fitted = finish_centroid_fit(
+            &mut ctx,
+            x,
+            centers,
+            labels,
+            counts,
+            inertia,
+            self.max_iter,
+        );
+        ctx.finish(fitted)
+    }
+}
+
+impl PartialFit for MiniBatchKMeans {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), self.k.max(1), &ctx.policy);
+        if x.nrows() == 0 || x.ncols() == 0 {
+            return ctx.finish(dummy_explain(self.updates, 0, self.n_seen));
+        }
+        let counts_before: Vec<f64> = self.counts.clone();
+        let (labels, loss_b, loss_a, moved) = self.apply_batch(&mut ctx, x);
+        let n_eff: f64 = self.counts.iter().sum();
+        let mut assign = vec![0.0; self.k.max(1)];
+        for i in 0..labels.len() {
+            let c = labels[i] as usize;
+            if c < assign.len() {
+                assign[c] += 1.0;
+            }
+        }
+        let delta_norm = moved.iter().map(|(_, d)| d * d).sum::<f64>().sqrt();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = n_eff;
+        q.parameter_delta_norm = Some(delta_norm);
+        q.parameter_delta_max = moved
+            .iter()
+            .map(|(_, d)| *d)
+            .fold(None, |a, b| Some(a.unwrap_or(0.0).max(b)));
+        q.top_moved_parameters = moved.clone();
+        q.loss_before = Some(loss_b);
+        q.loss_after = Some(loss_a);
+        q.information_gain = Some((loss_b - loss_a).abs().max(delta_norm));
+        q.still_identified = n_eff > 0.0 && self.initialized;
+        q.warmup = self.n_seen < self.k as u64 * 3;
+        q.explanation = format!(
+            "mini-batch k-means: assignment counts {:?}; centroid L2 moves {:?}; n_eff={n_eff:.1}",
+            assign, moved
+        );
+        if q.is_uninformative(ctx.policy.uninformative_info_eps) {
+            ctx.push(
+                Issue::builder(IssueCode::UpdateWithZeroInformation)
+                    .incremental(q.clone())
+                    .message("mini-batch did not move centroids")
+                    .build(),
+            );
+        }
+        for (c, cnt) in assign.iter().enumerate() {
+            if *cnt == 0.0 && counts_before.get(c).copied().unwrap_or(0.0) == 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::EmptyCluster)
+                        .message(format!("cluster {c} unused in this mini-batch and historically empty"))
+                        .metric("cluster", c as f64)
+                        .build(),
+                );
+            }
+        }
+        let expl = IncrementalExplain::from_quality(
+            q,
+            format!("centroids moved: {moved:?}; assignment counts {assign:?}"),
+            "online centroid update with η = 1/count[c] after nearest-centroid assignment",
+            format!("batch inertia={loss_b:.6e}; counts_before={counts_before:?}"),
+            format!("batch inertia={loss_a:.6e}; n_eff={n_eff:.4}"),
+        )
+        .contribute("n_eff", n_eff);
+        ctx.session.record_incremental(expl.clone());
+        ctx.finish(expl)
+    }
+}
+
+/// STREAM-style weighted online k-means (chunk means + count weights).
+#[derive(Clone, Debug)]
+pub struct StreamKMeans {
+    /// Number of clusters.
+    pub k: usize,
+    /// PRNG seed used for the first initializing chunk.
+    pub seed: u64,
+    centroids: Option<Matrix>,
+    weights: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for StreamKMeans {
+    fn default() -> Self {
+        Self {
+            k: 8,
+            seed: 0,
+            centroids: None,
+            weights: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl StreamKMeans {
+    /// `k` streaming centers.
+    pub fn new(k: usize) -> Self {
+        Self {
+            k,
+            ..Self::default()
+        }
+    }
+
+    /// Current centers.
+    pub fn centroids(&self) -> Option<&Matrix> {
+        self.centroids.as_ref()
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKMeans>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+impl FitUnsupervised for StreamKMeans {
+    type Fitted = FittedKMeans;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKMeans>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), self.k.max(1), &ctx.policy);
+        if x.nrows() == 0 || x.ncols() == 0 {
+            return ctx.finish(empty_kmeans(self.k, x.ncols(), x.nrows()));
+        }
+        let _ = self.partial_fit(x, None, &session.child("stream_init"));
+        let centers = self
+            .centroids
+            .clone()
+            .unwrap_or_else(|| Matrix::zeros(self.k, x.ncols()));
+        let (labels, counts, inertia) = assign_lloyd(x, &centers);
+        ctx.finish(finish_centroid_fit(
+            &mut ctx, x, centers, labels, counts, inertia, 1,
+        ))
+    }
+}
+
+impl PartialFit for StreamKMeans {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), self.k.max(1), &ctx.policy);
+        if x.nrows() == 0 || x.ncols() == 0 {
+            return ctx.finish(dummy_explain(self.updates, 0, self.n_seen));
+        }
+        let k = self.k.max(1);
+        let p = x.ncols();
+        if !self.initialized {
+            let mut rng = Rng::new(self.seed | 1);
+            self.centroids = Some(kmeans_plus_plus(x, k.min(x.nrows()), &mut rng));
+            if let Some(c) = &self.centroids {
+                if c.nrows() < k {
+                    let mut padded = Matrix::zeros(k, p);
+                    for i in 0..c.nrows() {
+                        copy_row(&mut padded, i, c, i);
+                    }
+                    self.centroids = Some(padded);
+                }
+            }
+            self.weights = vec![0.0; k];
+            self.initialized = true;
+        } else if self.centroids.as_ref().map(|c| c.ncols()) != Some(p) {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .message("STREAM k-means feature dimension changed")
+                    .build(),
+            );
+            return ctx.finish(dummy_explain(self.updates, x.nrows(), self.n_seen));
+        }
+        let mut centers = self.centroids.clone().unwrap_or_else(|| Matrix::zeros(k, p));
+        let before = centers.clone();
+        let (labels, assign_counts, loss_b) = assign_lloyd(x, &centers);
+        let mut batch_acc = Matrix::zeros(k, p);
+        for i in 0..x.nrows() {
+            let c = labels[i] as usize;
+            if c >= k {
+                continue;
+            }
+            for j in 0..p {
+                batch_acc.set(c, j, batch_acc.get(c, j) + x.get(i, j));
+            }
+        }
+        let mut moved = Vec::new();
+        for c in 0..k {
+            let w_old = self.weights[c];
+            let w_new = assign_counts[c] as f64;
+            if w_new > 0.0 {
+                let tot = w_old + w_new;
+                for j in 0..p {
+                    let mean_new = batch_acc.get(c, j) / w_new;
+                    let v = if tot > 0.0 {
+                        (w_old * centers.get(c, j) + w_new * mean_new) / tot
+                    } else {
+                        mean_new
+                    };
+                    centers.set(c, j, v);
+                }
+                self.weights[c] = tot;
+            }
+            let mut d2 = 0.0;
+            for j in 0..p {
+                let d = centers.get(c, j) - before.get(c, j);
+                d2 += d * d;
+            }
+            moved.push((format!("centroid[{c}]"), d2.sqrt()));
+            if assign_counts[c] == 0 {
+                ctx.push(
+                    Issue::builder(IssueCode::EmptyCluster)
+                        .message(format!("STREAM chunk assigned 0 points to cluster {c}"))
+                        .metric("cluster", c as f64)
+                        .build(),
+                );
+            }
+        }
+        let (_, _, loss_a) = assign_lloyd(x, &centers);
+        self.centroids = Some(centers);
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let n_eff: f64 = self.weights.iter().sum();
+        let delta_norm = moved.iter().map(|(_, d)| d * d).sum::<f64>().sqrt();
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = n_eff;
+        q.parameter_delta_norm = Some(delta_norm);
+        q.parameter_delta_max = moved.iter().map(|(_, d)| *d).fold(None, |a, b| Some(a.unwrap_or(0.0).max(b)));
+        q.top_moved_parameters = moved.clone();
+        q.loss_before = Some(loss_b);
+        q.loss_after = Some(loss_a);
+        q.information_gain = Some((loss_b - loss_a).abs().max(delta_norm));
+        q.still_identified = n_eff >= self.k as f64;
+        q.warmup = self.n_seen < 10;
+        q.explanation = format!(
+            "STREAM k-means weighted merge: assignment {assign_counts:?}; moves {moved:?}; n_eff={n_eff:.1}"
+        );
+        let expl = IncrementalExplain::from_quality(
+            q,
+            format!("weighted centroids moved {moved:?}; chunk assignment {assign_counts:?}"),
+            "STREAM-style merge of chunk means into count-weighted centers",
+            format!("chunk inertia={loss_b:.6e}"),
+            format!("chunk inertia={loss_a:.6e}; n_eff={n_eff:.4}"),
+        )
+        .contribute("n_eff", n_eff);
+        ctx.session.record_incremental(expl.clone());
+        ctx.finish(expl)
+    }
+}
+
+impl Predict for StreamKMeans {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let Some(c) = &self.centroids else {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        };
+        let (labels, _, _) = assign_lloyd(x, c);
+        ctx.finish(labels)
+    }
+}
+
+/// DBSCAN (Ester et al.): density-connected components plus noise (`-1`).
+#[derive(Clone, Debug)]
+pub struct Dbscan {
+    /// Neighborhood radius.
+    pub eps: f64,
+    /// Minimum neighborhood size (including the point itself) to be a core point.
+    pub min_samples: usize,
+}
+
+impl Default for Dbscan {
+    fn default() -> Self {
+        Self {
+            eps: 0.5,
+            min_samples: 5,
+        }
+    }
+}
+
+impl Dbscan {
+    /// DBSCAN with the given radius and core-point threshold.
+    pub fn new(eps: f64, min_samples: usize) -> Self {
+        Self { eps, min_samples }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedDbscan>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted DBSCAN partition.
+#[derive(Clone, Debug)]
+pub struct FittedDbscan {
+    /// Cluster ids; noise is `-1.0`.
+    pub labels: Vector,
+    /// Number of non-noise clusters.
+    pub n_clusters: usize,
+    /// `1` if the row is a core point, else `0`.
+    pub core: Vector,
+}
+
+impl FitUnsupervised for Dbscan {
+    type Fitted = FittedDbscan;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDbscan>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), 1, &ctx.policy);
+        let n = x.nrows();
+        if n == 0 || x.ncols() == 0 {
+            return ctx.finish(FittedDbscan {
+                labels: Vector::zeros(0),
+                n_clusters: 0,
+                core: Vector::zeros(0),
+            });
+        }
+        if !(self.eps.is_finite() && self.eps > 0.0) {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .message(format!("DBSCAN eps={} is not a positive finite radius", self.eps))
+                    .build(),
+            );
+            return ctx.finish(FittedDbscan {
+                labels: Vector::filled(n, -1.0),
+                n_clusters: 0,
+                core: Vector::zeros(n),
+            });
+        }
+        let eps2 = self.eps * self.eps;
+        let min_s = self.min_samples.max(1);
+        let mut neigh: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for i in 0..n {
+            for j in i..n {
+                if sq_dist_rows(x, i, j) <= eps2 {
+                    neigh[i].push(j);
+                    if i != j {
+                        neigh[j].push(i);
+                    }
+                }
+            }
+        }
+        let mut labels = vec![-2i64; n]; // -2 unseen, -1 noise
+        let mut core = Vector::zeros(n);
+        for i in 0..n {
+            if neigh[i].len() >= min_s {
+                core[i] = 1.0;
+            }
+        }
+        let mut cid = 0i64;
+        for i in 0..n {
+            if labels[i] != -2 {
+                continue;
+            }
+            if core[i] < 0.5 {
+                labels[i] = -1;
+                continue;
+            }
+            let mut stack = vec![i];
+            labels[i] = cid;
+            while let Some(p) = stack.pop() {
+                for &q in &neigh[p] {
+                    if labels[q] == -1 {
+                        labels[q] = cid;
+                    }
+                    if labels[q] != -2 {
+                        continue;
+                    }
+                    labels[q] = cid;
+                    if core[q] > 0.5 {
+                        stack.push(q);
+                    }
+                }
+            }
+            cid += 1;
+        }
+        let n_clusters = cid as usize;
+        if n_clusters == 0 {
+            ctx.push(degenerate_cluster_issue(
+                "DBSCAN produced only noise; no core point exists at this (eps, min_samples)",
+            ));
+        }
+        if all_rows_identical(x, ctx.policy.near_zero_variance) && n > 1 {
+            ctx.push(degenerate_cluster_issue(
+                "DBSCAN input rows are identical",
+            ));
+        }
+        let lab = Vector::from_iter(labels.iter().map(|v| *v as f64));
+        push_if_nonfinite_vec(&mut ctx, &lab, "dbscan labels");
+        ctx.finish(FittedDbscan {
+            labels: lab,
+            n_clusters,
+            core,
+        })
+    }
+}
+
+/// Hierarchical linkage rule on pairwise Euclidean distances.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Linkage {
+    /// Unweighted average of cross-pair distances (UPGMA).
+    Average,
+    /// Maximum cross-pair distance (complete / farthest neighbor).
+    Complete,
+    /// Minimum cross-pair distance (single / nearest neighbor).
+    Single,
+}
+
+/// Agglomerative clustering on the full Euclidean distance matrix.
+#[derive(Clone, Debug)]
+pub struct Agglomerative {
+    /// Requested number of clusters.
+    pub n_clusters: usize,
+    /// Linkage.
+    pub linkage: Linkage,
+}
+
+impl Default for Agglomerative {
+    fn default() -> Self {
+        Self {
+            n_clusters: 2,
+            linkage: Linkage::Average,
+        }
+    }
+}
+
+impl Agglomerative {
+    /// `n_clusters` with average linkage.
+    pub fn new(n_clusters: usize) -> Self {
+        Self {
+            n_clusters,
+            linkage: Linkage::Average,
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedAgglomerative>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted agglomerative partition.
+#[derive(Clone, Debug)]
+pub struct FittedAgglomerative {
+    /// Cluster id per row.
+    pub labels: Vector,
+    /// Linkage that produced the tree.
+    pub linkage: Linkage,
+}
+
+fn cluster_link(a: &[usize], b: &[usize], dist: &Matrix, linkage: Linkage) -> f64 {
+    match linkage {
+        Linkage::Single => {
+            let mut m = f64::INFINITY;
+            for &i in a {
+                for &j in b {
+                    m = m.min(dist.get(i, j));
+                }
+            }
+            m
+        }
+        Linkage::Complete => {
+            let mut m = f64::NEG_INFINITY;
+            for &i in a {
+                for &j in b {
+                    m = m.max(dist.get(i, j));
+                }
+            }
+            m
+        }
+        Linkage::Average => {
+            let mut s = 0.0;
+            let mut c = 0.0;
+            for &i in a {
+                for &j in b {
+                    s += dist.get(i, j);
+                    c += 1.0;
+                }
+            }
+            if c == 0.0 {
+                f64::INFINITY
+            } else {
+                s / c
+            }
+        }
+    }
+}
+
+impl FitUnsupervised for Agglomerative {
+    type Fitted = FittedAgglomerative;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedAgglomerative>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), self.n_clusters.max(1), &ctx.policy);
+        let n = x.nrows();
+        if n == 0 || x.ncols() == 0 {
+            return ctx.finish(FittedAgglomerative {
+                labels: Vector::zeros(0),
+                linkage: self.linkage,
+            });
+        }
+        if all_rows_identical(x, ctx.policy.near_zero_variance) {
+            ctx.push(degenerate_cluster_issue(
+                "agglomerative input is a single repeated point",
+            ));
+        }
+        let mut want = self.n_clusters.max(1);
+        if want > n {
+            ctx.push(
+                Issue::builder(IssueCode::Overparameterized)
+                    .message(format!("n_clusters={want} > n={n}"))
+                    .build(),
+            );
+            want = n;
+        }
+        let dist = Matrix::from_fn(n, n, |i, j| {
+            if i == j {
+                0.0
+            } else {
+                sq_dist_rows(x, i, j).sqrt()
+            }
+        });
+        let mut clusters: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+        while clusters.len() > want {
+            let mut bi = 0usize;
+            let mut bj = 1usize;
+            let mut best = f64::INFINITY;
+            for i in 0..clusters.len() {
+                for j in (i + 1)..clusters.len() {
+                    let d = cluster_link(&clusters[i], &clusters[j], &dist, self.linkage);
+                    if d < best {
+                        best = d;
+                        bi = i;
+                        bj = j;
+                    }
+                }
+            }
+            if !best.is_finite() {
+                ctx.push(
+                    Issue::builder(IssueCode::NonFiniteOutput)
+                        .message("agglomerative linkage produced a non-finite merge distance")
+                        .build(),
+                );
+                break;
+            }
+            let mut merged = clusters[bi].clone();
+            merged.extend_from_slice(&clusters[bj]);
+            if bi > bj {
+                clusters.remove(bi);
+                clusters.remove(bj);
+            } else {
+                clusters.remove(bj);
+                clusters.remove(bi);
+            }
+            clusters.push(merged);
+        }
+        let mut labels = Vector::zeros(n);
+        for (c, members) in clusters.iter().enumerate() {
+            if members.len() == 1 {
+                ctx.push(
+                    Issue::builder(IssueCode::SinglePointCluster)
+                        .message(format!("agglomerative cluster {c} is a singleton"))
+                        .metric("cluster", c as f64)
+                        .build(),
+                );
+            }
+            for &i in members {
+                labels[i] = c as f64;
+            }
+        }
+        ctx.finish(FittedAgglomerative {
+            labels,
+            linkage: self.linkage,
+        })
+    }
+}
+
+/// Diagonal-covariance Gaussian mixture via EM.
+#[derive(Clone, Debug)]
+pub struct GaussianMixture {
+    /// Number of mixture components.
+    pub n_components: usize,
+    /// EM iteration cap.
+    pub max_iter: usize,
+    /// PRNG seed for k-means++ mean initialization.
+    pub seed: u64,
+}
+
+impl Default for GaussianMixture {
+    fn default() -> Self {
+        Self {
+            n_components: 2,
+            max_iter: 100,
+            seed: 0,
+        }
+    }
+}
+
+impl GaussianMixture {
+    /// `k` components.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted diagonal Gaussian mixture.
+#[derive(Clone, Debug)]
+pub struct FittedGmm {
+    /// Hard labels (`argmax` responsibility).
+    pub labels: Vector,
+    /// Mixing weights (length `k`).
+    pub weights: Vector,
+    /// Component means (`k` × `p`).
+    pub means: Matrix,
+    /// Diagonal variances (`k` × `p`).
+    pub covariances: Matrix,
+    /// Final average log-likelihood.
+    pub loglik: f64,
+}
+
+fn diag_gauss_logpdf(x: &Matrix, i: usize, mean: &Matrix, c: usize, var: &Matrix) -> f64 {
+    let p = x.ncols().min(mean.ncols()).min(var.ncols());
+    let mut s = 0.0;
+    let ln2pi = (2.0 * std::f64::consts::PI).ln();
+    for j in 0..p {
+        let v = var.get(c, j).max(COV_FLOOR);
+        let d = x.get(i, j) - mean.get(c, j);
+        s += d * d / v + v.ln() + ln2pi;
+    }
+    -0.5 * s
+}
+
+impl FitUnsupervised for GaussianMixture {
+    type Fitted = FittedGmm;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(
+            &mut ctx.report,
+            x.nrows(),
+            self.n_components.max(1),
+            &ctx.policy,
+        );
+        let (n, p) = x.shape();
+        let k = self.n_components.max(1).min(n.max(1));
+        if n == 0 || p == 0 {
+            return ctx.finish(FittedGmm {
+                labels: Vector::zeros(0),
+                weights: Vector::zeros(self.n_components),
+                means: Matrix::zeros(self.n_components, p),
+                covariances: Matrix::zeros(self.n_components, p),
+                loglik: f64::NAN,
+            });
+        }
+        if all_rows_identical(x, ctx.policy.near_zero_variance) {
+            ctx.push(degenerate_cluster_issue(
+                "GMM data have zero spread; component covariances collapse",
+            ));
+            ctx.push(
+                Issue::builder(IssueCode::EmissionDegenerate)
+                    .message("every row is identical; Gaussian emissions have zero variance")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "mixture parameters",
+                        "a point-mass sample does not identify a covariance",
+                        "do not interpret component scales",
+                    ))
+                    .build(),
+            );
+        }
+        if k < self.n_components {
+            ctx.push(
+                Issue::builder(IssueCode::Overparameterized)
+                    .message("n_components exceeds n; clamping")
+                    .build(),
+            );
+        }
+        let mut rng = Rng::new(self.seed | 1);
+        let mut means = kmeans_plus_plus(x, k, &mut rng);
+        let mut weights = Vector::filled(k, 1.0 / k as f64);
+        let mut vars = Matrix::zeros(k, p);
+        for j in 0..p {
+            let col = x.column(j);
+            let v = col.std().max(COV_FLOOR);
+            for c in 0..k {
+                vars.set(c, j, v * v);
+            }
+        }
+        let mut loglik = f64::NEG_INFINITY;
+        let mut resp = vec![vec![0.0; k]; n];
+        for it in 0..self.max_iter.max(1) {
+            let mut ll = 0.0;
+            for i in 0..n {
+                let mut logp = vec![0.0; k];
+                for c in 0..k {
+                    let lw = if weights[c] > 0.0 {
+                        weights[c].ln()
+                    } else {
+                        f64::NEG_INFINITY
+                    };
+                    logp[c] = lw + diag_gauss_logpdf(x, i, &means, c, &vars);
+                }
+                let lse = logsumexp(&logp);
+                ll += lse;
+                for c in 0..k {
+                    resp[i][c] = if lse.is_finite() {
+                        (logp[c] - lse).exp()
+                    } else {
+                        1.0 / k as f64
+                    };
+                }
+            }
+            loglik = ll / n as f64;
+            ctx.session.step(it as u64, -loglik, None);
+            let mut nk = vec![0.0; k];
+            for i in 0..n {
+                for c in 0..k {
+                    nk[c] += resp[i][c];
+                }
+            }
+            for c in 0..k {
+                if nk[c] <= 1e-8 {
+                    ctx.push(
+                        Issue::builder(IssueCode::MixtureWeightCollapsed)
+                            .message(format!("component {c} weight collapsed; reseeding mean"))
+                            .metric("component", c as f64)
+                            .metric("n_eff", nk[c])
+                            .build(),
+                    );
+                    copy_row(&mut means, c, x, rng.below(n));
+                    weights[c] = 1.0 / k as f64;
+                    for j in 0..p {
+                        vars.set(c, j, vars.get(c, j).max(COV_FLOOR) * 2.0);
+                    }
+                    continue;
+                }
+                weights[c] = nk[c] / n as f64;
+                for j in 0..p {
+                    let mut m = 0.0;
+                    for i in 0..n {
+                        m += resp[i][c] * x.get(i, j);
+                    }
+                    means.set(c, j, m / nk[c]);
+                }
+                for j in 0..p {
+                    let mut s = 0.0;
+                    for i in 0..n {
+                        let d = x.get(i, j) - means.get(c, j);
+                        s += resp[i][c] * d * d;
+                    }
+                    let raw = s / nk[c];
+                    if raw <= ctx.policy.near_zero_variance {
+                        ctx.push(
+                            Issue::builder(IssueCode::EmissionDegenerate)
+                                .message(format!(
+                                    "component {c} feature {j} variance {raw:.3e} collapsed"
+                                ))
+                                .metric("component", c as f64)
+                                .metric("feature", j as f64)
+                                .meaninglessness(Meaninglessness::vacuous(
+                                    "component covariance",
+                                    "a collapsed Gaussian is a hard assignment, not a density",
+                                    "drop the component or add a covariance floor and stop interpreting scale",
+                                ))
+                                .build(),
+                        );
+                    }
+                    vars.set(c, j, raw.max(COV_FLOOR));
+                }
+                if nk[c] < 1.5 {
+                    ctx.push(
+                        Issue::builder(IssueCode::SinglePointCluster)
+                            .message(format!("component {c} effective count {nk:.3}", nk = nk[c]))
+                            .metric("component", c as f64)
+                            .build(),
+                    );
+                }
+            }
+            let wsum: f64 = (0..k).map(|c| weights[c]).sum();
+            if wsum > 0.0 {
+                for c in 0..k {
+                    weights[c] /= wsum;
+                }
+            }
+            if it + 1 == self.max_iter {
+                ctx.push(
+                    Issue::builder(IssueCode::MaxIterReached)
+                        .message("GMM EM hit max_iter")
+                        .build(),
+                );
+            }
+        }
+        let mut labels = Vector::zeros(n);
+        for i in 0..n {
+            let mut b = 0usize;
+            let mut bv = f64::NEG_INFINITY;
+            for c in 0..k {
+                if resp[i][c] > bv {
+                    bv = resp[i][c];
+                    b = c;
+                }
+            }
+            labels[i] = b as f64;
+        }
+        push_if_nonfinite_vec(&mut ctx, &labels, "gmm labels");
+        push_if_nonfinite_mat(&mut ctx, &means, "gmm means");
+        if !loglik.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::LossIsNan)
+                    .message("GMM log-likelihood is not finite")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedGmm {
+            labels,
+            weights,
+            means,
+            covariances: vars,
+            loglik,
+        })
+    }
+}
+
+impl Predict for FittedGmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.ncols() != self.means.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("GMM predict column count does not match the fitted means")
+                    .build(),
+            );
+        }
+        let k = self.means.nrows();
+        let mut labels = Vector::zeros(x.nrows());
+        for i in 0..x.nrows() {
+            let mut b = 0usize;
+            let mut bv = f64::NEG_INFINITY;
+            for c in 0..k {
+                let lp = self.weights[c].max(1e-300).ln()
+                    + diag_gauss_logpdf(x, i, &self.means, c, &self.covariances);
+                if lp > bv {
+                    bv = lp;
+                    b = c;
+                }
+            }
+            labels[i] = b as f64;
+        }
+        ctx.finish(labels)
+    }
+}
+
+/// Spectral clustering: Gaussian affinity → Laplacian eigenmap → k-means.
+#[derive(Clone, Debug)]
+pub struct SpectralClustering {
+    /// Number of clusters / eigenvectors kept.
+    pub n_clusters: usize,
+    /// Seed for the k-means stage.
+    pub seed: u64,
+    /// RBF coefficient `γ` in `exp(−γ‖x−y‖²)`. `None` uses `1 / median ‖x−y‖²`.
+    pub gamma: Option<f64>,
+}
+
+impl Default for SpectralClustering {
+    fn default() -> Self {
+        Self {
+            n_clusters: 2,
+            seed: 0,
+            gamma: None,
+        }
+    }
+}
+
+impl SpectralClustering {
+    /// `n_clusters` with automatic RBF bandwidth.
+    pub fn new(n_clusters: usize) -> Self {
+        Self {
+            n_clusters,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedSpectral>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted spectral embedding and labels.
+#[derive(Clone, Debug)]
+pub struct FittedSpectral {
+    /// Cluster id per row.
+    pub labels: Vector,
+    /// Rows are the Laplacian eigenvectors used as features.
+    pub embedding: Matrix,
+}
+
+impl FitUnsupervised for SpectralClustering {
+    type Fitted = FittedSpectral;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedSpectral>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), self.n_clusters.max(1), &ctx.policy);
+        let n = x.nrows();
+        if n == 0 || x.ncols() == 0 {
+            return ctx.finish(FittedSpectral {
+                labels: Vector::zeros(0),
+                embedding: Matrix::zeros(0, self.n_clusters),
+            });
+        }
+        if all_rows_identical(x, ctx.policy.near_zero_variance) {
+            ctx.push(degenerate_cluster_issue(
+                "spectral clustering on identical rows; the Laplacian is unidentified",
+            ));
+        }
+        let mut d2s = Vec::with_capacity(n * n / 2 + 1);
+        for i in 0..n {
+            for j in (i + 1)..n {
+                d2s.push(sq_dist_rows(x, i, j));
+            }
+        }
+        d2s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let med = if d2s.is_empty() {
+            1.0
+        } else {
+            d2s[d2s.len() / 2].max(1e-12)
+        };
+        let gamma = self.gamma.filter(|g| g.is_finite() && *g > 0.0).unwrap_or(1.0 / med);
+        let w = Matrix::from_fn(n, n, |i, j| {
+            if i == j {
+                0.0
+            } else {
+                (-gamma * sq_dist_rows(x, i, j)).exp()
+            }
+        });
+        let mut deg = vec![0.0; n];
+        for i in 0..n {
+            let mut s = 0.0;
+            for j in 0..n {
+                s += w.get(i, j);
+            }
+            if s <= ctx.policy.near_zero_variance {
+                ctx.push(
+                    Issue::builder(IssueCode::EmptyCluster)
+                        .message(format!("row {i} has degree {s:.3e}; isolated in the affinity graph"))
+                        .metric("row", i as f64)
+                        .build(),
+                );
+            }
+            deg[i] = s.max(1e-12);
+        }
+        // Normalized Laplacian L = I − D^{-1/2} W D^{-1/2}.
+        let mut l = Mat::<f64>::zeros(n, n);
+        for i in 0..n {
+            let di = deg[i].sqrt();
+            for j in 0..n {
+                let dj = deg[j].sqrt();
+                let off = w.get(i, j) / (di * dj);
+                l[(i, j)] = if i == j { 1.0 - off } else { -off };
+            }
+        }
+        let Some((vals, vecs)) = symmetric_eigen(&mut ctx.report, &l, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::EigenDidNotConverge)
+                    .message("Laplacian eigensolve failed")
+                    .build(),
+            );
+            return ctx.finish(FittedSpectral {
+                labels: Vector::zeros(n),
+                embedding: Matrix::zeros(n, self.n_clusters),
+            });
+        };
+        let mut order: Vec<usize> = (0..vals.len()).collect();
+        order.sort_by(|&a, &b| vals[a].partial_cmp(&vals[b]).unwrap_or(std::cmp::Ordering::Equal));
+        for &i in &order {
+            if vals[i] < -ctx.policy.rank_tol_relative {
+                ctx.push(
+                    Issue::builder(IssueCode::NegativeEigenvalueDropped)
+                        .message(format!("Laplacian eigenvalue {ev:.3e} < 0", ev = vals[i]))
+                        .metric("eigenvalue", vals[i])
+                        .build(),
+                );
+            }
+        }
+        let k = self.n_clusters.max(1).min(n).min(vals.len());
+        if k < self.n_clusters {
+            ctx.push(
+                Issue::builder(IssueCode::ComponentsExceedRank)
+                    .message("requested more spectral components than Laplacian rank")
+                    .build(),
+            );
+        }
+        let embedding = Matrix::from_fn(n, k, |i, c| {
+            let col = order[c];
+            if i < vecs.nrows() && col < vecs.ncols() {
+                vecs[(i, col)]
+            } else {
+                0.0
+            }
+        });
+        // Row-normalize the embedding (Ng–Jordan–Weiss).
+        let mut emb = embedding.clone();
+        for i in 0..n {
+            let mut nrm = 0.0;
+            for c in 0..k {
+                nrm += emb.get(i, c) * emb.get(i, c);
+            }
+            nrm = nrm.sqrt();
+            if nrm > 0.0 {
+                for c in 0..k {
+                    emb.set(i, c, emb.get(i, c) / nrm);
+                }
+            }
+        }
+        let mut rng = Rng::new(self.seed | 1);
+        let init = kmeans_plus_plus(&emb, k, &mut rng);
+        let (centers, labels, counts, _inertia, _) =
+            run_lloyd(&mut ctx, &emb, init, 80, &mut rng);
+        let _ = (centers, counts);
+        if unique_label_count(&labels) <= 1 && k > 1 {
+            ctx.push(degenerate_cluster_issue(
+                "spectral k-means collapsed to one cluster",
+            ));
+        }
+        ctx.finish(FittedSpectral {
+            labels,
+            embedding: emb,
+        })
+    }
+}
+
+/// Simplified affinity propagation (Frey & Dueck): responsibility / availability.
+#[derive(Clone, Debug)]
+pub struct AffinityPropagation {
+    /// Message-passing iteration cap.
+    pub max_iter: usize,
+    /// Damping in `(0, 1)` (higher is more conservative).
+    pub damping: f64,
+    /// Seed reserved for tie-breaking preference jitter.
+    pub seed: u64,
+}
+
+impl Default for AffinityPropagation {
+    fn default() -> Self {
+        Self {
+            max_iter: 50,
+            damping: 0.5,
+            seed: 0,
+        }
+    }
+}
+
+impl AffinityPropagation {
+    /// Default preference (median similarity) and damping.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedAffinity>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted affinity-propagation exemplars.
+#[derive(Clone, Debug)]
+pub struct FittedAffinity {
+    /// Cluster id per row (exemplar index, remapped to `0 .. n_exemplars-1`).
+    pub labels: Vector,
+    /// Exemplar row indices as `f64`.
+    pub exemplars: Vector,
+}
+
+impl FitUnsupervised for AffinityPropagation {
+    type Fitted = FittedAffinity;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedAffinity>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), 1, &ctx.policy);
+        let n = x.nrows();
+        if n == 0 || x.ncols() == 0 {
+            return ctx.finish(FittedAffinity {
+                labels: Vector::zeros(0),
+                exemplars: Vector::zeros(0),
+            });
+        }
+        if all_rows_identical(x, ctx.policy.near_zero_variance) {
+            ctx.push(degenerate_cluster_issue(
+                "affinity propagation on identical rows yields a single exemplar",
+            ));
+        }
+        let damp = self.damping.clamp(0.05, 0.95);
+        let mut s = Matrix::from_fn(n, n, |i, j| -sq_dist_rows(x, i, j));
+        let mut off: Vec<f64> = Vec::with_capacity(n * n);
+        for i in 0..n {
+            for j in 0..n {
+                if i != j {
+                    off.push(s.get(i, j));
+                }
+            }
+        }
+        off.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let pref = if off.is_empty() {
+            0.0
+        } else {
+            off[off.len() / 2]
+        };
+        let mut rng = Rng::new(self.seed | 1);
+        for i in 0..n {
+            s.set(i, i, pref + 1e-12 * rng.standard_normal());
+        }
+        let mut r = Matrix::zeros(n, n);
+        let mut a = Matrix::zeros(n, n);
+        for it in 0..self.max_iter.max(1) {
+            let old_r = r.clone();
+            let old_a = a.clone();
+            for i in 0..n {
+                for k in 0..n {
+                    let mut mx = f64::NEG_INFINITY;
+                    for kp in 0..n {
+                        if kp == k {
+                            continue;
+                        }
+                        mx = mx.max(a.get(i, kp) + s.get(i, kp));
+                    }
+                    let val = s.get(i, k) - mx;
+                    r.set(i, k, damp * old_r.get(i, k) + (1.0 - damp) * val);
+                }
+            }
+            for i in 0..n {
+                for k in 0..n {
+                    let val = if i == k {
+                        let mut sm = 0.0;
+                        for ip in 0..n {
+                            if ip != k {
+                                sm += r.get(ip, k).max(0.0);
+                            }
+                        }
+                        sm
+                    } else {
+                        let mut sm = 0.0;
+                        for ip in 0..n {
+                            if ip != i && ip != k {
+                                sm += r.get(ip, k).max(0.0);
+                            }
+                        }
+                        (r.get(k, k) + sm).min(0.0)
+                    };
+                    a.set(i, k, damp * old_a.get(i, k) + (1.0 - damp) * val);
+                }
+            }
+            if it + 1 == self.max_iter {
+                ctx.push(
+                    Issue::builder(IssueCode::MaxIterReached)
+                        .message("affinity propagation hit max_iter")
+                        .build(),
+                );
+            }
+        }
+        let mut exemplar_of = vec![0usize; n];
+        let mut exemplars: Vec<usize> = Vec::new();
+        for i in 0..n {
+            let mut bk = 0usize;
+            let mut bv = f64::NEG_INFINITY;
+            for k in 0..n {
+                let v = a.get(i, k) + r.get(i, k);
+                if v > bv {
+                    bv = v;
+                    bk = k;
+                }
+            }
+            exemplar_of[i] = bk;
+            if a.get(bk, bk) + r.get(bk, bk) > 0.0 && !exemplars.contains(&bk) {
+                exemplars.push(bk);
+            }
+        }
+        if exemplars.is_empty() {
+            for &e in &exemplar_of {
+                if !exemplars.contains(&e) {
+                    exemplars.push(e);
+                }
+            }
+        }
+        if exemplars.len() <= 1 && n > 1 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateClusters)
+                    .message("affinity propagation found a single exemplar")
+                    .build(),
+            );
+        }
+        let mut labels = Vector::zeros(n);
+        for i in 0..n {
+            let e = exemplar_of[i];
+            let id = exemplars.iter().position(|&z| z == e).unwrap_or(0);
+            labels[i] = id as f64;
+        }
+        ctx.finish(FittedAffinity {
+            labels,
+            exemplars: Vector::from_iter(exemplars.iter().map(|e| *e as f64)),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ojizou_san::Session;
+
+    fn two_blobs() -> Matrix {
+        // 20 points near (−4, −4) and 20 near (4, 4).
+        Matrix::from_fn(40, 2, |i, j| {
+            if i < 20 {
+                -4.0 + 0.05 * (i as f64) + 0.02 * j as f64
+            } else {
+                4.0 + 0.05 * ((i - 20) as f64) + 0.02 * j as f64
+            }
+        })
+    }
+
+    #[test]
+    fn kmeans_recovers_two_blobs() {
+        let x = two_blobs();
+        let session = Session::new("kmeans", "fit");
+        let q = KMeans {
+            k: 2,
+            max_iter: 40,
+            seed: 3,
+            n_init: 4,
+        }
+        .fit(&x, &session)
+        .expect("kmeans");
+        let lab = q.value.labels.as_slice();
+        let a = lab[0];
+        let b = lab[20];
+        assert_ne!(a, b, "blobs must receive different labels: {lab:?}");
+        for i in 0..20 {
+            assert_eq!(lab[i], a, "blob A row {i}");
+        }
+        for i in 20..40 {
+            assert_eq!(lab[i], b, "blob B row {i}");
+        }
+        let pred = q
+            .value
+            .predict(&x, &Session::new("kmeans", "predict"))
+            .expect("predict");
+        assert_eq!(pred.value.len(), 40);
+    }
+
+    #[test]
+    fn kmeans_empty_errors() {
+        let x = Matrix::zeros(0, 2);
+        let session = Session::new("kmeans", "fit");
+        let err = KMeans::new(2).fit(&x, &session).unwrap_err();
+        assert_eq!(err.primary().code, IssueCode::EmptyMatrix);
+    }
+
+    #[test]
+    fn minibatch_explains_partial_fit() {
+        let x = two_blobs();
+        let session = Session::new("mbkmeans", "partial_fit");
+        let mut m = MiniBatchKMeans {
+            k: 2,
+            max_iter: 5,
+            seed: 1,
+            batch_size: 16,
+            ..MiniBatchKMeans::default()
+        };
+        let q = m.partial_fit(&x, None, &session).expect("pf");
+        assert!(!q.value.narrative.is_empty());
+        assert!(q.value.quality.effective_sample_size > 0.0);
+    }
+}
