@@ -4789,6 +4789,50 @@ const INVENTORY: &[Algorithm] = &[
         "river.stats.RollingEntropy",
         "online",
     ),
+    a(
+        "stats.medcouple",
+        "statsmodels.stats.stattools.medcouple",
+        "stats",
+    ),
+    a(
+        "stats.wls_prediction_std",
+        "statsmodels.sandbox.regression.predstd.wls_prediction_std",
+        "stats",
+    ),
+    a(
+        "stats.linear_lm",
+        "statsmodels.stats.diagnostic.linear_lm",
+        "stats",
+    ),
+    a(
+        "stats.ttest_ind_from_stats",
+        "statsmodels.stats.weightstats.ttest_ind_from_stats",
+        "stats",
+    ),
+    a(
+        "stats.power_ftest",
+        "statsmodels.stats.power.FTestPower",
+        "stats",
+    ),
+    a(
+        "online.RollingCorr",
+        "river.stats.RollingPearsonCorr",
+        "online",
+    ),
+    a("online.RollingMae", "river.metrics.MAE", "online"),
+    a("online.RollingMape", "river.metrics.MAPE", "online"),
+    a("online.RollingRmse", "river.metrics.RMSE", "online"),
+    a("online.OnlineMatthews", "river.metrics.MCC", "online"),
+    a(
+        "online.OnlinePoissonDeviance",
+        "river.metrics.PoissonDeviance",
+        "online",
+    ),
+    a(
+        "online.OnlineGammaDeviance",
+        "river.metrics.GammaDeviance",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5111,6 +5155,10 @@ mod tests {
             "tsa.ch_test",
             "tslearn.Sfa",
             "online.OnlineBrier",
+            "stats.medcouple",
+            "stats.linear_lm",
+            "online.RollingCorr",
+            "online.OnlineMatthews",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

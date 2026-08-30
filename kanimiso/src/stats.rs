@@ -5423,6 +5423,296 @@ pub fn outlier_test(
     })
 }
 
+/// Medcouple robust skewness (statsmodels `stattools.medcouple`).
+///
+/// Pair count is not identification `p`.
+pub fn medcouple(x: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, x);
+    let mut v: Vec<f64> = x.as_slice().iter().copied().filter(|z| z.is_finite()).collect();
+    if v.len() < 3 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message(format!("medcouple needs ≥3 finite points; got {}", v.len()))
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    let med = if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        0.5 * (v[n / 2 - 1] + v[n / 2])
+    };
+    let mut h = Vec::new();
+    for i in 0..n {
+        for j in i..n {
+            if v[i] <= med && v[j] >= med {
+                let den = v[j] - v[i];
+                if den.abs() <= 1e-15 {
+                    h.push(0.0);
+                } else {
+                    h.push(((v[j] - med) - (med - v[i])) / den);
+                }
+            }
+        }
+    }
+    if h.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("medcouple pair set is empty")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    h.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let m = h.len();
+    let mc = if m % 2 == 1 {
+        h[m / 2]
+    } else {
+        0.5 * (h[m / 2 - 1] + h[m / 2])
+    };
+    ctx.finish(mc)
+}
+
+/// WLS / OLS prediction standard errors (statsmodels `wls_prediction_std`).
+///
+/// Observation count is not identification `p`. Equal weights (OLS) are used.
+#[derive(Clone, Debug)]
+pub struct WlsPredictionStd {
+    /// Fitted mean.
+    pub predicted: Vector,
+    /// Standard error of the mean \(\,s\sqrt{h_{ii}}\).
+    pub se_mean: Vector,
+    /// Predictive SE \(\,s\sqrt{1+h_{ii}}\).
+    pub se_obs: Vector,
+}
+
+/// In-sample OLS prediction standard errors.
+pub fn wls_prediction_std(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<WlsPredictionStd>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let design = x.with_intercept();
+    let mut scratch = Report::new("wlspred", "ols");
+    let Some(beta) = least_squares(&mut scratch, &design, y, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::UnidentifiedModel)
+                .message("wls_prediction_std: OLS failed")
+                .build(),
+        );
+        return ctx.finish(WlsPredictionStd {
+            predicted: Vector::zeros(y.len()),
+            se_mean: Vector::zeros(y.len()),
+            se_obs: Vector::zeros(y.len()),
+        });
+    };
+    for issue in scratch.issues() {
+        if matches!(
+            issue.code,
+            IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+        ) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let n = design.nrows().min(y.len());
+    let p = design.ncols();
+    let fit = design.matvec(&beta);
+    let mut sse = 0.0;
+    for i in 0..n {
+        let e = y[i] - fit[i];
+        sse += e * e;
+    }
+    let df = (n as f64 - p as f64).max(1.0);
+    let s = (sse / df).sqrt().max(1e-12);
+    let mut xtx = faer::Mat::<f64>::zeros(p, p);
+    for i in 0..n {
+        for a in 0..p {
+            for b in 0..p {
+                xtx[(a, b)] += design.get(i, a) * design.get(i, b);
+            }
+        }
+    }
+    let mut xtx_inv = Matrix::zeros(p, p);
+    for j in 0..p {
+        let mut e = Vector::zeros(p);
+        e[j] = 1.0;
+        let mut sc = Report::new("wlspred", "inv");
+        if let Some(col) = chol_solve(&mut sc, &xtx, &e, &ctx.policy) {
+            for i in 0..p {
+                xtx_inv.set(i, j, col[i]);
+            }
+        }
+    }
+    let mut se_mean = Vector::zeros(n);
+    let mut se_obs = Vector::zeros(n);
+    for i in 0..n {
+        let mut h = 0.0;
+        for a in 0..p {
+            let mut sa = 0.0;
+            for b in 0..p {
+                sa += xtx_inv.get(a, b) * design.get(i, b);
+            }
+            h += design.get(i, a) * sa;
+        }
+        h = h.clamp(0.0, 1.0 - 1e-12);
+        se_mean[i] = s * h.sqrt();
+        se_obs[i] = s * (1.0 + h).sqrt();
+    }
+    ctx.finish(WlsPredictionStd {
+        predicted: Vector::from_iter((0..n).map(|i| fit[i])),
+        se_mean,
+        se_obs,
+    })
+}
+
+/// Lagrange-multiplier linearity test (statsmodels `linear_lm`).
+///
+/// Residuals of \(y\) on \(x\) are regressed on \(x\) and column-0 squares.
+/// Expanded feature count is not identification `p`.
+pub fn linear_lm(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let design = x.with_intercept();
+    let mut scratch = Report::new("linlm", "ols");
+    let Some(beta) = least_squares(&mut scratch, &design, y, &ctx.policy) else {
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: y.len() as f64,
+        });
+    };
+    for issue in scratch.issues() {
+        if matches!(
+            issue.code,
+            IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+        ) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let n = design.nrows().min(y.len());
+    let fit = design.matvec(&beta);
+    let e = Vector::from_iter((0..n).map(|i| y[i] - fit[i]));
+    let aux = Matrix::from_fn(n, x.ncols() + 2, |i, j| {
+        if j == 0 {
+            1.0
+        } else if j <= x.ncols() {
+            x.get(i, j - 1)
+        } else {
+            let v = x.get(i, 0);
+            v * v
+        }
+    });
+    let mut aux_sc = Report::new("linlm", "aux");
+    let Some(ab) = least_squares(&mut aux_sc, &aux, &e, &ctx.policy) else {
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: n as f64,
+        });
+    };
+    let fitted = aux.matvec(&ab);
+    let mut sse = 0.0;
+    let mut sst = 0.0;
+    let em = e.mean();
+    for i in 0..n {
+        let r = e[i] - fitted[i];
+        sse += r * r;
+        let d = e[i] - em;
+        sst += d * d;
+    }
+    let r2 = if sst > 0.0 { 1.0 - sse / sst } else { 0.0 };
+    let stat = n as f64 * r2.max(0.0);
+    let pvalue = chi2_pvalue(stat, 1.0);
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: 1.0,
+        nobs: n as f64,
+    })
+}
+
+/// Two-sample *t* from summary statistics (statsmodels `ttest_ind_from_stats`).
+///
+/// Sample sizes are not identification `p`.
+pub fn ttest_ind_from_stats(
+    mean1: f64,
+    std1: f64,
+    n1: f64,
+    mean2: f64,
+    std2: f64,
+    n2: f64,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if ![mean1, std1, n1, mean2, std2, n2]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .message("ttest_ind_from_stats received a non-finite argument")
+                .build(),
+        );
+    }
+    if n1 <= 1.0 || n2 <= 1.0 || std1 < 0.0 || std2 < 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("ttest_ind_from_stats needs n>1 and non-negative std")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: n1 + n2,
+        });
+    }
+    let v1 = std1 * std1 / n1;
+    let v2 = std2 * std2 / n2;
+    let den = (v1 + v2).sqrt();
+    let stat = if den > 1e-18 {
+        (mean1 - mean2) / den
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("ttest_ind_from_stats pooled variance is ~0")
+                .build(),
+        );
+        f64::NAN
+    };
+    let df = if v1 + v2 > 1e-18 {
+        (v1 + v2) * (v1 + v2) / (v1 * v1 / (n1 - 1.0) + v2 * v2 / (n2 - 1.0)).max(1e-18)
+    } else {
+        n1 + n2 - 2.0
+    };
+    let pvalue = if stat.is_finite() && df > 0.0 {
+        student_t_pvalue(stat, df)
+    } else {
+        f64::NAN
+    };
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df,
+        nobs: n1 + n2,
+    })
+}
+
 /// Two-sample mean comparison (statsmodels `CompareMeans`).
 #[derive(Clone, Debug)]
 pub struct CompareMeansResult {
@@ -7151,6 +7441,17 @@ pub fn ftest_power(
         f64::NAN
     };
     ctx.finish(power)
+}
+
+/// Alias of [`ftest_power`] (statsmodels `power.ftest_power`).
+pub fn power_ftest(
+    effect_size: f64,
+    df_num: f64,
+    df_den: f64,
+    alpha: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    ftest_power(effect_size, df_num, df_den, alpha, session)
 }
 
 /// χ² goodness-of-fit power (statsmodels `GofChisquarePower`).
@@ -12851,5 +13152,22 @@ mod tests {
             .as_slice()
             .iter()
             .all(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0));
+        let mc = medcouple(&y, &Session::new("mcouple", "t")).expect("mcouple");
+        assert!(mc.value.is_finite());
+        let wps = wls_prediction_std(&x, &y, &Session::new("wps", "t")).expect("wps");
+        assert_eq!(wps.value.predicted.len(), 40);
+        assert!(wps
+            .value
+            .se_obs
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        let llm = linear_lm(&x, &y, &Session::new("llm", "t")).expect("llm");
+        assert!(llm.value.statistic.is_finite() || llm.value.pvalue.is_nan());
+        let tfs = ttest_ind_from_stats(0.0, 1.0, 20.0, 1.0, 1.0, 20.0, &Session::new("tifs", "t"))
+            .expect("tifs");
+        assert!(tfs.value.pvalue.is_finite() && tfs.value.pvalue < 0.05);
+        let pwf = power_ftest(0.5, 2.0, 30.0, 0.05, &Session::new("pwf", "t")).expect("pwf");
+        assert!(pwf.value.is_finite() && pwf.value > 0.0 && pwf.value <= 1.0);
     }
 }

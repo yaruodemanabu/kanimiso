@@ -17668,6 +17668,713 @@ impl PartialFit for RollingEntropy {
     }
 }
 
+/// Rolling Pearson correlation of column 0 and `y` (river `stats.RollingPearsonCorr`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingCorr {
+    /// Window capacity.
+    pub window: usize,
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingCorr {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            xs: Vec::new(),
+            ys: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingCorr {
+    /// Rolling correlation with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Current Pearson correlation, or NaN when the window is degenerate.
+    pub fn score(&self) -> f64 {
+        let n = self.xs.len().min(self.ys.len());
+        if n < 2 {
+            return f64::NAN;
+        }
+        let nf = n as f64;
+        let mx = self.xs.iter().take(n).sum::<f64>() / nf;
+        let my = self.ys.iter().take(n).sum::<f64>() / nf;
+        let mut c = 0.0;
+        let mut vx = 0.0;
+        let mut vy = 0.0;
+        for i in 0..n {
+            let dx = self.xs[i] - mx;
+            let dy = self.ys[i] - my;
+            c += dx * dy;
+            vx += dx * dx;
+            vy += dy * dy;
+        }
+        let den = (vx * vy).sqrt();
+        if den <= 1e-18 {
+            f64::NAN
+        } else {
+            c / den
+        }
+    }
+}
+
+impl PartialFit for RollingCorr {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no y for RollingCorr"),
+            );
+        };
+        let before = self.score();
+        let cap = self.window.max(2);
+        let n = x.nrows().min(y.len());
+        for i in 0..n {
+            let xv = x.get(i, 0);
+            let yv = y[i];
+            if xv.is_finite() && yv.is_finite() {
+                rolling_push(&mut self.xs, xv, cap);
+                rolling_push(&mut self.ys, yv, cap);
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.xs.len().min(self.ys.len()) as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.xs.len().min(self.ys.len()) >= 2;
+        q.warmup = self.xs.len().min(self.ys.len()) < 2;
+        q.explanation = format!("RollingCorr={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed Pearson correlation",
+                "sliding corr of column 0 and y; window is not identification p",
+                format!("r={before:.6e}"),
+                format!("r={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Rolling MAE (river `metrics.Rolling` + MAE).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingMae {
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingMae {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingMae {
+    /// Rolling MAE with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window MAE, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.buf.is_empty() {
+            f64::NAN
+        } else {
+            self.buf.iter().sum::<f64>() / self.buf.len() as f64
+        }
+    }
+}
+
+impl PartialFit for RollingMae {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no y for RollingMae"),
+            );
+        };
+        let before = self.score();
+        let cap = self.window.max(1);
+        for i in 0..x.nrows().min(y.len()) {
+            let pred = x.get(i, 0);
+            let truth = y[i];
+            if pred.is_finite() && truth.is_finite() {
+                rolling_push(&mut self.buf, (pred - truth).abs(), cap);
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.buf.is_empty();
+        q.warmup = self.buf.is_empty();
+        q.explanation = format!("RollingMae={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed MAE",
+                "sliding mean |pred−y|; window is not identification p",
+                format!("mae={before:.6e}"),
+                format!("mae={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Rolling MAPE (river `metrics.Rolling` + MAPE).
+///
+/// Window length is not identification `p`. Zeros in `y` are skipped.
+#[derive(Clone, Debug)]
+pub struct RollingMape {
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingMape {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingMape {
+    /// Rolling MAPE with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window MAPE, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.buf.is_empty() {
+            f64::NAN
+        } else {
+            self.buf.iter().sum::<f64>() / self.buf.len() as f64
+        }
+    }
+}
+
+impl PartialFit for RollingMape {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no y for RollingMape"),
+            );
+        };
+        let before = self.score();
+        let cap = self.window.max(1);
+        let mut skipped = 0usize;
+        for i in 0..x.nrows().min(y.len()) {
+            let pred = x.get(i, 0);
+            let truth = y[i];
+            if !pred.is_finite() || !truth.is_finite() || truth.abs() <= 1e-12 {
+                skipped += 1;
+                continue;
+            }
+            rolling_push(&mut self.buf, (pred - truth).abs() / truth.abs(), cap);
+            self.n_seen += 1;
+        }
+        if skipped > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message(format!("RollingMape skipped {skipped} pairs with |y|≈0"))
+                    .build(),
+            );
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.buf.is_empty();
+        q.warmup = self.buf.is_empty();
+        q.explanation = format!("RollingMape={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed MAPE",
+                "sliding |pred−y|/|y|; zeros in y are skipped",
+                format!("mape={before:.6e}"),
+                format!("mape={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Rolling RMSE (river `metrics.Rolling` + RMSE).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingRmse {
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingRmse {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingRmse {
+    /// Rolling RMSE with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window RMSE, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.buf.is_empty() {
+            f64::NAN
+        } else {
+            let ms = self.buf.iter().map(|e| e * e).sum::<f64>() / self.buf.len() as f64;
+            ms.sqrt()
+        }
+    }
+}
+
+impl PartialFit for RollingRmse {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no y for RollingRmse"),
+            );
+        };
+        let before = self.score();
+        let cap = self.window.max(1);
+        for i in 0..x.nrows().min(y.len()) {
+            let pred = x.get(i, 0);
+            let truth = y[i];
+            if pred.is_finite() && truth.is_finite() {
+                rolling_push(&mut self.buf, pred - truth, cap);
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.buf.is_empty();
+        q.warmup = self.buf.is_empty();
+        q.explanation = format!("RollingRmse={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed RMSE",
+                "sliding root-mean-square error; window is not identification p",
+                format!("rmse={before:.6e}"),
+                format!("rmse={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming Matthews correlation (river `metrics.MCC`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineMatthews {
+    tp: f64,
+    tn: f64,
+    fp: f64,
+    fn_: f64,
+    updates: u64,
+}
+
+impl OnlineMatthews {
+    /// Empty MCC.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current MCC, or NaN when a margin is empty.
+    pub fn score(&self) -> f64 {
+        let den = ((self.tp + self.fp)
+            * (self.tp + self.fn_)
+            * (self.tn + self.fp)
+            * (self.tn + self.fn_))
+            .sqrt();
+        if den <= 1e-18 {
+            f64::NAN
+        } else {
+            (self.tp * self.tn - self.fp * self.fn_) / den
+        }
+    }
+}
+
+impl PartialFit for OnlineMatthews {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    (self.tp + self.tn + self.fp + self.fn_) as u64,
+                    "no y for OnlineMatthews",
+                ),
+            );
+        };
+        let before = self.score();
+        for i in 0..x.nrows().min(y.len()) {
+            let pred = x.get(i, 0);
+            let truth = y[i];
+            if !pred.is_finite() || !truth.is_finite() {
+                continue;
+            }
+            let p = pred > 0.5;
+            let t = truth > 0.5;
+            match (p, t) {
+                (true, true) => self.tp += 1.0,
+                (false, false) => self.tn += 1.0,
+                (true, false) => self.fp += 1.0,
+                (false, true) => self.fn_ += 1.0,
+            }
+        }
+        self.updates += 1;
+        let n = (self.tp + self.tn + self.fp + self.fn_) as u64;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), n);
+        q.effective_sample_size = n as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = after.is_finite();
+        q.warmup = !after.is_finite();
+        q.explanation = format!("OnlineMatthews={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Matthews correlation",
+                "streaming (TP·TN−FP·FN) / √((TP+FP)(TP+FN)(TN+FP)(TN+FN))",
+                format!("mcc={before:.6e}"),
+                format!("mcc={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming Poisson deviance (river `metrics.PoissonDeviance`).
+///
+/// Non-positive means or counts are skipped with a warning.
+#[derive(Clone, Debug, Default)]
+pub struct OnlinePoissonDeviance {
+    acc: f64,
+    n: u64,
+    updates: u64,
+}
+
+impl OnlinePoissonDeviance {
+    /// Empty Poisson deviance.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current mean deviance, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.n == 0 {
+            f64::NAN
+        } else {
+            self.acc / self.n as f64
+        }
+    }
+}
+
+impl PartialFit for OnlinePoissonDeviance {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n,
+                    "no y for OnlinePoissonDeviance",
+                ),
+            );
+        };
+        let before = self.score();
+        let mut skipped = 0usize;
+        for i in 0..x.nrows().min(y.len()) {
+            let mu = x.get(i, 0);
+            let yi = y[i];
+            if !mu.is_finite() || !yi.is_finite() || mu <= 0.0 || yi < 0.0 {
+                skipped += 1;
+                continue;
+            }
+            let term = if yi <= 1e-15 {
+                mu
+            } else {
+                yi * (yi / mu).ln() - (yi - mu)
+            };
+            self.acc += 2.0 * term;
+            self.n += 1;
+        }
+        if skipped > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "OnlinePoissonDeviance skipped {skipped} pairs with μ≤0 or y<0"
+                    ))
+                    .build(),
+            );
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n);
+        q.effective_sample_size = self.n as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 1;
+        q.warmup = self.n < 1;
+        q.explanation = format!("OnlinePoissonDeviance={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Poisson deviance",
+                "mean 2(y ln(y/μ) − (y−μ)); non-positive μ or y<0 skipped",
+                format!("dev={before:.6e}"),
+                format!("dev={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming Gamma deviance (river `metrics.GammaDeviance`).
+///
+/// Non-positive pairs are skipped with a warning.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineGammaDeviance {
+    acc: f64,
+    n: u64,
+    updates: u64,
+}
+
+impl OnlineGammaDeviance {
+    /// Empty Gamma deviance.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current mean deviance, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.n == 0 {
+            f64::NAN
+        } else {
+            self.acc / self.n as f64
+        }
+    }
+}
+
+impl PartialFit for OnlineGammaDeviance {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n,
+                    "no y for OnlineGammaDeviance",
+                ),
+            );
+        };
+        let before = self.score();
+        let mut skipped = 0usize;
+        for i in 0..x.nrows().min(y.len()) {
+            let mu = x.get(i, 0);
+            let yi = y[i];
+            if !mu.is_finite() || !yi.is_finite() || mu <= 0.0 || yi <= 0.0 {
+                skipped += 1;
+                continue;
+            }
+            self.acc += 2.0 * ((yi - mu) / mu - (yi / mu).ln());
+            self.n += 1;
+        }
+        if skipped > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "OnlineGammaDeviance skipped {skipped} pairs with μ≤0 or y≤0"
+                    ))
+                    .build(),
+            );
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n);
+        q.effective_sample_size = self.n as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 1;
+        q.warmup = self.n < 1;
+        q.explanation = format!("OnlineGammaDeviance={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Gamma deviance",
+                "mean 2((y−μ)/μ − ln(y/μ)); non-positive pairs skipped",
+                format!("dev={before:.6e}"),
+                format!("dev={after:.6e}"),
+            ),
+        )
+    }
+}
+
 /// ADWIN-resetting bag of perceptrons (river `ensemble.ADWINBaggingClassifier`).
 #[derive(Clone, Debug)]
 pub struct AdwinBagging {
@@ -26356,6 +27063,27 @@ mod tests {
         RollingEntropy::new(4)
             .partial_fit(&x, None, &session)
             .expect("rent");
+        RollingCorr::new(4)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("rcorr");
+        RollingMae::new(4)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("rmae");
+        RollingMape::new(4)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("rmape");
+        RollingRmse::new(4)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("rrmse");
+        OnlineMatthews::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("omcc");
+        OnlinePoissonDeviance::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("opois");
+        OnlineGammaDeviance::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("ogam");
 
         let n_expl = session
             .ledger()
