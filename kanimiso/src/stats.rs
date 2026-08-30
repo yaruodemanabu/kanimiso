@@ -23443,6 +23443,764 @@ impl CauseSpecificForest {
     }
 }
 
+fn fg_at_risk(times: &Vector, events: &Vector, cause: i64, t: f64, i: usize) -> bool {
+    if i >= times.len() || !times[i].is_finite() {
+        return false;
+    }
+    if times[i] + 1e-15 >= t {
+        return true;
+    }
+    i < events.len()
+        && events[i].is_finite()
+        && events[i] > 0.5
+        && (events[i].round() as i64) != cause
+}
+
+fn fg_mh_stat(
+    times: &Vector,
+    events: &Vector,
+    cause: i64,
+    left: &[usize],
+    right: &[usize],
+) -> f64 {
+    let mut ev_t: Vec<f64> = left
+        .iter()
+        .chain(right.iter())
+        .copied()
+        .filter(|&i| {
+            i < events.len()
+                && i < times.len()
+                && events[i].is_finite()
+                && (events[i].round() as i64) == cause
+                && times[i].is_finite()
+        })
+        .map(|i| times[i])
+        .collect();
+    ev_t.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ev_t.dedup_by(|a, b| (*a - *b).abs() <= 0.0);
+    let mut oe = 0.0_f64;
+    let mut var = 0.0_f64;
+    for &t in &ev_t {
+        let mut n0 = 0.0_f64;
+        let mut n1 = 0.0_f64;
+        let mut d0 = 0.0_f64;
+        let mut d1 = 0.0_f64;
+        for &i in left {
+            if fg_at_risk(times, events, cause, t, i) {
+                n0 += 1.0;
+                if i < events.len()
+                    && (events[i].round() as i64) == cause
+                    && (times[i] - t).abs() <= 0.0
+                {
+                    d0 += 1.0;
+                }
+            }
+        }
+        for &i in right {
+            if fg_at_risk(times, events, cause, t, i) {
+                n1 += 1.0;
+                if i < events.len()
+                    && (events[i].round() as i64) == cause
+                    && (times[i] - t).abs() <= 0.0
+                {
+                    d1 += 1.0;
+                }
+            }
+        }
+        let n = n0 + n1;
+        let d = d0 + d1;
+        if n <= 1.0 || d <= 0.0 {
+            continue;
+        }
+        oe += d0 - d * n0 / n;
+        var += d * (n - d) * n0 * n1 / (n * n * (n - 1.0));
+    }
+    if var <= 1e-15 {
+        0.0
+    } else {
+        oe * oe / var
+    }
+}
+
+fn fg_leaf_cif(times: &Vector, events: &Vector, cause: i64, idx: &[usize]) -> f64 {
+    let mut ev_t: Vec<f64> = idx
+        .iter()
+        .copied()
+        .filter(|&i| {
+            i < events.len()
+                && i < times.len()
+                && events[i].is_finite()
+                && (events[i].round() as i64) == cause
+                && times[i].is_finite()
+        })
+        .map(|i| times[i])
+        .collect();
+    ev_t.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ev_t.dedup_by(|a, b| (*a - *b).abs() <= 0.0);
+    let mut h = 0.0_f64;
+    for &t in &ev_t {
+        let mut r = 0.0_f64;
+        let mut d = 0.0_f64;
+        for &i in idx {
+            if fg_at_risk(times, events, cause, t, i) {
+                r += 1.0;
+                if i < events.len()
+                    && (events[i].round() as i64) == cause
+                    && (times[i] - t).abs() <= 0.0
+                {
+                    d += 1.0;
+                }
+            }
+        }
+        if r > 1e-15 {
+            h += d / r;
+        }
+    }
+    1.0 - (-h).exp()
+}
+
+fn grow_fg_tree(
+    x: &Matrix,
+    times: &Vector,
+    events: &Vector,
+    cause: i64,
+    idx: &[usize],
+    depth: usize,
+    max_depth: usize,
+    min_samples: usize,
+    n_try: usize,
+    rng: &mut Rng,
+) -> SurvNode {
+    let n_ev = idx
+        .iter()
+        .filter(|&&i| i < events.len() && events[i].is_finite() && (events[i].round() as i64) == cause)
+        .count();
+    if depth >= max_depth || idx.len() < min_samples.saturating_mul(2) || n_ev == 0 {
+        return SurvNode::Leaf {
+            risk: fg_leaf_cif(times, events, cause, idx),
+        };
+    }
+    let p = x.ncols().max(1);
+    let mut best: Option<(f64, usize, f64, Vec<usize>, Vec<usize>)> = None;
+    for _ in 0..n_try.max(1) {
+        let j = rng.below(p);
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for &i in idx {
+            let v = x.get(i, j);
+            if v.is_finite() {
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+        }
+        if !lo.is_finite() || hi - lo <= 1e-15 {
+            continue;
+        }
+        let t = lo + rng.uniform() * (hi - lo);
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for &i in idx {
+            if x.get(i, j) <= t {
+                left.push(i);
+            } else {
+                right.push(i);
+            }
+        }
+        if left.len() < min_samples || right.len() < min_samples {
+            continue;
+        }
+        let stat = fg_mh_stat(times, events, cause, &left, &right);
+        if !stat.is_finite() {
+            continue;
+        }
+        if best.as_ref().map(|b| stat > b.0).unwrap_or(true) {
+            best = Some((stat, j, t, left, right));
+        }
+    }
+    match best {
+        None => SurvNode::Leaf {
+            risk: fg_leaf_cif(times, events, cause, idx),
+        },
+        Some((_, j, t, left, right)) => SurvNode::Split {
+            feat: j,
+            thresh: t,
+            left: Box::new(grow_fg_tree(
+                x, times, events, cause, &left, depth + 1, max_depth, min_samples, n_try, rng,
+            )),
+            right: Box::new(grow_fg_tree(
+                x, times, events, cause, &right, depth + 1, max_depth, min_samples, n_try, rng,
+            )),
+        },
+    }
+}
+
+/// Fine–Gray extra-trees forest (sksurv competing-risk CIF forest lite).
+///
+/// Splits use a Mantel–Haenszel score on the **subdistribution** risk set
+/// (competing events stay at risk). Tree / cause counts are not identification
+/// `p`. Does not call [`aalen_johansen`].
+#[derive(Clone, Debug)]
+pub struct FineGrayForest {
+    /// Trees. Not identification `p`.
+    pub n_estimators: usize,
+    /// Maximum depth.
+    pub max_depth: usize,
+    /// Cause code (0 ⇒ 1).
+    pub cause: i64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for FineGrayForest {
+    fn default() -> Self {
+        Self {
+            n_estimators: 6,
+            max_depth: 3,
+            cause: 1,
+            seed: 47,
+        }
+    }
+}
+
+impl FineGrayForest {
+    /// Default Fine–Gray extra-trees forest.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit CIF extra-trees for one cause.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedRandomSurvivalForest>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(durations.len()).min(events.len());
+        let cause = if self.cause == 0 { 1 } else { self.cause };
+        let n_events = (0..n)
+            .filter(|&i| events[i].is_finite() && (events[i].round() as i64) == cause)
+            .count();
+        if n_events == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("FineGrayForest has no events of the requested cause")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "subdistribution CIF forest",
+                        "zero cause events ⇒ empty Gray splits and empty CIF leaves",
+                        "choose a cause that occurs",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("FineGrayForest is extra-trees on FG risk sets, not a published CIF forest")
+                .compromise(NumericalCompromise::new(
+                    "Fine–Gray / CIF random forest",
+                    "Mantel–Haenszel on the subdistribution risk set and 1−exp(−H) leaves",
+                    "IPCW Fine–Gray weights and OOB CIF calibration are omitted",
+                    "read the score as a cause ranking, not a published CIF",
+                ))
+                .build(),
+        );
+        let idx: Vec<usize> = (0..n).collect();
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        for _ in 0..self.n_estimators.max(1) {
+            let mut trng = Rng::new(rng.next_u64());
+            trees.push(grow_fg_tree(
+                x,
+                durations,
+                events,
+                cause,
+                &idx,
+                0,
+                self.max_depth.max(1),
+                2,
+                6,
+                &mut trng,
+            ));
+        }
+        ctx.finish(FittedRandomSurvivalForest {
+            trees,
+            n_features: x.ncols(),
+        })
+    }
+}
+
+/// IPCW censored quantile regression (Portnoy / sksurv-adjacent).
+///
+/// Events are weighted by \(1/\hat G(T)\). Quantile \(\tau\) is not
+/// identification `p`. Local censoring KM; does not call [`nelson_aalen`].
+#[derive(Clone, Debug)]
+pub struct CensoredQuantileRegressor {
+    /// Quantile in \((0,1)\). Not identification `p`.
+    pub tau: f64,
+    /// ISTA steps. Not identification `p`.
+    pub max_iter: usize,
+}
+
+impl Default for CensoredQuantileRegressor {
+    fn default() -> Self {
+        Self {
+            tau: 0.5,
+            max_iter: 40,
+        }
+    }
+}
+
+impl CensoredQuantileRegressor {
+    /// Quantile \(\tau\) (clamped to \((0,1)\)).
+    pub fn new(tau: f64) -> Self {
+        Self {
+            tau,
+            ..Self::default()
+        }
+    }
+
+    /// Fit \(Q_\tau(T\mid x)=x\beta+b\) on IPCW events.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCensoredQuantile>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(durations.len()).min(events.len());
+        let p = x.ncols();
+        let n_events = (0..n).filter(|&i| events[i] > 0.5).count();
+        if n_events == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("CensoredQuantileRegressor has no events")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "IPCW quantile slopes",
+                        "zero events ⇒ empty check-loss",
+                        "collect events",
+                    ))
+                    .build(),
+            );
+        }
+        let tau = if self.tau.is_finite() && self.tau > 0.0 && self.tau < 1.0 {
+            self.tau
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "CensoredQuantileRegressor τ={} is not in (0,1); using 0.5",
+                        self.tau
+                    ))
+                    .build(),
+            );
+            0.5
+        };
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("CensoredQuantileRegressor is IPCW ISTA, not Portnoy's recursive CRQ")
+                .compromise(NumericalCompromise::new(
+                    "Portnoy / Powell censored quantile regression",
+                    "ISTA on ρ_τ with event weights 1/Ĝ(T)",
+                    "the recursive redistribution and interior-point CRQ are omitted",
+                    "read β as a weighted quantile ranking, not a published CRQ path",
+                ))
+                .build(),
+        );
+        let g_hat = censoring_km(durations, events);
+        let mut beta = Vector::zeros(p);
+        let mut intercept = durations
+            .as_slice()
+            .iter()
+            .take(n)
+            .filter(|t| t.is_finite())
+            .copied()
+            .fold(0.0_f64, |a, t| a + t)
+            / n.max(1) as f64;
+        let lr = 0.05_f64 / (1.0 + p as f64);
+        for _it in 0..self.max_iter.max(1) {
+            let mut gβ = Vector::zeros(p);
+            let mut gb = 0.0_f64;
+            for i in 0..n {
+                if events[i] <= 0.5 || !durations[i].is_finite() {
+                    continue;
+                }
+                let w = 1.0 / censor_surv_at(&g_hat, durations[i]).max(1e-8);
+                let mut xb = intercept;
+                for j in 0..p {
+                    xb += x.get(i, j) * beta[j];
+                }
+                let u = durations[i] - xb;
+                let psi = tau - if u < 0.0 { 1.0 } else { 0.0 };
+                gb += w * psi;
+                for j in 0..p {
+                    gβ[j] += w * psi * x.get(i, j);
+                }
+            }
+            intercept = (intercept + lr * gb / n.max(1) as f64).clamp(-1e6, 1e6);
+            for j in 0..p {
+                beta[j] = (beta[j] + lr * gβ[j] / n.max(1) as f64).clamp(-20.0, 20.0);
+            }
+            if gβ.norm() + gb.abs() < 1e-6 {
+                break;
+            }
+        }
+        ctx.finish(FittedCensoredQuantile {
+            coef: beta,
+            intercept,
+            tau,
+        })
+    }
+}
+
+/// Fitted IPCW censored quantile.
+#[derive(Clone, Debug)]
+pub struct FittedCensoredQuantile {
+    /// Slopes.
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+    /// Fitted quantile.
+    pub tau: f64,
+}
+
+impl FittedCensoredQuantile {
+    /// Predicted \(Q_\tau(T\mid x)\).
+    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let mut s = x.matvec(&self.coef);
+        for i in 0..s.len() {
+            s[i] += self.intercept;
+        }
+        ctx.finish(s)
+    }
+}
+
+/// Named Portnoy CRQ alias.
+#[derive(Clone, Debug, Default)]
+pub struct PortnoyQuantile {
+    inner: CensoredQuantileRegressor,
+}
+
+impl PortnoyQuantile {
+    /// Median IPCW CRQ.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit the IPCW check-loss.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCensoredQuantile>> {
+        self.inner.fit(durations, events, x, session)
+    }
+}
+
+fn mh_split_stat_w(
+    times: &Vector,
+    events: &Vector,
+    w: &[f64],
+    left: &[usize],
+    right: &[usize],
+) -> f64 {
+    let mut ev_t: Vec<f64> = left
+        .iter()
+        .chain(right.iter())
+        .copied()
+        .filter(|&i| i < events.len() && i < times.len() && events[i] > 0.5 && times[i].is_finite())
+        .map(|i| times[i])
+        .collect();
+    ev_t.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ev_t.dedup_by(|a, b| (*a - *b).abs() <= 0.0);
+    let mut oe = 0.0_f64;
+    let mut var = 0.0_f64;
+    for &t in &ev_t {
+        let mut n0 = 0.0_f64;
+        let mut n1 = 0.0_f64;
+        let mut d0 = 0.0_f64;
+        let mut d1 = 0.0_f64;
+        for &i in left {
+            if i >= times.len() || !times[i].is_finite() {
+                continue;
+            }
+            if times[i] + 1e-15 >= t {
+                n0 += 1.0;
+                if i < events.len() && events[i] > 0.5 && (times[i] - t).abs() <= 0.0 {
+                    d0 += w.get(i).copied().unwrap_or(1.0);
+                }
+            }
+        }
+        for &i in right {
+            if i >= times.len() || !times[i].is_finite() {
+                continue;
+            }
+            if times[i] + 1e-15 >= t {
+                n1 += 1.0;
+                if i < events.len() && events[i] > 0.5 && (times[i] - t).abs() <= 0.0 {
+                    d1 += w.get(i).copied().unwrap_or(1.0);
+                }
+            }
+        }
+        let n = n0 + n1;
+        let d = d0 + d1;
+        if n <= 1.0 || d <= 0.0 {
+            continue;
+        }
+        oe += d0 - d * n0 / n;
+        var += d * (n - d).max(0.0) * n0 * n1 / (n * n * (n - 1.0));
+    }
+    if var <= 1e-15 {
+        0.0
+    } else {
+        oe * oe / var
+    }
+}
+
+fn nelson_aalen_idx_w(times: &Vector, events: &Vector, w: &[f64], idx: &[usize]) -> f64 {
+    let mut ev_t: Vec<f64> = idx
+        .iter()
+        .copied()
+        .filter(|&i| i < events.len() && i < times.len() && events[i] > 0.5 && times[i].is_finite())
+        .map(|i| times[i])
+        .collect();
+    ev_t.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ev_t.dedup_by(|a, b| (*a - *b).abs() <= 0.0);
+    let mut h = 0.0_f64;
+    for &t in &ev_t {
+        let mut r = 0.0_f64;
+        let mut d = 0.0_f64;
+        for &i in idx {
+            if i >= times.len() || !times[i].is_finite() {
+                continue;
+            }
+            if times[i] + 1e-15 >= t {
+                r += 1.0;
+            }
+            if i < events.len() && events[i] > 0.5 && (times[i] - t).abs() <= 0.0 {
+                d += w.get(i).copied().unwrap_or(1.0);
+            }
+        }
+        if r > 1e-15 {
+            h += d / r;
+        }
+    }
+    h
+}
+
+fn grow_ipcw_tree(
+    x: &Matrix,
+    times: &Vector,
+    events: &Vector,
+    w: &[f64],
+    idx: &[usize],
+    depth: usize,
+    max_depth: usize,
+    min_samples: usize,
+    n_try: usize,
+    rng: &mut Rng,
+) -> SurvNode {
+    let n_ev = idx
+        .iter()
+        .filter(|&&i| i < events.len() && events[i] > 0.5)
+        .count();
+    if depth >= max_depth || idx.len() < min_samples.saturating_mul(2) || n_ev == 0 {
+        return SurvNode::Leaf {
+            risk: nelson_aalen_idx_w(times, events, w, idx),
+        };
+    }
+    let p = x.ncols().max(1);
+    let mut best: Option<(f64, usize, f64, Vec<usize>, Vec<usize>)> = None;
+    for _ in 0..n_try.max(1) {
+        let j = rng.below(p);
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for &i in idx {
+            let v = x.get(i, j);
+            if v.is_finite() {
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+        }
+        if !lo.is_finite() || hi - lo <= 1e-15 {
+            continue;
+        }
+        let t = lo + rng.uniform() * (hi - lo);
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for &i in idx {
+            if x.get(i, j) <= t {
+                left.push(i);
+            } else {
+                right.push(i);
+            }
+        }
+        if left.len() < min_samples || right.len() < min_samples {
+            continue;
+        }
+        let stat = mh_split_stat_w(times, events, w, &left, &right);
+        if !stat.is_finite() {
+            continue;
+        }
+        if best.as_ref().map(|b| stat > b.0).unwrap_or(true) {
+            best = Some((stat, j, t, left, right));
+        }
+    }
+    match best {
+        None => SurvNode::Leaf {
+            risk: nelson_aalen_idx_w(times, events, w, idx),
+        },
+        Some((_, j, t, left, right)) => SurvNode::Split {
+            feat: j,
+            thresh: t,
+            left: Box::new(grow_ipcw_tree(
+                x, times, events, w, &left, depth + 1, max_depth, min_samples, n_try, rng,
+            )),
+            right: Box::new(grow_ipcw_tree(
+                x, times, events, w, &right, depth + 1, max_depth, min_samples, n_try, rng,
+            )),
+        },
+    }
+}
+
+/// IPCW random survival forest (sksurv-adjacent).
+///
+/// Extra-trees log-rank splits weight events by \(1/\hat G(T)\). Tree count is
+/// not identification `p`. Local censoring KM; does not call [`nelson_aalen`].
+#[derive(Clone, Debug)]
+pub struct IpcwSurvivalForest {
+    /// Trees. Not identification `p`.
+    pub n_estimators: usize,
+    /// Maximum depth.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for IpcwSurvivalForest {
+    fn default() -> Self {
+        Self {
+            n_estimators: 6,
+            max_depth: 3,
+            seed: 53,
+        }
+    }
+}
+
+impl IpcwSurvivalForest {
+    /// Default IPCW extra-trees survival forest.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit IPCW-weighted log-rank extra-trees.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedRandomSurvivalForest>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(durations.len()).min(events.len());
+        let n_events = (0..n).filter(|&i| events[i] > 0.5).count();
+        if n_events == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("IpcwSurvivalForest has no events")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "IPCW ensemble cumulative hazard",
+                        "zero events ⇒ empty weighted log-rank and empty Nelson–Aalen",
+                        "collect events",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("IpcwSurvivalForest is extra-trees with 1/Ĝ event weights, not a published IPCW RSF")
+                .compromise(NumericalCompromise::new(
+                    "IPCW random survival forest",
+                    "Mantel–Haenszel splits and Nelson–Aalen leaves with event weights 1/Ĝ(T)",
+                    "OOB C-index and time-dependent ensemble CHF are omitted",
+                    "read the score as a ranking proxy, not a published IPCW RSF",
+                ))
+                .build(),
+        );
+        let g_hat = censoring_km(durations, events);
+        let w: Vec<f64> = (0..n)
+            .map(|i| {
+                if events[i] > 0.5 && durations[i].is_finite() {
+                    1.0 / censor_surv_at(&g_hat, durations[i]).max(1e-8)
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        let idx: Vec<usize> = (0..n).collect();
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        for _ in 0..self.n_estimators.max(1) {
+            let mut trng = Rng::new(rng.next_u64());
+            trees.push(grow_ipcw_tree(
+                x,
+                durations,
+                events,
+                &w,
+                &idx,
+                0,
+                self.max_depth.max(1),
+                2,
+                6,
+                &mut trng,
+            ));
+        }
+        ctx.finish(FittedRandomSurvivalForest {
+            trees,
+            n_features: x.ncols(),
+        })
+    }
+}
+
+/// Named IPCW RSF alias.
+#[derive(Clone, Debug, Default)]
+pub struct IpcwRandomSurvivalForest {
+    inner: IpcwSurvivalForest,
+}
+
+impl IpcwRandomSurvivalForest {
+    /// Default IPCW RSF.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit the weighted extra-trees forest.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedRandomSurvivalForest>> {
+        self.inner.fit(durations, events, x, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -24486,5 +25244,29 @@ mod tests {
             .fit(&dur, &ev, &xcox, &Session::new("csf", "t"))
             .expect("csf");
         assert_eq!(csf.value.n_features, 1);
+        let fgf = FineGrayForest::new()
+            .fit(&dur, &ev, &xcox, &Session::new("fgf", "t"))
+            .expect("fgf");
+        let pfgf = fgf
+            .value
+            .predict(&xcox, &Session::new("fgf", "p"))
+            .expect("fgfp");
+        assert_eq!(pfgf.value.len(), 20);
+        let cqr = CensoredQuantileRegressor::new(0.5)
+            .fit(&dur, &ev, &xcox, &Session::new("cqr", "t"))
+            .expect("cqr");
+        assert_eq!(cqr.value.coef.len(), 1);
+        let pnq = PortnoyQuantile::new()
+            .fit(&dur, &ev, &xcox, &Session::new("pnq", "t"))
+            .expect("pnq");
+        assert_eq!(pnq.value.coef.len(), 1);
+        let iprf = IpcwSurvivalForest::new()
+            .fit(&dur, &ev, &xcox, &Session::new("iprf", "t"))
+            .expect("iprf");
+        assert_eq!(iprf.value.n_features, 1);
+        let iprsf = IpcwRandomSurvivalForest::new()
+            .fit(&dur, &ev, &xcox, &Session::new("iprsf", "t"))
+            .expect("iprsf");
+        assert_eq!(iprsf.value.n_features, 1);
     }
 }

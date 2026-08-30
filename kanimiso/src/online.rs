@@ -36169,6 +36169,1052 @@ impl Predict for AdwinBaggingRegressor {
     }
 }
 
+/// Named HAT regressor (river `tree.HoeffdingAdaptiveTreeRegressor`).
+#[derive(Clone, Debug, Default)]
+pub struct HATRegressor {
+    inner: HoeffdingAdaptiveTreeRegressor,
+}
+
+impl HATRegressor {
+    /// Default HAT regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for HATRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for HATRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+/// Named streaming AdaBoost (river `ensemble.AdaBoostClassifier`).
+#[derive(Clone, Debug, Default)]
+pub struct AdaBoostClassifier {
+    inner: OnlineAdaBoost,
+}
+
+impl AdaBoostClassifier {
+    /// Default online AdaBoost.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for AdaBoostClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for AdaBoostClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+/// Named streaming bagging (river `ensemble.BaggingClassifier`).
+#[derive(Clone, Debug, Default)]
+pub struct BaggingClassifier {
+    inner: OnlineBagging,
+}
+
+impl BaggingClassifier {
+    /// Default online bagging.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for BaggingClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for BaggingClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+/// Poisson bag of Mondrian trees (river `forest.MondrianForestClassifier`).
+///
+/// Member count is not identification `p`. Each tree is the existing
+/// [`MondrianTree`]; Poisson(\(w\)) replay diversifies the random cut.
+#[derive(Clone, Debug)]
+pub struct MondrianForest {
+    /// Trees. Not identification `p`.
+    pub n_trees: usize,
+    /// Poisson leverage.
+    pub w: f64,
+    trees: Vec<MondrianTree>,
+    n_seen: u64,
+    updates: u64,
+    rng: Rng,
+}
+
+impl Default for MondrianForest {
+    fn default() -> Self {
+        Self {
+            n_trees: 3,
+            w: 1.0,
+            trees: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            rng: Rng::new(0x4d07_f04e),
+        }
+    }
+}
+
+impl MondrianForest {
+    /// Forest of `n_trees` Mondrian classifiers.
+    pub fn new(n_trees: usize) -> Self {
+        Self {
+            n_trees: n_trees.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for MondrianForest {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        if self.trees.is_empty() {
+            self.trees = (0..self.n_trees.max(1))
+                .map(|_| MondrianTree::new())
+                .collect();
+        }
+        let before = self.n_seen;
+        let mut n_updates = 0u64;
+        let w = if self.w.is_finite() && self.w > 0.0 {
+            self.w
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("MondrianForest w is not a positive finite; using 1")
+                    .build(),
+            );
+            1.0
+        };
+        for (m, tree) in self.trees.iter_mut().enumerate() {
+            let k = self.rng.poisson(w) as usize;
+            for _ in 0..k.max(1) {
+                let _ = tree.partial_fit(x, Some(y), &session.child(format!("mf_{m}")));
+                n_updates += 1;
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(n_updates as f64);
+        q.information_gain = Some(n_updates as f64);
+        q.still_identified = self.n_seen >= 8;
+        q.warmup = self.n_seen < 8;
+        q.explanation = format!(
+            "MondrianForest: {} trees, {n_updates} Poisson-weighted updates",
+            self.trees.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("{n_updates} Poisson(w={w}) Mondrian updates"),
+                "each tree is a range-tracking Mondrian stump; Poisson replay diversifies the cut",
+                format!("n={before}"),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for MondrianForest {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.trees.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let n_t = self.trees.len() as f64;
+        let mut acc = vec![0.0; x.nrows()];
+        for (m, tree) in self.trees.iter().enumerate() {
+            match tree.predict(x, &session.child(format!("mfp_{m}"))) {
+                Ok(q) => {
+                    for i in 0..x.nrows().min(q.value.len()) {
+                        acc[i] += q.value[i];
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        ctx.finish(Vector::from_iter(acc.iter().map(|v| {
+            if *v / n_t.max(1.0) >= 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        })))
+    }
+}
+
+/// Named Mondrian forest classifier.
+#[derive(Clone, Debug)]
+pub struct MondrianForestClassifier {
+    inner: MondrianForest,
+}
+
+impl Default for MondrianForestClassifier {
+    fn default() -> Self {
+        Self {
+            inner: MondrianForest::default(),
+        }
+    }
+}
+
+impl MondrianForestClassifier {
+    /// Forest of `n_trees` Mondrian classifiers.
+    pub fn new(n_trees: usize) -> Self {
+        Self {
+            inner: MondrianForest::new(n_trees),
+        }
+    }
+}
+
+impl PartialFit for MondrianForestClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for MondrianForestClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MondrianRegTree {
+    mins: Vector,
+    maxs: Vector,
+    split_j: Option<usize>,
+    threshold: f64,
+    leaf_sum: f64,
+    leaf_n: f64,
+    left_sum: f64,
+    left_n: f64,
+    right_sum: f64,
+    right_n: f64,
+    n_seen: u64,
+}
+
+impl MondrianRegTree {
+    fn new() -> Self {
+        Self {
+            mins: Vector::zeros(0),
+            maxs: Vector::zeros(0),
+            split_j: None,
+            threshold: 0.0,
+            leaf_sum: 0.0,
+            leaf_n: 0.0,
+            left_sum: 0.0,
+            left_n: 0.0,
+            right_sum: 0.0,
+            right_n: 0.0,
+            n_seen: 0,
+        }
+    }
+
+    fn mean(sum: f64, n: f64) -> f64 {
+        if n > 0.0 {
+            sum / n
+        } else {
+            0.0
+        }
+    }
+
+    fn update(&mut self, x: &Matrix, i: usize, yi: f64, rng: &mut Rng) {
+        if !yi.is_finite() {
+            return;
+        }
+        if self.mins.is_empty() && x.ncols() > 0 {
+            self.mins = Vector::from_iter((0..x.ncols()).map(|j| x.get(i, j)));
+            self.maxs = self.mins.clone();
+        }
+        for j in 0..x.ncols().min(self.mins.len()) {
+            let v = x.get(i, j);
+            if v < self.mins[j] {
+                self.mins[j] = v;
+            }
+            if v > self.maxs[j] {
+                self.maxs[j] = v;
+            }
+        }
+        if let Some(j) = self.split_j {
+            if x.get(i, j) <= self.threshold {
+                self.left_sum += yi;
+                self.left_n += 1.0;
+            } else {
+                self.right_sum += yi;
+                self.right_n += 1.0;
+            }
+        } else {
+            self.leaf_sum += yi;
+            self.leaf_n += 1.0;
+        }
+        self.n_seen += 1;
+        if self.split_j.is_none() && self.n_seen >= 8 && !self.mins.is_empty() {
+            let mut cand = Vec::new();
+            for j in 0..self.mins.len() {
+                if self.maxs[j] - self.mins[j] > 1e-12 {
+                    cand.push(j);
+                }
+            }
+            if !cand.is_empty() {
+                let j = cand[rng.below(cand.len())];
+                let span = self.maxs[j] - self.mins[j];
+                self.threshold = self.mins[j] + rng.uniform() * span;
+                self.split_j = Some(j);
+                self.left_sum = self.leaf_sum;
+                self.left_n = self.leaf_n;
+                self.right_sum = 0.0;
+                self.right_n = 0.0;
+            }
+        }
+    }
+
+    fn predict_one(&self, x: &Matrix, i: usize) -> f64 {
+        match self.split_j {
+            Some(j) if j < x.ncols() => {
+                if x.get(i, j) <= self.threshold {
+                    Self::mean(self.left_sum, self.left_n)
+                } else {
+                    Self::mean(self.right_sum, self.right_n)
+                }
+            }
+            _ => Self::mean(self.leaf_sum, self.leaf_n),
+        }
+    }
+}
+
+/// Poisson bag of Mondrian regressor trees (river `forest.MondrianForestRegressor`).
+///
+/// Member count is not identification `p`. Distinct from [`AmfRegressor`]
+/// (widest-range stump) by using a delayed random cut and Poisson bagging.
+#[derive(Clone, Debug)]
+pub struct MondrianForestRegressor {
+    /// Trees. Not identification `p`.
+    pub n_trees: usize,
+    trees: Vec<MondrianRegTree>,
+    detector: Adwin,
+    n_seen: u64,
+    updates: u64,
+    resets: u64,
+    rng: Rng,
+}
+
+impl Default for MondrianForestRegressor {
+    fn default() -> Self {
+        Self {
+            n_trees: 3,
+            trees: Vec::new(),
+            detector: Adwin::new(0.002),
+            n_seen: 0,
+            updates: 0,
+            resets: 0,
+            rng: Rng::new(0x4d07_a4f),
+        }
+    }
+}
+
+impl MondrianForestRegressor {
+    /// Forest of `n_trees` Mondrian regressors.
+    pub fn new(n_trees: usize) -> Self {
+        Self {
+            n_trees: n_trees.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for MondrianForestRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        if self.trees.is_empty() {
+            self.trees = (0..self.n_trees.max(1))
+                .map(|_| MondrianRegTree::new())
+                .collect();
+        } else if !self.trees[0].mins.is_empty() && self.trees[0].mins.len() != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self.n_seen;
+        let mut n_updates = 0u64;
+        for tree in &mut self.trees {
+            for i in 0..x.nrows().min(y.len()) {
+                let k = self.rng.poisson(1.0) as usize;
+                for _ in 0..k.max(1) {
+                    tree.update(x, i, y[i], &mut self.rng);
+                    n_updates += 1;
+                }
+            }
+        }
+        let mut mae = 0.0_f64;
+        let mut n_mae = 0.0_f64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let mut s = 0.0;
+            for t in &self.trees {
+                s += t.predict_one(x, i);
+            }
+            mae += (s / self.trees.len().max(1) as f64 - y[i]).abs();
+            n_mae += 1.0;
+        }
+        if n_mae > 0.0 {
+            if let Ok(d) = self.detector.update(mae / n_mae, &session.child("amf_adwin")) {
+                if matches!(d.value, DriftDecision::Drift { .. }) {
+                    self.trees = (0..self.trees.len())
+                        .map(|_| MondrianRegTree::new())
+                        .collect();
+                    self.detector.reset();
+                    self.resets += 1;
+                    ctx.push(
+                        Issue::builder(IssueCode::ConceptDriftDetected)
+                            .message("MondrianForestRegressor reset after an ADWIN cut on MAE")
+                            .build(),
+                    );
+                }
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(n_updates as f64 + self.resets as f64);
+        q.information_gain = Some(n_updates as f64);
+        q.still_identified = self.n_seen >= 8;
+        q.warmup = self.n_seen < 8;
+        q.explanation = format!(
+            "MondrianForestRegressor {} trees, updates={n_updates} resets={}",
+            self.trees.len(),
+            self.resets
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Mondrian regressor forest update",
+                "Poisson bag of range-tracking mean trees; ADWIN resets on MAE",
+                format!("n={before}"),
+                format!("n={} resets={}", self.n_seen, self.resets),
+            ),
+        )
+    }
+}
+
+impl Predict for MondrianForestRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.trees.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let n_t = self.trees.len() as f64;
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = 0.0;
+            for t in &self.trees {
+                s += t.predict_one(x, i);
+            }
+            s / n_t.max(1.0)
+        })))
+    }
+}
+
+/// Named aggregated Mondrian forest regressor (river `forest.AMFRegressor`).
+#[derive(Clone, Debug, Default)]
+pub struct AMFRegressor {
+    inner: AmfRegressor,
+}
+
+impl AMFRegressor {
+    /// AMF with `n_trees` Mondrian stumps.
+    pub fn new(n_trees: usize) -> Self {
+        Self {
+            inner: AmfRegressor::new(n_trees),
+        }
+    }
+}
+
+impl PartialFit for AMFRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for AMFRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+#[derive(Clone, Debug)]
+enum SgtNode {
+    Leaf(SgtLeaf),
+    Split {
+        feature: usize,
+        threshold: f64,
+        left: Box<SgtNode>,
+        right: Box<SgtNode>,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct SgtLeaf {
+    pred: f64,
+    g: f64,
+    h: f64,
+    n: f64,
+    bins: Vec<SgtBin>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SgtBin {
+    gx: Gauss,
+    lg: f64,
+    lh: f64,
+    rg: f64,
+    rh: f64,
+}
+
+impl SgtLeaf {
+    fn new(p: usize, pred: f64) -> Self {
+        Self {
+            pred,
+            g: 0.0,
+            h: 0.0,
+            n: 0.0,
+            bins: vec![SgtBin::default(); p],
+        }
+    }
+}
+
+fn sgt_gain(gl: f64, hl: f64, gr: f64, hr: f64, g: f64, h: f64, lambda: f64) -> f64 {
+    let sl = gl * gl / (hl + lambda).max(1e-12);
+    let sr = gr * gr / (hr + lambda).max(1e-12);
+    let sp = g * g / (h + lambda).max(1e-12);
+    0.5 * (sl + sr - sp)
+}
+
+fn sgt_push(leaf: &mut SgtLeaf, x: &Matrix, i: usize, gi: f64, hi: f64) {
+    leaf.g += gi;
+    leaf.h += hi;
+    leaf.n += 1.0;
+    for j in 0..x.ncols().min(leaf.bins.len()) {
+        let xv = x.get(i, j);
+        let t = if leaf.bins[j].gx.n < 1.0 {
+            xv
+        } else {
+            leaf.bins[j].gx.mean
+        };
+        if xv <= t {
+            leaf.bins[j].lg += gi;
+            leaf.bins[j].lh += hi;
+        } else {
+            leaf.bins[j].rg += gi;
+            leaf.bins[j].rh += hi;
+        }
+        leaf.bins[j].gx.push(xv);
+    }
+}
+
+fn sgt_maybe_split(leaf: &SgtLeaf, min_samples: usize, lambda: f64, tau: f64) -> Option<(usize, f64, f64)> {
+    if (leaf.n as usize) < min_samples {
+        return None;
+    }
+    let mut best = (0usize, 0.0, -1.0);
+    for (j, bin) in leaf.bins.iter().enumerate() {
+        if bin.lh < 1e-8 || bin.rh < 1e-8 {
+            continue;
+        }
+        let gain = sgt_gain(bin.lg, bin.lh, bin.rg, bin.rh, leaf.g, leaf.h, lambda);
+        if gain > best.2 {
+            best = (j, bin.gx.mean, gain);
+        }
+    }
+    if best.2 > tau {
+        Some((best.0, best.1, best.2))
+    } else {
+        None
+    }
+}
+
+fn sgt_update(
+    node: &mut SgtNode,
+    x: &Matrix,
+    i: usize,
+    gi: f64,
+    hi: f64,
+    min_samples: usize,
+    lambda: f64,
+    tau: f64,
+    lr: f64,
+) -> Option<f64> {
+    match node {
+        SgtNode::Split {
+            feature,
+            threshold,
+            left,
+            right,
+        } => {
+            let v = if *feature < x.ncols() {
+                x.get(i, *feature)
+            } else {
+                0.0
+            };
+            if v <= *threshold {
+                sgt_update(left, x, i, gi, hi, min_samples, lambda, tau, lr)
+            } else {
+                sgt_update(right, x, i, gi, hi, min_samples, lambda, tau, lr)
+            }
+        }
+        SgtNode::Leaf(leaf) => {
+            sgt_push(leaf, x, i, gi, hi);
+            leaf.pred -= lr * gi / hi.max(1e-8);
+            if let Some((j, t, gain)) = sgt_maybe_split(leaf, min_samples, lambda, tau) {
+                let pred = leaf.pred;
+                let p = leaf.bins.len();
+                *node = SgtNode::Split {
+                    feature: j,
+                    threshold: t,
+                    left: Box::new(SgtNode::Leaf(SgtLeaf::new(p, pred))),
+                    right: Box::new(SgtNode::Leaf(SgtLeaf::new(p, pred))),
+                };
+                Some(gain)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn sgt_predict(node: &SgtNode, x: &Matrix, i: usize) -> f64 {
+    match node {
+        SgtNode::Leaf(l) => l.pred,
+        SgtNode::Split {
+            feature,
+            threshold,
+            left,
+            right,
+        } => {
+            let v = if *feature < x.ncols() {
+                x.get(i, *feature)
+            } else {
+                0.0
+            };
+            if v <= *threshold {
+                sgt_predict(left, x, i)
+            } else {
+                sgt_predict(right, x, i)
+            }
+        }
+    }
+}
+
+/// Streaming gradient tree regressor (river `tree.SGTRegressor`).
+///
+/// Leaves accumulate squared-error gradient / Hessian bins and split on
+/// XGBoost-style gain. Split / bin counts are not identification `p`.
+/// Computationally distinct from the single-leaf [`SgtRegressor`].
+#[derive(Clone, Debug)]
+pub struct StreamingGradientTreeRegressor {
+    /// Newton / SGD step on the leaf score.
+    pub learning_rate: f64,
+    /// L2 on the Hessian denominator.
+    pub lambda: f64,
+    /// Minimum observations before a split. Not identification `p`.
+    pub min_samples: usize,
+    /// Minimum gain to split.
+    pub tau: f64,
+    root: SgtNode,
+    n_seen: u64,
+    updates: u64,
+    n_features: usize,
+    initialized: bool,
+    last_gain: f64,
+}
+
+impl Default for StreamingGradientTreeRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.1,
+            lambda: 1.0,
+            min_samples: 8,
+            tau: 1e-4,
+            root: SgtNode::Leaf(SgtLeaf::new(0, 0.0)),
+            n_seen: 0,
+            updates: 0,
+            n_features: 0,
+            initialized: false,
+            last_gain: 0.0,
+        }
+    }
+}
+
+impl StreamingGradientTreeRegressor {
+    /// Default streaming gradient tree.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for StreamingGradientTreeRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "SGT needs y"),
+            );
+        };
+        if self.initialized && self.n_features != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        if !self.initialized {
+            self.n_features = x.ncols();
+            self.root = SgtNode::Leaf(SgtLeaf::new(x.ncols(), 0.0));
+            self.initialized = true;
+        }
+        let lr = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("StreamingGradientTreeRegressor learning_rate is not a positive finite; using 0.1")
+                    .build(),
+            );
+            0.1
+        };
+        let before = self.n_seen;
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let mut splits = 0u64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let pred = sgt_predict(&self.root, x, i);
+            let e0 = pred - y[i];
+            loss_before += e0 * e0;
+            let gi = pred - y[i];
+            let hi = 1.0;
+            if sgt_update(
+                &mut self.root,
+                x,
+                i,
+                gi,
+                hi,
+                self.min_samples.max(2),
+                self.lambda.max(1e-8),
+                self.tau.max(0.0),
+                lr,
+            )
+            .is_some()
+            {
+                splits += 1;
+            }
+            let pred1 = sgt_predict(&self.root, x, i);
+            let e1 = pred1 - y[i];
+            loss_after += e1 * e1;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        self.last_gain = splits as f64;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(splits as f64);
+        q.information_gain = Some((loss_before - loss_after).abs());
+        q.loss_before = Some(loss_before);
+        q.loss_after = Some(loss_after);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 8;
+        q.explanation = format!("StreamingGradientTreeRegressor splits={splits} n={}", self.n_seen);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "SGT squared-error split / leaf Newton",
+                "leaves accumulate g=pred−y, h=1 and split on ½(G²/(H+λ)) gain",
+                format!("n={before}"),
+                format!("n={} splits={splits}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for StreamingGradientTreeRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| sgt_predict(&self.root, x, i)),
+        ))
+    }
+}
+
+/// Streaming gradient tree classifier (river `tree.SGTClassifier`).
+///
+/// Log-loss gradient \(p-y\) and Hessian \(p(1-p)\) drive the same split
+/// machinery as [`StreamingGradientTreeRegressor`]. Distinct from the
+/// single-logit [`SgtClassifier`].
+#[derive(Clone, Debug)]
+pub struct StreamingGradientTreeClassifier {
+    /// Newton step on the leaf logit.
+    pub learning_rate: f64,
+    /// L2 on the Hessian denominator.
+    pub lambda: f64,
+    /// Minimum observations before a split. Not identification `p`.
+    pub min_samples: usize,
+    /// Minimum gain to split.
+    pub tau: f64,
+    root: SgtNode,
+    n_seen: u64,
+    updates: u64,
+    n_features: usize,
+    initialized: bool,
+}
+
+impl Default for StreamingGradientTreeClassifier {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.1,
+            lambda: 1.0,
+            min_samples: 8,
+            tau: 1e-4,
+            root: SgtNode::Leaf(SgtLeaf::new(0, 0.0)),
+            n_seen: 0,
+            updates: 0,
+            n_features: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl StreamingGradientTreeClassifier {
+    /// Default streaming gradient tree classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for StreamingGradientTreeClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "SGT needs labels"),
+            );
+        };
+        if self.initialized && self.n_features != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        if !self.initialized {
+            self.n_features = x.ncols();
+            self.root = SgtNode::Leaf(SgtLeaf::new(x.ncols(), 0.0));
+            self.initialized = true;
+        }
+        let lr = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("StreamingGradientTreeClassifier learning_rate is not a positive finite; using 0.1")
+                    .build(),
+            );
+            0.1
+        };
+        let before = self.n_seen;
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let mut splits = 0u64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let yi = if y[i] >= 0.5 { 1.0 } else { 0.0 };
+            let logit = sgt_predict(&self.root, x, i);
+            let p0 = 1.0 / (1.0 + (-logit).exp());
+            loss_before += -(yi * p0.max(1e-15).ln() + (1.0 - yi) * (1.0 - p0).max(1e-15).ln());
+            let gi = p0 - yi;
+            let hi = (p0 * (1.0 - p0)).max(1e-8);
+            if sgt_update(
+                &mut self.root,
+                x,
+                i,
+                gi,
+                hi,
+                self.min_samples.max(2),
+                self.lambda.max(1e-8),
+                self.tau.max(0.0),
+                lr,
+            )
+            .is_some()
+            {
+                splits += 1;
+            }
+            let logit1 = sgt_predict(&self.root, x, i);
+            let p1 = 1.0 / (1.0 + (-logit1).exp());
+            loss_after += -(yi * p1.max(1e-15).ln() + (1.0 - yi) * (1.0 - p1).max(1e-15).ln());
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(splits as f64);
+        q.information_gain = Some((loss_before - loss_after).abs());
+        q.loss_before = Some(loss_before);
+        q.loss_after = Some(loss_after);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 8;
+        q.explanation = format!("StreamingGradientTreeClassifier splits={splits} n={}", self.n_seen);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "SGT log-loss split / leaf Newton",
+                "leaves accumulate g=p−y, h=p(1−p) and split on ½(G²/(H+λ)) gain",
+                format!("n={before}"),
+                format!("n={} splits={splits}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for StreamingGradientTreeClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let p = 1.0 / (1.0 + (-sgt_predict(&self.root, x, i)).exp());
+            if p >= 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -36778,6 +37824,33 @@ mod tests {
         AdwinBaggingRegressor::new(2)
             .partial_fit(&x, Some(&y), &session)
             .expect("adwinr");
+        HATRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("hatr");
+        AdaBoostClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("adaboost");
+        BaggingClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("bagc");
+        MondrianForest::new(2)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("mf");
+        MondrianForestClassifier::new(2)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("mfc");
+        MondrianForestRegressor::new(2)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("mfr");
+        AMFRegressor::new(2)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("amfr");
+        StreamingGradientTreeRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("sgtr");
+        StreamingGradientTreeClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("sgtc");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

@@ -15119,6 +15119,42 @@ impl Fit for RiseClassifier {
     }
 }
 
+/// Named temporal dictionary ensemble (sktime `TemporalDictionaryEnsemble`).
+#[derive(Clone, Debug)]
+pub struct TdeClassifier {
+    inner: TemporalDictionaryEnsemble,
+}
+
+impl Default for TdeClassifier {
+    fn default() -> Self {
+        Self {
+            inner: TemporalDictionaryEnsemble {
+                window: 3,
+                n_words: 6,
+            },
+        }
+    }
+}
+
+impl TdeClassifier {
+    /// TDE with a window that fits width-6 series.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for TdeClassifier {
+    type Fitted = FittedTemporalDictionaryEnsemble;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedTemporalDictionaryEnsemble>> {
+        self.inner.fit(x, y, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -15632,6 +15668,17 @@ mod tests {
         assert_eq!(
             risc.value
                 .predict(&x, &Session::new("ts", "riscp"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let tdec = TdeClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "tdec"))
+            .unwrap();
+        assert_eq!(
+            tdec.value
+                .predict(&x, &Session::new("ts", "tdecp"))
                 .unwrap()
                 .value
                 .len(),

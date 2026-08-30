@@ -6010,6 +6010,77 @@ const INVENTORY: &[Algorithm] = &[
         "sksurv.ensemble.RandomSurvivalForest",
         "estimator",
     ),
+    a(
+        "stats.FineGrayForest",
+        "sksurv.ensemble.RandomSurvivalForest",
+        "estimator",
+    ),
+    a(
+        "stats.CensoredQuantileRegressor",
+        "sksurv.linear_model.IPCRidge",
+        "estimator",
+    ),
+    a(
+        "stats.PortnoyQuantile",
+        "sksurv.linear_model.IPCRidge",
+        "estimator",
+    ),
+    a(
+        "stats.IpcwSurvivalForest",
+        "sksurv.ensemble.RandomSurvivalForest",
+        "estimator",
+    ),
+    a(
+        "stats.IpcwRandomSurvivalForest",
+        "sksurv.ensemble.RandomSurvivalForest",
+        "estimator",
+    ),
+    a(
+        "online.HATRegressor",
+        "river.tree.HoeffdingAdaptiveTreeRegressor",
+        "online",
+    ),
+    a(
+        "online.AdaBoostClassifier",
+        "river.ensemble.AdaBoostClassifier",
+        "online",
+    ),
+    a(
+        "online.BaggingClassifier",
+        "river.ensemble.BaggingClassifier",
+        "online",
+    ),
+    a(
+        "online.MondrianForest",
+        "river.forest.AMFClassifier",
+        "online",
+    ),
+    a(
+        "online.MondrianForestClassifier",
+        "river.forest.AMFClassifier",
+        "online",
+    ),
+    a(
+        "online.MondrianForestRegressor",
+        "river.forest.MondrianForestRegressor",
+        "online",
+    ),
+    a("online.AMFRegressor", "river.forest.AMFRegressor", "online"),
+    a(
+        "online.StreamingGradientTreeRegressor",
+        "river.tree.SGTRegressor",
+        "online",
+    ),
+    a(
+        "online.StreamingGradientTreeClassifier",
+        "river.tree.SGTClassifier",
+        "online",
+    ),
+    a(
+        "tslearn.TdeClassifier",
+        "sktime.classification.dictionary_based.TemporalDictionaryEnsemble",
+        "estimator",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6491,6 +6562,11 @@ mod tests {
             "online.AdwinBaggingRegressor",
             "tslearn.RiseClassifier",
             "stats.CompetingRisksForest",
+            "stats.FineGrayForest",
+            "stats.CensoredQuantileRegressor",
+            "online.MondrianForest",
+            "online.StreamingGradientTreeRegressor",
+            "tslearn.TdeClassifier",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
