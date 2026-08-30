@@ -53,6 +53,57 @@ pub fn acf(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vect
     ctx.finish(Vector::from_iter(rho))
 }
 
+/// Biased sample autocovariance \(\gamma_0,\ldots,\gamma_{\mathrm{nlags}}\)
+/// (statsmodels `acovf`).
+///
+/// Lag count is not identification `p`.
+pub fn acovf(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    if nlags + 1 > y.len() && !y.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .message(format!("acovf nlags={nlags} ≥ n={}", y.len()))
+                .build(),
+        );
+    }
+    let st = slice_stats(y.as_slice());
+    if y.len() >= 2 && st.is_constant(ctx.policy.near_zero_variance) {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("acovf of a constant series is the zero map after centering")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "sample autocovariance",
+                    "every deviation from the mean is 0",
+                    "do not report acovf on a degenerate series",
+                ))
+                .build(),
+        );
+    }
+    let n = y.len();
+    let mut out = Vector::zeros(nlags + 1);
+    if n == 0 {
+        return ctx.finish(out);
+    }
+    for k in 0..=nlags {
+        if k >= n {
+            out[k] = f64::NAN;
+            continue;
+        }
+        let mut g = 0.0;
+        let mut c = 0.0;
+        for t in k..n {
+            if y[t].is_finite() && y[t - k].is_finite() {
+                g += (y[t] - st.mean) * (y[t - k] - st.mean);
+                c += 1.0;
+            }
+        }
+        out[k] = if n > 0 { g / n as f64 } else { 0.0 };
+        let _ = c;
+    }
+    ctx.finish(out)
+}
+
 /// Partial autocorrelation via Yule–Walker systems solved by OLS at each lag.
 ///
 /// `φ_{kk}` is the last coefficient of the order-`k` Toeplitz system
@@ -7789,5 +7840,10 @@ mod tests {
             .value;
         assert!(ao.aic.is_finite() || ao.scores.is_empty());
         assert!(ao.p <= 1 && ao.q <= 1);
+        let g = acovf(&y, 3, &Session::new("acovf", "fit"))
+            .expect("acovf")
+            .value;
+        assert_eq!(g.len(), 4);
+        assert!(g[0].is_finite() && g[0] > 0.0);
     }
 }

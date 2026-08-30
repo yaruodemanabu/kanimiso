@@ -8915,6 +8915,242 @@ impl Transform for QuantileFilter {
     }
 }
 
+/// Streaming RMSE (river `metrics.RMSE`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineRmse {
+    sse: f64,
+    n: u64,
+    updates: u64,
+}
+
+impl OnlineRmse {
+    /// Empty RMSE.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current RMSE, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.n == 0 {
+            f64::NAN
+        } else {
+            (self.sse / self.n as f64).sqrt()
+        }
+    }
+}
+
+impl PartialFit for OnlineRmse {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        metric_partial(
+            session,
+            "rmse",
+            x,
+            y,
+            self.updates,
+            self.n,
+            |pred, truth| {
+                let e = pred - truth;
+                self.sse += e * e;
+                self.n += 1;
+                self.updates += 1;
+                self.score()
+            },
+        )
+    }
+}
+
+/// Streaming Cohen's κ (river `metrics.CohenKappa`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineCohenKappa {
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    updates: u64,
+}
+
+impl OnlineCohenKappa {
+    /// Empty κ.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current κ, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        let n = self.a + self.b + self.c + self.d;
+        if n <= 0.0 {
+            return f64::NAN;
+        }
+        let po = (self.a + self.d) / n;
+        let pe = ((self.a + self.b) * (self.a + self.c) + (self.c + self.d) * (self.b + self.d))
+            / (n * n);
+        if (1.0 - pe).abs() <= 1e-18 {
+            f64::NAN
+        } else {
+            (po - pe) / (1.0 - pe)
+        }
+    }
+}
+
+impl PartialFit for OnlineCohenKappa {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        metric_partial(
+            session,
+            "cohen_kappa",
+            x,
+            y,
+            self.updates,
+            (self.a + self.b + self.c + self.d) as u64,
+            |pred, truth| {
+                let p = pred > 0.5;
+                let t = truth > 0.5;
+                match (p, t) {
+                    (false, false) => self.a += 1.0,
+                    (true, false) => self.b += 1.0,
+                    (false, true) => self.c += 1.0,
+                    (true, true) => self.d += 1.0,
+                }
+                self.updates += 1;
+                self.score()
+            },
+        )
+    }
+}
+
+/// Exponentially weighted mean (river `stats.EWMean`).
+#[derive(Clone, Debug)]
+pub struct EwMean {
+    /// Fade factor in \((0, 1]\). `1` is the expanding mean.
+    pub fading: f64,
+    mean: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for EwMean {
+    fn default() -> Self {
+        Self {
+            fading: 0.5,
+            mean: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl EwMean {
+    /// EW mean with fade `fading`.
+    pub fn new(fading: f64) -> Self {
+        Self {
+            fading,
+            ..Self::default()
+        }
+    }
+
+    /// Current mean, or NaN before the first update.
+    pub fn score(&self) -> f64 {
+        if self.initialized {
+            self.mean
+        } else {
+            f64::NAN
+        }
+    }
+}
+
+impl PartialFit for EwMean {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let fade = if self.fading.is_finite() && self.fading > 0.0 && self.fading <= 1.0 {
+            self.fading
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "EwMean.fading={} is not in (0,1]; using 0.5",
+                        self.fading
+                    ))
+                    .build(),
+            );
+            0.5
+        };
+        let before = self.mean;
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            if !self.initialized {
+                self.mean = v;
+                self.initialized = true;
+            } else if fade >= 1.0 {
+                let n = self.n_seen as f64;
+                self.mean = (self.mean * n + v) / (n + 1.0);
+            } else {
+                self.mean = fade * self.mean + (1.0 - fade) * v;
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = if fade >= 1.0 {
+            self.n_seen as f64
+        } else {
+            (1.0 / (1.0 - fade)).min(self.n_seen as f64)
+        };
+        q.parameter_delta_norm = Some((self.mean - before).abs());
+        q.information_gain = Some(
+            (self.mean - before)
+                .abs()
+                .max(1.0 / self.n_seen.max(1) as f64),
+        );
+        q.still_identified = self.initialized;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("EWMean fade={fade:.3} mean={:.6e}", self.mean);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "exponentially weighted mean",
+                "fade previous mean and fold in the new observation",
+                format!("mean={before:.6e}"),
+                format!("mean={:.6e}", self.mean),
+            ),
+        )
+    }
+}
+
+impl Predict for EwMean {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|_| self.mean)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9161,6 +9397,15 @@ mod tests {
         QuantileFilter::new(0.9)
             .partial_fit(&x, None, &session)
             .expect("qf");
+        OnlineRmse::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("rmse");
+        OnlineCohenKappa::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("kappa");
+        EwMean::new(0.6)
+            .partial_fit(&x, None, &session)
+            .expect("ewm");
 
         let n_expl = session
             .ledger()

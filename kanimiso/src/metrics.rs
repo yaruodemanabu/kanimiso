@@ -1595,6 +1595,169 @@ pub fn d2_tweedie_score(
     ctx.finish(1.0 - d_model.value / d_null.value)
 }
 
+/// Balanced accuracy: mean of per-class recalls (sklearn `balanced_accuracy_score`).
+pub fn balanced_accuracy(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "balanced_accuracy") {
+        return ctx.finish(f64::NAN);
+    }
+    inspect_classes(&mut ctx.report, y_true, &ctx.policy);
+    warn_constant_target(&mut ctx, y_true, true);
+    let yt = labels_of(y_true);
+    let yp = labels_of(y_pred);
+    let classes = unique_sorted(&yt);
+    if classes.is_empty() {
+        return ctx.finish(f64::NAN);
+    }
+    let mut acc = 0.0;
+    for &c in &classes {
+        let mut tp = 0.0;
+        let mut n = 0.0;
+        for i in 0..yt.len().min(yp.len()) {
+            if yt[i] == c {
+                n += 1.0;
+                if yp[i] == c {
+                    tp += 1.0;
+                }
+            }
+        }
+        if n > 0.0 {
+            acc += tp / n;
+        }
+    }
+    ctx.finish(acc / classes.len() as f64)
+}
+
+/// Mean Gamma deviance (Tweedie power 2).
+pub fn mean_gamma_deviance(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    mean_tweedie_deviance(y_true, y_pred, 2.0, session)
+}
+
+/// \(D^2\) absolute-error score (sklearn `d2_absolute_error_score`).
+pub fn d2_absolute_error_score(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "d2_absolute_error_score") {
+        return ctx.finish(f64::NAN);
+    }
+    warn_constant_target(&mut ctx, y_true, false);
+    let mut xs: Vec<f64> = y_true
+        .as_slice()
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
+    if xs.is_empty() {
+        return ctx.finish(f64::NAN);
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = xs.len() / 2;
+    let med = if xs.len() % 2 == 0 {
+        0.5 * (xs[mid - 1] + xs[mid])
+    } else {
+        xs[mid]
+    };
+    let mut mae_m = 0.0;
+    let mut mae_n = 0.0;
+    let mut n = 0.0;
+    for i in 0..y_true.len().min(y_pred.len()) {
+        if !y_true[i].is_finite() || !y_pred[i].is_finite() {
+            continue;
+        }
+        mae_m += (y_true[i] - y_pred[i]).abs();
+        mae_n += (y_true[i] - med).abs();
+        n += 1.0;
+    }
+    if n <= 0.0 || mae_n <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::R2IsZero)
+                .message("D² absolute-error null MAE is ~0; the score is undefined")
+                .compromise(NumericalCompromise::new(
+                    "positive null MAE to the median",
+                    "D² set to NaN",
+                    "the median-only absolute error vanished",
+                    "do not read a missing D² as a perfect fit",
+                ))
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(1.0 - mae_m / mae_n)
+}
+
+fn dcg_at(rels: &[f64]) -> f64 {
+    let mut s = 0.0;
+    for (i, &r) in rels.iter().enumerate() {
+        let gain = (2.0_f64).powf(r) - 1.0;
+        s += gain / ((i as f64) + 2.0).log2();
+    }
+    s
+}
+
+/// Discounted cumulative gain (sklearn `dcg_score`).
+pub fn dcg_score(y_true: &Vector, y_score: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_score, "dcg_score") {
+        return ctx.finish(f64::NAN);
+    }
+    let mut pairs: Vec<(f64, f64)> = (0..y_true.len().min(y_score.len()))
+        .filter(|&i| y_true[i].is_finite() && y_score[i].is_finite())
+        .map(|i| (y_score[i], y_true[i]))
+        .collect();
+    if pairs.is_empty() {
+        return ctx.finish(f64::NAN);
+    }
+    pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let rels: Vec<f64> = pairs.iter().map(|p| p.1).collect();
+    ctx.finish(dcg_at(&rels))
+}
+
+/// Normalized DCG (sklearn `ndcg_score`).
+pub fn ndcg_score(y_true: &Vector, y_score: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let dcg = dcg_score(y_true, y_score, &session.child("dcg"))?;
+    for issue in dcg.report.issues() {
+        if issue.code == IssueCode::MeaninglessFit {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let mut ideal: Vec<f64> = y_true
+        .as_slice()
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
+    ideal.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let idcg = dcg_at(&ideal);
+    if !idcg.is_finite() || idcg.abs() <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::R2IsZero)
+                .message("nDCG ideal DCG is ~0; the score is undefined")
+                .compromise(NumericalCompromise::new(
+                    "positive ideal DCG",
+                    "nDCG set to NaN",
+                    "all relevances are zero",
+                    "do not read a missing nDCG as a perfect ranking",
+                ))
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(dcg.value / idcg)
+}
+
 fn bump<K: PartialEq>(xs: &mut Vec<(K, f64)>, key: K) {
     if let Some(e) = xs.iter_mut().find(|(k, _)| *k == key) {
         e.1 += 1.0;
@@ -1817,5 +1980,31 @@ mod tests {
             .unwrap()
             .value;
         assert!(d2.is_finite());
+        let ba = balanced_accuracy(
+            &y,
+            &Vector::from_slice(&[0.0, 1.0, 1.0, 0.0]),
+            &Session::new("m", "ba"),
+        )
+        .unwrap()
+        .value;
+        assert!((ba - 1.0).abs() < 1e-12);
+        let gd = mean_gamma_deviance(&y2, &h2, &Session::new("m", "gd"))
+            .unwrap()
+            .value;
+        assert!(gd.is_finite() && gd >= 0.0);
+        let d2a = d2_absolute_error_score(&y2, &h2, &Session::new("m", "d2a"))
+            .unwrap()
+            .value;
+        assert!(d2a.is_finite());
+        let rel = Vector::from_slice(&[3.0, 2.0, 1.0, 0.0]);
+        let sc = Vector::from_slice(&[0.9, 0.8, 0.1, 0.0]);
+        let nd = ndcg_score(&rel, &sc, &Session::new("m", "ndcg"))
+            .unwrap()
+            .value;
+        assert!((nd - 1.0).abs() < 1e-12);
+        let dc = dcg_score(&rel, &sc, &Session::new("m", "dcg"))
+            .unwrap()
+            .value;
+        assert!(dc.is_finite() && dc > 0.0);
     }
 }

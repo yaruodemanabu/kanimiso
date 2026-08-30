@@ -2153,6 +2153,73 @@ impl Fit for TimeSeriesSvc {
     }
 }
 
+/// PAA features plus ridge (tslearn / sktime `TimeSeriesSVR` lite).
+///
+/// Segment count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct TimeSeriesSvr {
+    /// PAA segments.
+    pub n_segments: usize,
+    /// Ridge penalty.
+    pub alpha: f64,
+}
+
+impl Default for TimeSeriesSvr {
+    fn default() -> Self {
+        Self {
+            n_segments: 4,
+            alpha: 0.1,
+        }
+    }
+}
+
+impl TimeSeriesSvr {
+    /// SVR on a PAA map.
+    pub fn new(n_segments: usize) -> Self {
+        Self {
+            n_segments: n_segments.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl Fit for TimeSeriesSvr {
+    type Fitted = FittedPenalized;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPenalized>> {
+        let z = Paa::new(self.n_segments).transform(x, &session.child("paa"))?;
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, &z.value, Some(y), &ctx.policy);
+        let mut scratch = signlred::Report::new("tssvr", "ridge");
+        let design = z.value.with_intercept();
+        let beta = ridge_solve(&mut scratch, &design, y, self.alpha.max(0.0), &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::PerfectCollinearity
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedPenalized {
+            coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            alpha: self.alpha,
+            l1_ratio: 0.0,
+        })
+    }
+}
+
 /// Interval-feature forest regressor (sktime `TimeSeriesForestRegressor`).
 #[derive(Clone, Debug)]
 pub struct TimeSeriesForestRegressor {
@@ -3144,6 +3211,111 @@ impl MiniRocket {
                     .build(),
             );
         }
+        ctx.finish(feat)
+    }
+}
+
+/// MultiROCKET: dilated kernels with PPV, max, and mean pooling
+/// (sktime `MultiRocket`).
+///
+/// Kernel count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MultiRocket {
+    /// Number of random kernels.
+    pub n_kernels: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for MultiRocket {
+    fn default() -> Self {
+        Self {
+            n_kernels: 16,
+            seed: 11,
+        }
+    }
+}
+
+impl MultiRocket {
+    /// MultiROCKET with `k` kernels (3 features each).
+    pub fn new(n_kernels: usize) -> Self {
+        Self {
+            n_kernels,
+            ..Self::default()
+        }
+    }
+}
+
+impl Transform for MultiRocket {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let n = x.nrows();
+        let t = x.ncols();
+        let w = 9usize.min(t.max(1));
+        if t < 9 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!("MultiROCKET series length {t} < 9"))
+                    .build(),
+            );
+        }
+        let mut rng = crate::rng::Rng::new(self.seed);
+        let k = self.n_kernels.max(1);
+        let max_dil = if t > w {
+            ((t - 1) as f64 / (w - 1) as f64).log2().max(0.0)
+        } else {
+            0.0
+        };
+        let mut kernels: Vec<(usize, [usize; 3])> = Vec::with_capacity(k);
+        for _ in 0..k {
+            let dil = 2f64.powf(rng.uniform() * max_dil).floor().max(1.0) as usize;
+            let pos = [rng.below(w), rng.below(w), rng.below(w)];
+            kernels.push((dil, pos));
+        }
+        let feat = Matrix::from_fn(n, k * 3, |i, j| {
+            let kid = j / 3;
+            let kind = j % 3;
+            let (dil, pos) = kernels[kid];
+            let last = t.saturating_sub(1 + (w - 1) * dil) + 1;
+            let mut pos_cnt = 0.0;
+            let mut mx = f64::NEG_INFINITY;
+            let mut sm = 0.0;
+            let mut cnt = 0.0;
+            for start in 0..last.max(1) {
+                let mut acc = 0.0;
+                for u in 0..w {
+                    let idx = start + u * dil;
+                    if idx >= t {
+                        continue;
+                    }
+                    let wt = if pos.contains(&u) { 2.0 } else { -1.0 };
+                    acc += wt * x.get(i, idx);
+                }
+                if acc > mx {
+                    mx = acc;
+                }
+                if acc > 0.0 {
+                    pos_cnt += 1.0;
+                }
+                sm += acc;
+                cnt += 1.0;
+            }
+            if cnt <= 0.0 {
+                return 0.0;
+            }
+            match kind {
+                0 => pos_cnt / cnt,
+                1 => {
+                    if mx.is_finite() {
+                        mx
+                    } else {
+                        0.0
+                    }
+                }
+                _ => sm / cnt,
+            }
+        });
         ctx.finish(feat)
     }
 }
@@ -4150,5 +4322,26 @@ mod tests {
             .value;
         assert_eq!(rp.len(), 6);
         assert!(rp.as_slice().iter().all(|v| v.is_finite()));
+        let mr2 = MultiRocket::new(4)
+            .transform(&x, &Session::new("ts", "mrm"))
+            .unwrap()
+            .value;
+        assert_eq!(mr2.ncols(), 12);
+        let tsvr = TimeSeriesSvr::new(2)
+            .fit(&x, &yramp, &Session::new("ts", "tsvr"))
+            .unwrap();
+        let tsvp = tsvr
+            .value
+            .predict(
+                &Paa::new(2)
+                    .transform(&x, &Session::new("ts", "pa2"))
+                    .unwrap()
+                    .value,
+                &Session::new("ts", "tsvrp"),
+            )
+            .unwrap()
+            .value;
+        assert_eq!(tsvp.len(), 6);
+        assert!(tsvp.as_slice().iter().all(|v| v.is_finite()));
     }
 }

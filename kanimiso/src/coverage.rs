@@ -2576,6 +2576,41 @@ const INVENTORY: &[Algorithm] = &[
         "river.anomaly.QuantileFilter",
         "online",
     ),
+    a(
+        "metrics.balanced_accuracy",
+        "sklearn.metrics.balanced_accuracy_score",
+        "metric",
+    ),
+    a(
+        "metrics.mean_gamma_deviance",
+        "sklearn.metrics.mean_gamma_deviance",
+        "metric",
+    ),
+    a(
+        "metrics.d2_absolute_error_score",
+        "sklearn.metrics.d2_absolute_error_score",
+        "metric",
+    ),
+    a("metrics.dcg_score", "sklearn.metrics.dcg_score", "metric"),
+    a("metrics.ndcg_score", "sklearn.metrics.ndcg_score", "metric"),
+    a("tsa.acovf", "statsmodels.tsa.stattools.acovf", "forecast"),
+    a(
+        "tslearn.MultiRocket",
+        "sktime.transformations.panel.rocket.MultiRocket",
+        "timeseries",
+    ),
+    a(
+        "tslearn.TimeSeriesSvr",
+        "sktime.regression.kernel_based.TimeSeriesSVR",
+        "timeseries",
+    ),
+    a("online.OnlineRmse", "river.metrics.RMSE", "online"),
+    a(
+        "online.OnlineCohenKappa",
+        "river.metrics.CohenKappa",
+        "online",
+    ),
+    a("online.EwMean", "river.stats.EWMean", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -2673,6 +2708,10 @@ mod tests {
             "tslearn.msm",
             "tsa.welch",
             "online.OnlineF1",
+            "metrics.balanced_accuracy",
+            "tsa.acovf",
+            "tslearn.MultiRocket",
+            "online.OnlineRmse",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
