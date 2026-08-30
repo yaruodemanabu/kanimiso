@@ -28478,6 +28478,222 @@ impl Predict for CoClustering {
     }
 }
 
+/// Streaming Ben-Haim / Tom-Tov histogram (river `sketch.Histogram`).
+///
+/// Bin count is not identification `p`. Closest adjacent bins are merged when
+/// the capacity is exceeded.
+#[derive(Clone, Debug)]
+pub struct OnlineHistogram {
+    /// Maximum stored bins. Not identification `p`.
+    pub max_bins: usize,
+    bins: Vec<(f64, f64)>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OnlineHistogram {
+    fn default() -> Self {
+        Self::new(8)
+    }
+}
+
+impl OnlineHistogram {
+    /// Empty histogram with at most `max_bins` centroids.
+    pub fn new(max_bins: usize) -> Self {
+        Self {
+            max_bins: max_bins.max(1),
+            bins: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+
+    /// Current `(center, count)` bins, left to right.
+    pub fn bins(&self) -> &[(f64, f64)] {
+        &self.bins
+    }
+
+    fn insert(&mut self, v: f64) {
+        if !v.is_finite() {
+            return;
+        }
+        if let Some(i) = self
+            .bins
+            .iter()
+            .position(|(c, _)| (*c - v).abs() <= 1e-15)
+        {
+            self.bins[i].1 += 1.0;
+        } else {
+            self.bins.push((v, 1.0));
+            self.bins
+                .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        while self.bins.len() > self.max_bins {
+            let mut best = 0usize;
+            let mut best_d = f64::INFINITY;
+            for i in 0..self.bins.len().saturating_sub(1) {
+                let d = (self.bins[i + 1].0 - self.bins[i].0).abs();
+                if d < best_d {
+                    best_d = d;
+                    best = i;
+                }
+            }
+            let (c1, n1) = self.bins[best];
+            let (c2, n2) = self.bins[best + 1];
+            let n = n1 + n2;
+            let c = if n > 0.0 { (c1 * n1 + c2 * n2) / n } else { c1 };
+            self.bins[best] = (c, n);
+            self.bins.remove(best + 1);
+        }
+    }
+}
+
+impl PartialFit for OnlineHistogram {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let before = self.bins.len();
+        for i in 0..x.nrows() {
+            self.insert(x.get(i, 0));
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let after = self.bins.len();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((after as f64 - before as f64).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.bins.is_empty();
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("OnlineHistogram bins={after}");
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("OnlineHistogram has fewer than two observations")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Ben-Haim/Tom-Tov bin update",
+                "bin count is not identification p",
+                format!("bins={before}"),
+                format!("bins={after} n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+/// Streaming Weibull via Gumbel moments on \(\log x\) (river-style `proba`).
+///
+/// Shape \(\pi/(s\sqrt{6})\) from the log-scale sample sd. Shape is not
+/// identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineWeibull {
+    n: f64,
+    mean_log: f64,
+    m2_log: f64,
+    updates: u64,
+}
+
+impl OnlineWeibull {
+    /// Empty Weibull accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Gumbel-moment shape, or NaN during warmup.
+    pub fn shape(&self) -> f64 {
+        if self.n < 2.0 {
+            return f64::NAN;
+        }
+        let var = self.m2_log / (self.n - 1.0);
+        let s = var.max(0.0).sqrt().max(1e-6);
+        (std::f64::consts::PI / (s * 6.0_f64.sqrt())).clamp(0.2, 5.0)
+    }
+}
+
+impl PartialFit for OnlineWeibull {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.shape();
+        let mut nonpos = 0u64;
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            if v <= 0.0 {
+                nonpos += 1;
+                continue;
+            }
+            let z = v.ln();
+            self.n += 1.0;
+            let d = z - self.mean_log;
+            self.mean_log += d / self.n;
+            self.m2_log += d * (z - self.mean_log);
+        }
+        if nonpos > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "OnlineWeibull skipped {nonpos} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        self.updates += 1;
+        let after = self.shape();
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 2.0 && after.is_finite();
+        q.warmup = self.n < 2.0;
+        q.explanation = format!("OnlineWeibull shape={after:.6e}");
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("OnlineWeibull needs two positive observations")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Weibull Gumbel-moment shape",
+                "Welford mean/variance of log(column-0) positives",
+                format!("shape={before:.6e}"),
+                format!("shape={after:.6e}"),
+            ),
+        )
+    }
+}
+
 /// AdaMax linear regressor (river `optim.AdaMax`).
 ///
 /// Infinity-norm second moment: \(u \leftarrow \max(\beta_2 u, |g|)\).
@@ -30918,6 +31134,12 @@ mod tests {
         CoClustering::new()
             .partial_fit(&xui, Some(&y), &session)
             .expect("coclust");
+        OnlineHistogram::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("ohist");
+        OnlineWeibull::new()
+            .partial_fit(&x, None, &session)
+            .expect("oweib");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

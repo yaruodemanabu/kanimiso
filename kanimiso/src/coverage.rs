@@ -5364,6 +5364,68 @@ const INVENTORY: &[Algorithm] = &[
         "sktime.classification.feature_based.Catch22Classifier",
         "estimator",
     ),
+    a(
+        "stats.fleming_harrington",
+        "lifelines.statistics.logrank_test",
+        "function",
+    ),
+    a(
+        "stats.life_table",
+        "statsmodels.duration.survfunc.SurvfuncRight",
+        "stats",
+    ),
+    a(
+        "stats.LifeTable",
+        "statsmodels.duration.survfunc.SurvfuncRight",
+        "estimator",
+    ),
+    a(
+        "stats.weighted_km",
+        "statsmodels.duration.survfunc.SurvfuncRight",
+        "stats",
+    ),
+    a(
+        "stats.WeightedKm",
+        "statsmodels.duration.survfunc.SurvfuncRight",
+        "estimator",
+    ),
+    a(
+        "stats.andersen_gill",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "function",
+    ),
+    a(
+        "stats.AndersenGill",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "estimator",
+    ),
+    a(
+        "stats.pwp_cox",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "function",
+    ),
+    a("stats.PwpCox", "statsmodels.duration.hazard_regression.PHReg", "estimator"),
+    a(
+        "stats.cloglog_ph",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "stats",
+    ),
+    a(
+        "stats.CloglogPH",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "estimator",
+    ),
+    a(
+        "online.OnlineHistogram",
+        "river.sketch.Histogram",
+        "online",
+    ),
+    a("online.OnlineWeibull", "scipy.stats.weibull_min", "online"),
+    a(
+        "tslearn.RotationForestClassifier",
+        "sktime.classification.sklearn.RotationForest",
+        "estimator",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5752,6 +5814,12 @@ mod tests {
             "stats.logrank_trend",
             "online.BaselineOnly",
             "tslearn.Catch22El",
+            "stats.fleming_harrington",
+            "stats.life_table",
+            "stats.AndersenGill",
+            "stats.cloglog_ph",
+            "online.OnlineHistogram",
+            "tslearn.RotationForestClassifier",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

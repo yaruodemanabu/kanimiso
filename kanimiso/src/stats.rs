@@ -6228,6 +6228,7 @@ enum LogrankWeight {
     Gehan,
     TaroneWare,
     Peto,
+    FlemingHarrington { p: f64, q: f64 },
 }
 
 fn logrank_weighted(
@@ -6341,6 +6342,9 @@ fn logrank_weighted(
             LogrankWeight::Gehan => nn,
             LogrankWeight::TaroneWare => nn.sqrt(),
             LogrankWeight::Peto => s,
+            LogrankWeight::FlemingHarrington { p, q } => {
+                s.max(0.0).powf(p) * (1.0 - s).max(0.0).powf(q)
+            }
         };
         oe += w * (d0 - n0 * dd / nn);
         if nn > 1.0 {
@@ -6438,6 +6442,32 @@ pub fn logrank_trend(
         session,
         LogrankWeight::Unity,
         "logrank_trend",
+    )
+}
+
+/// Fleming–Harrington weighted log-rank (weight \(\hat S(t-)^{p}(1-\hat S(t-))^{q}\)).
+///
+/// Survival is the pooled product-limit computed locally; do not call
+/// [`kaplan_meier_fit`] (zero events would vacuous-abort). The exponents `p`
+/// and `q` are weights, not identification dimension. Group count is not
+/// identification `p`. Inspect times with `y=None`.
+pub fn fleming_harrington(
+    times: &Vector,
+    events: &Vector,
+    groups: &Vector,
+    p: f64,
+    q: f64,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let pp = if p.is_finite() { p.clamp(0.0, 5.0) } else { 0.0 };
+    let qq = if q.is_finite() { q.clamp(0.0, 5.0) } else { 0.0 };
+    logrank_weighted(
+        times,
+        events,
+        groups,
+        session,
+        LogrankWeight::FlemingHarrington { p: pp, q: qq },
+        "fleming_harrington",
     )
 }
 
@@ -15892,6 +15922,758 @@ impl LogLogisticPH {
     }
 }
 
+/// Actuarial life-table survival (statsmodels / textbook `LifeTable`).
+///
+/// Equal-width intervals on \([0, t_{\max}]\). Cut count is not identification
+/// `p`. Do not call [`kaplan_meier_fit`]. Inspect times with `y=None`.
+#[derive(Clone, Debug)]
+pub struct FittedLifeTable {
+    /// Right endpoints of the intervals.
+    pub cuts: Vector,
+    /// Actuarial \(\hat S\) at each right endpoint.
+    pub survival: Vector,
+    /// Interval failure probability \(q_j = d_j / n'_j\).
+    pub hazard: Vector,
+    /// Headcount at risk at the left endpoint.
+    pub n_risk: Vector,
+    /// Event count per interval.
+    pub n_event: Vector,
+    /// Censor count per interval.
+    pub n_censor: Vector,
+}
+
+/// Actuarial life table on right-censored times.
+///
+/// \(n'_j = n_j - c_j/2\), \(q_j = d_j / n'_j\), \(S_j = S_{j-1}(1-q_j)\).
+pub fn life_table(
+    time: &Vector,
+    event: &Vector,
+    n_cuts: usize,
+    session: &Session,
+) -> Result<Qualified<FittedLifeTable>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(time),
+        None,
+        &ctx.policy,
+    );
+    if let Some(issue) = scan_finite(event.as_slice()).to_issue("event") {
+        ctx.push(issue);
+    }
+    let n = time.len().min(event.len());
+    if event.len() != time.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "life_table time.len()={} ≠ event.len()={}",
+                    time.len(),
+                    event.len()
+                ))
+                .build(),
+        );
+    }
+    let mut rows: Vec<(f64, f64)> = (0..n)
+        .filter(|&i| time[i].is_finite() && event[i].is_finite() && time[i] > 0.0)
+        .map(|i| (time[i], event[i]))
+        .collect();
+    if rows.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("life_table has no finite positive times")
+                .build(),
+        );
+        return ctx.finish(FittedLifeTable {
+            cuts: Vector::zeros(0),
+            survival: Vector::zeros(0),
+            hazard: Vector::zeros(0),
+            n_risk: Vector::zeros(0),
+            n_event: Vector::zeros(0),
+            n_censor: Vector::zeros(0),
+        });
+    }
+    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let n_ev = rows.iter().filter(|r| r.1 > 0.5).count();
+    if n_ev == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("life table has zero events; Ŝ is identically 1")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "actuarial survival curve",
+                    "without events every interval failure probability is 0",
+                    "collect events or report only the censoring pattern",
+                ))
+                .build(),
+        );
+    }
+    let tmax = rows
+        .iter()
+        .map(|r| r.0)
+        .fold(0.0_f64, |a, t| if t > a { t } else { a });
+    let k = n_cuts.max(1);
+    let width = (tmax / k as f64).max(1e-12);
+    let mut cuts = Vec::with_capacity(k);
+    let mut surv = Vec::with_capacity(k);
+    let mut hazard = Vec::with_capacity(k);
+    let mut nrisk = Vec::with_capacity(k);
+    let mut nevent = Vec::with_capacity(k);
+    let mut ncensor = Vec::with_capacity(k);
+    let mut s = 1.0_f64;
+    for j in 0..k {
+        let lo = j as f64 * width;
+        let hi = (j + 1) as f64 * width;
+        let n_j = rows.iter().filter(|(t, _)| *t > lo).count() as f64;
+        let mut d_j = 0.0_f64;
+        let mut c_j = 0.0_f64;
+        for &(t, e) in &rows {
+            if t > lo && t <= hi + 1e-15 {
+                if e > 0.5 {
+                    d_j += 1.0;
+                } else {
+                    c_j += 1.0;
+                }
+            }
+        }
+        let nprime = (n_j - 0.5 * c_j).max(0.0);
+        let q = if nprime > 1e-15 { d_j / nprime } else { 0.0 };
+        s *= (1.0 - q).max(0.0);
+        cuts.push(hi);
+        surv.push(s.max(0.0));
+        hazard.push(q);
+        nrisk.push(n_j);
+        nevent.push(d_j);
+        ncensor.push(c_j);
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("life_table is equal-width actuarial, not a Kaplan–Meier product-limit")
+            .compromise(NumericalCompromise::new(
+                "Kaplan–Meier at the observed event times",
+                "equal-width actuarial intervals with c/2 withdrawal",
+                "binning and the half-censor correction move Ŝ off the KM",
+                "read as a life-table summary, not the unique NPMLE",
+            ))
+            .build(),
+    );
+    ctx.finish(FittedLifeTable {
+        cuts: Vector::from_iter(cuts),
+        survival: Vector::from_iter(surv),
+        hazard: Vector::from_iter(hazard),
+        n_risk: Vector::from_iter(nrisk),
+        n_event: Vector::from_iter(nevent),
+        n_censor: Vector::from_iter(ncensor),
+    })
+}
+
+/// Named actuarial life table.
+#[derive(Clone, Debug)]
+pub struct LifeTable {
+    /// Number of equal-width intervals. Not identification `p`.
+    pub n_cuts: usize,
+}
+
+impl Default for LifeTable {
+    fn default() -> Self {
+        Self { n_cuts: 4 }
+    }
+}
+
+impl LifeTable {
+    /// Default four-interval life table.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit on right-censored times.
+    pub fn fit(
+        &self,
+        time: &Vector,
+        event: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLifeTable>> {
+        life_table(time, event, self.n_cuts, session)
+    }
+}
+
+/// Weighted Kaplan–Meier (statsmodels `SurvfuncRight` with `weights`).
+///
+/// Case-weight count is not identification `p`. Do not call
+/// [`kaplan_meier_fit`]. Inspect times with `y=None`.
+pub fn weighted_km(
+    durations: &Vector,
+    events: &Vector,
+    weights: &Vector,
+    session: &Session,
+) -> Result<Qualified<FittedKaplanMeier>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    if let Some(issue) = scan_finite(events.as_slice()).to_issue("events") {
+        ctx.push(issue);
+    }
+    if weights.len() != durations.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "weighted_km weights.len()={} ≠ durations.len()={}",
+                    weights.len(),
+                    durations.len()
+                ))
+                .build(),
+        );
+    }
+    let n = durations.len().min(events.len());
+    let mut rows: Vec<(f64, f64, f64)> = Vec::new();
+    let mut bad_w = 0usize;
+    for i in 0..n {
+        if !durations[i].is_finite() || !events[i].is_finite() {
+            continue;
+        }
+        let w = if i < weights.len() { weights[i] } else { 1.0 };
+        if !w.is_finite() || w <= 0.0 {
+            bad_w += 1;
+            continue;
+        }
+        rows.push((durations[i], events[i], w));
+    }
+    if bad_w > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("weighted_km skipped {bad_w} non-positive or non-finite weights"))
+                .build(),
+        );
+    }
+    if rows.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("weighted_km received no finite weighted pairs")
+                .build(),
+        );
+        return ctx.finish(FittedKaplanMeier {
+            times: Vector::zeros(0),
+            survival: Vector::zeros(0),
+            n_risk: Vector::zeros(0),
+            n_event: Vector::zeros(0),
+        });
+    }
+    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut times = Vec::new();
+    let mut surv = Vec::new();
+    let mut nrisk = Vec::new();
+    let mut nevent = Vec::new();
+    let mut s = 1.0_f64;
+    let mut i = 0;
+    let mut n_ev_total = 0.0_f64;
+    while i < rows.len() {
+        let t = rows[i].0;
+        let at_risk: f64 = rows[i..].iter().map(|r| r.2).sum();
+        let mut d = 0.0_f64;
+        while i < rows.len() && (rows[i].0 - t).abs() <= 0.0 {
+            if rows[i].1 > 0.5 {
+                d += rows[i].2;
+                n_ev_total += rows[i].2;
+            }
+            i += 1;
+        }
+        if d > 0.0 {
+            if at_risk > 1e-15 {
+                s *= (1.0 - d / at_risk).max(0.0);
+            }
+            times.push(t);
+            surv.push(s);
+            nrisk.push(at_risk);
+            nevent.push(d);
+        }
+    }
+    if n_ev_total <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("weighted KM has zero weighted events; Ŝ is identically 1")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "weighted product-limit survival curve",
+                    "without events the estimator never leaves 1",
+                    "collect events or report only the censoring pattern",
+                ))
+                .build(),
+        );
+    }
+    ctx.finish(FittedKaplanMeier {
+        times: Vector::from_iter(times),
+        survival: Vector::from_iter(surv),
+        n_risk: Vector::from_iter(nrisk),
+        n_event: Vector::from_iter(nevent),
+    })
+}
+
+/// Named weighted product-limit estimator.
+#[derive(Clone, Debug, Default)]
+pub struct WeightedKm;
+
+impl WeightedKm {
+    /// Default weighted KM.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit with case weights (`weights[i] ≤ 0` rows are dropped).
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        weights: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedKaplanMeier>> {
+        weighted_km(durations, events, weights, session)
+    }
+}
+
+fn skip_aborting_inner(issue: &Issue) -> bool {
+    matches!(
+        issue.code,
+        IssueCode::CholeskyFailed
+            | IssueCode::ResidualTooLarge
+            | IssueCode::NearSingular
+            | IssueCode::R2IsOne
+            | IssueCode::RankZero
+            | IssueCode::InformationMatrixSingular
+            | IssueCode::LossIsNan
+            | IssueCode::MeaninglessFit
+    )
+}
+
+/// Andersen–Gill counting-process Cox for recurrent events (statsmodels `PHReg`).
+///
+/// At risk at \(t\) are rows with `start < t ≤ stop`. Interval / subject counts
+/// are not identification `p`. Independent increments are assumed (no frailty).
+pub fn andersen_gill(
+    start: &Vector,
+    stop: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<FittedCoxPH>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(stop),
+        None,
+        &ctx.policy,
+    );
+    let n = x.nrows();
+    let p = x.ncols();
+    inspect_identification(&mut ctx.report, n, p, &ctx.policy);
+    let n_events = (0..n)
+        .filter(|&i| i < events.len() && events[i] > 0.5)
+        .count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("Andersen–Gill has no events")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "counting-process Cox coefficients",
+                    "zero events ⇒ empty partial likelihood",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedCoxPH {
+            coef: Vector::zeros(p),
+            loglik: 0.0,
+            n_events: 0,
+            n,
+            converged: false,
+        });
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("Andersen–Gill assumes independent increments; no frailty or sandwich SE")
+            .compromise(NumericalCompromise::new(
+                "cluster-robust AG with subject frailty",
+                "Breslow counting-process Cox on start/stop intervals",
+                "within-subject dependence is ignored",
+                "read β as an independent-increment PH, not a frailty AG",
+            ))
+            .build(),
+    );
+    match time_varying_cox(start, stop, events, x, &session.child("ag-tv")) {
+        Ok(q) => {
+            for issue in q.report.issues() {
+                if skip_aborting_inner(issue) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            ctx.finish(q.value)
+        }
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("Andersen–Gill inner counting-process Newton failed")
+                    .build(),
+            );
+            ctx.finish(FittedCoxPH {
+                coef: Vector::zeros(p),
+                loglik: f64::NAN,
+                n_events,
+                n,
+                converged: false,
+            })
+        }
+    }
+}
+
+/// Named Andersen–Gill recurrent-event Cox.
+#[derive(Clone, Debug, Default)]
+pub struct AndersenGill;
+
+impl AndersenGill {
+    /// Default AG counting-process Cox.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on interval starts, stops, events, and covariates.
+    pub fn fit(
+        &self,
+        start: &Vector,
+        stop: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCoxPH>> {
+        andersen_gill(start, stop, events, x, session)
+    }
+}
+
+/// Prentice–Williams–Peterson total-time Cox (event-number strata).
+///
+/// Event-order count is not identification `p`. Calendar time is used as-is;
+/// the caller must pass gap times for a gap-time PWP.
+pub fn pwp_cox(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    event_order: &Vector,
+    session: &Session,
+) -> Result<Qualified<FittedCoxPH>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+    let n = x.nrows();
+    let p = x.ncols();
+    inspect_identification(&mut ctx.report, n, p, &ctx.policy);
+    if event_order.len() != n {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("PwpCox event_order length ≠ X rows")
+                .build(),
+        );
+    }
+    let n_events = (0..n)
+        .filter(|&i| i < events.len() && events[i] > 0.5)
+        .count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("PWP Cox has no events")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "PWP stratified partial-likelihood coefficients",
+                    "zero events ⇒ empty product over event-number strata",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedCoxPH {
+            coef: Vector::zeros(p),
+            loglik: 0.0,
+            n_events: 0,
+            n,
+            converged: false,
+        });
+    }
+    let mut seen: BTreeMap<i64, usize> = BTreeMap::new();
+    for i in 0..n.min(event_order.len()) {
+        if event_order[i].is_finite() {
+            *seen.entry(event_order[i].round() as i64).or_insert(0) += 1;
+        }
+    }
+    if seen.len() <= 1 {
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("PWP event-order is constant; the fit reduces to unstratified Cox")
+                .compromise(NumericalCompromise::new(
+                    "PWP with multiple event numbers",
+                    "StratifiedCox on a single event-order label",
+                    "there is no within-subject event sequence to stratify",
+                    "read as ordinary Breslow Cox, not a recurrent-event PWP",
+                ))
+                .build(),
+        );
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("pwp_cox is total-time PWP (calendar time), not gap-time")
+            .compromise(NumericalCompromise::new(
+                "PWP gap-time and total-time with robust cluster SE",
+                "StratifiedCox with strata = event number",
+                "gap times and sandwich SEs are not computed",
+                "pass time-since-last-event if a gap-time PWP is intended",
+            ))
+            .build(),
+    );
+    let spec = StratifiedCox::default();
+    match spec.fit(durations, events, x, event_order, &session.child("pwp-str")) {
+        Ok(q) => {
+            for issue in q.report.issues() {
+                if skip_aborting_inner(issue) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            ctx.finish(q.value)
+        }
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("PWP inner stratified Newton failed")
+                    .build(),
+            );
+            ctx.finish(FittedCoxPH {
+                coef: Vector::zeros(p),
+                loglik: f64::NAN,
+                n_events,
+                n,
+                converged: false,
+            })
+        }
+    }
+}
+
+/// Named Prentice–Williams–Peterson total-time Cox.
+#[derive(Clone, Debug, Default)]
+pub struct PwpCox;
+
+impl PwpCox {
+    /// Default PWP total-time Cox.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit with `event_order` as the PWP stratum (1 = first event, …).
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        event_order: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCoxPH>> {
+        pwp_cox(durations, events, x, event_order, session)
+    }
+}
+
+/// Local complementary-log-log IRLS on a scratch report (never promotes Fatal
+/// Cholesky).
+fn discrete_cloglog_irls(
+    design: &Matrix,
+    y: &Vector,
+    policy: &signlred::Policy,
+    max_iter: usize,
+) -> Vector {
+    let mut beta = Vector::zeros(design.ncols());
+    if !beta.is_empty() {
+        let p = y.as_slice().iter().filter(|v| **v > 0.5).count() as f64 / y.len().max(1) as f64;
+        let p = p.clamp(1e-3, 1.0 - 1e-3);
+        beta[0] = (-(1.0 - p).ln()).ln();
+    }
+    for _ in 0..max_iter.max(1) {
+        let mut xs = Matrix::zeros(design.nrows(), design.ncols());
+        let mut rhs = Vector::zeros(design.nrows());
+        for i in 0..design.nrows() {
+            let mut eta = 0.0_f64;
+            for j in 0..design.ncols() {
+                eta += design.get(i, j) * beta[j];
+            }
+            eta = eta.clamp(-8.0, 5.0);
+            let el = eta.exp();
+            let mu = (1.0 - (-el).exp()).clamp(1e-12, 1.0 - 1e-12);
+            let dmu = (el * (1.0 - mu)).max(1e-12);
+            let w = (dmu * dmu / (mu * (1.0 - mu))).max(1e-12);
+            let sw = w.sqrt();
+            rhs[i] = (eta + (y[i] - mu) / dmu) * sw;
+            for j in 0..design.ncols() {
+                xs.set(i, j, design.get(i, j) * sw);
+            }
+        }
+        let mut scratch = Report::new("cloglog_ph", "irls");
+        let Some(next) = least_squares(&mut scratch, &xs, &rhs, policy) else {
+            break;
+        };
+        let d = next.sub(&beta).norm();
+        beta = next;
+        if d < 1e-7 {
+            break;
+        }
+    }
+    beta
+}
+
+/// Fitted discrete complementary-log-log proportional hazards.
+#[derive(Clone, Debug)]
+pub struct FittedCloglogPH {
+    /// Intercept of \(\mathrm{cloglog}\,h\).
+    pub intercept: f64,
+    /// Slope on the integer period index.
+    pub time_coef: f64,
+    /// Covariate slopes.
+    pub coef: Vector,
+    /// Expanded person-period rows.
+    pub n_person_periods: usize,
+    /// Events in the expansion.
+    pub n_events: usize,
+}
+
+/// Discrete-time complementary log-log PH (person-period cloglog on
+/// \([1, t, x]\)). Period count is not identification `p`. Inspect times with
+/// `y=None`.
+pub fn cloglog_ph(
+    time: &Vector,
+    event: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<FittedCloglogPH>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(time),
+        None,
+        &ctx.policy,
+    );
+    let n = time.len().min(event.len()).min(x.nrows());
+    if event.len() != time.len() || x.nrows() != time.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("cloglog_ph lengths do not match")
+                .build(),
+        );
+    }
+    let p_x = x.ncols();
+    let mut rows: Vec<(f64, f64, usize)> = Vec::new();
+    for i in 0..n {
+        if !time[i].is_finite() || !event[i].is_finite() || time[i] <= 0.0 {
+            continue;
+        }
+        let tmax = time[i].ceil().max(1.0) as usize;
+        for t in 1..=tmax {
+            let ev = if t == tmax && event[i] > 0.5 {
+                1.0
+            } else {
+                0.0
+            };
+            rows.push((t as f64, ev, i));
+        }
+    }
+    if rows.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("cloglog_ph has no finite positive times")
+                .build(),
+        );
+        return ctx.finish(FittedCloglogPH {
+            intercept: 0.0,
+            time_coef: 0.0,
+            coef: Vector::zeros(p_x),
+            n_person_periods: 0,
+            n_events: 0,
+        });
+    }
+    let n_events = rows.iter().filter(|r| r.1 > 0.5).count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("cloglog PH expansion has zero events")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "discrete complementary-log-log hazard",
+                    "an all-zero person-period outcome identifies no cloglog slope",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedCloglogPH {
+            intercept: 0.0,
+            time_coef: 0.0,
+            coef: Vector::zeros(p_x),
+            n_person_periods: rows.len(),
+            n_events: 0,
+        });
+    }
+    let m = rows.len();
+    let design = Matrix::from_fn(m, 2 + p_x, |r, j| {
+        if j == 0 {
+            1.0
+        } else if j == 1 {
+            rows[r].0
+        } else {
+            x.get(rows[r].2, j - 2)
+        }
+    });
+    let yexp = Vector::from_iter(rows.iter().map(|r| r.1));
+    let beta = discrete_cloglog_irls(&design, &yexp, &ctx.policy, 20);
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("cloglog_ph is person-period complementary log-log on [1, t, x]")
+            .compromise(NumericalCompromise::new(
+                "continuous cloglog PH with period dummies",
+                "discrete cloglog IRLS on integer periods",
+                "the time effect is a linear period slope, not a dummy baseline",
+                "read as a discrete PH, not the unique continuous cloglog MLE",
+            ))
+            .build(),
+    );
+    ctx.finish(FittedCloglogPH {
+        intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+        time_coef: beta.as_slice().get(1).copied().unwrap_or(0.0),
+        coef: Vector::from_iter((2..beta.len()).map(|j| beta[j])),
+        n_person_periods: m,
+        n_events,
+    })
+}
+
+/// Named discrete complementary-log-log PH.
+#[derive(Clone, Debug, Default)]
+pub struct CloglogPH;
+
+impl CloglogPH {
+    /// Default person-period cloglog PH.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on times, events, and covariates.
+    pub fn fit(
+        &self,
+        time: &Vector,
+        event: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCloglogPH>> {
+        cloglog_ph(time, event, x, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -16571,5 +17353,35 @@ mod tests {
         assert!(gw.value.nobs > 0.0);
         let lrt = logrank_trend(&dur, &ev, &grp, &Session::new("lrt", "t")).expect("lrt");
         assert!(lrt.value.statistic.is_finite() || lrt.value.pvalue.is_nan());
+        let fh = fleming_harrington(&dur, &ev, &grp, 1.0, 0.0, &Session::new("fh", "t")).expect("fh");
+        assert!(fh.value.statistic.is_finite() || fh.value.pvalue.is_nan());
+        let lt = life_table(&dur, &ev, 4, &Session::new("ltab", "t")).expect("ltab");
+        assert_eq!(lt.value.survival.len(), 4);
+        assert!(lt
+            .value
+            .survival
+            .as_slice()
+            .iter()
+            .all(|s| *s >= 0.0 && *s <= 1.0));
+        let wts = Vector::from_iter((0..20).map(|_| 1.0));
+        let wkm = weighted_km(&dur, &ev, &wts, &Session::new("wkm", "t")).expect("wkm");
+        assert!(!wkm.value.times.is_empty());
+        assert!(wkm
+            .value
+            .survival
+            .as_slice()
+            .iter()
+            .all(|s| *s >= 0.0 && *s <= 1.0));
+        let ag = andersen_gill(&entry0, &dur, &ev, &xcox, &Session::new("ag", "t")).expect("ag");
+        assert_eq!(ag.value.coef.len(), 1);
+        assert!(ag.value.coef[0].is_finite() || !ag.value.converged);
+        let eord = Vector::from_iter((0..20).map(|_| 1.0));
+        let pwp = pwp_cox(&dur, &ev, &xcox, &eord, &Session::new("pwp", "t")).expect("pwp");
+        assert_eq!(pwp.value.coef.len(), 1);
+        assert!(pwp.value.coef[0].is_finite() || !pwp.value.converged);
+        let clph = cloglog_ph(&dur, &ev, &xcox, &Session::new("clph", "t")).expect("clph");
+        assert!(clph.value.n_events > 0);
+        assert_eq!(clph.value.coef.len(), 1);
+        assert!(clph.value.intercept.is_finite());
     }
 }

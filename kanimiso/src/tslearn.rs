@@ -11085,6 +11085,132 @@ impl Predict for FittedCatch22El {
     }
 }
 
+/// Catch22 + Rotation Forest (sktime `RotationForestClassifier` / Catch22 pipeline).
+///
+/// Catch22 width and tree count are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RotationForestClassifier {
+    /// Rotation-forest members.
+    pub n_estimators: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for RotationForestClassifier {
+    fn default() -> Self {
+        Self {
+            n_estimators: 4,
+            max_depth: 4,
+            seed: 7,
+        }
+    }
+}
+
+impl RotationForestClassifier {
+    /// Default Catch22–rotation-forest ensemble.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted Catch22–rotation forest (ridge fallback if every rotated tree fails).
+#[derive(Clone, Debug)]
+pub struct FittedRotationForestClassifier {
+    forest: Option<crate::ensemble::FittedRotationForest>,
+    ridge: Option<FittedCatch22Classifier>,
+}
+
+impl Fit for RotationForestClassifier {
+    type Fitted = FittedRotationForestClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRotationForestClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let z = catch22_rows(x, session, &mut ctx);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("RotationForestClassifier is Catch22 features plus rotation trees")
+                .compromise(NumericalCompromise::new(
+                    "sktime RotationForest on the raw series",
+                    "catch22_rows then ensemble RotationForest",
+                    "PCA rotations are on Catch22, not on the time axis",
+                    "do not read as a published Rotation Forest TSC accuracy",
+                ))
+                .build(),
+        );
+        let mut rf = crate::ensemble::RotationForest {
+            n_estimators: self.n_estimators.max(1),
+            max_depth: self.max_depth.max(1),
+            seed: self.seed,
+        };
+        match rf.fit(&z, y, &session.child("rotf-c22")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::R2IsOne
+                            | IssueCode::RankZero
+                            | IssueCode::MeaninglessFit
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                ctx.finish(FittedRotationForestClassifier {
+                    forest: Some(q.value),
+                    ridge: None,
+                })
+            }
+            Err(_) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("RotationForest failed; falling back to Catch22 ridge")
+                        .build(),
+                );
+                match Catch22Classifier::new(0.1).fit(x, y, &session.child("rotf-ridge")) {
+                    Ok(q) => ctx.finish(FittedRotationForestClassifier {
+                        forest: None,
+                        ridge: Some(q.value),
+                    }),
+                    Err(_) => ctx.finish(FittedRotationForestClassifier {
+                        forest: None,
+                        ridge: None,
+                    }),
+                }
+            }
+        }
+    }
+}
+
+impl Predict for FittedRotationForestClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        if let Some(f) = &self.forest {
+            let z = {
+                let mut ctx = FitCtx::with_session(session.child("rotf-z"));
+                catch22_rows(x, session, &mut ctx)
+            };
+            return f.predict(&z, session);
+        }
+        if let Some(r) = &self.ridge {
+            return r.predict(x, session);
+        }
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+        ctx.finish(Vector::zeros(x.nrows()))
+    }
+}
+
 /// Random supervised time-series forest (sktime `RSTSF` lite).
 ///
 /// Interval / tree counts are not identification `p`.
@@ -13053,6 +13179,16 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(pc22el.len(), 8);
+        let rfc = RotationForestClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "rotf"))
+            .unwrap();
+        let prfc = rfc
+            .value
+            .predict(&x, &Session::new("ts", "rotfp"))
+            .unwrap()
+            .value;
+        assert_eq!(prfc.len(), 8);
+        assert!(prfc.as_slice().iter().all(|v| v.is_finite()));
         let rst = Rstsf::new()
             .fit(&x, &y, &Session::new("ts", "rstsf"))
             .unwrap();
