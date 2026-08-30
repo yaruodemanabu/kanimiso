@@ -1066,6 +1066,103 @@ pub fn haversine_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<
     ctx.finish(out)
 }
 
+/// Additive χ² kernel \(\sum 2xy/(x+y)\) (sklearn `additive_chi2_kernel`).
+///
+/// Negative coordinates are skipped with a warning; they are not identification
+/// `p`.
+pub fn additive_chi2_kernel(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("additive_chi2_kernel column mismatch")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    let mut saw_neg = false;
+    for src in [a, b] {
+        for i in 0..src.nrows() {
+            for k in 0..src.ncols() {
+                if src.get(i, k) < 0.0 {
+                    saw_neg = true;
+                }
+            }
+        }
+    }
+    if saw_neg {
+        ctx.push(
+            Issue::builder(IssueCode::NonPositiveSeries)
+                .severity(Severity::Warning)
+                .message("additive_chi2_kernel skipped negative coordinates")
+                .build(),
+        );
+    }
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let mut s = 0.0;
+        for k in 0..a.ncols() {
+            let u = a.get(i, k);
+            let v = b.get(j, k);
+            if u < 0.0 || v < 0.0 {
+                continue;
+            }
+            let den = u + v;
+            if den > 1e-18 {
+                s += 2.0 * u * v / den;
+            }
+        }
+        s
+    });
+    ctx.finish(out)
+}
+
+/// Cosine distances \(1 - \cos\) (sklearn `cosine_distances`).
+///
+/// A zero-norm row is recorded as a numerical compromise and contributes 1.
+pub fn cosine_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let sim = cosine_similarity(a, b, session)?;
+    let out = Matrix::from_fn(sim.value.nrows(), sim.value.ncols(), |i, j| {
+        (1.0 - sim.value.get(i, j)).clamp(0.0, 2.0)
+    });
+    Ok(sim.map(|_| out))
+}
+
+/// Paired Euclidean distances of aligned rows (sklearn `paired_distances`).
+///
+/// Row count is not identification `p`.
+pub fn paired_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if a.nrows() != b.nrows() || a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "paired_distances shapes {:?} vs {:?}",
+                    a.shape(),
+                    b.shape()
+                ))
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(a.nrows().min(b.nrows())));
+    }
+    let out = Vector::from_iter((0..a.nrows()).map(|i| {
+        let mut s = 0.0;
+        for k in 0..a.ncols() {
+            let d = a.get(i, k) - b.get(i, k);
+            s += d * d;
+        }
+        s.sqrt()
+    }));
+    ctx.finish(out)
+}
+
 /// Maximum residual (sklearn `max_error`).
 pub fn max_error(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
@@ -3803,5 +3900,18 @@ mod tests {
             .value;
         assert!((cr.precision - 1.0).abs() < 1e-12);
         assert!((cr.f1 - 1.0).abs() < 1e-12);
+        let ach = additive_chi2_kernel(&xb, &xb, &Session::new("m", "achi"))
+            .unwrap()
+            .value;
+        assert!(ach.get(1, 1).is_finite());
+        let cd = cosine_distances(&xb, &xb, &Session::new("m", "cdist"))
+            .unwrap()
+            .value;
+        assert!(cd.get(1, 1).abs() < 1e-9);
+        let pd = paired_distances(&xb, &xb, &Session::new("m", "pair"))
+            .unwrap()
+            .value;
+        assert_eq!(pd.len(), 8);
+        assert!(pd[1].abs() < 1e-12);
     }
 }

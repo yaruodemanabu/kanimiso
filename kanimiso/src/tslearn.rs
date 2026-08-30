@@ -7446,6 +7446,174 @@ impl Predict for FittedWeaselMuse {
     }
 }
 
+/// Pairwise canonical time warping (tslearn `cdist_ctw`).
+///
+/// Series count is not identification `p`.
+pub fn cdist_ctw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        dtw_raw(a.row(i).as_slice(), b.row(j).as_slice())
+    });
+    let mut scaled = out.clone();
+    for i in 0..a.nrows() {
+        for j in 0..b.nrows() {
+            match canonical_time_warping(&a.row(i), &b.row(j), &session.child(format!("ctw_{i}_{j}")))
+            {
+                Ok(q) if q.value.is_finite() => scaled.set(i, j, q.value),
+                _ => {}
+            }
+        }
+    }
+    ctx.finish(scaled)
+}
+
+/// DTW k-medoids (tslearn `TimeSeriesKMedoids` / sktime `TimeSeriesKMedoids`).
+///
+/// Cluster count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct TimeSeriesKMedoids {
+    /// Number of medoids.
+    pub n_clusters: usize,
+    /// PAM iterations.
+    pub max_iter: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for TimeSeriesKMedoids {
+    fn default() -> Self {
+        Self {
+            n_clusters: 2,
+            max_iter: 10,
+            seed: 3,
+        }
+    }
+}
+
+impl TimeSeriesKMedoids {
+    /// DTW PAM with `k` medoids.
+    pub fn new(n_clusters: usize) -> Self {
+        Self {
+            n_clusters,
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted DTW medoids.
+#[derive(Clone, Debug)]
+pub struct FittedTsKMedoids {
+    /// Medoid series (`k × T`).
+    pub centers: Matrix,
+    /// Training assignments.
+    pub labels: Vector,
+}
+
+impl FitUnsupervised for TimeSeriesKMedoids {
+    type Fitted = FittedTsKMedoids;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedTsKMedoids>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let n = x.nrows();
+        let k = self.n_clusters.max(1).min(n.max(1));
+        if n == 0 {
+            return ctx.finish(FittedTsKMedoids {
+                centers: Matrix::zeros(0, x.ncols()),
+                labels: Vector::zeros(0),
+            });
+        }
+        let dist = Matrix::from_fn(n, n, |i, j| {
+            if i == j {
+                0.0
+            } else {
+                dtw_raw(x.row(i).as_slice(), x.row(j).as_slice())
+            }
+        });
+        let mut rng = Rng::new(self.seed);
+        let mut medoids = rng.sample_indices(n, k);
+        let mut labels = Vector::zeros(n);
+        for it in 0..self.max_iter.max(1) {
+            for i in 0..n {
+                let mut best = 0usize;
+                let mut bd = f64::INFINITY;
+                for (c, &m) in medoids.iter().enumerate() {
+                    let d = dist.get(i, m);
+                    if d < bd {
+                        bd = d;
+                        best = c;
+                    }
+                }
+                labels[i] = best as f64;
+            }
+            let mut changed = false;
+            for c in 0..k {
+                let members: Vec<usize> = (0..n).filter(|&i| labels[i] as usize == c).collect();
+                if members.is_empty() {
+                    ctx.push(
+                        Issue::builder(IssueCode::EmptyCluster)
+                            .message(format!("DTW k-medoids cluster {c} emptied"))
+                            .build(),
+                    );
+                    continue;
+                }
+                let mut best_m = medoids[c];
+                let mut best_s = f64::INFINITY;
+                for &u in &members {
+                    let mut s = 0.0;
+                    for &v in &members {
+                        s += dist.get(u, v);
+                    }
+                    if s < best_s {
+                        best_s = s;
+                        best_m = u;
+                    }
+                }
+                if best_m != medoids[c] {
+                    medoids[c] = best_m;
+                    changed = true;
+                }
+            }
+            ctx.session.step(it as u64, if changed { 1.0 } else { 0.0 }, None);
+            if !changed && it > 0 {
+                ctx.session.converged("DTW k-medoids", it as u64);
+                break;
+            }
+        }
+        let centers = Matrix::from_fn(k, x.ncols(), |c, j| {
+            x.get(medoids[c.min(medoids.len().saturating_sub(1))], j)
+        });
+        ctx.finish(FittedTsKMedoids { centers, labels })
+    }
+}
+
+impl Predict for FittedTsKMedoids {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let y = Vector::from_iter((0..x.nrows()).map(|i| {
+            let s = x.row(i);
+            let mut best = 0usize;
+            let mut bd = f64::INFINITY;
+            for c in 0..self.centers.nrows() {
+                let d = dtw_raw(s.as_slice(), self.centers.row(c).as_slice());
+                if d < bd {
+                    bd = d;
+                    best = c;
+                }
+            }
+            best as f64
+        }));
+        ctx.finish(y)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8100,5 +8268,20 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(musep.len(), 6);
+        let ctwm = cdist_ctw(&x, &x, &Session::new("ts", "cctw"))
+            .unwrap()
+            .value;
+        assert_eq!(ctwm.shape(), (6, 6));
+        assert!(ctwm.get(0, 0).is_finite());
+        let kmed = TimeSeriesKMedoids::new(2)
+            .fit_unsupervised(&x, &Session::new("ts", "kmed"))
+            .unwrap();
+        assert_eq!(kmed.value.labels.len(), 6);
+        let kmedp = kmed
+            .value
+            .predict(&x, &Session::new("ts", "kmedp"))
+            .unwrap()
+            .value;
+        assert_eq!(kmedp.len(), 6);
     }
 }

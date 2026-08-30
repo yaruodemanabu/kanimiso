@@ -12560,6 +12560,643 @@ impl Transform for RandomUnderSampler {
     }
 }
 
+/// Streaming mean (river `stats.Mean`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineMean {
+    n: f64,
+    mean: f64,
+    updates: u64,
+}
+
+impl OnlineMean {
+    /// Empty mean accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current mean, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.n <= 0.0 {
+            f64::NAN
+        } else {
+            self.mean
+        }
+    }
+}
+
+impl PartialFit for OnlineMean {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            self.n += 1.0;
+            self.mean += (v - self.mean) / self.n;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 1.0;
+        q.warmup = self.n < 1.0;
+        q.explanation = format!("OnlineMean={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Welford mean",
+                "running mean of column 0",
+                format!("mean={before:.6e}"),
+                format!("mean={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming variance (river `stats.Var`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineVar {
+    n: f64,
+    mean: f64,
+    m2: f64,
+    updates: u64,
+}
+
+impl OnlineVar {
+    /// Empty variance accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current sample variance, or NaN during warmup.
+    pub fn score(&self) -> f64 {
+        if self.n < 2.0 {
+            f64::NAN
+        } else {
+            self.m2 / (self.n - 1.0)
+        }
+    }
+}
+
+impl PartialFit for OnlineVar {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            self.n += 1.0;
+            let d = v - self.mean;
+            self.mean += d / self.n;
+            self.m2 += d * (v - self.mean);
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 2.0;
+        q.warmup = self.n < 2.0;
+        q.explanation = format!("OnlineVar={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Welford variance",
+                "running sample variance of column 0",
+                format!("var={before:.6e}"),
+                format!("var={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming finite-count (river `stats.Count`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineCount {
+    n: u64,
+    updates: u64,
+}
+
+impl OnlineCount {
+    /// Empty counter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current count.
+    pub fn score(&self) -> f64 {
+        self.n as f64
+    }
+}
+
+impl PartialFit for OnlineCount {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            if x.get(i, 0).is_finite() {
+                self.n += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n);
+        q.effective_sample_size = self.n as f64;
+        q.parameter_delta_norm = Some((after - before).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n > 0;
+        q.warmup = self.n == 0;
+        q.explanation = format!("OnlineCount={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "count update",
+                "finite entries in column 0",
+                format!("n={before:.6e}"),
+                format!("n={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming lag-1 autocorrelation (river `stats.AutoCorr`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineAutoCorr {
+    last: Option<f64>,
+    n: f64,
+    mx: f64,
+    my: f64,
+    c: f64,
+    vx: f64,
+    vy: f64,
+    updates: u64,
+}
+
+impl OnlineAutoCorr {
+    /// Empty lag-1 accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current lag-1 correlation, or NaN during warmup.
+    pub fn score(&self) -> f64 {
+        if self.n < 2.0 {
+            return f64::NAN;
+        }
+        let den = (self.vx * self.vy).sqrt();
+        if den <= 1e-18 {
+            f64::NAN
+        } else {
+            self.c / den
+        }
+    }
+}
+
+impl PartialFit for OnlineAutoCorr {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            if let Some(prev) = self.last {
+                self.n += 1.0;
+                let dx = prev - self.mx;
+                self.mx += dx / self.n;
+                let dy = v - self.my;
+                self.my += dy / self.n;
+                self.c += dx * (v - self.my);
+                self.vx += dx * (prev - self.mx);
+                self.vy += dy * (v - self.my);
+            }
+            self.last = Some(v);
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 3.0;
+        q.warmup = self.n < 3.0;
+        q.explanation = format!("OnlineAutoCorr={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "lag-1 correlation",
+                "Welford Pearson of consecutive column-0 values",
+                format!("rho={before:.6e}"),
+                format!("rho={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming variance threshold (river `feature_selection.VarianceThreshold`).
+#[derive(Clone, Debug)]
+pub struct OnlineVarianceThreshold {
+    /// Keep columns with sample variance above this.
+    pub threshold: f64,
+    n: Vec<f64>,
+    mean: Vec<f64>,
+    m2: Vec<f64>,
+    n_features: usize,
+    updates: u64,
+}
+
+impl Default for OnlineVarianceThreshold {
+    fn default() -> Self {
+        Self {
+            threshold: 0.0,
+            n: Vec::new(),
+            mean: Vec::new(),
+            m2: Vec::new(),
+            n_features: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlineVarianceThreshold {
+    /// Threshold `t` (not identification `p`).
+    pub fn new(threshold: f64) -> Self {
+        Self {
+            threshold,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineVarianceThreshold {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.n_features == 0 {
+            self.n_features = x.ncols();
+            self.n = vec![0.0; x.ncols()];
+            self.mean = vec![0.0; x.ncols()];
+            self.m2 = vec![0.0; x.ncols()];
+        } else if x.ncols() != self.n_features {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .message(format!(
+                        "OnlineVarianceThreshold saw {} columns after init with {}",
+                        x.ncols(),
+                        self.n_features
+                    ))
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), 0, "feature space changed"),
+            );
+        }
+        let before = self
+            .m2
+            .iter()
+            .zip(&self.n)
+            .map(|(m2, n)| if *n > 1.0 { m2 / (n - 1.0) } else { 0.0 })
+            .sum::<f64>();
+        for j in 0..x.ncols() {
+            for i in 0..x.nrows() {
+                let v = x.get(i, j);
+                if !v.is_finite() {
+                    continue;
+                }
+                self.n[j] += 1.0;
+                let d = v - self.mean[j];
+                self.mean[j] += d / self.n[j];
+                self.m2[j] += d * (v - self.mean[j]);
+            }
+        }
+        self.updates += 1;
+        let after = self
+            .m2
+            .iter()
+            .zip(&self.n)
+            .map(|(m2, n)| if *n > 1.0 { m2 / (n - 1.0) } else { 0.0 })
+            .sum::<f64>();
+        let kept = (0..self.n_features)
+            .filter(|&j| {
+                let n = self.n[j];
+                n > 1.0 && self.m2[j] / (n - 1.0) > self.threshold
+            })
+            .count();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), 0);
+        q.effective_sample_size = self.n.iter().copied().fold(0.0_f64, f64::max);
+        q.parameter_delta_norm = Some((after - before).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = kept >= 1;
+        q.warmup = self.n.iter().all(|n| *n < 2.0);
+        q.explanation = format!("OnlineVarianceThreshold kept={kept}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "column variance update",
+                "Welford variance per column; transform drops near-constants",
+                format!("sumvar={before:.6e}"),
+                format!("sumvar={after:.6e} kept={kept}"),
+            ),
+        )
+    }
+}
+
+impl Transform for OnlineVarianceThreshold {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        let mut keep = Vec::new();
+        for j in 0..x.ncols().min(self.n_features) {
+            let n = self.n.get(j).copied().unwrap_or(0.0);
+            let v = if n > 1.0 {
+                self.m2[j] / (n - 1.0)
+            } else {
+                0.0
+            };
+            if v > self.threshold {
+                keep.push(j);
+            }
+        }
+        if keep.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::NearZeroVariance)
+                    .message("OnlineVarianceThreshold kept no columns; returning column 0")
+                    .build(),
+            );
+            keep.push(0);
+        }
+        ctx.finish(Matrix::from_fn(x.nrows(), keep.len(), |i, j| {
+            x.get(i, keep[j].min(x.ncols().saturating_sub(1)))
+        }))
+    }
+}
+
+/// Streaming univariate Gaussian (river `proba.Gaussian`).
+#[derive(Clone, Debug, Default)]
+pub struct OnlineGaussian {
+    n: f64,
+    mean: f64,
+    m2: f64,
+    updates: u64,
+}
+
+impl OnlineGaussian {
+    /// Empty Gaussian.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Density at `x`, or NaN during warmup.
+    pub fn pdf(&self, x: f64) -> f64 {
+        if self.n < 2.0 {
+            return f64::NAN;
+        }
+        let var = self.m2 / (self.n - 1.0);
+        if var <= 1e-18 {
+            return f64::NAN;
+        }
+        let z = (x - self.mean) / var.sqrt();
+        (-0.5 * z * z).exp() / (std::f64::consts::TAU * var).sqrt()
+    }
+}
+
+impl PartialFit for OnlineGaussian {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.mean;
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            self.n += 1.0;
+            let d = v - self.mean;
+            self.mean += d / self.n;
+            self.m2 += d * (v - self.mean);
+        }
+        self.updates += 1;
+        if self.n >= 2.0 && self.m2 / (self.n - 1.0) <= 1e-18 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateDistribution)
+                    .message("OnlineGaussian variance vanished; pdf is undefined")
+                    .build(),
+            );
+        }
+        let after = self.mean;
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some((after - before).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 2.0 && self.m2 > 1e-18;
+        q.warmup = self.n < 2.0;
+        q.explanation = format!("OnlineGaussian μ={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Gaussian sufficient stats",
+                "Welford mean and variance of column 0",
+                format!("mu={before:.6e}"),
+                format!("mu={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Hard-example buffer around a perceptron (river `imblearn.HardSamplingClassifier`).
+#[derive(Clone, Debug)]
+pub struct HardSamplingClassifier {
+    inner: Perceptron,
+    buffer_x: Vec<Vec<f64>>,
+    buffer_y: Vec<f64>,
+    cap: usize,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for HardSamplingClassifier {
+    fn default() -> Self {
+        Self {
+            inner: Perceptron::new(),
+            buffer_x: Vec::new(),
+            buffer_y: Vec::new(),
+            cap: 32,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl HardSamplingClassifier {
+    /// Buffer capacity `cap` (not identification `p`).
+    pub fn new(cap: usize) -> Self {
+        Self {
+            cap: cap.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for HardSamplingClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        let before = self.buffer_x.len();
+        if self.n_seen == 0 {
+            let _ = self.inner.partial_fit(x, Some(y), &session.child("hs_init"));
+        }
+        let pred = if self.n_seen == 0 {
+            Vector::zeros(x.nrows())
+        } else {
+            match self.inner.predict(x, &session.child("hs_pred")) {
+                Ok(q) => q.value,
+                Err(_) => Vector::zeros(x.nrows()),
+            }
+        };
+        for i in 0..x.nrows().min(y.len()) {
+            let wrong = self.n_seen == 0
+                || (i < pred.len() && (pred[i] - y[i]).abs() >= 0.5);
+            if wrong && y[i].is_finite() {
+                self.buffer_x
+                    .push((0..x.ncols()).map(|j| x.get(i, j)).collect());
+                self.buffer_y.push(y[i]);
+            }
+        }
+        while self.buffer_x.len() > self.cap {
+            self.buffer_x.remove(0);
+            self.buffer_y.remove(0);
+        }
+        if !self.buffer_x.is_empty() {
+            let p = self.buffer_x[0].len();
+            let xb = Matrix::from_fn(self.buffer_x.len(), p, |i, j| self.buffer_x[i][j]);
+            let yb = Vector::from_slice(&self.buffer_y);
+            let _ = self
+                .inner
+                .partial_fit(&xb, Some(&yb), &session.child("hs_hard"));
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let after = self.buffer_x.len();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = after as f64;
+        q.parameter_delta_norm = Some((after as f64 - before as f64).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!("HardSamplingClassifier buffer={after}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "hard-example buffer",
+                "misclassified rows are replayed through the perceptron",
+                format!("buf={before}"),
+                format!("buf={after}"),
+            ),
+        )
+    }
+}
+
+impl Predict for HardSamplingClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.n_seen == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        match self.inner.predict(x, session) {
+            Ok(q) => ctx.finish(q.value),
+            Err(_) => ctx.finish(Vector::zeros(x.nrows())),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -12905,6 +13542,27 @@ mod tests {
         RandomUnderSampler::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("rus");
+        OnlineMean::new()
+            .partial_fit(&x, None, &session)
+            .expect("omean");
+        OnlineVar::new()
+            .partial_fit(&x, None, &session)
+            .expect("ovar");
+        OnlineCount::new()
+            .partial_fit(&x, None, &session)
+            .expect("ocnt");
+        OnlineAutoCorr::new()
+            .partial_fit(&x, None, &session)
+            .expect("oac");
+        OnlineVarianceThreshold::new(0.0)
+            .partial_fit(&x, None, &session)
+            .expect("ovt");
+        OnlineGaussian::new()
+            .partial_fit(&x, None, &session)
+            .expect("ogauss");
+        HardSamplingClassifier::new(8)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("hsc");
 
         let n_expl = session
             .ledger()

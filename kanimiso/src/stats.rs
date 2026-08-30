@@ -5670,6 +5670,232 @@ pub fn schoenfeld(
     ctx.finish(out)
 }
 
+/// D'Agostino–Pearson \(K^2\) normality test (scipy `normaltest` / statsmodels
+/// `omni_normtest`).
+///
+/// Uses the large-sample skew / excess-kurtosis \(z\)-scores. That is a
+/// documented compromise, not identification `p`.
+pub fn omni_normtest(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, x);
+    let st = slice_stats(x.as_slice());
+    if st.count < 8 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("omni_normtest n<8; the χ²(2) tail is a planning approximation")
+                .build(),
+        );
+    }
+    let (skew, kurt) = fisher_skew_kurt(x.as_slice(), st.mean, st.std());
+    let n = st.count as f64;
+    let zs = if n > 0.0 { skew * (n / 6.0).sqrt() } else { f64::NAN };
+    let zk = if n > 0.0 {
+        kurt * (n / 24.0).sqrt()
+    } else {
+        f64::NAN
+    };
+    let stat: f64 = zs * zs + zk * zk;
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .message("omni_normtest uses large-sample z(skew)+z(kurtosis), not D'Agostino tables")
+            .compromise(NumericalCompromise::new(
+                "D'Agostino–Pearson K² with exact moment transforms",
+                "K² = n(s²/6 + k²/24)",
+                "the finite-sample D'Agostino transformations are not tabulated here",
+                "treat the p-value as a screening statistic, not an exact size-α test",
+            ))
+            .build(),
+    );
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: if stat.is_finite() {
+            chi2_pvalue(stat.max(0.0), 2.0)
+        } else {
+            f64::NAN
+        },
+        df: 2.0,
+        nobs: n,
+    })
+}
+
+/// Alias of [`omni_normtest`] (scipy `stats.normaltest`).
+pub fn normaltest(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    omni_normtest(x, session)
+}
+
+/// Ljung–Box \(Q\) from the sample ACF (statsmodels `q_stat`).
+///
+/// Lag count is not identification `p`.
+pub fn q_stat(x: &Vector, lags: usize, session: &Session) -> Result<Qualified<LjungBoxResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, x);
+    let h = lags.max(1).min(x.len().saturating_sub(1).max(1));
+    if lags != h {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("q_stat lags={lags} clipped to {h}"))
+                .build(),
+        );
+    }
+    let acf = acf_raw(x.as_slice(), h);
+    let n = x.len() as f64;
+    let mut q = 0.0;
+    for k in 1..=h {
+        let r = acf.get(k).copied().unwrap_or(0.0);
+        if r.is_finite() && n > k as f64 {
+            q += r * r / (n - k as f64);
+        }
+    }
+    let stat: f64 = n * (n + 2.0) * q;
+    ctx.finish(LjungBoxResult {
+        stat,
+        pvalue: if stat.is_finite() {
+            chi2_pvalue(stat.max(0.0), h as f64)
+        } else {
+            f64::NAN
+        },
+        lags: h,
+    })
+}
+
+/// Wald confidence interval for a binomial proportion (statsmodels
+/// `proportion_confint`).
+#[derive(Clone, Debug)]
+pub struct ProportionConfint {
+    /// Point estimate.
+    pub point: f64,
+    /// Lower bound.
+    pub low: f64,
+    /// Upper bound.
+    pub high: f64,
+}
+
+/// Wald interval for the mean of a 0/1 series.
+///
+/// `alpha` is not identification `p`.
+pub fn proportion_confint(
+    y: &Vector,
+    alpha: f64,
+    session: &Session,
+) -> Result<Qualified<ProportionConfint>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, y);
+    let a = if alpha.is_finite() && alpha > 0.0 && alpha < 1.0 {
+        alpha
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("proportion_confint alpha={alpha} not in (0,1); using 0.05"))
+                .build(),
+        );
+        0.05
+    };
+    let mut s: f64 = 0.0;
+    let mut n: f64 = 0.0;
+    for &v in y.as_slice() {
+        if v.is_finite() {
+            s += if v >= 0.5 { 1.0 } else { 0.0 };
+            n += 1.0;
+        }
+    }
+    if n < 1.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("proportion_confint needs a finite 0/1 observation")
+                .build(),
+        );
+        return ctx.finish(ProportionConfint {
+            point: f64::NAN,
+            low: f64::NAN,
+            high: f64::NAN,
+        });
+    }
+    let p = s / n;
+    if n * p < 5.0 || n * (1.0 - p) < 5.0 {
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .message(format!("Wald interval nπ={:.2} is thin; do not treat bounds as exact", n * p))
+                .build(),
+        );
+    }
+    let z = norm_ppf(1.0 - a / 2.0);
+    let se = f64::sqrt(p * (1.0 - p) / n);
+    ctx.finish(ProportionConfint {
+        point: p,
+        low: (p - z * se).clamp(0.0, 1.0),
+        high: (p + z * se).clamp(0.0, 1.0),
+    })
+}
+
+/// Two-proportion z-test power (statsmodels `NormalIndPower` lite).
+///
+/// Sample sizes are not identification `p`.
+pub fn proportions_ztest_power(
+    p1: f64,
+    p2: f64,
+    nobs1: f64,
+    nobs2: f64,
+    alpha: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if ![p1, p2, nobs1, nobs2, alpha]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .message("proportions_ztest_power received a non-finite argument")
+                .build(),
+        );
+    }
+    let a = if alpha > 0.0 && alpha < 1.0 { alpha } else { 0.05 };
+    if a != alpha {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("proportions_ztest_power alpha={alpha}; using 0.05"))
+                .build(),
+        );
+    }
+    if nobs1 <= 1.0 || nobs2 <= 1.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("proportions_ztest_power needs nobs>1 on each arm")
+                .build(),
+        );
+    }
+    let pbar = (p1 + p2) * 0.5;
+    let se0: f64 = (pbar * (1.0 - pbar) * (1.0 / nobs1 + 1.0 / nobs2)).sqrt();
+    let se1: f64 = (p1 * (1.0 - p1) / nobs1 + p2 * (1.0 - p2) / nobs2).sqrt();
+    let zcrit = norm_ppf(1.0 - a / 2.0);
+    let ncp = if se1 > 1e-18 { (p1 - p2).abs() / se1 } else { 0.0 };
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .message("proportions_ztest_power uses a normal approximation, not the exact binomial power")
+            .compromise(NumericalCompromise::new(
+                "exact two-binomial power",
+                "1 − Φ(z_crit − ncp) + Φ(−z_crit − ncp)",
+                "the exact discrete power function is not summed",
+                "use the number for planning, not as a certified size-α calculation",
+            ))
+            .build(),
+    );
+    let _ = se0;
+    let power = if zcrit.is_finite() && ncp.is_finite() {
+        (1.0 - norm_cdf(zcrit - ncp) + norm_cdf(-zcrit - ncp))
+            .clamp(0.0, 1.0)
+    } else {
+        f64::NAN
+    };
+    ctx.finish(power)
+}
+
 /// Nested-model ANOVA (statsmodels `anova_lm`).
 #[derive(Clone, Debug)]
 pub struct AnovaLm {
@@ -6766,5 +6992,16 @@ mod tests {
         let sch = schoenfeld(&dur, &ev, &cx, &Session::new("sch", "t")).expect("sch");
         assert_eq!(sch.value.ncols(), 1);
         assert!(sch.value.nrows() == 0 || (0..sch.value.nrows()).all(|i| sch.value.get(i, 0).is_finite()));
+        let om = omni_normtest(&y, &Session::new("omni", "t")).expect("omni");
+        assert!(om.value.statistic.is_finite() || om.value.pvalue.is_nan());
+        let nt = normaltest(&y, &Session::new("nt", "t")).expect("nt");
+        assert!(nt.value.df > 0.0);
+        let qs = q_stat(&e, 3, &Session::new("qs", "t")).expect("qstat");
+        assert!(qs.value.stat.is_finite() || qs.value.pvalue.is_nan());
+        let pci = proportion_confint(&ybin, 0.05, &Session::new("pci", "t")).expect("pci");
+        assert!(pci.value.low <= pci.value.point && pci.value.point <= pci.value.high);
+        let pwr = proportions_ztest_power(0.5, 0.7, 40.0, 40.0, 0.05, &Session::new("pwr", "t"))
+            .expect("pwr");
+        assert!(pwr.value.is_finite() && pwr.value >= 0.0 && pwr.value <= 1.0);
     }
 }

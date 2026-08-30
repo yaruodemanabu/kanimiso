@@ -3137,6 +3137,74 @@ const INVENTORY: &[Algorithm] = &[
         "river.imblearn.RandomUnderSampler",
         "online",
     ),
+    a(
+        "metrics.additive_chi2_kernel",
+        "sklearn.metrics.pairwise.additive_chi2_kernel",
+        "metric",
+    ),
+    a(
+        "metrics.cosine_distances",
+        "sklearn.metrics.pairwise.cosine_distances",
+        "metric",
+    ),
+    a(
+        "metrics.paired_distances",
+        "sklearn.metrics.pairwise.paired_distances",
+        "metric",
+    ),
+    a(
+        "stats.omni_normtest",
+        "statsmodels.stats.stattools.omni_normtest",
+        "stats",
+    ),
+    a("stats.normaltest", "scipy.stats.normaltest", "stats"),
+    a("stats.q_stat", "statsmodels.stats.diagnostic.acorr_ljungbox", "stats"),
+    a(
+        "stats.proportion_confint",
+        "statsmodels.stats.proportion.proportion_confint",
+        "stats",
+    ),
+    a(
+        "stats.proportions_ztest_power",
+        "statsmodels.stats.power.NormalIndPower",
+        "stats",
+    ),
+    a(
+        "tsa.innovations_algo",
+        "statsmodels.tsa.innovations.arma_innovations",
+        "forecast",
+    ),
+    a(
+        "tsa.innovations_filter",
+        "statsmodels.tsa.innovations.innovations_filter",
+        "forecast",
+    ),
+    a(
+        "tsa.arma2ma",
+        "statsmodels.tsa.arima_process.arma2ma",
+        "forecast",
+    ),
+    a("tslearn.cdist_ctw", "tslearn.metrics.cdist_ctw", "timeseries"),
+    a(
+        "tslearn.TimeSeriesKMedoids",
+        "tslearn.clustering.TimeSeriesKMedoids",
+        "timeseries",
+    ),
+    a("online.OnlineMean", "river.stats.Mean", "online"),
+    a("online.OnlineVar", "river.stats.Var", "online"),
+    a("online.OnlineCount", "river.stats.Count", "online"),
+    a("online.OnlineAutoCorr", "river.stats.AutoCorr", "online"),
+    a(
+        "online.OnlineVarianceThreshold",
+        "river.feature_selection.VarianceThreshold",
+        "online",
+    ),
+    a("online.OnlineGaussian", "river.proba.Gaussian", "online"),
+    a(
+        "online.HardSamplingClassifier",
+        "river.imblearn.HardSamplingClassifier",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -3268,6 +3336,11 @@ mod tests {
             "tslearn.HydraMultiRocket",
             "tsa.reconcile_mint",
             "online.AdwinBagging",
+            "metrics.cosine_distances",
+            "stats.omni_normtest",
+            "tsa.innovations_algo",
+            "tslearn.TimeSeriesKMedoids",
+            "online.OnlineGaussian",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

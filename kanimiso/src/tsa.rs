@@ -6562,6 +6562,164 @@ pub fn reconcile_mint(
     ctx.finish(out)
 }
 
+/// Innovations-algorithm MA coefficients and innovation variances
+/// (statsmodels `tsa.innovations.arma_innovations`).
+///
+/// `gamma` is the autocovariance sequence \(\gamma_0,\ldots,\gamma_{m-1}\).
+/// Lag count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Innovations {
+    /// \(\theta_{n,j}\) stored as row `n`, column `j` (0-based, \(\theta_{n,0}\) unused).
+    pub theta: Matrix,
+    /// Innovation variances \(v_0,\ldots,v_{m-1}\).
+    pub variance: Vector,
+}
+
+/// Brockwell–Davis innovations algorithm on a covariance sequence.
+pub fn innovations_algo(gamma: &Vector, session: &Session) -> Result<Qualified<Innovations>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, gamma);
+    let m = gamma.len();
+    if m == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("innovations_algo received an empty acovf")
+                .build(),
+        );
+        return ctx.finish(Innovations {
+            theta: Matrix::zeros(0, 0),
+            variance: Vector::zeros(0),
+        });
+    }
+    if gamma[0] <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .message("innovations_algo γ₀ vanished; variances are set to 0")
+                .build(),
+        );
+    }
+    let mut theta = Matrix::zeros(m, m);
+    let mut v = Vector::zeros(m);
+    v[0] = gamma[0].max(0.0);
+    for n in 1..m {
+        for k in 0..n {
+            let mut s = if n >= k { gamma[n - k] } else { 0.0 };
+            for j in 0..k {
+                s -= theta.get(k, k - j) * theta.get(n, n - j) * v[j];
+            }
+            let tnk = if v[k].abs() > 1e-18 { s / v[k] } else { 0.0 };
+            theta.set(n, n - k, tnk);
+        }
+        let mut vn = gamma[0];
+        for j in 0..n {
+            let t = theta.get(n, n - j);
+            vn -= t * t * v[j];
+        }
+        if vn < -1e-8 {
+            ctx.push(
+                Issue::builder(IssueCode::InvertibilityViolated)
+                    .message(format!("innovations v_{n}={vn:.3e} went negative"))
+                    .build(),
+            );
+        }
+        v[n] = vn.max(0.0);
+    }
+    ctx.finish(Innovations {
+        theta,
+        variance: v,
+    })
+}
+
+/// One-step innovations residuals (statsmodels `innovations_filter`).
+///
+/// Uses [`innovations_algo`] on the sample acovf of `y`. Lag count is not
+/// identification `p`.
+pub fn innovations_filter(
+    y: &Vector,
+    nlags: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let h = nlags.max(1).min(y.len().saturating_sub(1).max(1));
+    let g = match acovf(y, h, &session.child("acovf")) {
+        Ok(q) => q.value,
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::PValueUnreliable)
+                    .message("innovations_filter acovf failed; residuals are y itself")
+                    .build(),
+            );
+            return ctx.finish(y.clone());
+        }
+    };
+    let inn = match innovations_algo(&g, &session.child("theta")) {
+        Ok(q) => q.value,
+        Err(_) => {
+            return ctx.finish(y.clone());
+        }
+    };
+    let n = y.len();
+    let mut e = Vector::zeros(n);
+    let mut xhat = Vector::zeros(n);
+    for t in 0..n {
+        let mut pred = 0.0;
+        let row = t.min(inn.theta.nrows().saturating_sub(1));
+        for j in 1..=t.min(h) {
+            if t >= j {
+                pred += inn.theta.get(row, j) * e[t - j];
+            }
+        }
+        xhat[t] = pred;
+        e[t] = y[t] - pred;
+    }
+    ctx.finish(e)
+}
+
+/// ARMA(\(p,q\)) to MA(\(\infty\)) coefficients (statsmodels `arma2ma`).
+///
+/// \(\psi_0=1\), \(\psi_k=\theta_k+\sum_j\phi_j\psi_{k-j}\). Orders are not
+/// identification `p`.
+pub fn arma2ma(
+    ar: &Vector,
+    ma: &Vector,
+    lags: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, ar);
+    inspect_univariate(&mut ctx, ma);
+    let m = lags.max(1);
+    if lags == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message("arma2ma lags=0; using 1")
+                .build(),
+        );
+    }
+    let mut psi = Vector::zeros(m);
+    if m > 0 {
+        psi[0] = 1.0;
+    }
+    for k in 1..m {
+        let mut s = if k - 1 < ma.len() { ma[k - 1] } else { 0.0 };
+        for j in 0..ar.len().min(k) {
+            s += ar[j] * psi[k - 1 - j];
+        }
+        psi[k] = s;
+        if !psi[k].is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::CausalityViolated)
+                    .message("arma2ma coefficient overflowed; later ψ set to 0")
+                    .build(),
+            );
+            psi[k] = 0.0;
+        }
+    }
+    ctx.finish(psi)
+}
+
 /// Multiple seasonal-trend LOESS (sktime `MSTL`).
 ///
 /// Second-period STL is run on the first residual. Periods are not
@@ -8230,5 +8388,22 @@ mod tests {
             .value;
         assert_eq!(mint.shape(), (2, 3));
         assert!(mint.get(0, 0).is_finite() && mint.get(0, 2).is_finite());
+        let g = acovf(&y, 4, &Session::new("inn", "g")).expect("acovf-inn").value;
+        let inn = innovations_algo(&g, &Session::new("inn", "algo")).expect("inn");
+        assert_eq!(inn.value.variance.len(), 5);
+        assert!(inn.value.variance.as_slice().iter().all(|v| v.is_finite()));
+        let ef = innovations_filter(&y, 4, &Session::new("inn", "filt")).expect("ifilt").value;
+        assert_eq!(ef.len(), 40);
+        let psi = arma2ma(
+            &Vector::from_slice(&[0.5]),
+            &Vector::from_slice(&[0.2]),
+            4,
+            &Session::new("arma2ma", "t"),
+        )
+        .expect("arma2ma")
+        .value;
+        assert_eq!(psi.len(), 4);
+        assert!((psi[0] - 1.0).abs() < 1e-12);
+        assert!(psi.as_slice().iter().all(|v| v.is_finite()));
     }
 }
