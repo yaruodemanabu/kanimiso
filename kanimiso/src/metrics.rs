@@ -1280,8 +1280,14 @@ mod tests {
             .unwrap()
             .value;
         assert!((mcc - 1.0).abs() < 1e-12);
-        let xb = Matrix::from_fn(6, 1, |i, _| if i < 3 { 0.0 } else { 10.0 });
-        let lb = Vector::from_iter((0..6).map(|i| if i < 3 { 0.0 } else { 1.0 }));
+        let xb = Matrix::from_fn(8, 1, |i, _| {
+            if i < 4 {
+                0.1 * i as f64
+            } else {
+                10.0 + 0.1 * (i as f64 - 4.0)
+            }
+        });
+        let lb = Vector::from_iter((0..8).map(|i| if i < 4 { 0.0 } else { 1.0 }));
         let ch = calinski_harabasz(&xb, &lb, &Session::new("m", "ch"))
             .unwrap()
             .value;

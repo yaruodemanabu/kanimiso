@@ -223,50 +223,49 @@ impl IvGmm {
         session: &Session,
     ) -> Result<Qualified<FittedIvGmm>> {
         let mut ctx = FitCtx::with_session(session.clone());
-        let q = match (TwoSls {
-            fit_intercept: self.fit_intercept,
-        })
-        .fit(x, y, z, &session.child("ivgmm-2sls"))
-        {
-            Ok(q) => q,
-            Err(e) => {
-                if !matches!(
-                    e.primary.code,
-                    IssueCode::ResidualTooLarge
-                        | IssueCode::NearSingular
-                        | IssueCode::RankZero
-                        | IssueCode::R2IsOne
-                ) {
-                    ctx.push(e.primary);
-                }
-                return ctx.finish(FittedIvGmm {
-                    coef: Vector::zeros(x.ncols()),
-                    intercept: 0.0,
-                    hansen_j: f64::NAN,
-                    hansen_p: f64::NAN,
-                    sargan: f64::NAN,
-                    df_overid: 0,
-                    first_stage_f: f64::NAN,
-                });
-            }
-        };
-        for issue in q.report.issues() {
-            if matches!(
-                issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
-                    | IssueCode::RankZero
-                    | IssueCode::R2IsOne
-            ) {
-                continue;
-            }
-            ctx.push(issue.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_xy(&mut ctx.report, z, None, &ctx.policy);
+        if z.nrows() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("IV-GMM instrument rows ≠ n")
+                    .build(),
+            );
+            return ctx.finish(FittedIvGmm {
+                coef: Vector::zeros(x.ncols()),
+                intercept: 0.0,
+                hansen_j: f64::NAN,
+                hansen_p: f64::NAN,
+                sargan: f64::NAN,
+                df_overid: 0,
+                first_stage_f: f64::NAN,
+            });
         }
-        let mut pred = x.matvec(&q.value.coef);
-        for i in 0..pred.len() {
-            pred[i] += q.value.intercept;
+        if z.ncols() < x.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::UnderdeterminedSystem)
+                    .message(format!(
+                        "IV-GMM order condition fails: {} instruments < {} endogenous columns",
+                        z.ncols(),
+                        x.ncols()
+                    ))
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "IV-GMM coefficients",
+                        "fewer instruments than endogenous regressors leaves β unidentified",
+                        "add instruments, or drop endogenous columns",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedIvGmm {
+                coef: Vector::zeros(x.ncols()),
+                intercept: 0.0,
+                hansen_j: f64::NAN,
+                hansen_p: f64::NAN,
+                sargan: f64::NAN,
+                df_overid: 0,
+                first_stage_f: f64::NAN,
+            });
         }
-        let e = Vector::from_iter(y.as_slice().iter().zip(pred.as_slice()).map(|(a, b)| a - b));
         let zdes = if self.fit_intercept {
             z.with_intercept()
         } else {
@@ -274,6 +273,75 @@ impl IvGmm {
         };
         let xdes_cols = x.ncols() + if self.fit_intercept { 1 } else { 0 };
         let df = zdes.ncols().saturating_sub(xdes_cols);
+        let mut xhat = Matrix::zeros(x.nrows(), x.ncols());
+        let mut min_f = f64::INFINITY;
+        for j in 0..x.ncols() {
+            let xj = x.column(j);
+            let mut scratch = signlred::Report::new("ivgmm", "stage1");
+            if let Some(g) = least_squares(&mut scratch, &zdes, &xj, &ctx.policy) {
+                let fit = zdes.matvec(&g);
+                for i in 0..x.nrows() {
+                    xhat.set(i, j, fit[i]);
+                }
+                let mut sse = 0.0;
+                let mut sst = 0.0;
+                let m = xj.mean();
+                for i in 0..xj.len() {
+                    let e = xj[i] - fit[i];
+                    sse += e * e;
+                    let d = xj[i] - m;
+                    sst += d * d;
+                }
+                let k = zdes.ncols().saturating_sub(1).max(1) as f64;
+                let dfr = (x.nrows() as f64 - zdes.ncols() as f64).max(1.0);
+                let f = if sse > 0.0 {
+                    ((sst - sse) / k) / (sse / dfr)
+                } else {
+                    f64::INFINITY
+                };
+                min_f = min_f.min(f);
+            }
+        }
+        if min_f < 10.0 {
+            ctx.push(
+                Issue::builder(IssueCode::CausalClaimUnidentified)
+                    .message(format!(
+                        "weak instruments: min first-stage F={min_f:.4e} < 10"
+                    ))
+                    .meaninglessness(Meaninglessness::new(
+                        "IV-GMM coefficient",
+                        "a weak first stage makes the IV estimand concentrated-asymptotically biased toward OLS",
+                        signlred::InterpretiveValue::Misleading,
+                        "report the first-stage F; do not treat IV-GMM as identified",
+                    ))
+                    .metric("min_first_stage_F", min_f)
+                    .build(),
+            );
+        }
+        let design = if self.fit_intercept {
+            xhat.with_intercept()
+        } else {
+            xhat.clone()
+        };
+        let mut scratch = signlred::Report::new("ivgmm", "stage2");
+        let beta = least_squares(&mut scratch, &design, y, &ctx.policy).unwrap_or_else(|| {
+            let mut b = Vector::zeros(design.ncols());
+            b[0] = y.mean();
+            b
+        });
+        let (intercept, coef) = if self.fit_intercept {
+            (
+                beta.as_slice().first().copied().unwrap_or(0.0),
+                Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            )
+        } else {
+            (0.0, beta)
+        };
+        let mut pred = x.matvec(&coef);
+        for i in 0..pred.len() {
+            pred[i] += intercept;
+        }
+        let e = Vector::from_iter(y.as_slice().iter().zip(pred.as_slice()).map(|(a, b)| a - b));
         let mut hansen_j = f64::NAN;
         let mut hansen_p = f64::NAN;
         if df == 0 {
@@ -285,8 +353,8 @@ impl IvGmm {
             );
             hansen_j = 0.0;
         } else {
-            let mut scratch = signlred::Report::new("ivgmm", "sargan");
-            if let Some(g) = least_squares(&mut scratch, &zdes, &e, &ctx.policy) {
+            let mut sargan = signlred::Report::new("ivgmm", "sargan");
+            if let Some(g) = least_squares(&mut sargan, &zdes, &e, &ctx.policy) {
                 let fit = zdes.matvec(&g);
                 let mut sse = 0.0;
                 let mut sst = 0.0;
@@ -311,13 +379,13 @@ impl IvGmm {
                 .build(),
         );
         ctx.finish(FittedIvGmm {
-            coef: q.value.coef,
-            intercept: q.value.intercept,
+            coef,
+            intercept,
             hansen_j,
             hansen_p,
             sargan: hansen_j,
             df_overid: df,
-            first_stage_f: q.value.first_stage_f,
+            first_stage_f: min_f,
         })
     }
 }
