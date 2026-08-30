@@ -1319,6 +1319,337 @@ impl AbsorbingLs {
     }
 }
 
+/// Two-way within FE: \(x_{it}-\bar x_{i\cdot}-\bar x_{\cdot t}+\bar x\)
+/// (linearmodels `AbsorbingLS` with entity + time).
+///
+/// Group and time counts are not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct TwoWayFe;
+
+impl TwoWayFe {
+    /// Default two-way within estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit after entity and time demeaning.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        times: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPanel>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if groups.len() != y.len() || times.len() != y.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("TwoWayFe groups/times length ≠ n")
+                    .build(),
+            );
+        }
+        let sizes_g = group_sizes(groups);
+        let sizes_t = group_sizes(times);
+        warn_panel_groups(&mut ctx, &sizes_g, "TwoWayFe");
+        if sizes_t.len() <= 1 {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("TwoWayFe: a single time cannot identify a two-way estimand")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "two-way within slopes",
+                        "time demeaning needs at least two times",
+                        "use one-way FE, or collect more times",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(empty_panel(x.ncols()));
+        }
+        if ctx.report.contains(IssueCode::UnidentifiedModel)
+            || ctx.report.contains(IssueCode::IncrementalUnidentifiable)
+        {
+            return ctx.finish(empty_panel(x.ncols()));
+        }
+        let (mx_g, my_g) = group_means(x, y, groups, &sizes_g);
+        let (mx_t, my_t) = group_means(x, y, times, &sizes_t);
+        let n = y.len().min(x.nrows()).min(groups.len()).min(times.len());
+        let p = x.ncols();
+        let mut mx_all = vec![0.0_f64; p];
+        let mut my_all = 0.0_f64;
+        let mut n_fin = 0.0_f64;
+        for i in 0..n {
+            if !y[i].is_finite() {
+                continue;
+            }
+            my_all += y[i];
+            n_fin += 1.0;
+            for j in 0..p {
+                mx_all[j] += x.get(i, j);
+            }
+        }
+        if n_fin > 0.0 {
+            my_all /= n_fin;
+            for j in 0..p {
+                mx_all[j] /= n_fin;
+            }
+        }
+        let mut xw = Matrix::zeros(n, p);
+        let mut yw = Vector::zeros(n);
+        for i in 0..n {
+            let g = groups[i].round() as i64;
+            let t = times[i].round() as i64;
+            let gx = mx_g.get(&g);
+            let tx = mx_t.get(&t);
+            let gy = my_g.get(&g).copied().unwrap_or(0.0);
+            let ty = my_t.get(&t).copied().unwrap_or(0.0);
+            yw[i] = y[i] - gy - ty + my_all;
+            for j in 0..p {
+                let mg = gx.map(|v| v[j]).unwrap_or(0.0);
+                let mt = tx.map(|v| v[j]).unwrap_or(0.0);
+                xw.set(i, j, x.get(i, j) - mg - mt + mx_all[j]);
+            }
+        }
+        if yw.std() <= ctx.policy.near_zero_variance {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("two-way within y has ~0 variance")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "two-way within slopes",
+                        "after entity+time demeaning there is no leftover variation in y",
+                        "the regressor is a sum of entity and time effects",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(empty_panel(p));
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("TwoWayFe is sequential demeaning, not iterated HDFE")
+                .compromise(NumericalCompromise::new(
+                    "iterated multi-way absorbed least squares",
+                    "entity and time means subtracted once",
+                    "unbalanced panels are not re-centred to convergence",
+                    "do not read this as linearmodels AbsorbingLS HDFE",
+                ))
+                .build(),
+        );
+        let mut scratch = signlred::Report::new("twoway_fe", "ols");
+        let Some(coef) = least_squares(&mut scratch, &xw, &yw, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("two-way within OLS failed")
+                    .build(),
+            );
+            return ctx.finish(empty_panel(p));
+        };
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::R2IsOne
+                    | IssueCode::RankZero
+                    | IssueCode::CholeskyFailed
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedPanel {
+            coef,
+            intercept: 0.0,
+            n_groups: sizes_g.len(),
+            n_eff: n,
+        })
+    }
+}
+
+/// Mundlak correlated random effects: pooled OLS of \(y\) on \((X, \bar X_g)\).
+///
+/// Group count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct Mundlak;
+
+impl Mundlak {
+    /// Default Mundlak device.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit \(y \sim 1 + X + \bar X_g\).
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPanel>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if groups.len() != y.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("Mundlak groups length ≠ n")
+                    .build(),
+            );
+        }
+        let sizes = group_sizes(groups);
+        warn_panel_groups(&mut ctx, &sizes, "Mundlak");
+        if ctx.report.contains(IssueCode::UnidentifiedModel) {
+            return ctx.finish(empty_panel(x.ncols()));
+        }
+        let (mx, _my) = group_means(x, y, groups, &sizes);
+        let n = y.len().min(x.nrows()).min(groups.len());
+        let p = x.ncols();
+        let design = Matrix::from_fn(n, 1 + 2 * p, |i, j| {
+            if j == 0 {
+                1.0
+            } else if j <= p {
+                x.get(i, j - 1)
+            } else {
+                let g = groups[i].round() as i64;
+                mx.get(&g).map(|v| v[j - 1 - p]).unwrap_or(0.0)
+            }
+        });
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Mundlak is pooled OLS on (X, group means), not CRE GLS")
+                .compromise(NumericalCompromise::new(
+                    "Mundlak CRE / GLS",
+                    "pooled OLS with appended group means of X",
+                    "random-effect GLS weights are omitted",
+                    "read the X slopes as a correlated-RE sketch",
+                ))
+                .build(),
+        );
+        let y_use = Vector::from_iter((0..n).map(|i| y[i]));
+        let mut scratch = signlred::Report::new("mundlak", "ols");
+        let Some(beta) = least_squares(&mut scratch, &design, &y_use, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("Mundlak OLS failed")
+                    .build(),
+            );
+            return ctx.finish(empty_panel(p));
+        };
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::R2IsOne
+                    | IssueCode::RankZero
+                    | IssueCode::CholeskyFailed
+                    | IssueCode::PerfectCollinearity
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let intercept = beta.as_slice().first().copied().unwrap_or(0.0);
+        let coef = Vector::from_iter((0..p).map(|j| {
+            beta.as_slice().get(j + 1).copied().unwrap_or(0.0)
+        }));
+        ctx.finish(FittedPanel {
+            coef,
+            intercept,
+            n_groups: sizes.len(),
+            n_eff: n,
+        })
+    }
+}
+
+/// Hausman–Taylor sketch: within slopes plus a between residual intercept
+/// (linearmodels `HausmanTaylor`).
+///
+/// Group count is not identification `p`. Not the full HT IV system.
+#[derive(Clone, Debug, Default)]
+pub struct HausmanTaylor;
+
+impl HausmanTaylor {
+    /// Default Hausman–Taylor sketch.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit within slopes, then a pooled residual intercept.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPanel>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("HausmanTaylor is within OLS + residual intercept, not HT IV")
+                .compromise(NumericalCompromise::new(
+                    "Hausman–Taylor IV for time-invariant endogenous regressors",
+                    "PanelFe slopes and mean(y − Xβ)",
+                    "no time-invariant block and no instrument partition",
+                    "do not read this as linearmodels HausmanTaylor",
+                ))
+                .build(),
+        );
+        match PanelFe::new().fit(x, y, groups, &session.child("ht-fe")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::R2IsOne
+                            | IssueCode::RankZero
+                            | IssueCode::CholeskyFailed
+                            | IssueCode::MeaninglessFit
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                let n = y.len().min(x.nrows());
+                let p = q.value.coef.len();
+                let mut rsum = 0.0_f64;
+                let mut n_fin = 0.0_f64;
+                for i in 0..n {
+                    if !y[i].is_finite() {
+                        continue;
+                    }
+                    let mut xb = 0.0_f64;
+                    for j in 0..p.min(x.ncols()) {
+                        xb += x.get(i, j) * q.value.coef[j];
+                    }
+                    rsum += y[i] - xb;
+                    n_fin += 1.0;
+                }
+                let intercept = if n_fin > 0.0 { rsum / n_fin } else { 0.0 };
+                ctx.finish(FittedPanel {
+                    coef: q.value.coef,
+                    intercept,
+                    n_groups: q.value.n_groups,
+                    n_eff: q.value.n_eff,
+                })
+            }
+            Err(_) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("HausmanTaylor inner within OLS failed")
+                        .build(),
+                );
+                ctx.finish(empty_panel(x.ncols()))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1411,5 +1742,27 @@ mod tests {
             .fit(&x, &y, &g, &Session::new("als", "fit"))
             .expect("als");
         assert!((als.value.coef[0] - 2.0).abs() < 0.25, "als={}", als.value.coef[0]);
+        let xtw = Matrix::from_fn(32, 1, |i, _| {
+            (i % 8) as f64 * (1.0 + (i / 8) as f64)
+        });
+        let ytw = Vector::from_iter((0..32).map(|i| {
+            2.0 * (i % 8) as f64 * (1.0 + (i / 8) as f64) + 5.0 * (i / 8) as f64
+        }));
+        let tw = TwoWayFe::new()
+            .fit(&xtw, &ytw, &g, &time, &Session::new("twfe", "fit"))
+            .expect("twfe");
+        assert!(
+            (tw.value.coef[0] - 2.0).abs() < 1e-6,
+            "twfe={}",
+            tw.value.coef[0]
+        );
+        let mk = Mundlak::new()
+            .fit(&x, &y, &g, &Session::new("mund", "fit"))
+            .expect("mund");
+        assert!(mk.value.coef[0].is_finite());
+        let ht = HausmanTaylor::new()
+            .fit(&x, &y, &g, &Session::new("ht", "fit"))
+            .expect("ht");
+        assert!((ht.value.coef[0] - 2.0).abs() < 0.25, "ht={}", ht.value.coef[0]);
     }
 }

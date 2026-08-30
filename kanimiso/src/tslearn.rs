@@ -13897,6 +13897,189 @@ impl FitUnsupervised for TimeSeriesSvd {
     }
 }
 
+/// Named Petitjean DBA (tslearn `DTWBarycenterAveraging`).
+#[derive(Clone, Debug)]
+pub struct DbaBarycenter {
+    /// Alignment iterations.
+    pub max_iter: usize,
+}
+
+impl Default for DbaBarycenter {
+    fn default() -> Self {
+        Self { max_iter: 8 }
+    }
+}
+
+impl DbaBarycenter {
+    /// Default DBA barycentre.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit the DTW barycentre of equal-length series rows.
+    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        dba(x, self.max_iter, session)
+    }
+}
+
+/// Named Euclidean barycentre (tslearn `euclidean_barycenter`).
+#[derive(Clone, Debug, Default)]
+pub struct EuclideanBarycenter;
+
+impl EuclideanBarycenter {
+    /// Default column-mean barycentre.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit the Euclidean mean of equal-length series rows.
+    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        euclidean_barycenter(x, session)
+    }
+}
+
+/// Random Interval Spectral Transform classifier (sktime `RISTClassifier` lite).
+///
+/// Interval count is not identification `p`. ExtraTrees may abort as a vacuous
+/// stump; ridge on the same interval map is the fallback.
+#[derive(Clone, Debug)]
+pub struct Rist {
+    /// ExtraTrees count.
+    pub n_estimators: usize,
+    /// Random intervals.
+    pub n_intervals: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for Rist {
+    fn default() -> Self {
+        Self {
+            n_estimators: 8,
+            n_intervals: 3,
+            max_depth: 4,
+            seed: 17,
+        }
+    }
+}
+
+impl Rist {
+    /// Default RIST lite.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted RIST forest or ridge fallback.
+#[derive(Clone, Debug)]
+pub struct FittedRist {
+    forest: Option<crate::tree::FittedForestClassifier>,
+    ridge: Option<crate::classification::FittedRidgeClassifier>,
+    intervals: Vec<Interval>,
+    default_label: f64,
+}
+
+impl Fit for Rist {
+    type Fitted = FittedRist;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRist>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let default_label = y
+            .as_slice()
+            .iter()
+            .copied()
+            .find(|v| v.is_finite())
+            .unwrap_or(0.0);
+        let mut rng = Rng::new(self.seed);
+        let tlen = x.ncols().max(1);
+        let mut intervals = Vec::new();
+        for _ in 0..self.n_intervals.max(1) {
+            let a = rng.below(tlen);
+            let span = 1 + rng.below(tlen);
+            intervals.push(Interval {
+                start: a,
+                end: (a + span).min(tlen).max(a + 1),
+            });
+        }
+        let feat = interval_feats_rise(x, &intervals);
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .severity(Severity::Advisory)
+                .message("Rist uses interval DFT summaries plus ExtraTrees, not the full RIST map")
+                .compromise(NumericalCompromise::new(
+                    "sktime RIST spectral + extra-trees pipeline",
+                    "RISE-style interval DFT then ExtraTreesClassifier",
+                    "ACF / periodogram / convolution members are omitted",
+                    "do not read as a published RIST accuracy",
+                ))
+                .build(),
+        );
+        let mut et = crate::tree::ExtraTreesClassifier {
+            n_estimators: self.n_estimators.max(1),
+            max_depth: self.max_depth.max(1),
+            min_samples_split: 2,
+            max_features: Some(4),
+            seed: self.seed,
+        };
+        match et.fit(&feat, y, &session.child("rist-et")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::R2IsOne
+                            | IssueCode::RankZero
+                            | IssueCode::MeaninglessFit
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                ctx.finish(FittedRist {
+                    forest: Some(q.value),
+                    ridge: None,
+                    intervals,
+                    default_label,
+                })
+            }
+            Err(_) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("Rist ExtraTrees failed; falling back to interval ridge")
+                        .build(),
+                );
+                let ridge = binary_ridge_from_features(&feat, y, 0.5, &ctx.policy, "rist");
+                ctx.finish(FittedRist {
+                    forest: None,
+                    ridge: Some(ridge),
+                    intervals,
+                    default_label,
+                })
+            }
+        }
+    }
+}
+
+impl Predict for FittedRist {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let feat = interval_feats_rise(x, &self.intervals);
+        if let Some(f) = &self.forest {
+            return f.predict(&feat, session);
+        }
+        if let Some(r) = &self.ridge {
+            return r.predict(&feat, session);
+        }
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+        ctx.finish(Vector::filled(x.nrows(), self.default_label))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -14266,6 +14449,26 @@ mod tests {
             .fit_unsupervised(&x, &Session::new("ts", "tssvd"))
             .unwrap();
         assert_eq!(tss.value.components.nrows(), 1);
+        let dba_b = DbaBarycenter::new()
+            .fit(&x, &Session::new("ts", "dba_b"))
+            .unwrap();
+        assert_eq!(dba_b.value.len(), 6);
+        assert!(dba_b.value.as_slice().iter().all(|v| v.is_finite()));
+        let eub = EuclideanBarycenter::new()
+            .fit(&x, &Session::new("ts", "eub"))
+            .unwrap();
+        assert_eq!(eub.value.len(), 6);
+        assert!(eub.value.as_slice().iter().all(|v| v.is_finite()));
+        let rist = Rist::new()
+            .fit(&x, &y, &Session::new("ts", "rist"))
+            .unwrap();
+        let prist = rist
+            .value
+            .predict(&x, &Session::new("ts", "ristp"))
+            .unwrap()
+            .value;
+        assert_eq!(prist.len(), 8);
+        assert!(prist.as_slice().iter().all(|v| v.is_finite()));
         let rst = Rstsf::new()
             .fit(&x, &y, &Session::new("ts", "rstsf"))
             .unwrap();

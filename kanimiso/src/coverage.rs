@@ -5607,6 +5607,39 @@ const INVENTORY: &[Algorithm] = &[
         "estimator",
     ),
     a("tslearn.TimeSeriesSvd", "tslearn.decomposition.TimeSeriesSVD", "estimator"),
+    a("stats.lognormal_fitter", "lifelines.LogNormalFitter", "function"),
+    a("stats.LogNormalFitter", "lifelines.LogNormalFitter", "estimator"),
+    a("stats.loglogistic_fitter", "lifelines.LogLogisticFitter", "function"),
+    a("stats.LogLogisticFitter", "lifelines.LogLogisticFitter", "estimator"),
+    a("stats.gompertz_fitter", "lifelines.GompertzFitter", "function"),
+    a("stats.GompertzFitter", "lifelines.GompertzFitter", "estimator"),
+    a("stats.mixture_cure_fitter", "lifelines.MixtureCureFitter", "function"),
+    a("stats.MixtureCureFitter", "lifelines.MixtureCureFitter", "estimator"),
+    a("stats.aalen_johansen_se", "lifelines.AalenJohansenFitter", "function"),
+    a("stats.cif_se", "sksurv.metrics.cumulative_incidence", "function"),
+    a("stats.scaled_schoenfeld", "lifelines.statistics.proportional_hazard_test", "function"),
+    a("panel.TwoWayFe", "linearmodels.AbsorbingLS", "estimator"),
+    a("panel.Mundlak", "linearmodels.RandomEffects", "estimator"),
+    a("panel.HausmanTaylor", "linearmodels.HausmanTaylor", "estimator"),
+    a("online.Snmf", "river.facto.SNMF", "online"),
+    a("online.ContentRecommender", "river.reco.Baseline", "online"),
+    a(
+        "online.InverseScalingRegressor",
+        "river.optim.schedulers.InverseScaling",
+        "online",
+    ),
+    a(
+        "online.CosineAnnealingRegressor",
+        "river.optim.schedulers.CosineAnnealing",
+        "online",
+    ),
+    a("tslearn.DbaBarycenter", "tslearn.barycenters.dtw_barycenter_averaging", "estimator"),
+    a(
+        "tslearn.EuclideanBarycenter",
+        "tslearn.barycenters.euclidean_barycenter",
+        "estimator",
+    ),
+    a("tslearn.Rist", "sktime.classification.hybrid.RISTClassifier", "estimator"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6023,6 +6056,13 @@ mod tests {
             "stats.ipcw_cindex",
             "online.SamKnn",
             "tslearn.LearningShapeletsRegressor",
+            "stats.LogNormalFitter",
+            "stats.aalen_johansen_se",
+            "panel.TwoWayFe",
+            "panel.Mundlak",
+            "online.Snmf",
+            "tslearn.Rist",
+            "stats.MixtureCureFitter",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

@@ -33229,6 +33229,674 @@ impl PartialFit for VeryFastDecisionRules {
     }
 }
 
+/// Supervised neural matrix factorisation (river `facto.SNMF`).
+///
+/// Factor count is not identification `p`. Needs `[user, item]` columns.
+#[derive(Clone, Debug)]
+pub struct Snmf {
+    /// Embedding width.
+    pub n_factors: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    w0: f64,
+    users: HashMap<i64, Vector>,
+    items: HashMap<i64, Vector>,
+    bu: HashMap<i64, f64>,
+    bi: HashMap<i64, f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for Snmf {
+    fn default() -> Self {
+        Self {
+            n_factors: 2,
+            learning_rate: 0.05,
+            w0: 0.0,
+            users: HashMap::new(),
+            items: HashMap::new(),
+            bu: HashMap::new(),
+            bi: HashMap::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl Snmf {
+    /// SNMF with `k` latent factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn score(&self, user: i64, item: i64) -> f64 {
+        let k = self.n_factors.max(1);
+        let mut dot = 0.0_f64;
+        if let (Some(eu), Some(ei)) = (self.users.get(&user), self.items.get(&item)) {
+            for f in 0..k.min(eu.len()).min(ei.len()) {
+                dot += eu[f] * ei[f];
+            }
+        }
+        self.w0
+            + self.bu.get(&user).copied().unwrap_or(0.0)
+            + self.bi.get(&item).copied().unwrap_or(0.0)
+            + dot.max(0.0)
+    }
+}
+
+impl PartialFit for Snmf {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no ratings"),
+            );
+        };
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("Snmf needs [user, item] columns")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need two columns"),
+            );
+        }
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("Snmf learning_rate was non-positive; using 0.05")
+                    .build(),
+            );
+            0.05
+        };
+        let k = self.n_factors.max(1);
+        let mut sse = 0.0_f64;
+        let mut moved = 0.0_f64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let user = x.get(i, 0).round() as i64;
+            let item = x.get(i, 1).round() as i64;
+            let mut eu = self
+                .users
+                .remove(&user)
+                .unwrap_or_else(|| Vector::filled(k, 0.01));
+            let mut ei = self
+                .items
+                .remove(&item)
+                .unwrap_or_else(|| Vector::filled(k, 0.01));
+            if eu.len() != k {
+                eu = Vector::filled(k, 0.01);
+            }
+            if ei.len() != k {
+                ei = Vector::filled(k, 0.01);
+            }
+            let mut dot = 0.0_f64;
+            for f in 0..k {
+                dot += eu[f] * ei[f];
+            }
+            let bu = self.bu.get(&user).copied().unwrap_or(0.0);
+            let bi = self.bi.get(&item).copied().unwrap_or(0.0);
+            let yhat = self.w0 + bu + bi + dot.max(0.0);
+            let err = yhat - y[i];
+            sse += err * err;
+            let gact = if dot > 0.0 { 1.0 } else { 0.0 };
+            self.w0 -= eta * err;
+            self.bu.insert(user, bu - eta * err);
+            self.bi.insert(item, bi - eta * err);
+            for f in 0..k {
+                let du = err * gact * ei[f];
+                let di = err * gact * eu[f];
+                eu[f] -= eta * du;
+                ei[f] -= eta * di;
+                moved += du.abs() + di.abs();
+            }
+            self.users.insert(user, eu);
+            self.items.insert(item, ei);
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(moved);
+        q.information_gain = Some(moved.max(x.nrows() as f64));
+        q.loss_after = Some(sse);
+        q.still_identified = !self.users.is_empty() && !self.items.is_empty();
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!(
+            "SNMF {} users × {} items, ||Δ||={moved:.6e}",
+            self.users.len(),
+            self.items.len()
+        );
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("Snmf has seen fewer than two ratings")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "supervised neural matrix factorisation",
+                "ReLU of user·item plus biases; k is not p",
+                "previous embeddings",
+                format!("{}×{}", self.users.len(), self.items.len()),
+            ),
+        )
+    }
+}
+
+impl Predict for Snmf {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("Snmf predict needs [user, item]")
+                    .build(),
+            );
+            return ctx.finish(Vector::filled(x.nrows(), self.w0));
+        }
+        if self.users.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            self.score(x.get(i, 0).round() as i64, x.get(i, 1).round() as i64)
+        })))
+    }
+}
+
+/// Content-based recommender: hashed item features averaged into a user profile.
+///
+/// Hash width is not identification `p`. Needs `[user, item]` columns.
+#[derive(Clone, Debug)]
+pub struct ContentRecommender {
+    profiles: HashMap<i64, Vector>,
+    counts: HashMap<i64, f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for ContentRecommender {
+    fn default() -> Self {
+        Self {
+            profiles: HashMap::new(),
+            counts: HashMap::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl ContentRecommender {
+    /// Empty content recommender.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn item_feat(item: f64) -> Vector {
+        Vector::from_iter((0..8).map(|d| {
+            let h = mix_hash(item, d as u64);
+            if h % 2 == 0 { 1.0 } else { -1.0 }
+        }))
+    }
+
+    fn score(&self, user: i64, item: f64) -> f64 {
+        let Some(p) = self.profiles.get(&user) else {
+            return 0.0;
+        };
+        let z = Self::item_feat(item);
+        let mut s = 0.0_f64;
+        for j in 0..p.len().min(z.len()) {
+            s += p[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for ContentRecommender {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no ratings"),
+            );
+        };
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("ContentRecommender needs [user, item] columns")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need two columns"),
+            );
+        }
+        let mut moved = 0.0_f64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let user = x.get(i, 0).round() as i64;
+            let feat = Self::item_feat(x.get(i, 1));
+            let n0 = self.counts.get(&user).copied().unwrap_or(0.0);
+            let mut prof = self
+                .profiles
+                .remove(&user)
+                .unwrap_or_else(|| Vector::zeros(8));
+            if prof.len() != 8 {
+                prof = Vector::zeros(8);
+            }
+            let n1 = n0 + 1.0;
+            for j in 0..8 {
+                let nxt = (prof[j] * n0 + y[i] * feat[j]) / n1;
+                moved += (nxt - prof[j]).abs();
+                prof[j] = nxt;
+            }
+            self.profiles.insert(user, prof);
+            self.counts.insert(user, n1);
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(moved);
+        q.information_gain = Some(moved.max(x.nrows() as f64));
+        q.still_identified = !self.profiles.is_empty();
+        q.warmup = self.profiles.is_empty();
+        q.explanation = format!(
+            "ContentRecommender {} user profiles, ||Δ||={moved:.6e}",
+            self.profiles.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "content user profiles",
+                "running mean of rating × hashed item features; hash width is not p",
+                "previous profiles",
+                format!("{} users", self.profiles.len()),
+            ),
+        )
+    }
+}
+
+impl Predict for ContentRecommender {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("ContentRecommender predict needs [user, item]")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        if self.profiles.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+        }
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.score(x.get(i, 0).round() as i64, x.get(i, 1))),
+        ))
+    }
+}
+
+/// SGD with inverse-scaling step \(\eta_0 / t^{p}\) (river `optim.schedulers.InverseScaling`).
+///
+/// The exponent is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct InverseScalingRegressor {
+    /// Base step \(\eta_0\).
+    pub eta0: f64,
+    /// Decay exponent.
+    pub power: f64,
+    w: Vector,
+    b: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for InverseScalingRegressor {
+    fn default() -> Self {
+        Self {
+            eta0: 0.1,
+            power: 0.5,
+            w: Vector::zeros(0),
+            b: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl InverseScalingRegressor {
+    /// Inverse-scaling SGD with \(\eta_0\) and exponent `power`.
+    pub fn new(eta0: f64, power: f64) -> Self {
+        Self {
+            eta0,
+            power,
+            ..Self::default()
+        }
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let mut s = self.b;
+        for j in 0..x.ncols().min(self.w.len()) {
+            s += self.w[j] * x.get(i, j);
+        }
+        s
+    }
+}
+
+impl PartialFit for InverseScalingRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let p = x.ncols().max(1);
+        if !self.initialized {
+            self.w = Vector::zeros(p);
+            self.initialized = true;
+        } else if self.w.len() != p {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message("InverseScalingRegressor feature dim changed")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let eta0 = if self.eta0.is_finite() && self.eta0 > 0.0 {
+            self.eta0
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("InverseScalingRegressor eta0 was non-positive; using 0.1")
+                    .build(),
+            );
+            0.1
+        };
+        let pow = if self.power.is_finite() && self.power >= 0.0 {
+            self.power
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("InverseScalingRegressor power was invalid; using 0.5")
+                    .build(),
+            );
+            0.5
+        };
+        let mut sse0 = 0.0_f64;
+        let mut sse1 = 0.0_f64;
+        let mut moved = 0.0_f64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let yhat = self.predict_row(x, i);
+            let err = yhat - y[i];
+            sse0 += err * err;
+            self.n_seen += 1;
+            let t = self.n_seen.max(1) as f64;
+            let eta = eta0 / t.powf(pow).max(1e-12);
+            self.b -= eta * err;
+            for j in 0..x.ncols().min(self.w.len()) {
+                let d = eta * err * x.get(i, j);
+                self.w[j] -= d;
+                moved += d.abs();
+            }
+            let after = self.predict_row(x, i);
+            let e1 = after - y[i];
+            sse1 += e1 * e1;
+        }
+        self.updates += 1;
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &Vector::filled(1, moved),
+            sse0,
+            sse1,
+            self.n_seen >= 2,
+            self.n_seen < 2,
+            "inverse-scaling SGD",
+            "η = η0 / t^power; the exponent is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for InverseScalingRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
+/// SGD with a cosine-annealed step (river `optim.schedulers.CosineAnnealing`).
+///
+/// Period length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct CosineAnnealingRegressor {
+    /// Peak step.
+    pub eta_max: f64,
+    /// Floor step.
+    pub eta_min: f64,
+    /// Annealing period.
+    pub period: usize,
+    w: Vector,
+    b: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for CosineAnnealingRegressor {
+    fn default() -> Self {
+        Self {
+            eta_max: 0.1,
+            eta_min: 0.001,
+            period: 8,
+            w: Vector::zeros(0),
+            b: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl CosineAnnealingRegressor {
+    /// Cosine-annealed SGD with period `period`.
+    pub fn new(period: usize) -> Self {
+        Self {
+            period: period.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let mut s = self.b;
+        for j in 0..x.ncols().min(self.w.len()) {
+            s += self.w[j] * x.get(i, j);
+        }
+        s
+    }
+}
+
+impl PartialFit for CosineAnnealingRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let p = x.ncols().max(1);
+        if !self.initialized {
+            self.w = Vector::zeros(p);
+            self.initialized = true;
+        } else if self.w.len() != p {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message("CosineAnnealingRegressor feature dim changed")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let t_max = if self.eta_max.is_finite() && self.eta_max > 0.0 {
+            self.eta_max
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("CosineAnnealingRegressor eta_max invalid; using 0.1")
+                    .build(),
+            );
+            0.1
+        };
+        let t_min = if self.eta_min.is_finite() && self.eta_min >= 0.0 {
+            self.eta_min.min(t_max)
+        } else {
+            0.001_f64.min(t_max)
+        };
+        let period = self.period.max(1);
+        let mut sse0 = 0.0_f64;
+        let mut sse1 = 0.0_f64;
+        let mut moved = 0.0_f64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let yhat = self.predict_row(x, i);
+            let err = yhat - y[i];
+            sse0 += err * err;
+            self.n_seen += 1;
+            let phase = ((self.n_seen - 1) as usize % period) as f64 / period as f64;
+            let eta = t_min + 0.5 * (t_max - t_min) * (1.0 + (std::f64::consts::PI * phase).cos());
+            self.b -= eta * err;
+            for j in 0..x.ncols().min(self.w.len()) {
+                let d = eta * err * x.get(i, j);
+                self.w[j] -= d;
+                moved += d.abs();
+            }
+            let after = self.predict_row(x, i);
+            let e1 = after - y[i];
+            sse1 += e1 * e1;
+        }
+        self.updates += 1;
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &Vector::filled(1, moved),
+            sse0,
+            sse1,
+            self.n_seen >= 2,
+            self.n_seen < 2,
+            "cosine-annealed SGD",
+            "η follows a cosine over `period`; period is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for CosineAnnealingRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.predict_row(x, i))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -33754,6 +34422,18 @@ mod tests {
         VeryFastDecisionRules::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("vfdr");
+        Snmf::new(2)
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("snmf");
+        ContentRecommender::new()
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("content");
+        InverseScalingRegressor::new(0.1, 0.5)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("invsc");
+        CosineAnnealingRegressor::new(8)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("cosann");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

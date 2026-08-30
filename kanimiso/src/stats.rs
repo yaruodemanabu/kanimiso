@@ -18894,6 +18894,625 @@ impl WeibullFitter {
     }
 }
 
+/// Log-normal lifetime via moments of log event times (lifelines `LogNormalFitter`).
+///
+/// Event count is not identification `p`. Inspect times with `y=None`.
+pub fn lognormal_fitter(
+    durations: &Vector,
+    events: &Vector,
+    session: &Session,
+) -> Result<Qualified<FittedParametricSurv>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    let n = durations.len().min(events.len());
+    let mut logs: Vec<f64> = Vec::new();
+    for i in 0..n {
+        if events[i] > 0.5 && durations[i].is_finite() && durations[i] > 0.0 {
+            logs.push(durations[i].ln());
+        }
+    }
+    if logs.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("lognormal_fitter needs two positive event times")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "log-normal μ and σ",
+                    "moments of log T are unidentified with <2 events",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedParametricSurv {
+            shape: f64::NAN,
+            scale: f64::NAN,
+            n_events: logs.len(),
+            n,
+        });
+    }
+    let m = logs.iter().sum::<f64>() / logs.len() as f64;
+    let var = logs
+        .iter()
+        .map(|v| {
+            let d = v - m;
+            d * d
+        })
+        .sum::<f64>()
+        / (logs.len() as f64 - 1.0);
+    let sigma = var.max(0.0).sqrt();
+    if sigma <= 1e-12 {
+        ctx.push(
+            Issue::builder(IssueCode::NearZeroVariance)
+                .message("lognormal_fitter log-times are nearly constant")
+                .build(),
+        );
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("lognormal_fitter is a moment sketch, not a censored log-normal MLE")
+            .compromise(NumericalCompromise::new(
+                "right-censored log-normal MLE",
+                "mean and SD of log event times only",
+                "censored rows do not enter (μ, σ)",
+                "read (σ, e^μ) as a moment sketch, not the lifelines MLE",
+            ))
+            .build(),
+    );
+    ctx.finish(FittedParametricSurv {
+        shape: sigma.max(1e-12),
+        scale: m.exp(),
+        n_events: logs.len(),
+        n,
+    })
+}
+
+/// Named log-normal fitter.
+#[derive(Clone, Debug, Default)]
+pub struct LogNormalFitter;
+
+impl LogNormalFitter {
+    /// Default log-normal lifetime.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on durations and event indicators.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedParametricSurv>> {
+        lognormal_fitter(durations, events, session)
+    }
+}
+
+/// Log-logistic lifetime via logistic moments on log event times
+/// (lifelines `LogLogisticFitter`).
+///
+/// Event count is not identification `p`. Inspect times with `y=None`.
+pub fn loglogistic_fitter(
+    durations: &Vector,
+    events: &Vector,
+    session: &Session,
+) -> Result<Qualified<FittedParametricSurv>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    let n = durations.len().min(events.len());
+    let mut logs: Vec<f64> = Vec::new();
+    for i in 0..n {
+        if events[i] > 0.5 && durations[i].is_finite() && durations[i] > 0.0 {
+            logs.push(durations[i].ln());
+        }
+    }
+    if logs.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("loglogistic_fitter needs two positive event times")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "log-logistic shape and scale",
+                    "logistic moments on log T are unidentified with <2 events",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedParametricSurv {
+            shape: f64::NAN,
+            scale: f64::NAN,
+            n_events: logs.len(),
+            n,
+        });
+    }
+    let m = logs.iter().sum::<f64>() / logs.len() as f64;
+    let var = logs
+        .iter()
+        .map(|v| {
+            let d = v - m;
+            d * d
+        })
+        .sum::<f64>()
+        / (logs.len() as f64 - 1.0);
+    let sd = var.max(0.0).sqrt();
+    let s = if sd > 1e-12 {
+        sd * 3.0_f64.sqrt() / std::f64::consts::PI
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::NearZeroVariance)
+                .message("loglogistic_fitter log-times are nearly constant")
+                .build(),
+        );
+        0.25
+    };
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("loglogistic_fitter is a logistic-moment shape, not a censored MLE")
+            .compromise(NumericalCompromise::new(
+                "right-censored log-logistic MLE",
+                "logistic scale from SD of log event times",
+                "censored rows do not enter the shape",
+                "read (1/s, e^μ) as a moment sketch",
+            ))
+            .build(),
+    );
+    ctx.finish(FittedParametricSurv {
+        shape: 1.0 / s.max(1e-12),
+        scale: m.exp(),
+        n_events: logs.len(),
+        n,
+    })
+}
+
+/// Named log-logistic fitter.
+#[derive(Clone, Debug, Default)]
+pub struct LogLogisticFitter;
+
+impl LogLogisticFitter {
+    /// Default log-logistic lifetime.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on durations and event indicators.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedParametricSurv>> {
+        loglogistic_fitter(durations, events, session)
+    }
+}
+
+/// Gompertz lifetime via a local Nelson–Aalen log-hazard slope
+/// (lifelines `GompertzFitter`).
+///
+/// Event-time count is not identification `p`. Inspect times with `y=None`.
+/// Does not call `kaplan_meier_fit`.
+pub fn gompertz_fitter(
+    durations: &Vector,
+    events: &Vector,
+    session: &Session,
+) -> Result<Qualified<FittedParametricSurv>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    let n = durations.len().min(events.len());
+    let mut idx: Vec<usize> = (0..n)
+        .filter(|&i| durations[i].is_finite() && durations[i] > 0.0)
+        .collect();
+    idx.sort_by(|&a, &b| {
+        durations[a]
+            .partial_cmp(&durations[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut pts: Vec<(f64, f64)> = Vec::new();
+    let mut t_prev = 0.0_f64;
+    let mut i = 0;
+    let mut n_events = 0usize;
+    while i < idx.len() {
+        let t = durations[idx[i]];
+        let mut j = i;
+        while j < idx.len() && (durations[idx[j]] - t).abs() <= 1e-15 {
+            j += 1;
+        }
+        let r = (idx.len() - i) as f64;
+        let mut d = 0.0_f64;
+        for &u in &idx[i..j] {
+            if events[u] > 0.5 {
+                d += 1.0;
+            }
+        }
+        n_events += d as usize;
+        if d > 0.0 && r > 0.0 {
+            let dt = (t - t_prev).max(1e-12);
+            let h = (d / r) / dt;
+            if h > 1e-18 {
+                pts.push((t, h.ln()));
+            }
+            t_prev = t;
+        }
+        i = j;
+    }
+    if pts.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("gompertz_fitter needs two distinct event times")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "Gompertz (a, b)",
+                    "log-hazard OLS needs two Nelson–Aalen increments",
+                    "collect events at two times",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedParametricSurv {
+            shape: f64::NAN,
+            scale: f64::NAN,
+            n_events,
+            n,
+        });
+    }
+    let (log_a, b) = if pts.len() == 2 {
+        let dt = pts[1].0 - pts[0].0;
+        let slope = if dt.abs() > 1e-12 {
+            (pts[1].1 - pts[0].1) / dt
+        } else {
+            0.0
+        };
+        (pts[0].1 - slope * pts[0].0, slope)
+    } else {
+        let xd = Matrix::from_fn(pts.len(), 2, |r, c| if c == 0 { 1.0 } else { pts[r].0 });
+        let yd = Vector::from_iter(pts.iter().map(|p| p.1));
+        let mut scratch = Report::new("gompertz", "logh");
+        match least_squares(&mut scratch, &xd, &yd, &ctx.policy) {
+            Some(sol) if sol.len() >= 2 && sol.as_slice().iter().all(|v| v.is_finite()) => {
+                (sol[0], sol[1])
+            }
+            _ => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("gompertz_fitter log-hazard OLS failed")
+                        .build(),
+                );
+                (0.0, 0.0)
+            }
+        }
+    };
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("gompertz_fitter is a local-NA log-hazard slope, not a censored MLE")
+            .compromise(NumericalCompromise::new(
+                "right-censored Gompertz MLE",
+                "OLS of log(ΔH/Δt) on event time",
+                "censoring enters only through the risk-set size",
+                "read (b, a) as a hazard-sketch, not the lifelines MLE",
+            ))
+            .build(),
+    );
+    ctx.finish(FittedParametricSurv {
+        shape: b,
+        scale: log_a.exp(),
+        n_events,
+        n,
+    })
+}
+
+/// Named Gompertz fitter.
+#[derive(Clone, Debug, Default)]
+pub struct GompertzFitter;
+
+impl GompertzFitter {
+    /// Default Gompertz lifetime.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on durations and event indicators.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedParametricSurv>> {
+        gompertz_fitter(durations, events, session)
+    }
+}
+
+/// Mixture-cure exponential (lifelines `MixtureCureFitter` lite).
+///
+/// Cure fraction is \(1 - n_{\mathrm{events}}/n\), not a Kaplan–Meier plateau.
+/// Event count is not identification `p`. Inspect times with `y=None`.
+pub fn mixture_cure_fitter(
+    durations: &Vector,
+    events: &Vector,
+    session: &Session,
+) -> Result<Qualified<FittedMixtureCure>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    let n = durations.len().min(events.len());
+    let mut sum_t = 0.0_f64;
+    let mut n_events = 0usize;
+    for i in 0..n {
+        if !durations[i].is_finite() || durations[i] <= 0.0 {
+            continue;
+        }
+        sum_t += durations[i];
+        if events[i] > 0.5 {
+            n_events += 1;
+        }
+    }
+    if n_events == 0 || sum_t <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("mixture_cure_fitter has no positive event times")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "cure fraction and latency scale",
+                    "the exponential latency MLE is events / Σt",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedMixtureCure {
+            cure_fraction: 1.0,
+            scale: f64::NAN,
+            n_events: 0,
+            n,
+        });
+    }
+    let cure = (1.0 - n_events as f64 / n.max(1) as f64).clamp(0.0, 1.0);
+    let scale = sum_t / n_events as f64;
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("mixture_cure_fitter uses 1 − events/n, not a KM plateau")
+            .compromise(NumericalCompromise::new(
+                "EM mixture-cure MLE",
+                "incidence = event rate; latency = exponential on all times",
+                "late censoring is not a nonparametric tail",
+                "do not read the cure fraction as a lifelines KM plateau",
+            ))
+            .build(),
+    );
+    ctx.finish(FittedMixtureCure {
+        cure_fraction: cure,
+        scale,
+        n_events,
+        n,
+    })
+}
+
+/// Fitted mixture-cure exponential.
+#[derive(Clone, Debug)]
+pub struct FittedMixtureCure {
+    /// Incidence-complement cure fraction.
+    pub cure_fraction: f64,
+    /// Exponential latency scale.
+    pub scale: f64,
+    /// Uncensored events.
+    pub n_events: usize,
+    /// Sample size.
+    pub n: usize,
+}
+
+/// Named mixture-cure fitter.
+#[derive(Clone, Debug, Default)]
+pub struct MixtureCureFitter;
+
+impl MixtureCureFitter {
+    /// Default mixture-cure exponential.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on durations and event indicators.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMixtureCure>> {
+        mixture_cure_fitter(durations, events, session)
+    }
+}
+
+/// Greenwood-style Aalen–Johansen CIF standard error at the last event time.
+///
+/// Cause count is not identification `p`. Inspect times with `y=None`.
+/// Does not call `kaplan_meier_fit`.
+pub fn aalen_johansen_se(
+    times: &Vector,
+    events: &Vector,
+    cause: i64,
+    session: &Session,
+) -> Result<Qualified<AalenJohansenSe>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(times),
+        None,
+        &ctx.policy,
+    );
+    let n = times.len().min(events.len());
+    if times.len() != events.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("aalen_johansen_se times/events length mismatch")
+                .build(),
+        );
+    }
+    let mut idx: Vec<usize> = (0..n).filter(|&i| times[i].is_finite()).collect();
+    idx.sort_by(|&a, &b| {
+        times[a]
+            .partial_cmp(&times[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut cif = 0.0_f64;
+    let mut var = 0.0_f64;
+    let mut surv = 1.0_f64;
+    let mut last_t = f64::NAN;
+    let mut n_cause = 0usize;
+    let mut i = 0;
+    while i < idx.len() {
+        let t = times[idx[i]];
+        let mut j = i;
+        while j < idx.len() && (times[idx[j]] - t).abs() <= 1e-15 {
+            j += 1;
+        }
+        let r = (idx.len() - i) as f64;
+        let mut d_k = 0.0_f64;
+        let mut d_tot = 0.0_f64;
+        for &u in &idx[i..j] {
+            if events[u].is_finite() {
+                let e = events[u].round() as i64;
+                if e > 0 {
+                    d_tot += 1.0;
+                    if e == cause {
+                        d_k += 1.0;
+                        n_cause += 1;
+                    }
+                }
+            }
+        }
+        if d_tot > 0.0 && r > 0.0 {
+            if d_k > 0.0 {
+                cif += surv * d_k / r;
+                var += (surv * surv) * d_k / (r * r);
+            }
+            surv *= (1.0 - d_tot / r).max(0.0);
+            last_t = t;
+        }
+        i = j;
+    }
+    if n_cause == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("aalen_johansen_se saw no events of the requested cause")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "CIF standard error",
+                    "Greenwood-Aalen variance is an empty sum without cause-k events",
+                    "choose a cause that occurs",
+                ))
+                .build(),
+        );
+        return ctx.finish(AalenJohansenSe {
+            cif: f64::NAN,
+            se: f64::NAN,
+            cause,
+            time: last_t,
+        });
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("aalen_johansen_se uses Σ S(s−)² d_k / r², not the full Aalen variance")
+            .compromise(NumericalCompromise::new(
+                "Aalen martingale CIF variance",
+                "Greenwood-style cause-k increments only",
+                "covariance between CIF and overall survival is omitted",
+                "treat se as a planning SE, not a published CIF interval",
+            ))
+            .build(),
+    );
+    ctx.finish(AalenJohansenSe {
+        cif,
+        se: var.max(0.0).sqrt(),
+        cause,
+        time: last_t,
+    })
+}
+
+/// Named alias of [`aalen_johansen_se`].
+pub fn cif_se(
+    times: &Vector,
+    events: &Vector,
+    cause: i64,
+    session: &Session,
+) -> Result<Qualified<AalenJohansenSe>> {
+    aalen_johansen_se(times, events, cause, session)
+}
+
+/// Greenwood-Aalen CIF payload.
+#[derive(Clone, Debug)]
+pub struct AalenJohansenSe {
+    /// Cumulative incidence at the last event time.
+    pub cif: f64,
+    /// Greenwood-style standard error.
+    pub se: f64,
+    /// Cause code.
+    pub cause: i64,
+    /// Last event time used.
+    pub time: f64,
+}
+
+/// Column-standardised Schoenfeld residuals (lifelines `scaled_schoenfeld`).
+///
+/// Event count is not identification `p`. Inspect covariates with `y=None`.
+pub fn scaled_schoenfeld(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    let sch = match schoenfeld(durations, events, x, &session.child("sch")) {
+        Ok(q) => q.value,
+        Err(e) => {
+            if !skip_aborting_inner(&e.primary) {
+                ctx.push(e.primary);
+            }
+            return ctx.finish(Matrix::zeros(0, x.ncols()));
+        }
+    };
+    if sch.nrows() == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("scaled_schoenfeld: no uncensored events")
+                .build(),
+        );
+        return ctx.finish(sch);
+    }
+    let p = sch.ncols();
+    let n = sch.nrows();
+    let out = Matrix::from_fn(n, p, |i, j| {
+        let mut m = 0.0_f64;
+        for r in 0..n {
+            m += sch.get(r, j);
+        }
+        m /= n as f64;
+        let mut ss = 0.0_f64;
+        for r in 0..n {
+            let d = sch.get(r, j) - m;
+            ss += d * d;
+        }
+        let sd = (ss / (n as f64 - 1.0).max(1.0)).sqrt().max(1e-12);
+        sch.get(i, j) / sd
+    });
+    ctx.finish(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -19702,5 +20321,26 @@ mod tests {
             .fit(&dur, &ev, &Session::new("wbf", "t"))
             .expect("wbf");
         assert!(wbf.value.shape.is_finite() && wbf.value.shape > 0.0);
+        let lnf = LogNormalFitter::new()
+            .fit(&dur, &ev, &Session::new("lnf", "t"))
+            .expect("lnf");
+        assert!(lnf.value.scale.is_finite() && lnf.value.scale > 0.0);
+        let llf = loglogistic_fitter(&dur, &ev, &Session::new("llf", "t")).expect("llf");
+        assert!(llf.value.shape.is_finite() && llf.value.shape > 0.0);
+        let gmf = GompertzFitter::new()
+            .fit(&dur, &ev, &Session::new("gmf", "t"))
+            .expect("gmf");
+        assert!(gmf.value.scale.is_finite() && gmf.value.scale > 0.0);
+        let mcf = MixtureCureFitter::new()
+            .fit(&dur, &ev, &Session::new("mcf", "t"))
+            .expect("mcf");
+        assert!(mcf.value.cure_fraction.is_finite() && mcf.value.scale.is_finite());
+        let ajs = aalen_johansen_se(&dur, &ev, 1, &Session::new("ajs", "t")).expect("ajs");
+        assert!(ajs.value.cif.is_finite() && ajs.value.se.is_finite());
+        let css = cif_se(&dur, &ev, 1, &Session::new("cifs", "t")).expect("cifs");
+        assert!(css.value.cif.is_finite());
+        let ssch = scaled_schoenfeld(&dur, &ev, &xcox, &Session::new("ssch", "t")).expect("ssch");
+        assert!(ssch.value.ncols() == 1);
+        assert!(ssch.value.nrows() == 0 || ssch.value.get(0, 0).is_finite());
     }
 }
