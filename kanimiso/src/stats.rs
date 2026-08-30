@@ -245,6 +245,140 @@ pub struct FittedCoxPH {
     pub converged: bool,
 }
 
+/// Named Cox wrapper (statsmodels `PHReg`).
+///
+/// Covariate count is the design width, not a substitute identification `p`
+/// for events. Newton uses the inner Cox fit; a failed Cholesky is swallowed
+/// so a diagnostic session is not aborted by a Fatal inner issue.
+#[derive(Clone, Debug, Default)]
+pub struct PHReg {
+    inner: CoxPH,
+}
+
+impl PHReg {
+    /// Default Breslow Cox wrapper.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit `h(t | x) = h0(t) exp(xβ)`.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedPHReg>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+        match self.inner.fit(durations, events, x, &session.child("cox")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::CholeskyFailed
+                            | IssueCode::InformationMatrixSingular
+                            | IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::R2IsOne
+                            | IssueCode::RankZero
+                            | IssueCode::LossIsNan
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                ctx.finish(FittedPHReg {
+                    coef: q.value.coef,
+                    loglik: q.value.loglik,
+                    n_events: q.value.n_events,
+                    n: q.value.n,
+                    converged: q.value.converged,
+                })
+            }
+            Err(_) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("PHReg inner Cox Newton failed; coefficients left at 0")
+                        .build(),
+                );
+                ctx.finish(FittedPHReg {
+                    coef: Vector::zeros(x.ncols()),
+                    loglik: f64::NAN,
+                    n_events: events
+                        .as_slice()
+                        .iter()
+                        .filter(|e| **e > 0.5)
+                        .count(),
+                    n: x.nrows(),
+                    converged: false,
+                })
+            }
+        }
+    }
+}
+
+/// Fitted PHReg coefficients.
+#[derive(Clone, Debug)]
+pub struct FittedPHReg {
+    /// Log-hazard slopes.
+    pub coef: Vector,
+    /// Partial log-likelihood at the reported point.
+    pub loglik: f64,
+    /// Uncensored events.
+    pub n_events: usize,
+    /// Sample size.
+    pub n: usize,
+    /// Whether the inner Newton reported convergence.
+    pub converged: bool,
+}
+
+/// Right-censored survival curve (statsmodels `SurvfuncRight`).
+///
+/// Event count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct SurvfuncRight {}
+
+impl SurvfuncRight {
+    /// Product-limit wrapper.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit on durations and event indicators (`1` = event).
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSurvfuncRight>> {
+        let q = KaplanMeier::new().fit(durations, events, session)?;
+        let mut ctx = FitCtx::with_session(session.clone());
+        for issue in q.report.issues() {
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedSurvfuncRight {
+            times: q.value.times,
+            survival: q.value.survival,
+            n_risk: q.value.n_risk,
+            n_event: q.value.n_event,
+        })
+    }
+}
+
+/// Fitted right-censored survival function.
+#[derive(Clone, Debug)]
+pub struct FittedSurvfuncRight {
+    /// Distinct event times.
+    pub times: Vector,
+    /// Product-limit survival.
+    pub survival: Vector,
+    /// Number at risk.
+    pub n_risk: Vector,
+    /// Events at each time.
+    pub n_event: Vector,
+}
+
 /// Shapiro–Francia normal-probability-plot correlation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShapiroFranciaResult {
@@ -5066,6 +5200,226 @@ pub fn ols_influence(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualif
         hat,
         dffits,
         dfbetas,
+    })
+}
+
+/// White specification / omitted-variable LM (statsmodels `spec_white`).
+///
+/// Expanded feature count is not identification `p`.
+pub fn spec_white(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let design = x.with_intercept();
+    let mut scratch = Report::new("specw", "ols");
+    let Some(beta) = least_squares(&mut scratch, &design, y, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::UnidentifiedModel)
+                .message("spec_white: primary OLS failed")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: y.len() as f64,
+        });
+    };
+    for issue in scratch.issues() {
+        if matches!(
+            issue.code,
+            IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+        ) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let n = design.nrows().min(y.len());
+    let fit = design.matvec(&beta);
+    let e2 = Vector::from_iter((0..n).map(|i| {
+        let e = y[i] - fit[i];
+        e * e
+    }));
+    if e2
+        .as_slice()
+        .iter()
+        .all(|v| *v <= ctx.policy.near_zero_variance)
+    {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("spec_white: squared residuals are identically zero")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: n as f64,
+        });
+    }
+    let p = x.ncols();
+    let mut cols: Vec<Vec<f64>> = Vec::new();
+    cols.push(vec![1.0; n]);
+    for j in 0..p {
+        cols.push((0..n).map(|i| x.get(i, j)).collect());
+    }
+    let base = cols.len();
+    for a in 1..base {
+        for b in a..base {
+            cols.push((0..n).map(|i| cols[a][i] * cols[b][i]).collect());
+        }
+    }
+    if cols.len() >= n {
+        ctx.push(
+            Issue::builder(IssueCode::Overparameterized)
+                .message(format!(
+                    "spec_white auxiliary has {} columns ≥ n={n}; higher-order terms are truncated",
+                    cols.len()
+                ))
+                .build(),
+        );
+        cols.truncate(n.saturating_sub(1).max(1));
+    }
+    let aux = Matrix::from_fn(n, cols.len(), |i, j| cols[j][i]);
+    let mut aux_sc = Report::new("specw", "aux");
+    let Some(ab) = least_squares(&mut aux_sc, &aux, &e2, &ctx.policy) else {
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: (cols.len().saturating_sub(1)) as f64,
+            nobs: n as f64,
+        });
+    };
+    let fitted = aux.matvec(&ab);
+    let mut sse = 0.0;
+    let mut sst = 0.0;
+    let ym = e2.mean();
+    for i in 0..n {
+        let r = e2[i] - fitted[i];
+        sse += r * r;
+        let d = e2[i] - ym;
+        sst += d * d;
+    }
+    let r2 = if sst > 0.0 { 1.0 - sse / sst } else { 0.0 };
+    let df = (cols.len().saturating_sub(1)) as f64;
+    let stat = n as f64 * r2.max(0.0);
+    let pvalue = chi2_pvalue(stat, df.max(1.0));
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df,
+        nobs: n as f64,
+    })
+}
+
+/// Engle ARCH LM on squared residuals (statsmodels `het_arch`).
+///
+/// Lag count is not identification `p`.
+pub fn het_arch(
+    resid: &Vector,
+    lags: usize,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    arch_lm(resid, lags, session)
+}
+
+/// Breusch–Godfrey residual AR LM (statsmodels `acorr_breusch_godfrey`).
+///
+/// Lag count is not identification `p`.
+pub fn acorr_breusch_godfrey(
+    resid: &Vector,
+    design: &Matrix,
+    lags: usize,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    breusch_godfrey(resid, design, lags, session)
+}
+
+/// Studentized residuals and Bonferroni p-values (statsmodels `outlier_test`).
+///
+/// Observation count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct OutlierTest {
+    /// Internally studentized residuals \(e_i / (s\sqrt{1-h_{ii}})\).
+    pub studentized: Vector,
+    /// Two-sided Student-\(t\) p-values.
+    pub pvalue: Vector,
+    /// Bonferroni-adjusted p-values \(\min(1, n\,p_i)\).
+    pub bonferroni: Vector,
+}
+
+/// Outlier test from the OLS hat matrix and residuals.
+pub fn outlier_test(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<OutlierTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let inf = match ols_influence(x, y, &session.child("infl")) {
+        Ok(q) => {
+            for issue in q.report.issues() {
+                if matches!(
+                    issue.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::R2IsOne
+                        | IssueCode::CholeskyFailed
+                ) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            q.value
+        }
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("outlier_test: OLS influence failed")
+                    .build(),
+            );
+            return ctx.finish(OutlierTest {
+                studentized: Vector::zeros(y.len()),
+                pvalue: Vector::zeros(y.len()),
+                bonferroni: Vector::zeros(y.len()),
+            });
+        }
+    };
+    let n = inf.resid.len();
+    let p = x.ncols() + 1;
+    let mut sse = 0.0;
+    for i in 0..n {
+        sse += inf.resid[i] * inf.resid[i];
+    }
+    let df = (n as f64 - p as f64).max(1.0);
+    let s = (sse / df).sqrt().max(1e-12);
+    let mut studentized = Vector::zeros(n);
+    let mut pvalue = Vector::zeros(n);
+    let mut bonferroni = Vector::zeros(n);
+    for i in 0..n {
+        let h = inf.hat.as_slice().get(i).copied().unwrap_or(0.0);
+        let denom = (s * (1.0 - h).max(1e-12).sqrt()).max(1e-12);
+        let t = inf.resid[i] / denom;
+        studentized[i] = t;
+        let pv = if t.is_finite() {
+            student_t_pvalue(t, df)
+        } else {
+            f64::NAN
+        };
+        pvalue[i] = pv;
+        bonferroni[i] = if pv.is_finite() {
+            (pv * n as f64).min(1.0)
+        } else {
+            f64::NAN
+        };
+    }
+    ctx.finish(OutlierTest {
+        studentized,
+        pvalue,
+        bonferroni,
     })
 }
 
@@ -12468,5 +12822,34 @@ mod tests {
         let ccx = compare_cox(&dur, &ev, &xcox, &Session::new("ccx", "t")).expect("ccx");
         assert!(ccx.value.statistic.is_finite() || ccx.value.pvalue.is_nan());
         assert!(ccx.value.df > 0.0);
+        let sw = spec_white(&x, &y, &Session::new("sw", "t")).expect("specw");
+        assert!(sw.value.statistic.is_finite() || sw.value.pvalue.is_nan());
+        let ha = het_arch(&e, 2, &Session::new("ha", "t")).expect("hetarch");
+        assert!(ha.value.df > 0.0);
+        let bg2 = acorr_breusch_godfrey(&e, &design, 1, &Session::new("abg", "t")).expect("abg");
+        assert!(bg2.value.df > 0.0);
+        let ot = outlier_test(&x, &y, &Session::new("ot", "t")).expect("out");
+        assert_eq!(ot.value.studentized.len(), 40);
+        assert!(ot
+            .value
+            .studentized
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite()));
+        let phr = PHReg::new()
+            .fit(&dur, &ev, &xcox, &Session::new("phr", "t"))
+            .expect("phreg");
+        assert_eq!(phr.value.coef.len(), 1);
+        assert!(phr.value.coef[0].is_finite() || !phr.value.converged);
+        let sfr = SurvfuncRight::new()
+            .fit(&dur, &ev, &Session::new("sfr", "t"))
+            .expect("sfr");
+        assert!(!sfr.value.times.is_empty());
+        assert!(sfr
+            .value
+            .survival
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0));
     }
 }

@@ -17193,6 +17193,481 @@ impl PartialFit for OnlineMsle {
     }
 }
 
+/// Streaming Brier score (river `metrics.Brier`).
+///
+/// Column 0 of `x` is the predicted probability; `y` is the 0/1 label.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineBrier {
+    acc: f64,
+    n: u64,
+    updates: u64,
+}
+
+impl OnlineBrier {
+    /// Empty Brier accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current Brier score, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.n == 0 {
+            f64::NAN
+        } else {
+            self.acc / self.n as f64
+        }
+    }
+}
+
+impl PartialFit for OnlineBrier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n, "no y for OnlineBrier"),
+            );
+        };
+        let before = self.score();
+        for i in 0..x.nrows().min(y.len()) {
+            let p = x.get(i, 0);
+            let t = y[i];
+            if !p.is_finite() || !t.is_finite() {
+                continue;
+            }
+            let p = p.clamp(0.0, 1.0);
+            let t = if t > 0.5 { 1.0 } else { 0.0 };
+            let d = p - t;
+            self.acc += d * d;
+            self.n += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n);
+        q.effective_sample_size = self.n as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 1;
+        q.warmup = self.n < 1;
+        q.explanation = format!("OnlineBrier={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Brier score",
+                "mean (p−y)² with p = col0 clipped to [0,1] and y hard-thresholded",
+                format!("brier={before:.6e}"),
+                format!("brier={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming cross-entropy on soft labels (river `metrics.CrossEntropy`).
+///
+/// Distinct from [`OnlineLogLoss`]: `y` is treated as a probability in
+/// \([0,1]\), not hard-thresholded.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineCrossEntropy {
+    nll: f64,
+    n: u64,
+    updates: u64,
+}
+
+impl OnlineCrossEntropy {
+    /// Empty cross-entropy accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current mean cross-entropy, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        if self.n == 0 {
+            f64::NAN
+        } else {
+            self.nll / self.n as f64
+        }
+    }
+}
+
+impl PartialFit for OnlineCrossEntropy {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n,
+                    "no y for OnlineCrossEntropy",
+                ),
+            );
+        };
+        let before = self.score();
+        for i in 0..x.nrows().min(y.len()) {
+            let p = x.get(i, 0);
+            let t = y[i];
+            if !p.is_finite() || !t.is_finite() {
+                continue;
+            }
+            let p = p.clamp(1e-12, 1.0 - 1e-12);
+            let t = t.clamp(0.0, 1.0);
+            self.nll += -(t * p.ln() + (1.0 - t) * (1.0 - p).ln());
+            self.n += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n);
+        q.effective_sample_size = self.n as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 1;
+        q.warmup = self.n < 1;
+        q.explanation = format!("OnlineCrossEntropy={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "soft cross-entropy",
+                "mean −[y ln p + (1−y) ln(1−p)] with y kept as a probability",
+                format!("ce={before:.6e}"),
+                format!("ce={after:.6e}"),
+            ),
+        )
+    }
+}
+
+fn window_skew(buf: &[f64]) -> f64 {
+    if buf.len() < 3 {
+        return f64::NAN;
+    }
+    let n = buf.len() as f64;
+    let mean = buf.iter().sum::<f64>() / n;
+    let mut m2 = 0.0;
+    let mut m3 = 0.0;
+    for &v in buf {
+        let d = v - mean;
+        m2 += d * d;
+        m3 += d * d * d;
+    }
+    if m2 <= 1e-18 {
+        f64::NAN
+    } else {
+        n.sqrt() * m3 / m2.powf(1.5)
+    }
+}
+
+fn window_kurtosis(buf: &[f64]) -> f64 {
+    if buf.len() < 4 {
+        return f64::NAN;
+    }
+    let n = buf.len() as f64;
+    let mean = buf.iter().sum::<f64>() / n;
+    let mut m2 = 0.0;
+    let mut m4 = 0.0;
+    for &v in buf {
+        let d = v - mean;
+        let d2 = d * d;
+        m2 += d2;
+        m4 += d2 * d2;
+    }
+    if m2 <= 1e-18 {
+        f64::NAN
+    } else {
+        n * m4 / (m2 * m2) - 3.0
+    }
+}
+
+fn window_entropy(buf: &[f64]) -> f64 {
+    if buf.is_empty() {
+        return f64::NAN;
+    }
+    let mut counts: HashMap<i64, u64> = HashMap::new();
+    for &v in buf {
+        *counts.entry(v.round() as i64).or_insert(0) += 1;
+    }
+    let tot = buf.len() as f64;
+    let mut h = 0.0;
+    for c in counts.values() {
+        let p = *c as f64 / tot;
+        if p > 0.0 {
+            h -= p * p.ln();
+        }
+    }
+    h
+}
+
+/// Rolling skewness (river `stats.RollingSkew`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingSkew {
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingSkew {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingSkew {
+    /// Rolling skewness with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(3),
+            ..Self::default()
+        }
+    }
+
+    /// Current window skewness, or NaN during warmup.
+    pub fn score(&self) -> f64 {
+        window_skew(&self.buf)
+    }
+}
+
+impl PartialFit for RollingSkew {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        let cap = self.window.max(3);
+        for i in 0..x.nrows() {
+            rolling_push(&mut self.buf, x.get(i, 0), cap);
+            if x.get(i, 0).is_finite() {
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.buf.len() >= 3;
+        q.warmup = self.buf.len() < 3;
+        q.explanation = format!("RollingSkew={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed skewness",
+                "sliding third-moment skew of column 0; window is not identification p",
+                format!("skew={before:.6e}"),
+                format!("skew={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Rolling excess kurtosis (river `stats.RollingKurtosis`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingKurtosis {
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingKurtosis {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingKurtosis {
+    /// Rolling kurtosis with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(4),
+            ..Self::default()
+        }
+    }
+
+    /// Current excess kurtosis, or NaN during warmup.
+    pub fn score(&self) -> f64 {
+        window_kurtosis(&self.buf)
+    }
+}
+
+impl PartialFit for RollingKurtosis {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        let cap = self.window.max(4);
+        for i in 0..x.nrows() {
+            rolling_push(&mut self.buf, x.get(i, 0), cap);
+            if x.get(i, 0).is_finite() {
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.buf.len() >= 4;
+        q.warmup = self.buf.len() < 4;
+        q.explanation = format!("RollingKurtosis={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed excess kurtosis",
+                "sliding fourth-moment kurtosis of column 0; window is not identification p",
+                format!("kurt={before:.6e}"),
+                format!("kurt={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Rolling Shannon entropy of rounded values (river `stats.RollingEntropy`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingEntropy {
+    /// Window capacity.
+    pub window: usize,
+    buf: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingEntropy {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            buf: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingEntropy {
+    /// Rolling entropy with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Current entropy in nats, or NaN when empty.
+    pub fn score(&self) -> f64 {
+        window_entropy(&self.buf)
+    }
+}
+
+impl PartialFit for RollingEntropy {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        let cap = self.window.max(2);
+        for i in 0..x.nrows() {
+            rolling_push(&mut self.buf, x.get(i, 0), cap);
+            if x.get(i, 0).is_finite() {
+                self.n_seen += 1;
+            }
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.buf.len() as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.buf.len() >= 2;
+        q.warmup = self.buf.len() < 2;
+        q.explanation = format!("RollingEntropy={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed entropy",
+                "Shannon entropy of rounded column-0 values in the window",
+                format!("H={before:.6e}"),
+                format!("H={after:.6e}"),
+            ),
+        )
+    }
+}
+
 /// ADWIN-resetting bag of perceptrons (river `ensemble.ADWINBaggingClassifier`).
 #[derive(Clone, Debug)]
 pub struct AdwinBagging {
@@ -25866,6 +26341,21 @@ mod tests {
         OnlineMsle::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("omsle");
+        OnlineBrier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("obrier");
+        OnlineCrossEntropy::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("oce");
+        RollingSkew::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("rskew");
+        RollingKurtosis::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("rkurt");
+        RollingEntropy::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("rent");
 
         let n_expl = session
             .ledger()

@@ -4692,6 +4692,103 @@ const INVENTORY: &[Algorithm] = &[
     ),
     a("online.RollingSem", "river.stats.RollingSEM", "online"),
     a("online.OnlineMsle", "river.metrics.MSLE", "online"),
+    a(
+        "glm.PhiGee",
+        "statsmodels.genmod.generalized_estimating_equations.GEE",
+        "estimator",
+    ),
+    a(
+        "glm.NominalGee",
+        "statsmodels.genmod.generalized_estimating_equations.NominalGEE",
+        "estimator",
+    ),
+    a(
+        "glm.OrdinalGee",
+        "statsmodels.genmod.generalized_estimating_equations.OrdinalGEE",
+        "estimator",
+    ),
+    a(
+        "glm.GlmGam",
+        "statsmodels.gam.generalized_additive_model.GLMGam",
+        "estimator",
+    ),
+    a(
+        "stats.PHReg",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "stats",
+    ),
+    a(
+        "stats.SurvfuncRight",
+        "statsmodels.duration.survfunc.SurvfuncRight",
+        "stats",
+    ),
+    a(
+        "stats.spec_white",
+        "statsmodels.stats.diagnostic.spec_white",
+        "stats",
+    ),
+    a(
+        "stats.het_arch",
+        "statsmodels.stats.diagnostic.het_arch",
+        "stats",
+    ),
+    a(
+        "stats.acorr_breusch_godfrey",
+        "statsmodels.stats.diagnostic.acorr_breusch_godfrey",
+        "stats",
+    ),
+    a(
+        "stats.outlier_test",
+        "statsmodels.stats.outliers_influence.OLSInfluence.outlier_test",
+        "stats",
+    ),
+    a(
+        "tsa.ch_test",
+        "statsmodels.tsa.stattools.canova_hansen",
+        "forecast",
+    ),
+    a(
+        "filters.miso_lfilter",
+        "statsmodels.tsa.filters.filtertools.miso_lfilter",
+        "forecast",
+    ),
+    a(
+        "tsa.lagmat2ds",
+        "statsmodels.tsa.tsatools.lagmat2ds",
+        "forecast",
+    ),
+    a(
+        "tslearn.Sfa",
+        "tslearn.piecewise.SymbolicFourierApproximation",
+        "timeseries",
+    ),
+    a(
+        "tslearn.SoftDtwSvm",
+        "tslearn.svm.TimeSeriesSVC",
+        "timeseries",
+    ),
+    a(
+        "tslearn.KNeighborsTimeSeriesClassifier",
+        "sktime.classification.distance_based.KNeighborsTimeSeriesClassifier",
+        "timeseries",
+    ),
+    a("online.OnlineBrier", "river.metrics.Brier", "online"),
+    a(
+        "online.OnlineCrossEntropy",
+        "river.metrics.CrossEntropy",
+        "online",
+    ),
+    a("online.RollingSkew", "river.stats.RollingSkew", "online"),
+    a(
+        "online.RollingKurtosis",
+        "river.stats.RollingKurtosis",
+        "online",
+    ),
+    a(
+        "online.RollingEntropy",
+        "river.stats.RollingEntropy",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5009,6 +5106,11 @@ mod tests {
             "glm.TruncatedLogit",
             "tsa.pacf_burg",
             "online.OnlineMsle",
+            "glm.GlmGam",
+            "stats.spec_white",
+            "tsa.ch_test",
+            "tslearn.Sfa",
+            "online.OnlineBrier",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

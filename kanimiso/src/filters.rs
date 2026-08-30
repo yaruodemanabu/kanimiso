@@ -410,6 +410,47 @@ pub fn recursive_filter(
     ctx.finish(y)
 }
 
+/// Multi-input single-output FIR (statsmodels `miso_lfilter`).
+///
+/// Each column of `x` is convolved with `kernel` and the channels are summed.
+/// Filter length is not identification `p`.
+pub fn miso_lfilter(
+    x: &Matrix,
+    kernel: &Vector,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    if kernel.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("miso_lfilter received an empty kernel")
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(x.nrows()));
+    }
+    if !kernel.as_slice().iter().all(|v| v.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .message("miso_lfilter kernel is non-finite")
+                .build(),
+        );
+    }
+    let k = kernel.len();
+    let out = Vector::from_iter((0..x.nrows()).map(|t| {
+        let mut s = 0.0;
+        for j in 0..x.ncols() {
+            for u in 0..k {
+                if t >= u {
+                    s += kernel[u] * x.get(t - u, j);
+                }
+            }
+        }
+        s
+    }));
+    ctx.finish(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,6 +474,18 @@ mod tests {
             .expect("rec")
             .value;
         assert!(rec.as_slice().iter().all(|v| v.is_finite()));
+        let x2 = Matrix::from_fn(48, 2, |i, j| {
+            if j == 0 {
+                i as f64
+            } else {
+                (i as f64).sin()
+            }
+        });
+        let miso = miso_lfilter(&x2, &ker, &Session::new("miso", "fit"))
+            .expect("miso")
+            .value;
+        assert_eq!(miso.len(), 48);
+        assert!(miso.as_slice().iter().all(|v| v.is_finite()));
     }
 
     #[test]

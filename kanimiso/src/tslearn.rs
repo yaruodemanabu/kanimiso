@@ -12082,6 +12082,188 @@ impl Predict for FittedSaxVsm {
     }
 }
 
+fn sfa_symbol_row(row: &[f64], n_coefs: usize, alphabet: usize) -> Vec<f64> {
+    let z = znorm(&Vector::from_slice(row));
+    let mags = dft_mags(z.as_slice(), n_coefs);
+    let a = alphabet.max(2);
+    mags.into_iter()
+        .map(|mag| {
+            let u = 0.5 + 0.5 * crate::special::erf(mag / std::f64::consts::SQRT_2);
+            ((u * a as f64).floor() as usize).min(a - 1) as f64
+        })
+        .collect()
+}
+
+fn sfa_feature_rows(x: &Matrix, n_coefs: usize, alphabet: usize) -> Matrix {
+    let m = n_coefs.max(1);
+    Matrix::from_fn(x.nrows(), m, |i, j| {
+        let w = sfa_symbol_row(x.row(i).as_slice(), m, alphabet);
+        w.get(j).copied().unwrap_or(0.0)
+    })
+}
+
+/// Symbolic Fourier Approximation (tslearn `SymbolicFourierApproximation`).
+///
+/// Word / alphabet counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Sfa {
+    /// Retained DFT magnitudes.
+    pub n_coefs: usize,
+    /// Alphabet size.
+    pub alphabet: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for Sfa {
+    fn default() -> Self {
+        Self {
+            n_coefs: 4,
+            alphabet: 4,
+            alpha: 0.1,
+        }
+    }
+}
+
+impl Sfa {
+    /// Default SFA classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted SFA ridge.
+#[derive(Clone, Debug)]
+pub struct FittedSfa {
+    n_coefs: usize,
+    alphabet: usize,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for Sfa {
+    type Fitted = FittedSfa;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSfa>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let z = sfa_feature_rows(x, self.n_coefs, self.alphabet);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "sfa");
+        ctx.finish(FittedSfa {
+            n_coefs: self.n_coefs.max(1),
+            alphabet: self.alphabet.max(2),
+            inner,
+        })
+    }
+}
+
+impl Predict for FittedSfa {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = sfa_feature_rows(x, self.n_coefs, self.alphabet);
+        self.inner.predict(&z, session)
+    }
+}
+
+fn softdtw_kernel_rows(x: &Matrix, train: &Matrix, gamma: f64) -> Matrix {
+    let g = gamma.max(1e-8);
+    Matrix::from_fn(x.nrows(), train.nrows(), |i, j| {
+        let d = softdtw_raw(x.row(i).as_slice(), train.row(j).as_slice(), g);
+        (-d / g).exp()
+    })
+}
+
+/// Soft-DTW kernel SVM (tslearn `TimeSeriesSVC` with soft-DTW).
+///
+/// Kernel count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SoftDtwSvm {
+    /// Soft-DTW \(\gamma\).
+    pub gamma: f64,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+}
+
+impl Default for SoftDtwSvm {
+    fn default() -> Self {
+        Self {
+            gamma: 1.0,
+            alpha: 0.1,
+        }
+    }
+}
+
+impl SoftDtwSvm {
+    /// Default soft-DTW kernel SVM.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted soft-DTW kernel ridge.
+#[derive(Clone, Debug)]
+pub struct FittedSoftDtwSvm {
+    x_train: Matrix,
+    gamma: f64,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for SoftDtwSvm {
+    type Fitted = FittedSoftDtwSvm;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSoftDtwSvm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let z = softdtw_kernel_rows(x, x, self.gamma);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "sdtwsvm");
+        ctx.finish(FittedSoftDtwSvm {
+            x_train: x.clone(),
+            gamma: self.gamma.max(1e-8),
+            inner,
+        })
+    }
+}
+
+impl Predict for FittedSoftDtwSvm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = softdtw_kernel_rows(x, &self.x_train, self.gamma);
+        self.inner.predict(&z, session)
+    }
+}
+
+/// Named DTW 1-NN wrapper (sktime `KNeighborsTimeSeriesClassifier`).
+#[derive(Clone, Debug)]
+pub struct KNeighborsTimeSeriesClassifier {
+    inner: KNeighborsTimeSeries,
+}
+
+impl Default for KNeighborsTimeSeriesClassifier {
+    fn default() -> Self {
+        Self {
+            inner: KNeighborsTimeSeries::default(),
+        }
+    }
+}
+
+impl KNeighborsTimeSeriesClassifier {
+    /// DTW 1-NN classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for KNeighborsTimeSeriesClassifier {
+    type Fitted = FittedKnnTs;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedKnnTs>> {
+        self.inner.fit(x, y, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -12553,6 +12735,38 @@ mod tests {
         assert_eq!(
             sv.value
                 .predict(&x, &Session::new("ts", "saxvsmp"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let sfa = Sfa::new()
+            .fit(&x, &y, &Session::new("ts", "sfa"))
+            .unwrap();
+        assert_eq!(
+            sfa.value
+                .predict(&x, &Session::new("ts", "sfap"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let sds = SoftDtwSvm::new()
+            .fit(&x, &y, &Session::new("ts", "sdsvm"))
+            .unwrap();
+        let sdsp = sds
+            .value
+            .predict(&x, &Session::new("ts", "sdsvmp"))
+            .unwrap()
+            .value;
+        assert_eq!(sdsp.len(), 8);
+        assert!(sdsp.as_slice().iter().all(|v| v.is_finite()));
+        let knn = KNeighborsTimeSeriesClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "knntsc"))
+            .unwrap();
+        assert_eq!(
+            knn.value
+                .predict(&x, &Session::new("ts", "knntscp"))
                 .unwrap()
                 .value
                 .len(),

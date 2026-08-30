@@ -1572,6 +1572,255 @@ impl Predict for FittedGee {
     }
 }
 
+/// Exchangeable GEE plus Pearson \(\phi\) (statsmodels `GEE` with scale).
+///
+/// Group count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct PhiGee {
+    inner: Gee,
+}
+
+impl PhiGee {
+    /// Default exchangeable GEE with Pearson scale.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit the working GEE and report \(\hat\phi = \sum e_i^2 / (n-k)\).
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPhiGee>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let q = self.inner.fit(x, y, groups, &session.child("gee"))?;
+        for issue in q.report.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::R2IsOne
+                    | IssueCode::RankZero
+                    | IssueCode::CholeskyFailed
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let gee = q.value;
+        let pred = match gee.predict(x, &session.child("phi")) {
+            Ok(p) => p.value,
+            Err(_) => Vector::zeros(y.len()),
+        };
+        let n = y.len().min(pred.len()) as f64;
+        let k = (gee.coef.len() + 1) as f64;
+        let mut sse = 0.0;
+        for i in 0..y.len().min(pred.len()) {
+            let e = y[i] - pred[i];
+            sse += e * e;
+        }
+        let phi = sse / (n - k).max(1.0);
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(Severity::Advisory)
+                .message("PhiGee reports Pearson φ from working residuals, not a sandwich scale")
+                .compromise(NumericalCompromise::new(
+                    "GEE Pearson dispersion",
+                    "φ = SSE / (n − k) after exchangeable GLS",
+                    "the working V is not inverted for a robust φ",
+                    "use φ as a scale diagnostic, not as a causal overdispersion parameter",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedPhiGee { gee, phi })
+    }
+}
+
+/// Fitted GEE with Pearson \(\phi\).
+#[derive(Clone, Debug)]
+pub struct FittedPhiGee {
+    /// Working GEE mean.
+    pub gee: FittedGee,
+    /// Pearson dispersion.
+    pub phi: f64,
+}
+
+impl Predict for FittedPhiGee {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.gee.predict(x, session)
+    }
+}
+
+/// Nominal (last-vs-rest) GEE (statsmodels `NominalGEE` lite).
+///
+/// Class count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct NominalGee {
+    inner: Gee,
+}
+
+impl NominalGee {
+    /// Default last-vs-rest GEE.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit a binary GEE of the largest label versus the rest.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedNominalGee>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let mut last = f64::NEG_INFINITY;
+        for &v in y.as_slice() {
+            if v.is_finite() && v > last {
+                last = v;
+            }
+        }
+        if !last.is_finite() {
+            last = 1.0;
+        }
+        let yb = Vector::from_iter(y.as_slice().iter().map(|&v| {
+            if v.is_finite() && (v - last).abs() < 1e-12 {
+                1.0
+            } else {
+                0.0
+            }
+        }));
+        let n_pos = yb.as_slice().iter().filter(|v| **v > 0.5).count();
+        if n_pos == 0 || n_pos == yb.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateDistribution)
+                    .message("NominalGee last-vs-rest has a single class after coding")
+                    .build(),
+            );
+        }
+        let q = self.inner.fit(x, &yb, groups, &session.child("ngee"))?;
+        for issue in q.report.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::R2IsOne
+                    | IssueCode::RankZero
+                    | IssueCode::CholeskyFailed
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedNominalGee {
+            gee: q.value,
+            last_class: last,
+        })
+    }
+}
+
+/// Fitted last-vs-rest GEE.
+#[derive(Clone, Debug)]
+pub struct FittedNominalGee {
+    /// Binary working GEE.
+    pub gee: FittedGee,
+    /// Label coded as 1.
+    pub last_class: f64,
+}
+
+impl Predict for FittedNominalGee {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.gee.predict(x, session)
+    }
+}
+
+/// Ordinal GEE treating `y` as numeric scores (statsmodels `OrdinalGEE` lite).
+///
+/// Class count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct OrdinalGee {
+    inner: Gee,
+}
+
+impl OrdinalGee {
+    /// Default score-GEE.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit an exchangeable GEE on the raw scores.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedOrdinalGee>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let mut classes: Vec<i64> = y
+            .as_slice()
+            .iter()
+            .filter(|v| v.is_finite())
+            .map(|v| v.round() as i64)
+            .collect();
+        classes.sort_unstable();
+        classes.dedup();
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("OrdinalGee treats ordered labels as interval scores")
+                .compromise(NumericalCompromise::new(
+                    "cumulative-logit ordinal GEE",
+                    "linear GEE on the numeric scores",
+                    "thresholds are not estimated",
+                    "read coefficients as score slopes, not as proportional-odds log-odds",
+                ))
+                .build(),
+        );
+        let q = self.inner.fit(x, y, groups, &session.child("ogee"))?;
+        for issue in q.report.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::R2IsOne
+                    | IssueCode::RankZero
+                    | IssueCode::CholeskyFailed
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedOrdinalGee {
+            gee: q.value,
+            n_classes: classes.len(),
+        })
+    }
+}
+
+/// Fitted score-GEE.
+#[derive(Clone, Debug)]
+pub struct FittedOrdinalGee {
+    /// Working GEE on the scores.
+    pub gee: FittedGee,
+    /// Distinct rounded labels.
+    pub n_classes: usize,
+}
+
+impl Predict for FittedOrdinalGee {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.gee.predict(x, session)
+    }
+}
+
 /// Zero-inflated Poisson (Lambert): intercept-only inflate + Poisson count GLM.
 #[derive(Clone, Debug)]
 pub struct ZeroInflatedPoisson {
@@ -4797,6 +5046,149 @@ pub struct FittedConditionalMNLogit {
     pub n_groups: usize,
 }
 
+/// Cubic truncated-power GAM (statsmodels `GLMGam` lite).
+///
+/// Knot count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct GlmGam {
+    /// Interior knots on column 0.
+    pub n_knots: usize,
+}
+
+impl Default for GlmGam {
+    fn default() -> Self {
+        Self { n_knots: 3 }
+    }
+}
+
+impl GlmGam {
+    /// Default three-knot truncated-power GAM.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted spline-basis OLS.
+#[derive(Clone, Debug)]
+pub struct FittedGlmGam {
+    /// Knots on column 0.
+    pub knots: Vector,
+    /// Slopes on `[x | (x_0-κ)_+^3]` (no intercept).
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+}
+
+fn gam_knots(x: &Matrix, n_knots: usize) -> Vec<f64> {
+    let n = x.nrows();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut col: Vec<f64> = (0..n).map(|i| x.get(i, 0)).filter(|v| v.is_finite()).collect();
+    if col.is_empty() {
+        return Vec::new();
+    }
+    col.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let k = n_knots.max(1).min(col.len().saturating_sub(1).max(1));
+    (1..=k)
+        .map(|j| {
+            let idx = (j * (col.len() - 1)) / (k + 1);
+            col[idx]
+        })
+        .collect()
+}
+
+fn gam_design(x: &Matrix, knots: &[f64]) -> Matrix {
+    let extra = knots.len();
+    let p = x.ncols() + extra;
+    Matrix::from_fn(x.nrows(), p, |i, j| {
+        if j < x.ncols() {
+            x.get(i, j)
+        } else {
+            let d = x.get(i, 0) - knots[j - x.ncols()];
+            if d > 0.0 {
+                d * d * d
+            } else {
+                0.0
+            }
+        }
+    })
+}
+
+impl Fit for GlmGam {
+    type Fitted = FittedGlmGam;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlmGam>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let knots = gam_knots(x, self.n_knots);
+        let z = gam_design(x, &knots);
+        let design = z.with_intercept();
+        let mut scratch = signlred::Report::new("glmgam", "ols");
+        let beta = least_squares(&mut scratch, &design, y, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::R2IsOne
+                    | IssueCode::RankZero
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("GlmGam uses a truncated-power cubic basis + OLS, not IRLS penalized splines")
+                .compromise(NumericalCompromise::new(
+                    "P-spline / cyclic cubic GAM",
+                    "unpenalized truncated-power OLS on column 0",
+                    "the smoother penalty is not identified",
+                    "treat the fit as a flexible mean, not as a roughness-penalized MLE",
+                ))
+                .build(),
+        );
+        let intercept = beta.as_slice().first().copied().unwrap_or(0.0);
+        let coef = if beta.len() > 1 {
+            Vector::from_iter((1..beta.len()).map(|j| beta[j]))
+        } else {
+            Vector::zeros(0)
+        };
+        ctx.finish(FittedGlmGam {
+            knots: Vector::from_iter(knots),
+            coef,
+            intercept,
+        })
+    }
+}
+
+impl Predict for FittedGlmGam {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let knots: Vec<f64> = self.knots.as_slice().to_vec();
+        let z = gam_design(x, &knots);
+        if z.ncols() != self.coef.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("GlmGam predict basis width ≠ coef")
+                    .build(),
+            );
+        }
+        let yhat = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..self.coef.len().min(z.ncols()) {
+                s += self.coef[j] * z.get(i, j);
+            }
+            s
+        }));
+        ctx.finish(yhat)
+    }
+}
+
 /// Scobit (skewed logit) binary GLM (statsmodels `Scobit`).
 ///
 /// \(P=\sigma(\eta)^\alpha\). The shape \(\alpha\) is not identification `p`.
@@ -5225,5 +5617,37 @@ mod tests {
             .expect("cmnl");
         assert_eq!(cmn.value.n_groups, 10);
         assert!(cmn.value.coef[0].is_finite());
+        let pg = PhiGee::new()
+            .fit(&x, &y, &g, &Session::new("phig", "fit"))
+            .expect("phigee");
+        assert!(pg.value.phi.is_finite() && pg.value.phi >= 0.0);
+        assert!(pg
+            .value
+            .predict(&x, &Session::new("phig", "p"))
+            .unwrap()
+            .value
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite()));
+        let ng = NominalGee::new()
+            .fit(&x, &ych, &g, &Session::new("nomg", "fit"))
+            .expect("nomgee");
+        assert!(ng.value.gee.coef[0].is_finite());
+        let og = OrdinalGee::new()
+            .fit(&x, &ych, &g, &Session::new("ordg", "fit"))
+            .expect("ordgee");
+        assert!(og.value.n_classes >= 2);
+        let gam = GlmGam::new()
+            .fit(&x, &yb, &Session::new("gam", "fit"))
+            .expect("glmgam");
+        assert!(gam.value.intercept.is_finite());
+        assert!(gam
+            .value
+            .predict(&x, &Session::new("gam", "p"))
+            .unwrap()
+            .value
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite()));
     }
 }

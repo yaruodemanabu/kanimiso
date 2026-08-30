@@ -15,7 +15,9 @@ use crate::data::{Matrix, Vector};
 use crate::linalg::{chol_solve, least_squares, thin_svd};
 use crate::rng::Rng;
 
-pub use crate::filters::{bk_filter, cf_filter, FittedLocalLinearTrend, LocalLinearTrend};
+pub use crate::filters::{
+    bk_filter, cf_filter, miso_lfilter, FittedLocalLinearTrend, LocalLinearTrend,
+};
 use crate::stats::{HypothesisTest, KpssResult};
 use crate::traits::{Fit, FitSeries, PartialFit};
 use crate::validate::{inspect_identification, inspect_xy};
@@ -15632,6 +15634,101 @@ pub fn fftconvolve(a: &Vector, b: &Vector, session: &Session) -> Result<Qualifie
     ctx.finish(out)
 }
 
+/// Canova–Hansen seasonal-stability LM (statsmodels / Canova–Hansen).
+///
+/// Seasonal dummies are OLS-fitted and a KPSS-like statistic is formed on the
+/// residuals. Period is not identification `p`.
+pub fn ch_test(
+    y: &Vector,
+    period: usize,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let s = period.max(2);
+    let n = y.len();
+    if n < 2 * s {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSeasonalCycles)
+                .message(format!("ch_test n={n} is tight for period={s}"))
+                .build(),
+        );
+    }
+    let dummies = Matrix::from_fn(n, s, |t, j| if t % s == j { 1.0 } else { 0.0 });
+    let beta = statistical_ols(&mut ctx, &dummies, y).unwrap_or_else(|| Vector::zeros(s));
+    let fit = dummies.matvec(&beta);
+    let e = Vector::from_iter((0..n).map(|i| y[i] - fit[i]));
+    match crate::stats::kpss(&e, None, &session.child("ch")) {
+        Ok(q) => {
+            for issue in q.report.issues() {
+                if matches!(
+                    issue.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::R2IsOne
+                        | IssueCode::RankZero
+                ) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            ctx.finish(HypothesisTest {
+                statistic: q.value.stat,
+                pvalue: q.value.pvalue,
+                df: (s.saturating_sub(1)) as f64,
+                nobs: n as f64,
+            })
+        }
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("ch_test KPSS on seasonal residuals failed")
+                    .build(),
+            );
+            ctx.finish(HypothesisTest {
+                statistic: f64::NAN,
+                pvalue: f64::NAN,
+                df: (s.saturating_sub(1)) as f64,
+                nobs: n as f64,
+            })
+        }
+    }
+}
+
+/// Multi-column lag embedding (statsmodels `lagmat2ds`).
+///
+/// Column block `j` holds lags \(1,\ldots,\mathrm{maxlag}\) of input column
+/// `j`. Lag and column counts are not identification `p`.
+pub fn lagmat2ds(
+    x: &Matrix,
+    maxlag: usize,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    let n = x.nrows();
+    let k = x.ncols();
+    let p = maxlag.max(1);
+    if n <= p {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .severity(Severity::Warning)
+                .message(format!("lagmat2ds maxlag={p} ≥ n={n}"))
+                .build(),
+        );
+    }
+    let out = Matrix::from_fn(n, k * p, |t, j| {
+        let col = j / p;
+        let lag = (j % p) + 1;
+        if t >= lag {
+            x.get(t - lag, col)
+        } else {
+            0.0
+        }
+    });
+    ctx.finish(out)
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -16789,5 +16886,13 @@ pub fn fftconvolve(a: &Vector, b: &Vector, session: &Session) -> Result<Qualifie
             .expect("fft");
         assert_eq!(conv.value.len(), 42);
         assert!(conv.value.as_slice().iter().all(|v| v.is_finite()));
+        let cht = ch_test(&y, 4, &Session::new("ch", "t")).expect("ch");
+        assert!(cht.value.statistic.is_finite() || cht.value.pvalue.is_nan());
+        let lm2 = lagmat2ds(&y2, 2, &Session::new("lm2", "t")).expect("lm2");
+        assert_eq!(lm2.value.shape(), (40, 4));
+        let ker = Vector::from_slice(&[0.5, 0.5]);
+        let miso = miso_lfilter(&y2, &ker, &Session::new("miso", "t")).expect("miso");
+        assert_eq!(miso.value.len(), 40);
+        assert!(miso.value.as_slice().iter().all(|v| v.is_finite()));
     }
 }
