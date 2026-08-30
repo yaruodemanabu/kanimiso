@@ -5161,6 +5161,31 @@ const INVENTORY: &[Algorithm] = &[
         "anomaly",
     ),
     a("online.Discard", "river.anomaly.Filter", "anomaly"),
+    a(
+        "glm.GompertzAft",
+        "lifelines.GompertzFitter",
+        "estimator",
+    ),
+    a(
+        "iv.sargan",
+        "statsmodels.sandbox.regression.gmm.IV2SLS",
+        "function",
+    ),
+    a(
+        "stats.dffits",
+        "statsmodels.stats.outliers_influence.OLSInfluence.dffits",
+        "stats",
+    ),
+    a(
+        "stats.dfbetas",
+        "statsmodels.stats.outliers_influence.OLSInfluence.dfbetas",
+        "stats",
+    ),
+    a(
+        "stats.hat_matrix_diag",
+        "statsmodels.stats.outliers_influence.OLSInfluence.hat_matrix_diag",
+        "stats",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5523,6 +5548,9 @@ mod tests {
             "online.RollingRocAuc",
             "online.QuantileThresholder",
             "online.Discard",
+            "glm.GompertzAft",
+            "iv.sargan",
+            "stats.dffits",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

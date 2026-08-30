@@ -5203,6 +5203,21 @@ pub fn ols_influence(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualif
     })
 }
 
+/// DFFITS vector (statsmodels `OLSInfluence.dffits`).
+pub fn dffits(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    Ok(ols_influence(x, y, session)?.map(|v| v.dffits))
+}
+
+/// DFBETAS matrix (statsmodels `OLSInfluence.dfbetas`).
+pub fn dfbetas(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+    Ok(ols_influence(x, y, session)?.map(|v| v.dfbetas))
+}
+
+/// Hat-matrix diagonal (statsmodels `OLSInfluence.hat_matrix_diag`).
+pub fn hat_matrix_diag(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    Ok(ols_influence(x, y, session)?.map(|v| v.hat))
+}
+
 /// White specification / omitted-variable LM (statsmodels `spec_white`).
 ///
 /// Expanded feature count is not identification `p`.
@@ -14290,5 +14305,13 @@ mod tests {
         assert!(clm.value.statistic.is_finite() || clm.value.pvalue.is_nan());
         let lrst = linear_reset(&x, &y, &Session::new("lreset", "t")).expect("lreset");
         assert!(lrst.value.statistic.is_finite() || lrst.value.pvalue.is_nan());
+        let dff = dffits(&x, &y, &Session::new("dff", "t")).expect("dff");
+        assert_eq!(dff.value.len(), 40);
+        assert!(dff.value.as_slice().iter().all(|v| v.is_finite()));
+        let dfb = dfbetas(&x, &y, &Session::new("dfb", "t")).expect("dfb");
+        assert_eq!(dfb.value.shape(), (40, 2));
+        let hatd = hat_matrix_diag(&x, &y, &Session::new("hat", "t")).expect("hat");
+        assert_eq!(hatd.value.len(), 40);
+        assert!(hatd.value.as_slice().iter().all(|v| *v >= 0.0 && *v < 1.0));
     }
 }

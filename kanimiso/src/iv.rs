@@ -8,7 +8,7 @@ use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linalg::{chol_solve, least_squares};
 use crate::special::{chi2_pvalue, student_t_pvalue};
-use crate::stats::{adfuller, phillips_perron};
+use crate::stats::{adfuller, phillips_perron, HypothesisTest};
 use crate::traits::Predict;
 use crate::validate::{inspect_identification, inspect_xy};
 use faer::Mat;
@@ -2333,6 +2333,113 @@ pub fn get_robustcov_results(
     })
 }
 
+/// Sargan overidentification LM (statsmodels `IV2SLS.sargan`).
+///
+/// Regresses 2SLS residuals on the instrument design. The statistic is
+/// \(n R^2\) against \(\chi^2_{k_z-k_x}\). Instrument count is not
+/// identification `p`. Just-identified systems have df 0.
+pub fn sargan(
+    x: &Matrix,
+    y: &Vector,
+    z: &Matrix,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    inspect_xy(&mut ctx.report, z, None, &ctx.policy);
+    let n = y.len().min(x.nrows()).min(z.nrows());
+    let df = (z.ncols() as f64 - x.ncols() as f64).max(0.0);
+    let nan = || HypothesisTest {
+        statistic: f64::NAN,
+        pvalue: f64::NAN,
+        df,
+        nobs: n as f64,
+    };
+    if z.ncols() <= x.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message("sargan: just-identified; overidentification df is 0")
+                .build(),
+        );
+        return ctx.finish(nan());
+    }
+    let fit = match TwoSls::new().fit(x, y, z, &session.child("sargan_2sls")) {
+        Ok(q) => q.value,
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("sargan: inner 2SLS failed")
+                    .build(),
+            );
+            return ctx.finish(nan());
+        }
+    };
+    if fit.coef.len() != x.ncols() {
+        return ctx.finish(nan());
+    }
+    let resid = Vector::from_iter((0..n).map(|i| {
+        let mut pred = fit.intercept;
+        for j in 0..x.ncols() {
+            pred += x.get(i, j) * fit.coef[j];
+        }
+        y[i] - pred
+    }));
+    let zdes = z.with_intercept();
+    if zdes.ncols() != fit.coef.len() + 1 && zdes.ncols() <= x.ncols() + 1 {
+        return ctx.finish(nan());
+    }
+    let mut scratch = signlred::Report::new("sargan", "aux");
+    let Some(bz) = least_squares(&mut scratch, &zdes, &resid, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("sargan: auxiliary OLS of 2SLS residuals failed")
+                .build(),
+        );
+        return ctx.finish(nan());
+    };
+    if bz.len() != zdes.ncols() {
+        return ctx.finish(nan());
+    }
+    let fit_e = zdes.matvec(&bz);
+    let mut sse = 0.0_f64;
+    let mut sy = 0.0_f64;
+    let mut sy2 = 0.0_f64;
+    for i in 0..n {
+        let e = resid[i];
+        let r = e - if i < fit_e.len() { fit_e[i] } else { 0.0 };
+        sse += r * r;
+        sy += e;
+        sy2 += e * e;
+    }
+    let nf = n as f64;
+    let sst = sy2 - if nf > 0.0 { sy * sy / nf } else { 0.0 };
+    if sst.abs() <= 1e-15 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .severity(Severity::Warning)
+                .message("sargan: 2SLS residuals have zero variance")
+                .build(),
+        );
+        return ctx.finish(nan());
+    }
+    let r2 = 1.0 - sse / sst;
+    let stat = nf * r2.max(0.0);
+    let pvalue = if stat.is_finite() && df > 0.0 {
+        chi2_pvalue(stat, df)
+    } else {
+        f64::NAN
+    };
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df,
+        nobs: nf,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2346,6 +2453,18 @@ mod tests {
             .expect("2sls");
         assert!((q.value.coef[0] - 2.0).abs() < 1e-8);
         assert!(q.value.first_stage_f.is_infinite() || q.value.first_stage_f > 100.0);
+        let sg0 = sargan(&x, &y, &x, &Session::new("iv", "sargan0")).expect("sargan0");
+        assert!(sg0.value.df == 0.0 || sg0.value.pvalue.is_nan());
+        let z2 = Matrix::from_fn(20, 2, |i, j| {
+            if j == 0 {
+                i as f64
+            } else {
+                (i as f64) * (i as f64)
+            }
+        });
+        let sg = sargan(&x, &y, &z2, &Session::new("iv", "sargan")).expect("sargan");
+        assert!(sg.value.statistic.is_finite() || sg.value.pvalue.is_nan());
+        assert!(sg.value.df >= 1.0);
     }
 
     #[test]

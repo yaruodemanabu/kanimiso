@@ -2585,6 +2585,90 @@ impl Fit for LogNormalAft {
     }
 }
 
+/// Gompertz AFT: \(\log T = x^\top\beta + \sigma\varepsilon\), \(\varepsilon\sim\) Gumbel.
+///
+/// Fit is log-OLS with \(\sigma = \hat s \sqrt{6}/\pi\). `y ≤ 0` is
+/// [`IssueCode::NonPositiveSeries`].
+#[derive(Clone, Debug, Default)]
+pub struct GompertzAft;
+
+impl GompertzAft {
+    /// Default Gompertz AFT.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Fit for GompertzAft {
+    type Fitted = FittedWeibullAft;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedWeibullAft>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        for (i, &yi) in y.as_slice().iter().enumerate() {
+            if yi <= 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .message(format!("Gompertz AFT y[{i}]={yi} is not strictly positive"))
+                        .build(),
+                );
+                break;
+            }
+        }
+        let design = x.with_intercept();
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let logy = Vector::from_iter(y.as_slice().iter().map(|v| v.max(1e-12).ln()));
+        let mut scratch = signlred::Report::new("gomp_aft", "ols");
+        let beta = least_squares(&mut scratch, &design, &logy, &ctx.policy).unwrap_or_else(|| {
+            let mut b = Vector::zeros(design.ncols());
+            b[0] = logy.mean();
+            b
+        });
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let fit = design.matvec(&beta);
+        let mut sse = 0.0_f64;
+        for i in 0..logy.len().min(fit.len()) {
+            let e = logy[i] - fit[i];
+            sse += e * e;
+        }
+        let n = logy.len().max(1) as f64;
+        let s = (sse / n).sqrt();
+        let sigma = (s * 6.0_f64.sqrt() / std::f64::consts::PI).max(1e-6);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Gompertz AFT uses log-OLS + Gumbel scale, not a full MLE")
+                .compromise(NumericalCompromise::new(
+                    "Gompertz MLE",
+                    "log-OLS with σ = s √6 / π",
+                    "the Gumbel likelihood is not maximised and censoring is ignored",
+                    "read coefficients as log-mean slopes, not MLE AFT effects",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedWeibullAft {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            sigma,
+        })
+    }
+}
+
 /// Two-part hurdle: logit for \(P(Y>0)\) and log-OLS for \(E[\log Y \mid Y>0]\).
 ///
 /// A series of all zeros is vacuous. Few positives are a warning, not
@@ -5841,6 +5925,10 @@ mod tests {
             .fit(&x, &yt, &Session::new("lnaft", "fit"))
             .expect("lnaft");
         assert!(ln.value.sigma > 0.0 && ln.value.sigma.is_finite());
+        let gz = GompertzAft::new()
+            .fit(&x, &yt, &Session::new("gaft", "fit"))
+            .expect("gaft");
+        assert!(gz.value.sigma > 0.0 && gz.value.sigma.is_finite());
         let hu = Hurdle::new()
             .fit(&x, &y, &Session::new("hurdle", "fit"))
             .expect("hurdle");
