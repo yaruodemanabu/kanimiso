@@ -17383,6 +17383,159 @@ impl PartialFit for OnlineVoting {
     }
 }
 
+/// Heavy-hitter sketch (river `sketch.HeavyHitters`).
+///
+/// Capacity `k` is a sketch size, not identification `p`.
+#[derive(Clone, Debug)]
+pub struct HeavyHitters {
+    /// Maximum stored keys.
+    pub k: usize,
+    counts: HashMap<u64, u64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for HeavyHitters {
+    fn default() -> Self {
+        Self::new(8)
+    }
+}
+
+impl HeavyHitters {
+    /// Keep the `k` most frequent hashed rows.
+    pub fn new(k: usize) -> Self {
+        Self {
+            k: k.max(1),
+            counts: HashMap::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+
+    /// Current top keys (hash, count), highest count first.
+    pub fn top(&self) -> Vec<(u64, u64)> {
+        let mut v: Vec<(u64, u64)> = self.counts.iter().map(|(&k, &c)| (k, c)).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        v.truncate(self.k);
+        v
+    }
+}
+
+impl PartialFit for HeavyHitters {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("heavy_hitters"));
+        inspect_online_xy(&mut ctx, x, y);
+        let before = self.n_seen;
+        for i in 0..x.nrows() {
+            let key = row_hash(x, i, 13);
+            *self.counts.entry(key).or_insert(0) += 1;
+        }
+        if self.counts.len() > self.k.saturating_mul(4).max(self.k) {
+            let keep: Vec<u64> = self.top().into_iter().map(|(k, _)| k).collect();
+            self.counts.retain(|k, _| keep.contains(k));
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = !self.counts.is_empty();
+        q.explanation = format!("heavy hitters stored {} keys", self.counts.len());
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("updated frequency table ({before} → {} rows)", self.n_seen),
+                "river.sketch.HeavyHitters keeps the most frequent hashed rows",
+                format!("n={before}"),
+                format!("n={} keys={}", self.n_seen, self.counts.len()),
+            ),
+        )
+    }
+}
+
+/// Online one-vs-rest perceptrons (river `multiclass.OneVsRestClassifier`).
+///
+/// Class count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineOneVsRest {
+    members: HashMap<i64, Perceptron>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl OnlineOneVsRest {
+    /// Empty OvR ensemble.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for OnlineOneVsRest {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("online_ovr"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        let mut labels: Vec<i64> = y
+            .as_slice()
+            .iter()
+            .map(|v| v.round() as i64)
+            .collect();
+        for lab in self.members.keys().copied() {
+            labels.push(lab);
+        }
+        labels.sort_unstable();
+        labels.dedup();
+        for lab in labels {
+            let yi = Vector::from_iter((0..y.len()).map(|i| {
+                if (y[i].round() as i64) == lab {
+                    1.0
+                } else {
+                    0.0
+                }
+            }));
+            self.members
+                .entry(lab)
+                .or_default()
+                .partial_fit(x, Some(&yi), session)?;
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.members.len() >= 2;
+        q.warmup = self.members.len() < 2;
+        q.explanation = format!("OvR members={}", self.members.len());
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("updated {} one-vs-rest perceptrons", self.members.len()),
+                "river OneVsRest trains one binary member per observed label",
+                "previous OvR state",
+                format!("n_seen={} members={}", self.n_seen, self.members.len()),
+            ),
+        )
+    }
+}
+
 fn online_linear_dim(fit_intercept: bool, p: usize) -> usize {
     p + if fit_intercept { 1 } else { 0 }
 }
@@ -21799,6 +21952,12 @@ mod tests {
         OnlineVoting::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("ovote");
+        HeavyHitters::new(8)
+            .partial_fit(&x, None, &session)
+            .expect("hh");
+        OnlineOneVsRest::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("ovr");
 
         let n_expl = session
             .ledger()

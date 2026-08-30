@@ -4136,6 +4136,42 @@ const INVENTORY: &[Algorithm] = &[
         "river.ensemble.VotingClassifier",
         "online",
     ),
+    a(
+        "tsa.RecursiveTabularForecaster",
+        "sktime.forecasting.compose.RecursiveTabularRegressionForecaster",
+        "forecast",
+    ),
+    a(
+        "tsa.DirRecTabularForecaster",
+        "sktime.forecasting.compose.DirRecTabularRegressionForecaster",
+        "forecast",
+    ),
+    a(
+        "tsa.RealizedGarch",
+        "arch.univariate.RealizedGARCH",
+        "forecast",
+    ),
+    a(
+        "stats.frank_copula",
+        "statsmodels.distributions.copula.FrankCopula",
+        "stats",
+    ),
+    a(
+        "stats.student_t_copula",
+        "statsmodels.distributions.copula.StudentTCopula",
+        "stats",
+    ),
+    a("stats.UnivariateGam", "statsmodels.gam.GLMGam", "stats"),
+    a(
+        "online.HeavyHitters",
+        "river.sketch.HeavyHitters",
+        "online",
+    ),
+    a(
+        "online.OnlineOneVsRest",
+        "river.multiclass.OneVsRestClassifier",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4408,6 +4444,9 @@ mod tests {
             "stats.bai_perron",
             "online.OnlineLogCosh",
             "online.CountMinSketch",
+            "tsa.RecursiveTabularForecaster",
+            "stats.frank_copula",
+            "online.HeavyHitters",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

@@ -8108,6 +8108,218 @@ impl FittedMultioutputTabular {
     }
 }
 
+/// Recursive tabular reduction (sktime `RecursiveTabularRegressionForecaster`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RecursiveTabularForecaster {
+    /// Lag window.
+    pub window: usize,
+}
+
+impl Default for RecursiveTabularForecaster {
+    fn default() -> Self {
+        Self { window: 3 }
+    }
+}
+
+impl RecursiveTabularForecaster {
+    /// Recursive reducer with lag `window`.
+    pub fn new(window: usize) -> Self {
+        Self { window: window.max(1) }
+    }
+}
+
+impl FitSeries for RecursiveTabularForecaster {
+    type Fitted = crate::reducer::FittedReducer;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<crate::reducer::FittedReducer>> {
+        crate::reducer::RecursiveReducer {
+            window: self.window,
+        }
+        .fit_series(y, session)
+    }
+}
+
+/// DirRec tabular reduction (sktime `DirRecTabularRegressionForecaster`).
+///
+/// Window / horizon counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct DirRecTabularForecaster {
+    /// Lag window.
+    pub window: usize,
+    /// DirRec horizons.
+    pub horizon: usize,
+}
+
+impl Default for DirRecTabularForecaster {
+    fn default() -> Self {
+        Self {
+            window: 3,
+            horizon: 3,
+        }
+    }
+}
+
+impl DirRecTabularForecaster {
+    /// DirRec reducer with lag `window` and `horizon` models.
+    pub fn new(window: usize, horizon: usize) -> Self {
+        Self {
+            window: window.max(1),
+            horizon: horizon.max(1),
+        }
+    }
+}
+
+impl FitSeries for DirRecTabularForecaster {
+    type Fitted = crate::reducer::FittedDirRecReducer;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<crate::reducer::FittedDirRecReducer>> {
+        crate::reducer::DirRecReducer {
+            window: self.window,
+            horizon: self.horizon,
+        }
+        .fit_series(y, session)
+    }
+}
+
+/// Realized GARCH-X: \(h_t=\omega+\alpha\varepsilon_{t-1}^2+\beta h_{t-1}+\gamma\mathrm{RV}_t\).
+///
+/// Realized-variance length is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct RealizedGarch;
+
+/// Fitted realized-GARCH path.
+#[derive(Clone, Debug)]
+pub struct FittedRealizedGarch {
+    /// ω.
+    pub omega: f64,
+    /// ARCH coefficient.
+    pub alpha: f64,
+    /// GARCH coefficient.
+    pub beta: f64,
+    /// Realized-variance slope.
+    pub gamma: f64,
+    /// In-sample variances.
+    pub sigma2: Vector,
+}
+
+impl RealizedGarch {
+    /// Empty realized-GARCH estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on returns `y` and a realized-variance proxy `rv`.
+    pub fn fit(
+        &self,
+        y: &Vector,
+        rv: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRealizedGarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        inspect_univariate(&mut ctx, rv);
+        let n = y.len().min(rv.len());
+        if n < 6 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("realized GARCH needs n≥6")
+                    .build(),
+            );
+        }
+        let mean = y.as_slice().iter().take(n).sum::<f64>() / n.max(1) as f64;
+        let e: Vec<f64> = y.as_slice().iter().take(n).map(|v| v - mean).collect();
+        let var = e.iter().map(|v| v * v).sum::<f64>() / n.max(1) as f64;
+        let mut omega = 0.05 * var.max(1e-8);
+        let mut alpha = 0.05_f64;
+        let mut beta = 0.70_f64;
+        let mut gamma = 0.20_f64;
+        let nll = |omega: f64, alpha: f64, beta: f64, gamma: f64| {
+            if omega <= 0.0 || alpha < 0.0 || beta < 0.0 || gamma < 0.0 {
+                return f64::INFINITY;
+            }
+            let mut h = var.max(omega);
+            let mut s = 0.0;
+            for t in 0..n {
+                if t > 0 {
+                    let rvt = rv.as_slice().get(t).copied().unwrap_or(0.0).max(0.0);
+                    h = omega + alpha * e[t - 1] * e[t - 1] + beta * h + gamma * rvt;
+                    if !h.is_finite() || h <= 0.0 {
+                        h = omega.max(1e-12);
+                    }
+                }
+                s += 0.5 * (h.max(1e-12).ln() + e[t] * e[t] / h.max(1e-12));
+            }
+            s
+        };
+        let mut best = nll(omega, alpha, beta, gamma);
+        let mut step = 0.05;
+        for it in 0..20 {
+            let mut improved = false;
+            for (i, cur) in [omega, alpha, beta, gamma].into_iter().enumerate() {
+                for dir in [-step, step] {
+                    let mut cand = [omega, alpha, beta, gamma];
+                    cand[i] = (cur + dir).max(1e-8);
+                    if cand[1] + cand[2] + cand[3] >= 0.999 {
+                        continue;
+                    }
+                    let v = nll(cand[0], cand[1], cand[2], cand[3]);
+                    if v < best {
+                        best = v;
+                        omega = cand[0];
+                        alpha = cand[1];
+                        beta = cand[2];
+                        gamma = cand[3];
+                        improved = true;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, best, None);
+            if !improved {
+                step *= 0.5;
+                if step < 1e-5 {
+                    break;
+                }
+            }
+        }
+        if !best.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("realized GARCH QMLE likelihood is non-finite")
+                    .build(),
+            );
+        }
+        let mut sigma = Vector::zeros(n);
+        let mut h = var.max(omega);
+        for t in 0..n {
+            if t > 0 {
+                let rvt = rv.as_slice().get(t).copied().unwrap_or(0.0).max(0.0);
+                h = omega + alpha * e[t - 1] * e[t - 1] + beta * h + gamma * rvt;
+                if !h.is_finite() || h <= 0.0 {
+                    h = omega.max(1e-12);
+                }
+            }
+            sigma[t] = h.max(1e-12);
+        }
+        ctx.finish(FittedRealizedGarch {
+            omega,
+            alpha,
+            beta,
+            gamma,
+            sigma2: sigma,
+        })
+    }
+}
+
 fn fit_arima(spec: &Arima, y: &Vector, session: &Session) -> Result<Qualified<FittedArima>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
@@ -13230,5 +13442,39 @@ mod tests {
             .value;
         assert_eq!(motf.shape(), (3, 2));
         assert!(motf.get(0, 0).is_finite() && motf.get(2, 1).is_finite());
+        let recu = RecursiveTabularForecaster::new(3)
+            .fit_series(&y, &Session::new("rtab", "fit"))
+            .expect("rtab");
+        let recuf = recu
+            .value
+            .forecast(3, &Session::new("rtab", "fc"))
+            .expect("rtabf")
+            .value;
+        assert_eq!(recuf.len(), 3);
+        assert!(recuf.as_slice().iter().all(|v| v.is_finite()));
+        let drec = DirRecTabularForecaster::new(3, 3)
+            .fit_series(&y, &Session::new("drec", "fit"))
+            .expect("drec");
+        let drecf = drec
+            .value
+            .forecast(3, &Session::new("drec", "fc"))
+            .expect("drecf")
+            .value;
+        assert_eq!(drecf.len(), 3);
+        assert!(drecf.as_slice().iter().all(|v| v.is_finite()));
+        let rvx = Vector::from_iter((0..y.len()).map(|i| {
+            let e = y[i] - y.mean();
+            e * e
+        }));
+        let rg = RealizedGarch::new()
+            .fit(&y, &rvx, &Session::new("rgarch", "fit"))
+            .expect("rgarch");
+        assert!(rg
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        assert!(rg.value.gamma.is_finite());
     }
 }

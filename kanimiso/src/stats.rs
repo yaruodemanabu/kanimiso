@@ -9588,6 +9588,291 @@ pub fn gumbel_copula(
     })
 }
 
+/// Fitted Frank copula (statsmodels `FrankCopula`).
+#[derive(Clone, Debug)]
+pub struct FrankCopula {
+    /// Dependence \(\theta \neq 0\).
+    pub theta: f64,
+    /// Copula log-likelihood.
+    pub loglik: f64,
+}
+
+fn frank_ll(u: &[f64], v: &[f64], theta: f64) -> f64 {
+    if theta.abs() < 1e-6 {
+        return f64::NEG_INFINITY;
+    }
+    let em = (-theta).exp();
+    let eta = 1.0 - em;
+    if eta.abs() < 1e-18 {
+        return f64::NEG_INFINITY;
+    }
+    let mut ll = 0.0;
+    for i in 0..u.len() {
+        let eu = (-theta * u[i]).exp();
+        let ev = (-theta * v[i]).exp();
+        let den = eta - (1.0 - eu) * (1.0 - ev);
+        if den.abs() < 1e-18 {
+            return f64::NEG_INFINITY;
+        }
+        let dens = (theta * eta * (-theta * (u[i] + v[i])).exp()) / (den * den);
+        if !dens.is_finite() || dens <= 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        ll += dens.ln();
+    }
+    ll
+}
+
+/// Fit a bivariate Frank copula by a \(\theta\) grid on ranks.
+///
+/// Pair count is not identification `p`.
+pub fn frank_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<FrankCopula>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let n = y1.len().min(y2.len());
+    let x = Matrix::from_fn(n, 2, |i, j| if j == 0 { y1[i] } else { y2[i] });
+    inspect_xy(&mut ctx.report, &x, None, &ctx.policy);
+    let (u, v) = copula_uv(y1, y2);
+    if u.len() < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Frank copula needs n≥4 pairs")
+                .build(),
+        );
+        return ctx.finish(FrankCopula {
+            theta: 1.0,
+            loglik: f64::NAN,
+        });
+    }
+    let mut best_th = 2.0_f64;
+    let mut best_ll = f64::NEG_INFINITY;
+    for step in 0..10 {
+        let th = -4.0 + 0.9 * step as f64;
+        if th.abs() < 0.2 {
+            continue;
+        }
+        let ll = frank_ll(&u, &v, th);
+        if ll > best_ll {
+            best_ll = ll;
+            best_th = th;
+        }
+    }
+    ctx.finish(FrankCopula {
+        theta: best_th,
+        loglik: best_ll,
+    })
+}
+
+/// Fitted Student-\(t\) copula (statsmodels `StudentTCopula`).
+#[derive(Clone, Debug)]
+pub struct StudentTCopula {
+    /// Correlation of \(t\) scores.
+    pub rho: f64,
+    /// Degrees of freedom used for the inverse CDF.
+    pub df: f64,
+    /// Copula log-likelihood proxy (Gaussian-score form at the fitted \(\rho\)).
+    pub loglik: f64,
+}
+
+/// Fit a bivariate \(t\) copula via \(t\) scores and Pearson \(\rho\).
+///
+/// Pair / df counts are not identification `p`.
+pub fn student_t_copula(
+    y1: &Vector,
+    y2: &Vector,
+    df: f64,
+    session: &Session,
+) -> Result<Qualified<StudentTCopula>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let n = y1.len().min(y2.len());
+    let x = Matrix::from_fn(n, 2, |i, j| if j == 0 { y1[i] } else { y2[i] });
+    inspect_xy(&mut ctx.report, &x, None, &ctx.policy);
+    let (u, v) = copula_uv(y1, y2);
+    let nu = if df.is_finite() && df > 2.0 { df } else { 5.0 };
+    if u.len() < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Student-t copula needs n≥4 pairs")
+                .build(),
+        );
+        return ctx.finish(StudentTCopula {
+            rho: 0.0,
+            df: nu,
+            loglik: f64::NAN,
+        });
+    }
+    let z1: Vec<f64> = u.iter().map(|&p| student_t_ppf(p, nu)).collect();
+    let z2: Vec<f64> = v.iter().map(|&p| student_t_ppf(p, nu)).collect();
+    let m1 = z1.iter().sum::<f64>() / z1.len() as f64;
+    let m2 = z2.iter().sum::<f64>() / z2.len() as f64;
+    let mut num = 0.0;
+    let mut d1 = 0.0;
+    let mut d2 = 0.0;
+    for i in 0..z1.len() {
+        let a = z1[i] - m1;
+        let b = z2[i] - m2;
+        num += a * b;
+        d1 += a * a;
+        d2 += b * b;
+    }
+    let rho = if d1 > 0.0 && d2 > 0.0 {
+        (num / (d1.sqrt() * d2.sqrt())).clamp(-0.999, 0.999)
+    } else {
+        0.0
+    };
+    let mut loglik = 0.0;
+    let omr2 = (1.0 - rho * rho).max(1e-12);
+    for i in 0..z1.len() {
+        let q1 = z1[i];
+        let q2 = z2[i];
+        loglik += -0.5 * omr2.ln()
+            - 0.5 / omr2 * (q1 * q1 + q2 * q2 - 2.0 * rho * q1 * q2)
+            + 0.5 * (q1 * q1 + q2 * q2);
+    }
+    ctx.finish(StudentTCopula {
+        rho,
+        df: nu,
+        loglik,
+    })
+}
+
+/// Univariate GAM-lite: cubic truncated-power spline + ridge (statsmodels `GLMGam`).
+///
+/// Knot count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct UnivariateGam {
+    /// Interior knots.
+    pub n_knots: usize,
+    /// Ridge on the spline coefficients.
+    pub ridge: f64,
+}
+
+impl Default for UnivariateGam {
+    fn default() -> Self {
+        Self {
+            n_knots: 4,
+            ridge: 1e-2,
+        }
+    }
+}
+
+impl UnivariateGam {
+    /// GAM with `n_knots` interior knots.
+    pub fn new(n_knots: usize) -> Self {
+        Self {
+            n_knots: n_knots.max(1),
+            ridge: 1e-2,
+        }
+    }
+
+    /// Fit \(y \approx a + b x + \sum_k (x-\kappa_k)_+^3\).
+    pub fn fit(&self, x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<FittedUnivariateGam>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let n = x.len().min(y.len());
+        let design0 = Matrix::from_fn(n, 1, |i, _| x[i]);
+        let y0 = Vector::from_iter(y.as_slice().iter().take(n).copied());
+        inspect_xy(&mut ctx.report, &design0, Some(&y0), &ctx.policy);
+        if n < 6 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("univariate GAM needs n≥6")
+                    .build(),
+            );
+        }
+        let mut xs: Vec<f64> = x.as_slice().iter().take(n).copied().filter(|v| v.is_finite()).collect();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let nk = self.n_knots.max(1).min(n.saturating_sub(3).max(1));
+        let mut knots = Vec::new();
+        for k in 0..nk {
+            let q = (k + 1) as f64 / (nk + 1) as f64;
+            let idx = ((xs.len().saturating_sub(1)) as f64 * q).round() as usize;
+            knots.push(*xs.get(idx).unwrap_or(&0.0));
+        }
+        let p = 2 + knots.len();
+        // Knot count is a smoother template, not a regression `p`.
+        let lam = if self.ridge.is_finite() && self.ridge > 0.0 {
+            self.ridge
+        } else {
+            1e-2
+        };
+        let extra = p.saturating_sub(1);
+        let design = Matrix::from_fn(n + extra, p, |i, j| {
+            if i < n {
+                let xi = x[i];
+                if j == 0 {
+                    1.0
+                } else if j == 1 {
+                    xi
+                } else {
+                    let d = xi - knots[j - 2];
+                    if d > 0.0 {
+                        d * d * d
+                    } else {
+                        0.0
+                    }
+                }
+            } else {
+                let k = i - n + 1;
+                if j == k {
+                    lam.sqrt()
+                } else {
+                    0.0
+                }
+            }
+        });
+        let mut scratch = Report::new("univariate_gam", "ridge");
+        let target = Vector::from_iter((0..n + extra).map(|i| {
+            if i < n {
+                y[i]
+            } else {
+                0.0
+            }
+        }));
+        let coef = match least_squares(&mut scratch, &design, &target, &ctx.policy) {
+            Some(c) => c,
+            None => {
+                let mut c = Vector::zeros(p);
+                c[0] = y.as_slice().iter().take(n).sum::<f64>() / n.max(1) as f64;
+                c
+            }
+        };
+        ctx.finish(FittedUnivariateGam { coef, knots })
+    }
+}
+
+/// Fitted univariate spline GAM.
+#[derive(Clone, Debug)]
+pub struct FittedUnivariateGam {
+    /// `[intercept, slope, knot coefs…]`.
+    pub coef: Vector,
+    /// Interior knots.
+    pub knots: Vec<f64>,
+}
+
+impl FittedUnivariateGam {
+    /// Predict at the supplied `x` locations.
+    pub fn predict(&self, x: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("predict"));
+        let y = Vector::from_iter((0..x.len()).map(|i| {
+            let xi = x[i];
+            let mut s = self.coef.as_slice().first().copied().unwrap_or(0.0);
+            if self.coef.len() > 1 {
+                s += self.coef[1] * xi;
+            }
+            for (k, &knot) in self.knots.iter().enumerate() {
+                let d = xi - knot;
+                if d > 0.0 {
+                    s += self.coef.as_slice().get(2 + k).copied().unwrap_or(0.0) * d * d * d;
+                }
+            }
+            s
+        }));
+        ctx.finish(y)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9989,5 +10274,18 @@ mod tests {
         assert!(cl.value.loglik.is_finite() || cl.value.loglik.is_infinite());
         let gu = gumbel_copula(&y, &y2c, &Session::new("gumb", "t")).expect("gumb");
         assert!(gu.value.theta >= 1.0);
+        let fr = frank_copula(&y, &y2c, &Session::new("frank", "t")).expect("frank");
+        assert!(fr.value.theta.is_finite());
+        let tc = student_t_copula(&y, &y2c, 5.0, &Session::new("tcop", "t")).expect("tcop");
+        assert!(tc.value.rho > 0.4, "t-rho={}", tc.value.rho);
+        let gam = UnivariateGam::new(3)
+            .fit(&xs, &ys, &Session::new("gam", "t"))
+            .expect("gam");
+        let gamp = gam
+            .value
+            .predict(&xs, &Session::new("gam", "p"))
+            .expect("gamp")
+            .value;
+        assert!((gamp[10] - 20.0).abs() < 2.0, "gam[10]={}", gamp[10]);
     }
 }
