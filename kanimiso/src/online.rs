@@ -26984,6 +26984,177 @@ impl PartialFit for ImplicitMf {
     }
 }
 
+/// Bayesian Personalized Ranking (river `reco.BPR`).
+///
+/// Factor count is not identification `p`. `X` is `[user, item]`; each row is
+/// a positive pair. A negative item is sampled uniformly from items seen so far.
+#[derive(Clone, Debug)]
+pub struct Bpr {
+    /// Latent rank.
+    pub n_factors: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    /// ℓ2 on factors.
+    pub l2: f64,
+    pu: Vec<Vec<f64>>,
+    qi: Vec<Vec<f64>>,
+    rng: Rng,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for Bpr {
+    fn default() -> Self {
+        Self {
+            n_factors: 4,
+            learning_rate: 0.05,
+            l2: 0.01,
+            pu: Vec::new(),
+            qi: Vec::new(),
+            rng: Rng::new(17),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl Bpr {
+    /// BPR with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn grow(&mut self, u: usize, i: usize) {
+        let k = self.n_factors.max(1);
+        while self.pu.len() <= u {
+            self.pu.push(vec![0.01; k]);
+        }
+        while self.qi.len() <= i {
+            self.qi.push(vec![0.01; k]);
+        }
+    }
+
+    fn score(&self, u: usize, i: usize) -> f64 {
+        let mut s = 0.0_f64;
+        if u < self.pu.len() && i < self.qi.len() {
+            for f in 0..self.n_factors.min(self.pu[u].len()).min(self.qi[i].len()) {
+                s += self.pu[u][f] * self.qi[i][f];
+            }
+        }
+        s
+    }
+}
+
+impl PartialFit for Bpr {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("BPR needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let lr = self.learning_rate.max(1e-6);
+        let l2 = self.l2.max(0.0);
+        let mut dsum = 0.0_f64;
+        let mut pairs = 0u64;
+        for r in 0..x.nrows() {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.grow(u, i);
+            let n_items = self.qi.len();
+            if n_items < 2 {
+                continue;
+            }
+            let mut j = self.rng.below(n_items);
+            if j == i {
+                j = (j + 1) % n_items;
+            }
+            let xui = self.score(u, i) - self.score(u, j);
+            let sig = sigmoid(xui);
+            let err = 1.0 - sig;
+            for f in 0..self.n_factors {
+                let pu = self.pu[u][f];
+                let qi = self.qi[i][f];
+                let qj = self.qi[j][f];
+                self.pu[u][f] += lr * (err * (qi - qj) - l2 * pu);
+                self.qi[i][f] += lr * (err * pu - l2 * qi);
+                self.qi[j][f] += lr * (-err * pu - l2 * qj);
+                dsum += (self.pu[u][f] - pu).abs()
+                    + (self.qi[i][f] - qi).abs()
+                    + (self.qi[j][f] - qj).abs();
+            }
+            pairs += 1;
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        if pairs == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message("BPR has fewer than two items; no negative was sampled")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(pairs as f64);
+        q.still_identified = pairs > 0;
+        q.warmup = pairs == 0;
+        q.explanation = format!(
+            "BPR pairs={pairs} ||Δ||₁={dsum:.4e} users={} items={}",
+            self.pu.len(),
+            self.qi.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "BPR pairwise ranking step",
+                "sigmoid(s_ui-s_uj) SGD; factor count is not identification p",
+                "pre-batch factors",
+                format!("pairs={pairs} dsum={dsum:.4e}"),
+            ),
+        )
+    }
+}
+
+impl Predict for Bpr {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("BPR predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.score(u, i)
+        }));
+        ctx.finish(out)
+    }
+}
+
 /// AdaMax linear regressor (river `optim.AdaMax`).
 ///
 /// Infinity-norm second moment: \(u \leftarrow \max(\beta_2 u, |g|)\).
@@ -29397,6 +29568,9 @@ mod tests {
         ImplicitMf::new(2)
             .partial_fit(&xui, Some(&y), &session)
             .expect("imf");
+        Bpr::new(2)
+            .partial_fit(&xui, None, &session)
+            .expect("bpr");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

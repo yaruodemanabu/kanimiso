@@ -13705,6 +13705,309 @@ pub fn linear_reset(
     ramsey_reset(x, y, session)
 }
 
+/// Left-truncated / delayed-entry product-limit (statsmodels `SurvfuncRight` with `entry`).
+///
+/// At risk at \(t\) are rows with `entry ≤ t ≤ time`. Entry times are not
+/// identification `p`. Zero events abort as vacuous, same as Kaplan–Meier.
+pub fn survfunc_left(
+    entry: &Vector,
+    time: &Vector,
+    event: &Vector,
+    session: &Session,
+) -> Result<Qualified<FittedKaplanMeier>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(time),
+        None,
+        &ctx.policy,
+    );
+    if let Some(issue) = scan_finite(entry.as_slice()).to_issue("entry") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = scan_finite(event.as_slice()).to_issue("event") {
+        ctx.push(issue);
+    }
+    let n = time.len().min(entry.len()).min(event.len());
+    if entry.len() != time.len() || event.len() != time.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "survfunc_left lengths entry={} time={} event={}",
+                    entry.len(),
+                    time.len(),
+                    event.len()
+                ))
+                .build(),
+        );
+    }
+    let mut rows: Vec<(f64, f64, f64)> = (0..n)
+        .filter(|&i| entry[i].is_finite() && time[i].is_finite() && event[i].is_finite())
+        .map(|i| (entry[i], time[i], event[i]))
+        .collect();
+    if rows.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("survfunc_left received no finite (entry, time, event) triples")
+                .build(),
+        );
+        return ctx.finish(FittedKaplanMeier {
+            times: Vector::zeros(0),
+            survival: Vector::zeros(0),
+            n_risk: Vector::zeros(0),
+            n_event: Vector::zeros(0),
+        });
+    }
+    rows.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut times = Vec::new();
+    let mut surv = Vec::new();
+    let mut nrisk = Vec::new();
+    let mut nevent = Vec::new();
+    let mut s = 1.0_f64;
+    let mut i = 0;
+    let mut n_ev_total = 0usize;
+    while i < rows.len() {
+        let t = rows[i].1;
+        let mut d = 0.0_f64;
+        while i < rows.len() && (rows[i].1 - t).abs() <= 0.0 {
+            if rows[i].2 > 0.5 {
+                d += 1.0;
+                n_ev_total += 1;
+            }
+            i += 1;
+        }
+        if d <= 0.0 {
+            continue;
+        }
+        let at_risk = rows
+            .iter()
+            .filter(|r| r.0 <= t && r.1 >= t)
+            .count()
+            .max(1);
+        s *= 1.0 - d / at_risk as f64;
+        times.push(t);
+        surv.push(s);
+        nrisk.push(at_risk as f64);
+        nevent.push(d);
+    }
+    if n_ev_total == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("left-truncated KM has zero events; Ŝ(t) is identically 1")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "delayed-entry product-limit curve",
+                    "without events the estimator never leaves 1",
+                    "collect events or report only the entry/censoring pattern",
+                ))
+                .build(),
+        );
+    }
+    ctx.finish(FittedKaplanMeier {
+        times: Vector::from_iter(times),
+        survival: Vector::from_iter(surv),
+        n_risk: Vector::from_iter(nrisk),
+        n_event: Vector::from_iter(nevent),
+    })
+}
+
+/// Named delayed-entry Kaplan–Meier (statsmodels `SurvfuncRight` + `entry`).
+#[derive(Clone, Debug, Default)]
+pub struct LeftTruncatedKM;
+
+impl LeftTruncatedKM {
+    /// Default delayed-entry product-limit estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on entry times, exit times, and event indicators.
+    pub fn fit(
+        &self,
+        entry: &Vector,
+        time: &Vector,
+        event: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedKaplanMeier>> {
+        survfunc_left(entry, time, event, session)
+    }
+}
+
+fn turnbull_covers(t: f64, lo: f64, hi: f64) -> bool {
+    if !lo.is_finite() && !hi.is_finite() {
+        return false;
+    }
+    if lo.is_finite() && hi.is_finite() && (lo - hi).abs() <= 1e-12 {
+        return (t - lo).abs() <= 1e-12;
+    }
+    let left_ok = !lo.is_finite() || t > lo || (t - lo).abs() <= 1e-15;
+    let right_ok = !hi.is_finite() || t <= hi;
+    left_ok && right_ok
+}
+
+/// Turnbull / interval-censored NPMLE (statsmodels `survfunc_dc`).
+///
+/// Self-consistency EM on unique finite endpoints. Interval count is not
+/// identification `p`. Do not call [`kaplan_meier_fit`] here: complementary
+/// censoring with zero events would vacuous-abort. Zero probability mass
+/// (every interval empty of candidates) is vacuous.
+pub fn survfunc_dc(
+    left: &Vector,
+    right: &Vector,
+    session: &Session,
+) -> Result<Qualified<FittedKaplanMeier>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(left),
+        None,
+        &ctx.policy,
+    );
+    if let Some(issue) = scan_finite(right.as_slice()).to_issue("right") {
+        ctx.push(issue);
+    }
+    let n = left.len().min(right.len());
+    if left.len() != right.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "survfunc_dc left.len()={} ≠ right.len()={}",
+                    left.len(),
+                    right.len()
+                ))
+                .build(),
+        );
+    }
+    let mut times: Vec<f64> = Vec::new();
+    let mut intervals: Vec<(f64, f64)> = Vec::new();
+    for i in 0..n {
+        let lo = left[i];
+        let hi = right[i];
+        if !lo.is_finite() && !hi.is_finite() {
+            continue;
+        }
+        intervals.push((lo, hi));
+        if lo.is_finite() {
+            times.push(lo);
+        }
+        if hi.is_finite() {
+            times.push(hi);
+        }
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    times.dedup_by(|a, b| (*a - *b).abs() <= 1e-12);
+    if times.is_empty() || intervals.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("survfunc_dc has no finite interval endpoints")
+                .build(),
+        );
+        return ctx.finish(FittedKaplanMeier {
+            times: Vector::zeros(0),
+            survival: Vector::zeros(0),
+            n_risk: Vector::zeros(0),
+            n_event: Vector::zeros(0),
+        });
+    }
+    let m = times.len();
+    let mut p = vec![1.0 / m as f64; m];
+    let mut empty_obs = 0usize;
+    for _ in 0..40 {
+        let mut pnew = vec![0.0_f64; m];
+        empty_obs = 0;
+        for &(lo, hi) in &intervals {
+            let mut mass = 0.0_f64;
+            for j in 0..m {
+                if turnbull_covers(times[j], lo, hi) {
+                    mass += p[j];
+                }
+            }
+            if mass <= 1e-15 {
+                empty_obs += 1;
+                continue;
+            }
+            for j in 0..m {
+                if turnbull_covers(times[j], lo, hi) {
+                    pnew[j] += p[j] / mass;
+                }
+            }
+        }
+        let tot: f64 = pnew.iter().sum();
+        if tot <= 1e-15 {
+            break;
+        }
+        for j in 0..m {
+            p[j] = pnew[j] / tot;
+        }
+    }
+    if empty_obs == intervals.len() {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("Turnbull intervals cover none of the candidate times")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "interval-censored NPMLE",
+                    "every (L,R] is empty of the discrete support",
+                    "widen intervals or add exact event times",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedKaplanMeier {
+            times: Vector::from_iter(times),
+            survival: Vector::from_iter((0..m).map(|_| 1.0)),
+            n_risk: Vector::from_iter((0..m).map(|_| intervals.len() as f64)),
+            n_event: Vector::zeros(m),
+        });
+    }
+    let mut cdf = 0.0_f64;
+    let mut surv = Vec::with_capacity(m);
+    let mut nevent = Vec::with_capacity(m);
+    for j in 0..m {
+        cdf += p[j];
+        surv.push((1.0 - cdf).max(0.0));
+        nevent.push(p[j] * intervals.len() as f64);
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("survfunc_dc is a discrete-endpoint Turnbull EM, not ICM")
+            .compromise(NumericalCompromise::new(
+                "Turnbull ICM on innermost intervals",
+                "self-consistency EM on unique finite endpoints",
+                "mass can sit on interval endpoints rather than innermost open intervals",
+                "read Ŝ as an NPMLE on the observed grid, not the unique continuous NPMLE",
+            ))
+            .build(),
+    );
+    ctx.finish(FittedKaplanMeier {
+        times: Vector::from_iter(times),
+        survival: Vector::from_iter(surv),
+        n_risk: Vector::from_iter((0..m).map(|_| intervals.len() as f64)),
+        n_event: Vector::from_iter(nevent),
+    })
+}
+
+/// Named interval-censored survival (statsmodels `survfunc_dc` / Turnbull).
+#[derive(Clone, Debug, Default)]
+pub struct Turnbull;
+
+impl Turnbull {
+    /// Default Turnbull NPMLE.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on left and right interval endpoints (`right` may be \(+\infty\)).
+    pub fn fit(
+        &self,
+        left: &Vector,
+        right: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedKaplanMeier>> {
+        survfunc_dc(left, right, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -14313,5 +14616,25 @@ mod tests {
         let hatd = hat_matrix_diag(&x, &y, &Session::new("hat", "t")).expect("hat");
         assert_eq!(hatd.value.len(), 40);
         assert!(hatd.value.as_slice().iter().all(|v| *v >= 0.0 && *v < 1.0));
+        let entry = Vector::from_iter((0..20).map(|_| 0.0));
+        let ltkm = survfunc_left(&entry, &dur, &ev, &Session::new("ltkm", "t")).expect("ltkm");
+        assert!(!ltkm.value.times.is_empty());
+        assert!(ltkm
+            .value
+            .survival
+            .as_slice()
+            .iter()
+            .all(|s| *s > 0.0 && *s <= 1.0));
+        let left = Vector::from_iter((0..20).map(|i| dur[i]));
+        let right = Vector::from_iter((0..20).map(|i| {
+            if ev[i] > 0.5 {
+                dur[i]
+            } else {
+                f64::INFINITY
+            }
+        }));
+        let tb = survfunc_dc(&left, &right, &Session::new("tbull", "t")).expect("tbull");
+        assert!(!tb.value.times.is_empty());
+        assert!(tb.value.survival.as_slice().iter().all(|s| *s >= 0.0 && *s <= 1.0));
     }
 }

@@ -5186,6 +5186,42 @@ const INVENTORY: &[Algorithm] = &[
         "statsmodels.stats.outliers_influence.OLSInfluence.hat_matrix_diag",
         "stats",
     ),
+    a(
+        "stats.survfunc_left",
+        "statsmodels.duration.survfunc.SurvfuncRight",
+        "stats",
+    ),
+    a(
+        "stats.survfunc_dc",
+        "statsmodels.duration.api.survfunc_dc",
+        "stats",
+    ),
+    a(
+        "stats.LeftTruncatedKM",
+        "statsmodels.duration.survfunc.SurvfuncRight",
+        "estimator",
+    ),
+    a(
+        "stats.Turnbull",
+        "statsmodels.duration.api.survfunc_dc",
+        "estimator",
+    ),
+    a(
+        "iv.anderson_rubin",
+        "statsmodels.sandbox.regression.gmm.IV2SLS",
+        "function",
+    ),
+    a(
+        "iv.cragg_donald",
+        "linearmodels.iv.results.IVResults.first_stage",
+        "function",
+    ),
+    a(
+        "iv.wu_hausman",
+        "statsmodels.sandbox.regression.gmm.IV2SLS.wu_hausman",
+        "function",
+    ),
+    a("online.Bpr", "river.reco.BPR", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5551,6 +5587,11 @@ mod tests {
             "glm.GompertzAft",
             "iv.sargan",
             "stats.dffits",
+            "stats.survfunc_left",
+            "stats.survfunc_dc",
+            "iv.anderson_rubin",
+            "iv.wu_hausman",
+            "online.Bpr",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

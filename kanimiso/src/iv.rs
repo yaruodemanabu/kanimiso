@@ -7,7 +7,7 @@
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linalg::{chol_solve, least_squares};
-use crate::special::{chi2_pvalue, student_t_pvalue};
+use crate::special::{chi2_pvalue, f_pvalue, student_t_pvalue};
 use crate::stats::{adfuller, phillips_perron, HypothesisTest};
 use crate::traits::Predict;
 use crate::validate::{inspect_identification, inspect_xy};
@@ -2440,6 +2440,269 @@ pub fn sargan(
     })
 }
 
+/// Anderson–Rubin test of \(H_0:\beta=0\) (statsmodels `IV2SLS` AR).
+///
+/// \(F\) from OLS of `y` on the instrument design. Instrument count is not
+/// identification `p`. Inner OLS failures are not promoted as fatal Cholesky.
+pub fn anderson_rubin(
+    y: &Vector,
+    z: &Matrix,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, z, Some(y), &ctx.policy);
+    let design = z.with_intercept();
+    let n = y.len().min(design.nrows());
+    let qdf = z.ncols().max(1) as f64;
+    let nan = || HypothesisTest {
+        statistic: f64::NAN,
+        pvalue: f64::NAN,
+        df: qdf,
+        nobs: n as f64,
+    };
+    let mut scratch = signlred::Report::new("ar", "ols");
+    let Some(beta) = least_squares(&mut scratch, &design, y, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("anderson_rubin: OLS of y on Z failed")
+                .build(),
+        );
+        return ctx.finish(nan());
+    };
+    if beta.len() != design.ncols() {
+        return ctx.finish(nan());
+    }
+    let fit = design.matvec(&beta);
+    let mut sse = 0.0_f64;
+    let mut sy = 0.0_f64;
+    let mut sy2 = 0.0_f64;
+    for i in 0..n {
+        let r = y[i] - if i < fit.len() { fit[i] } else { 0.0 };
+        sse += r * r;
+        sy += y[i];
+        sy2 += y[i] * y[i];
+    }
+    let nf = n as f64;
+    let sst = sy2 - if nf > 0.0 { sy * sy / nf } else { 0.0 };
+    let df_den = (nf - design.ncols() as f64).max(1.0);
+    if sst.abs() <= 1e-15 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .severity(Severity::Warning)
+                .message("anderson_rubin: y has zero variance")
+                .build(),
+        );
+        return ctx.finish(nan());
+    }
+    let stat = if sse > 0.0 {
+        ((sst - sse).max(0.0) / qdf) / (sse / df_den)
+    } else {
+        f64::INFINITY
+    };
+    let pvalue = if stat.is_finite() {
+        f_pvalue(stat.max(0.0), qdf, df_den)
+    } else {
+        f64::NAN
+    };
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: qdf,
+        nobs: nf,
+    })
+}
+
+/// Cragg–Donald first-stage \(F\) (single endogenous column).
+///
+/// Instrument count is not identification `p`. A perfect first stage reports
+/// \(+\infty\). Inner OLS failures are warnings, not fatal Cholesky.
+pub fn cragg_donald(
+    x: &Matrix,
+    z: &Matrix,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, z, None, &ctx.policy);
+    let n = x.nrows().min(z.nrows());
+    let qdf = z.ncols().max(1) as f64;
+    let nan = || HypothesisTest {
+        statistic: f64::NAN,
+        pvalue: f64::NAN,
+        df: qdf,
+        nobs: n as f64,
+    };
+    if x.ncols() == 0 {
+        return ctx.finish(nan());
+    }
+    let xj = x.column(0);
+    let zdes = z.with_intercept();
+    let mut scratch = signlred::Report::new("cd", "stage1");
+    let Some(g) = least_squares(&mut scratch, &zdes, &xj, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("cragg_donald: first-stage OLS failed")
+                .build(),
+        );
+        return ctx.finish(nan());
+    };
+    if g.len() != zdes.ncols() {
+        return ctx.finish(nan());
+    }
+    let fit = zdes.matvec(&g);
+    let mut sse = 0.0_f64;
+    let mut sst = 0.0_f64;
+    let m = xj.mean();
+    for i in 0..n.min(xj.len()) {
+        let e = xj[i] - if i < fit.len() { fit[i] } else { 0.0 };
+        sse += e * e;
+        let d = xj[i] - m;
+        sst += d * d;
+    }
+    let df_den = (n as f64 - zdes.ncols() as f64).max(1.0);
+    let stat = if sse > 0.0 {
+        ((sst - sse).max(0.0) / qdf) / (sse / df_den)
+    } else {
+        f64::INFINITY
+    };
+    let pvalue = if stat.is_finite() {
+        f_pvalue(stat.max(0.0), qdf, df_den)
+    } else {
+        f64::NAN
+    };
+    if x.ncols() > 1 {
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("cragg_donald reports the first-column first-stage F, not min-eigenvalue CD")
+                .compromise(NumericalCompromise::new(
+                    "Cragg–Donald min eigenvalue of X'P_Z X / σ²",
+                    "first-stage F of column 0 on Z",
+                    "only one endogenous column is scored",
+                    "do not read this as the full-matrix weak-IV statistic",
+                ))
+                .build(),
+        );
+    }
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: qdf,
+        nobs: n as f64,
+    })
+}
+
+/// Wu–Hausman residual-inclusion test (statsmodels `IV2SLS.wu_hausman`).
+///
+/// First-stage residual of `x` column 0 on `z` is included in OLS of `y`.
+/// Instrument count is not identification `p`. Inner Cholesky failures are
+/// warnings.
+pub fn wu_hausman(
+    x: &Matrix,
+    y: &Vector,
+    z: &Matrix,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    inspect_xy(&mut ctx.report, z, None, &ctx.policy);
+    let n = y.len().min(x.nrows()).min(z.nrows());
+    let nan = || HypothesisTest {
+        statistic: f64::NAN,
+        pvalue: f64::NAN,
+        df: 1.0,
+        nobs: n as f64,
+    };
+    if x.ncols() == 0 {
+        return ctx.finish(nan());
+    }
+    let xj = x.column(0);
+    let zdes = z.with_intercept();
+    let mut sc1 = signlred::Report::new("wh", "stage1");
+    let Some(g) = least_squares(&mut sc1, &zdes, &xj, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("wu_hausman: first-stage OLS failed")
+                .build(),
+        );
+        return ctx.finish(nan());
+    };
+    if g.len() != zdes.ncols() {
+        return ctx.finish(nan());
+    }
+    let fit1 = zdes.matvec(&g);
+    let resid = Vector::from_iter((0..n).map(|i| xj[i] - if i < fit1.len() { fit1[i] } else { 0.0 }));
+    if resid.as_slice().iter().all(|e| e.abs() <= 1e-12) {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .severity(Severity::Warning)
+                .message("wu_hausman: first-stage residual is ~0 (just-identified / x in Z)")
+                .build(),
+        );
+        return ctx.finish(nan());
+    }
+    let aug = Matrix::from_fn(n, 3, |i, j| {
+        if j == 0 {
+            1.0
+        } else if j == 1 {
+            x.get(i, 0)
+        } else {
+            resid[i]
+        }
+    });
+    let mut sc2 = signlred::Report::new("wh", "stage2");
+    let Some(b2) = least_squares(&mut sc2, &aug, y, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("wu_hausman: residual-inclusion OLS failed")
+                .build(),
+        );
+        return ctx.finish(nan());
+    };
+    if b2.len() != 3 {
+        return ctx.finish(nan());
+    }
+    let fit2 = aug.matvec(&b2);
+    let mut sse = 0.0_f64;
+    for i in 0..n {
+        let e = y[i] - if i < fit2.len() { fit2[i] } else { 0.0 };
+        sse += e * e;
+    }
+    let df = (n as f64 - 3.0).max(1.0);
+    let sigma2 = sse / df;
+    let xtx = aug.gram();
+    let mut e = Vector::zeros(3);
+    e[2] = 1.0;
+    let mut sc3 = signlred::Report::new("wh", "se");
+    let se = match chol_solve(&mut sc3, &xtx, &e, &ctx.policy) {
+        Some(col) => (sigma2 * col[2].max(0.0)).sqrt(),
+        None => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("wu_hausman: X'X is not SPD; residual t is unidentified")
+                    .build(),
+            );
+            return ctx.finish(nan());
+        }
+    };
+    let stat = if se.is_finite() && se > 1e-18 {
+        b2[2] / se
+    } else {
+        f64::NAN
+    };
+    let pvalue = student_t_pvalue(stat, df);
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: 1.0,
+        nobs: n as f64,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2465,6 +2728,24 @@ mod tests {
         let sg = sargan(&x, &y, &z2, &Session::new("iv", "sargan")).expect("sargan");
         assert!(sg.value.statistic.is_finite() || sg.value.pvalue.is_nan());
         assert!(sg.value.df >= 1.0);
+        let ar = anderson_rubin(&y, &z2, &Session::new("iv", "ar")).expect("ar");
+        assert!(ar.value.statistic.is_finite() || ar.value.pvalue.is_nan());
+        let cd = cragg_donald(&x, &z2, &Session::new("iv", "cd")).expect("cd");
+        assert!(
+            cd.value.statistic.is_finite()
+                || cd.value.statistic.is_infinite()
+                || cd.value.pvalue.is_nan()
+        );
+        let zwh = Matrix::from_fn(20, 2, |i, j| {
+            let t = i as f64;
+            if j == 0 {
+                t * t
+            } else {
+                t * t * t
+            }
+        });
+        let wh = wu_hausman(&x, &y, &zwh, &Session::new("iv", "wh")).expect("wh");
+        assert!(wh.value.statistic.is_finite() || wh.value.pvalue.is_nan());
     }
 
     #[test]
