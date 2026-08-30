@@ -13,8 +13,10 @@ use ojizou_san::Session;
 use signlred::{Issue, IssueCode, Qualified, Result};
 
 pub use crate::ensemble::{
-    BaggingRegressor, FittedBaggingRegressor, FittedStackingRegressor, FittedVotingClassifier,
-    FittedVotingRegressor, StackingRegressor, VotingClassifier, VotingRegressor,
+    BaggingClassifier, BaggingRegressor, FittedBaggingClassifier, FittedBaggingRegressor,
+    FittedStackingClassifier, FittedStackingRegressor, FittedVotingClassifier,
+    FittedVotingRegressor, StackingClassifier, StackingRegressor, VotingClassifier,
+    VotingRegressor,
 };
 
 /// Local column standardizer (mean / sample std). Not [`crate::preprocess::StandardScaler`].

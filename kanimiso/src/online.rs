@@ -3079,6 +3079,440 @@ where
     )
 }
 
+/// Kolmogorov–Smirnov windowing (river `KSWIN`).
+///
+/// The last `stat_size` observations are compared to the remainder of a
+/// sliding window. A KS statistic above the Hoeffding-style threshold is
+/// [`IssueCode::ConceptDriftDetected`].
+#[derive(Clone, Debug)]
+pub struct Kswin {
+    /// Window length.
+    pub window_size: usize,
+    /// Length of the recent comparison sample.
+    pub stat_size: usize,
+    /// Type-I level \(\alpha\).
+    pub alpha: f64,
+    window: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for Kswin {
+    fn default() -> Self {
+        Self {
+            window_size: 100,
+            stat_size: 30,
+            alpha: 0.005,
+            window: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl Kswin {
+    /// Detector with window `w`.
+    pub fn new(window_size: usize) -> Self {
+        Self {
+            window_size,
+            ..Self::default()
+        }
+    }
+
+    fn ks(a: &[f64], b: &[f64]) -> f64 {
+        let mut sa = a.to_vec();
+        let mut sb = b.to_vec();
+        sa.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+        sb.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+        let mut i = 0usize;
+        let mut j = 0usize;
+        let mut d: f64 = 0.0;
+        while i < sa.len() || j < sb.len() {
+            let va = sa.get(i).copied().unwrap_or(f64::INFINITY);
+            let vb = sb.get(j).copied().unwrap_or(f64::INFINITY);
+            if va <= vb {
+                i += 1;
+            }
+            if vb <= va {
+                j += 1;
+            }
+            let fa = i as f64 / sa.len().max(1) as f64;
+            let fb = j as f64 / sb.len().max(1) as f64;
+            d = d.max((fa - fb).abs());
+        }
+        d
+    }
+
+    /// Consume one scalar and decide.
+    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+        let mut ctx = FitCtx::with_session(session.child("update"));
+        if x.is_finite() {
+            self.window.push(x);
+        }
+        if self.window.len() > self.window_size {
+            let drop = self.window.len() - self.window_size;
+            self.window.drain(0..drop);
+        }
+        self.n_seen += 1;
+        let r = self.stat_size.min(self.window.len() / 2);
+        if self.window.len() < self.stat_size.max(16) * 2 {
+            return ctx.finish(DriftDecision::Stable);
+        }
+        let n = self.window.len();
+        let recent = &self.window[n - r..];
+        let past = &self.window[..n - r];
+        let stat = Self::ks(past, recent);
+        let crit = ((-0.5 * (self.alpha.max(1e-12) / 2.0).ln())
+            * ((past.len() + recent.len()) as f64 / (past.len() * recent.len()) as f64))
+            .sqrt();
+        if stat > crit {
+            ctx.push(
+                Issue::builder(IssueCode::ConceptDriftDetected)
+                    .message(format!("KSWIN KS={stat:.4} > {crit:.4}"))
+                    .metric("drift_statistic", stat)
+                    .build(),
+            );
+            self.window.drain(0..n - r);
+            return ctx.finish(DriftDecision::Drift { statistic: stat });
+        }
+        ctx.finish(DriftDecision::Stable)
+    }
+}
+
+impl PartialFit for Kswin {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let before = self.window.len();
+        let mut fired = 0.0;
+        for i in 0..x.nrows() {
+            match self.update(x.get(i, 0), &session.child("kswin")) {
+                Ok(q) => {
+                    if matches!(q.value, DriftDecision::Drift { .. }) {
+                        fired += 1.0;
+                    }
+                }
+                Err(e) => {
+                    if e.primary().code == IssueCode::ConceptDriftDetected {
+                        fired += 1.0;
+                    }
+                }
+            }
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.window.len() as f64;
+        q.information_gain = Some(fired);
+        q.drift_statistic = Some(fired);
+        q.still_identified = self.window.len() >= self.stat_size;
+        q.warmup = self.window.len() < self.stat_size.max(16) * 2;
+        q.explanation = format!(
+            "KSWIN consumed {} rows; window {before}→{}, drift_cuts={fired}",
+            x.nrows(),
+            self.window.len()
+        );
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "sliding KS window",
+                "two-sample KS of recent vs remainder",
+                format!("window={before}"),
+                format!("window={} cuts={fired}", self.window.len()),
+            ),
+        )
+    }
+}
+
+/// Hoeffding drift detection (river `HDDM_A`) on a 0/1 error stream.
+#[derive(Clone, Debug)]
+pub struct Hddm {
+    /// Confidence \(\delta\).
+    pub delta: f64,
+    n: u64,
+    mean: f64,
+    n_min: u64,
+    mean_min: f64,
+    updates: u64,
+}
+
+impl Default for Hddm {
+    fn default() -> Self {
+        Self {
+            delta: 0.002,
+            n: 0,
+            mean: 0.0,
+            n_min: 0,
+            mean_min: f64::INFINITY,
+            updates: 0,
+        }
+    }
+}
+
+impl Hddm {
+    /// Fresh HDDM_A detector.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn bound(n: u64, delta: f64) -> f64 {
+        if n == 0 {
+            return f64::INFINITY;
+        }
+        (0.5 / n as f64 * (1.0 / delta.max(1e-16)).ln()).sqrt()
+    }
+
+    /// Update with a 0/1 error indicator.
+    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+        let mut ctx = FitCtx::with_session(session.child("update"));
+        let e = if x > 0.5 { 1.0 } else { 0.0 };
+        self.n += 1;
+        self.mean += (e - self.mean) / self.n as f64;
+        let eps = Self::bound(self.n, self.delta);
+        let eps_min = Self::bound(self.n_min.max(1), self.delta);
+        if self.mean + eps < self.mean_min + eps_min {
+            self.mean_min = self.mean;
+            self.n_min = self.n;
+        }
+        let stat = self.mean - self.mean_min;
+        let decision = if self.n >= 30 && self.mean - eps > self.mean_min + eps_min {
+            ctx.push(
+                Issue::builder(IssueCode::ConceptDriftDetected)
+                    .message(format!(
+                        "HDDM_A drift: μ-ε={:.4} > μ_min+ε_min",
+                        self.mean - eps
+                    ))
+                    .metric("drift_statistic", stat)
+                    .build(),
+            );
+            self.n = 0;
+            self.mean = 0.0;
+            self.n_min = 0;
+            self.mean_min = f64::INFINITY;
+            DriftDecision::Drift { statistic: stat }
+        } else if self.n >= 30 && self.mean - 0.5 * eps > self.mean_min + 0.5 * eps_min {
+            DriftDecision::Warning { statistic: stat }
+        } else {
+            DriftDecision::Stable
+        };
+        ctx.finish(decision)
+    }
+}
+
+impl PartialFit for Hddm {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let before = self.mean;
+        let mut fired = 0.0;
+        for i in 0..x.nrows() {
+            match self.update(x.get(i, 0), &session.child("hddm")) {
+                Ok(q) => {
+                    if matches!(q.value, DriftDecision::Drift { .. }) {
+                        fired += 1.0;
+                    }
+                }
+                Err(e) => {
+                    if e.primary().code == IssueCode::ConceptDriftDetected {
+                        fired += 1.0;
+                    }
+                }
+            }
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n);
+        q.effective_sample_size = self.n as f64;
+        q.information_gain = Some(fired);
+        q.drift_statistic = Some(self.mean);
+        q.still_identified = self.n >= 30;
+        q.warmup = self.n < 30;
+        q.explanation = format!(
+            "HDDM_A μ {before:.4}→{:.4}, n={}, drift_cuts={fired}",
+            self.mean, self.n
+        );
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "error-rate mean and Hoeffding bound",
+                "HDDM_A comparison to the historical minimum",
+                format!("μ={before:.4}"),
+                format!("μ={:.4} n={}", self.mean, self.n),
+            ),
+        )
+    }
+}
+
+/// Approximate large-margin algorithm (Gentile 2001; river `ALMA`).
+#[derive(Clone, Debug)]
+pub struct Alma {
+    /// Margin parameter \(\alpha \in (0,1]\).
+    pub alpha: f64,
+    /// Aggressiveness \(C\).
+    pub c: f64,
+    /// Exponent \(p\) on the decaying rate (usually 2).
+    pub p: f64,
+    coef: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for Alma {
+    fn default() -> Self {
+        Self {
+            alpha: 0.9,
+            c: 1.0,
+            p: 2.0,
+            coef: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl Alma {
+    /// Default ALMA.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current weights (unit-norm after each update).
+    pub fn coef(&self) -> &Vector {
+        &self.coef
+    }
+}
+
+impl PartialFit for Alma {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(
+                Issue::builder(IssueCode::MissingTarget)
+                    .message("ALMA.partial_fit requires y")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        if !self.initialized {
+            self.coef = Vector::zeros(x.ncols());
+            self.initialized = true;
+        } else if self.coef.len() != x.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .message("ALMA feature count changed")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.coef.clone();
+        let mut n_hit = 0.0;
+        let mut loss_before = 0.0;
+        for i in 0..x.nrows() {
+            let yi = if y[i] >= 0.5 { 1.0 } else { -1.0 };
+            let mut pred = 0.0;
+            for j in 0..x.ncols() {
+                pred += self.coef[j] * x.get(i, j);
+            }
+            let margin = yi * pred;
+            let b = self.alpha * (1.0 + self.c * (self.n_seen as f64 + 1.0).powf(-1.0 / self.p));
+            loss_before += (b - margin).max(0.0);
+            if margin <= (1.0 - self.alpha) * b.max(1e-12) {
+                n_hit += 1.0;
+                let eta = self.c / (self.n_seen as f64 + 1.0).sqrt();
+                for j in 0..x.ncols() {
+                    self.coef[j] += eta * yi * x.get(i, j);
+                }
+                let nrm = self.coef.norm().max(1e-15);
+                for j in 0..x.ncols() {
+                    self.coef[j] /= nrm;
+                }
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta.norm());
+        q.information_gain = Some(n_hit);
+        q.loss_before = Some(loss_before);
+        q.still_identified = self.n_seen as usize > x.ncols();
+        q.warmup = self.n_seen < 5;
+        q.explanation = format!(
+            "ALMA: {n_hit} of {} rows inside the large-margin region, ||Δw||={:.4e}",
+            x.nrows(),
+            delta.norm()
+        );
+        if n_hit == 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::UpdateWithZeroInformation)
+                    .incremental(q.clone())
+                    .message("ALMA left every row outside the update region")
+                    .build(),
+            );
+        }
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "unit-norm ALMA weights",
+                "large-margin multiplicative schedule of Gentile (2001)",
+                format!("margin_loss={loss_before:.6e}"),
+                format!("updates={n_hit}"),
+            ),
+        )
+    }
+}
+
+impl Predict for Alma {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = 0.0;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            if s >= 0.0 {
+                1.0
+            } else {
+                0.0
+            }
+        }));
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3189,6 +3623,19 @@ mod tests {
         SgdRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("sgd");
+        crate::glm::SgdClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("sgdc");
+        crate::glm::PassiveAggressiveRegressor::new(1.0)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("par");
+        Alma::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("alma");
+        Kswin::new(32)
+            .partial_fit(&x, None, &session)
+            .expect("kswin");
+        Hddm::new().partial_fit(&x, None, &session).expect("hddm");
 
         let n_expl = session
             .ledger()
@@ -3197,7 +3644,7 @@ mod tests {
             .filter(|e| e.kind == EventKind::IncrementalExplanation)
             .count();
         assert!(
-            n_expl >= 15,
+            n_expl >= 20,
             "expected an IncrementalExplanation per partial_fit, got {n_expl}"
         );
     }

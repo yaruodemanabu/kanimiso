@@ -1,4 +1,4 @@
-//! Naive Bayes: Gaussian, multinomial, Bernoulli, and complement.
+//! Naive Bayes: Gaussian, multinomial, Bernoulli, complement, and categorical.
 //!
 //! [`GaussianNB`] supports [`crate::traits::PartialFit`] with a mandatory
 //! [`ojizou_san::IncrementalExplain`]: class-conditional mean / variance
@@ -889,6 +889,177 @@ impl Fit for ComplementNB {
     }
 }
 
+/// Categorical Naive Bayes (integer feature codes).
+#[derive(Clone, Debug)]
+pub struct CategoricalNB {
+    /// Additive smoothing \(\alpha \ge 0\).
+    pub alpha: f64,
+}
+
+impl Default for CategoricalNB {
+    fn default() -> Self {
+        Self { alpha: 1.0 }
+    }
+}
+
+impl CategoricalNB {
+    /// Categorical NB with the given smoothing.
+    pub fn new(alpha: f64) -> Self {
+        Self { alpha }
+    }
+}
+
+/// Fitted categorical NB.
+#[derive(Clone, Debug)]
+pub struct FittedCategoricalNB {
+    /// Sorted unique labels.
+    pub classes: Vec<i64>,
+    /// Log class priors.
+    pub log_prior: Vector,
+    /// `log P(x_j = v | y = c)` stored as `K` matrices of size `p × n_cats_j`.
+    pub log_prob: Vec<Matrix>,
+    /// Number of categories per feature.
+    pub n_categories: Vec<usize>,
+}
+
+impl FittedCategoricalNB {
+    fn predict_vec(&self, x: &Matrix) -> Vector {
+        Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut scores = Vec::with_capacity(self.classes.len());
+            for c in 0..self.classes.len() {
+                let mut s = self.log_prior[c];
+                for j in 0..x.ncols().min(self.log_prob.len()) {
+                    let v = x.get(i, j).round();
+                    if v < 0.0 {
+                        continue;
+                    }
+                    let cat = v as usize;
+                    if j < self.log_prob[c].nrows() && cat < self.log_prob[c].ncols() {
+                        s += self.log_prob[c].get(j, cat);
+                    }
+                }
+                scores.push(s);
+            }
+            argmax_label(&self.classes, &scores) as f64
+        }))
+    }
+}
+
+impl Predict for FittedCategoricalNB {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.n_categories.is_empty() {
+            predict_shape_guard(&mut ctx, x, self.n_categories.len());
+        }
+        ctx.finish(self.predict_vec(x))
+    }
+}
+
+impl Fit for CategoricalNB {
+    type Fitted = FittedCategoricalNB;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCategoricalNB>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let classes: Vec<i64> = counts.iter().map(|(k, _)| *k).collect();
+        let ylab = labels_of(y);
+        let k = classes.len();
+        let p = x.ncols();
+        let mut n_cats = vec![1usize; p];
+        let mut neg = false;
+        for i in 0..x.nrows() {
+            for j in 0..p {
+                let v = x.get(i, j);
+                if v < 0.0 {
+                    neg = true;
+                }
+                if v.is_finite() {
+                    let cat = v.round().max(0.0) as usize;
+                    n_cats[j] = n_cats[j].max(cat + 1);
+                }
+            }
+        }
+        if neg {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .message("CategoricalNB saw a negative feature code")
+                    .build(),
+            );
+        }
+        let a = self.alpha.max(0.0);
+        if !self.alpha.is_finite() || self.alpha < 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .message(format!(
+                        "smoothing α={} is not a finite non-negative number",
+                        self.alpha
+                    ))
+                    .build(),
+            );
+        }
+        let mut class_n = vec![0.0; k.max(1)];
+        let mut fc: Vec<Matrix> = (0..k.max(1))
+            .map(|_| Matrix::zeros(p, n_cats.iter().copied().max().unwrap_or(1)))
+            .collect();
+        for i in 0..x.nrows() {
+            let Some(c) = class_index(ylab[i], &classes) else {
+                continue;
+            };
+            class_n[c] += 1.0;
+            for j in 0..p {
+                let v = x.get(i, j).round();
+                if v < 0.0 {
+                    continue;
+                }
+                let cat = v as usize;
+                if cat < fc[c].ncols() {
+                    let prev = fc[c].get(j, cat);
+                    fc[c].set(j, cat, prev + 1.0);
+                }
+            }
+        }
+        let ntot: f64 = class_n.iter().sum::<f64>().max(1e-15);
+        let mut log_prior = Vector::zeros(k.max(1));
+        for c in 0..k {
+            log_prior[c] = (class_n[c] / ntot).max(1e-15).ln();
+        }
+        let mut log_prob = Vec::with_capacity(k.max(1));
+        for c in 0..k.max(1) {
+            let mut lp = Matrix::zeros(p, n_cats.iter().copied().max().unwrap_or(1));
+            for j in 0..p {
+                let nj = n_cats[j];
+                let den = class_n.get(c).copied().unwrap_or(0.0) + a * nj as f64;
+                for v in 0..nj {
+                    lp.set(
+                        j,
+                        v,
+                        ((fc[c].get(j, v) + a) / den.max(1e-15)).max(1e-15).ln(),
+                    );
+                }
+            }
+            log_prob.push(lp);
+        }
+        let fitted = FittedCategoricalNB {
+            classes,
+            log_prior,
+            log_prob,
+            n_categories: n_cats,
+        };
+        if !fitted.classes.is_empty() {
+            let pred = fitted.predict_vec(x);
+            diagnose_constant_predictions(&mut ctx, &pred, y);
+        }
+        ctx.finish(fitted)
+    }
+}
+
 // silence unused helper in non-test builds that still document log-sum-exp
 #[allow(dead_code)]
 fn _log_prob_norm(scores: &[f64]) -> Vec<f64> {
@@ -1031,6 +1202,33 @@ mod tests {
         let pred = q
             .value
             .predict(&x, &Session::new("cnb", "predict"))
+            .unwrap()
+            .value;
+        assert!(accuracy(&pred, &y) > 0.8);
+    }
+
+    #[test]
+    fn categorical_nb_integer_codes() {
+        let x = Matrix::from_fn(12, 2, |i, j| {
+            if i < 6 {
+                if j == 0 {
+                    0.0
+                } else {
+                    1.0
+                }
+            } else if j == 0 {
+                1.0
+            } else {
+                0.0
+            }
+        });
+        let y = Vector::from_iter((0..12).map(|i| if i < 6 { 0.0 } else { 1.0 }));
+        let q = CategoricalNB::new(1.0)
+            .fit(&x, &y, &Session::new("catnb", "fit"))
+            .expect("catnb");
+        let pred = q
+            .value
+            .predict(&x, &Session::new("catnb", "p"))
             .unwrap()
             .value;
         assert!(accuracy(&pred, &y) > 0.8);

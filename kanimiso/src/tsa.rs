@@ -13,6 +13,8 @@
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linalg::chol_solve;
+
+pub use crate::filters::{bk_filter, FittedLocalLinearTrend, LocalLinearTrend};
 use crate::traits::FitSeries;
 use crate::validate::{inspect_identification, inspect_xy};
 use ojizou_san::Session;

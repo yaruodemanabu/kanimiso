@@ -500,6 +500,123 @@ impl Fit for GridSearchRidge {
     }
 }
 
+/// Leave-one-out: each row is a singleton test fold.
+#[derive(Clone, Debug, Default)]
+pub struct LeaveOneOut;
+
+impl LeaveOneOut {
+    /// Default LOO splitter.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Materialize `n` folds.
+    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        if n < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .message("LeaveOneOut on n<2 has no training fold")
+                    .build(),
+            );
+        }
+        if n > 200 {
+            ctx.push(
+                Issue::builder(IssueCode::Overparameterized)
+                    .message(format!(
+                        "LeaveOneOut materializes {n} folds; this is O(n) refits"
+                    ))
+                    .build(),
+            );
+        }
+        let mut folds = Vec::with_capacity(n);
+        for i in 0..n {
+            let test = vec![i];
+            let train: Vec<usize> = (0..n).filter(|&j| j != i).collect();
+            folds.push(Split { train, test });
+        }
+        ctx.finish(folds)
+    }
+}
+
+/// Group k-fold: every group id appears in exactly one test fold.
+#[derive(Clone, Debug)]
+pub struct GroupKFold {
+    /// Number of folds.
+    pub n_splits: usize,
+}
+
+impl Default for GroupKFold {
+    fn default() -> Self {
+        Self { n_splits: 5 }
+    }
+}
+
+impl GroupKFold {
+    /// `k` group folds.
+    pub fn new(n_splits: usize) -> Self {
+        Self { n_splits }
+    }
+
+    /// Split `n` rows whose group labels are `groups`.
+    pub fn split(&self, groups: &Vector, session: &Session) -> Result<Qualified<Vec<Split>>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let n = groups.len();
+        let mut ids: Vec<i64> = Vec::new();
+        for &g in groups.as_slice() {
+            if !g.is_finite() {
+                continue;
+            }
+            let lab = g.round() as i64;
+            if !ids.contains(&lab) {
+                ids.push(lab);
+            }
+        }
+        ids.sort_unstable();
+        let k = self.n_splits.max(2).min(ids.len().max(1));
+        if self.n_splits < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .message("GroupKFold.n_splits < 2; using 2")
+                    .build(),
+            );
+        }
+        if ids.len() < self.n_splits.max(2) {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .message(format!(
+                        "GroupKFold requested {} folds but only {} groups",
+                        self.n_splits,
+                        ids.len()
+                    ))
+                    .build(),
+            );
+        }
+        let mut folds = Vec::with_capacity(k);
+        for f in 0..k {
+            let test_groups: Vec<i64> = ids
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(i, _)| i % k == f)
+                .map(|(_, g)| g)
+                .collect();
+            let mut test = Vec::new();
+            let mut train = Vec::new();
+            for i in 0..n {
+                let g = groups[i].round() as i64;
+                if test_groups.contains(&g) {
+                    test.push(i);
+                } else {
+                    train.push(i);
+                }
+            }
+            folds.push(Split { train, test });
+        }
+        ctx.finish(folds)
+    }
+}
+
 /// Fit a column standardizer on **all** rows of `X` and transform them.
 ///
 /// This is the helper that documents the leakage anti-pattern. The scale is
@@ -652,5 +769,33 @@ mod tests {
         let q = fit_transform_full(&x, &Session::new("ms", "leak")).unwrap();
         assert!(q.report.contains(IssueCode::TargetLeakageSuspected));
         assert!((q.value.column(0).mean()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn loo_and_group_kfold() {
+        let loo = LeaveOneOut::new()
+            .split(5, &Session::new("ms", "loo"))
+            .unwrap()
+            .value;
+        assert_eq!(loo.len(), 5);
+        assert!(loo.iter().all(|s| s.test.len() == 1 && s.train.len() == 4));
+        let g = Vector::from_slice(&[0.0, 0.0, 1.0, 1.0, 2.0, 2.0]);
+        let folds = GroupKFold::new(3)
+            .split(&g, &Session::new("ms", "gkf"))
+            .unwrap()
+            .value;
+        assert_eq!(folds.len(), 3);
+        for f in &folds {
+            let mut seen = Vec::new();
+            for &i in &f.test {
+                let lab = g[i].round() as i64;
+                if !seen.contains(&lab) {
+                    seen.push(lab);
+                }
+            }
+            for &i in &f.train {
+                assert!(!seen.contains(&(g[i].round() as i64)));
+            }
+        }
     }
 }

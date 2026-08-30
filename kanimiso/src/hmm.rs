@@ -4,7 +4,7 @@
 //! time, columns = dimensions) with scaled forward–backward, Viterbi decoding,
 //! and Baum–Welch. [`MultinomialHmm`] uses integer emission codes. [`GmmHmm`]
 //! uses a diagonal Gaussian mixture per state (one component recovers a
-//! diagonal [`GaussianHmm`]).
+//! diagonal [`GaussianHmm`]). [`PoissonHmm`] uses integer counts in column 0.
 //!
 //! Quality: [`IssueCode::ForwardUnderflow`], [`IssueCode::ScaleFactorZero`],
 //! [`IssueCode::EmissionDegenerate`], [`IssueCode::AbsorbingStateOnly`],
@@ -1503,6 +1503,222 @@ impl FitUnsupervised for GmmHmm {
     }
 }
 
+/// Poisson HMM (hmmlearn `PoissonHMM`): integer counts in column 0.
+///
+/// Negative observations are not in the support and abort. A constant zero
+/// series makes every rate unidentified.
+#[derive(Clone, Debug)]
+pub struct PoissonHmm {
+    /// Hidden states.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for PoissonHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+            seed: 1,
+        }
+    }
+}
+
+impl PoissonHmm {
+    /// `k`-state Poisson HMM.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedPoissonHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted Poisson HMM.
+#[derive(Clone, Debug)]
+pub struct FittedPoissonHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Poisson rates \(\lambda_j\).
+    pub rates: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+fn log_poisson(k: f64, lambda: f64) -> f64 {
+    if k < 0.0 || !k.is_finite() || !lambda.is_finite() {
+        return f64::NEG_INFINITY;
+    }
+    let lam = lambda.max(1e-12);
+    k * lam.ln() - lam - crate::special::ln_gamma(k + 1.0)
+}
+
+impl FittedPoissonHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let s = self.rates.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; s]; t];
+        for ti in 0..t {
+            let k = x.get(ti, 0).round();
+            for j in 0..s {
+                out[ti][j] = log_poisson(k, self.rates[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+
+    /// Sequence log-likelihood via scaled forward–backward.
+    pub fn score(&self, x: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+        let mut ctx = FitCtx::with_session(session.child("score"));
+        let log_emit = self.log_emit_seq(x);
+        let ll = scaled_forward_backward(&mut ctx, &self.start, &self.trans, &log_emit)
+            .map(|fb| fb.loglik)
+            .unwrap_or(f64::NEG_INFINITY);
+        ctx.finish(ll)
+    }
+}
+
+impl Predict for FittedPoissonHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for PoissonHmm {
+    type Fitted = FittedPoissonHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedPoissonHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        if t_len == 0 {
+            return ctx.finish(FittedPoissonHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                rates: Vector::zeros(k),
+                loglik: f64::NAN,
+            });
+        }
+        for i in 0..t_len {
+            if x.get(i, 0) < 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .message(format!("PoissonHMM y[{i}]={} < 0", x.get(i, 0)))
+                        .build(),
+                );
+                break;
+            }
+        }
+        let mean = x.column(0).mean().max(1e-3);
+        if x.column(0).std() <= ctx.policy.near_zero_variance {
+            ctx.push(emission_degenerate_issue(
+                "count series is constant; Poisson rates are not identified across states",
+            ));
+        }
+        let mut rates = Vector::from_iter((0..k).map(|j| mean * (0.5 + j as f64)));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let log_emit: Vec<Vec<f64>> = (0..t_len)
+                .map(|t| {
+                    let obs = x.get(t, 0).round();
+                    (0..k).map(|j| log_poisson(obs, rates[j])).collect()
+                })
+                .collect();
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &log_emit) else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            let mut ns = Vector::zeros(k);
+            let mut nt = Matrix::zeros(k, k);
+            let mut wr = Vector::zeros(k);
+            let mut mass = Vector::zeros(k);
+            for j in 0..k {
+                ns[j] = fb.gamma[0][j];
+            }
+            for t in 0..t_len {
+                for j in 0..k {
+                    wr[j] += fb.gamma[t][j] * x.get(t, 0).max(0.0);
+                    mass[j] += fb.gamma[t][j];
+                }
+            }
+            for j in 0..k {
+                rates[j] = if mass[j] > 1e-12 {
+                    wr[j] / mass[j]
+                } else {
+                    mean
+                }
+                .max(1e-6);
+            }
+            for t in 0..t_len.saturating_sub(1) {
+                for i in 0..k {
+                    for j in 0..k {
+                        nt.set(i, j, nt.get(i, j) + fb.xi[t][i][j]);
+                    }
+                }
+            }
+            start = ns;
+            trans = nt;
+            renormalize_vec(&mut start, TRANS_FLOOR);
+            renormalize_rows(&mut trans, TRANS_FLOOR);
+        }
+        let occup: Vec<f64> = (0..k)
+            .map(|j| {
+                last_gamma
+                    .iter()
+                    .map(|g| g.get(j).copied().unwrap_or(0.0))
+                    .sum()
+            })
+            .collect();
+        if !last_gamma.is_empty() {
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let log_emit: Vec<Vec<f64>> = (0..t_len)
+            .map(|t| {
+                let obs = x.get(t, 0).round();
+                (0..k).map(|j| log_poisson(obs, rates[j])).collect()
+            })
+            .collect();
+        let (labels, _) = viterbi_path(&start, &trans, &log_emit);
+        ctx.finish(FittedPoissonHmm {
+            labels,
+            start,
+            trans,
+            rates,
+            loglik,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1567,5 +1783,21 @@ mod tests {
         .fit(&x, &session)
         .unwrap_err();
         assert_eq!(err.primary().code, IssueCode::EmissionDegenerate);
+    }
+
+    #[test]
+    fn poisson_hmm_two_rates() {
+        let x = Matrix::from_fn(40, 1, |i, _| if i < 20 { 1.0 } else { 8.0 });
+        let q = PoissonHmm::new(2)
+            .fit(&x, &Session::new("phmm", "fit"))
+            .expect("phmm");
+        let mut rates = q.value.rates.as_slice().to_vec();
+        rates.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!(rates[0] < 3.0 && rates[1] > 5.0, "{rates:?}");
+        let sc = q
+            .value
+            .score(&x, &Session::new("phmm", "score"))
+            .expect("score");
+        assert!(sc.value.is_finite());
     }
 }

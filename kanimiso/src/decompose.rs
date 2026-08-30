@@ -101,6 +101,8 @@ fn project_centered(xc: &Matrix, components: &Matrix) -> Matrix {
     matmul_nt(xc, components)
 }
 
+pub use crate::kernel_pca::{FittedKernelPca, KernelPca};
+
 /// Principal component analysis via a thin SVD of column-centered `X`.
 #[derive(Clone, Debug)]
 pub struct Pca {

@@ -1050,6 +1050,284 @@ impl Predict for FittedTimeSeriesForest {
     }
 }
 
+/// ROCKET features + ridge classifier (sktime `RocketClassifier`).
+#[derive(Clone, Debug)]
+pub struct RocketClassifier {
+    /// Random kernels.
+    pub n_kernels: usize,
+    /// Kernel length.
+    pub kernel_len: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for RocketClassifier {
+    fn default() -> Self {
+        Self {
+            n_kernels: 32,
+            kernel_len: 7,
+            alpha: 1.0,
+            seed: 7,
+        }
+    }
+}
+
+impl RocketClassifier {
+    /// Default ROCKET classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted ROCKET + ridge classifier.
+#[derive(Clone, Debug)]
+pub struct FittedRocketClassifier {
+    rocket: Rocket,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+impl Fit for RocketClassifier {
+    type Fitted = FittedRocketClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRocketClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let rocket = Rocket {
+            n_kernels: self.n_kernels,
+            kernel_len: self.kernel_len,
+            seed: self.seed,
+        };
+        let feat = rocket.transform(x, &session.child("rocket"))?;
+        let mut clf = crate::classification::RidgeClassifier::new(self.alpha);
+        let inner = clf.fit(&feat.value, y, &session.child("ridge"))?.value;
+        ctx.finish(FittedRocketClassifier { rocket, inner })
+    }
+}
+
+impl Predict for FittedRocketClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let feat = self.rocket.transform(x, &session.child("rocket"))?;
+        self.inner.predict(&feat.value, session)
+    }
+}
+
+/// DTW 1-NN classifier (sktime `KNeighborsTimeSeriesClassifier`).
+#[derive(Clone, Debug)]
+pub struct KNeighborsTimeSeries {
+    /// Neighbours (only \(k=1\) is identified without a weighted vote).
+    pub n_neighbors: usize,
+}
+
+impl Default for KNeighborsTimeSeries {
+    fn default() -> Self {
+        Self { n_neighbors: 1 }
+    }
+}
+
+impl KNeighborsTimeSeries {
+    /// `k`-NN DTW classifier.
+    pub fn new(n_neighbors: usize) -> Self {
+        Self { n_neighbors }
+    }
+}
+
+/// Fitted DTW neighbour store.
+#[derive(Clone, Debug)]
+pub struct FittedKnnTs {
+    x_train: Matrix,
+    y_train: Vector,
+    k: usize,
+}
+
+impl Fit for KNeighborsTimeSeries {
+    type Fitted = FittedKnnTs;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedKnnTs>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        if self.n_neighbors != 1 {
+            ctx.push(
+                Issue::builder(IssueCode::Overparameterized)
+                    .message(format!(
+                        "KNeighborsTimeSeries requested k={}; only 1-NN is implemented as a majority of one",
+                        self.n_neighbors
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(FittedKnnTs {
+            x_train: x.clone(),
+            y_train: y.clone(),
+            k: self.n_neighbors.max(1),
+        })
+    }
+}
+
+impl Predict for FittedKnnTs {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let a = x.row(i);
+            let mut best = Vec::new();
+            for t in 0..self.x_train.nrows() {
+                let b = self.x_train.row(t);
+                let d = match dtw(&a, &b, &session.child("dtw")) {
+                    Ok(q) => q.value,
+                    Err(_) => f64::INFINITY,
+                };
+                best.push((d, self.y_train[t]));
+            }
+            best.sort_by(|u, v| u.0.partial_cmp(&v.0).unwrap_or(std::cmp::Ordering::Equal));
+            let take = self.k.min(best.len());
+            let mut votes: std::collections::BTreeMap<i64, usize> =
+                std::collections::BTreeMap::new();
+            for item in best.iter().take(take) {
+                *votes.entry(item.1.round() as i64).or_insert(0) += 1;
+            }
+            votes
+                .iter()
+                .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(k, _)| *k as f64)
+                .unwrap_or(0.0)
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// Interval-feature forest regressor (sktime `TimeSeriesForestRegressor`).
+#[derive(Clone, Debug)]
+pub struct TimeSeriesForestRegressor {
+    /// Number of trees.
+    pub n_estimators: usize,
+    /// Random intervals per tree.
+    pub n_intervals: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for TimeSeriesForestRegressor {
+    fn default() -> Self {
+        Self {
+            n_estimators: 10,
+            n_intervals: 4,
+            max_depth: 6,
+            seed: 3,
+        }
+    }
+}
+
+impl TimeSeriesForestRegressor {
+    /// Default interval forest regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted interval forest regressor.
+#[derive(Clone, Debug)]
+pub struct FittedTimeSeriesForestReg {
+    trees: Vec<crate::tree::FittedTreeRegressor>,
+    intervals: Vec<Vec<Interval>>,
+}
+
+impl Fit for TimeSeriesForestRegressor {
+    type Fitted = FittedTimeSeriesForestReg;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedTimeSeriesForestReg>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if x.ncols() < 3 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!(
+                        "TimeSeriesForestRegressor series length {} < 3",
+                        x.ncols()
+                    ))
+                    .build(),
+            );
+        }
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        let mut intervals = Vec::new();
+        let tlen = x.ncols().max(1);
+        for e in 0..self.n_estimators.max(1) {
+            let mut iv = Vec::new();
+            for _ in 0..self.n_intervals.max(1) {
+                let a = rng.below(tlen);
+                let span = 1 + rng.below(tlen);
+                let b = (a + span).min(tlen);
+                iv.push(Interval {
+                    start: a,
+                    end: b.max(a + 1),
+                });
+            }
+            let feat = interval_feats(x, &iv);
+            let mut tree = crate::tree::DecisionTreeRegressor {
+                max_depth: self.max_depth,
+                seed: rng.next_u64(),
+                ..crate::tree::DecisionTreeRegressor::default()
+            };
+            match tree.fit(&feat, y, &session.child("tsfr_tree")) {
+                Ok(q) => {
+                    trees.push(q.value);
+                    intervals.push(iv);
+                }
+                Err(err) => {
+                    for issue in err.report.issues() {
+                        ctx.push(issue.clone());
+                    }
+                }
+            }
+            ctx.session.step(e as u64, 0.0, None);
+        }
+        if trees.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("every TimeSeriesForestRegressor tree failed to fit")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedTimeSeriesForestReg { trees, intervals })
+    }
+}
+
+impl Predict for FittedTimeSeriesForestReg {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let mut acc = Vector::zeros(x.nrows());
+        let mut k = 0.0;
+        for (tree, iv) in self.trees.iter().zip(&self.intervals) {
+            let feat = interval_feats(x, iv);
+            if let Ok(q) = tree.predict(&feat, &session.child("tsfr_pred")) {
+                for i in 0..x.nrows() {
+                    acc[i] += q.value[i];
+                }
+                k += 1.0;
+            }
+        }
+        if k > 0.0 {
+            acc = acc.scale(1.0 / k);
+        }
+        ctx.finish(acc)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1148,5 +1426,49 @@ mod tests {
             }
         }
         assert!(ok >= 5, "tsf ok={ok}");
+        let knn = KNeighborsTimeSeries::new(1)
+            .fit(&x, &y, &Session::new("ts", "knn"))
+            .unwrap();
+        let pred = knn
+            .value
+            .predict(&x, &Session::new("ts", "knnp"))
+            .unwrap()
+            .value;
+        let mut ok = 0;
+        for i in 0..8 {
+            if (pred[i] - y[i]).abs() < 0.5 {
+                ok += 1;
+            }
+        }
+        assert!(ok >= 6, "knn ok={ok}");
+        let rc = RocketClassifier {
+            n_kernels: 16,
+            kernel_len: 5,
+            alpha: 0.5,
+            seed: 2,
+        }
+        .fit(&x, &y, &Session::new("ts", "rocketc"))
+        .unwrap();
+        let pred = rc
+            .value
+            .predict(&x, &Session::new("ts", "rp"))
+            .unwrap()
+            .value;
+        assert_eq!(pred.len(), 8);
+        let yr = Vector::from_iter((0..8).map(|i| x.row(i).mean()));
+        let tsfr = TimeSeriesForestRegressor {
+            n_estimators: 6,
+            n_intervals: 3,
+            max_depth: 3,
+            seed: 2,
+        }
+        .fit(&x, &yr, &Session::new("ts", "tsfr"))
+        .unwrap();
+        let pred = tsfr
+            .value
+            .predict(&x, &Session::new("ts", "tsfrp"))
+            .unwrap()
+            .value;
+        assert!(pred.as_slice().iter().all(|v| v.is_finite()));
     }
 }

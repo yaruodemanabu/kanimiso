@@ -668,6 +668,182 @@ pub fn smape(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qual
     ctx.finish(if k > 0.0 { s / k } else { f64::NAN })
 }
 
+/// Brier score \(\mathrm{mean}(p-y)^2\) for binary probabilities.
+pub fn brier(y_true: &Vector, p: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, p, "brier") {
+        return ctx.finish(f64::NAN);
+    }
+    warn_constant_target(&mut ctx, y_true, true);
+    let mut s = 0.0;
+    let mut n = 0.0;
+    for i in 0..y_true.len() {
+        if !y_true[i].is_finite() || !p[i].is_finite() {
+            continue;
+        }
+        let e = p[i] - y_true[i];
+        s += e * e;
+        n += 1.0;
+    }
+    ctx.finish(if n > 0.0 { s / n } else { f64::NAN })
+}
+
+/// Average precision (binary PR-AUC via the step-function interpolation).
+pub fn average_precision(
+    y_true: &Vector,
+    scores: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, scores, "average_precision") {
+        return ctx.finish(f64::NAN);
+    }
+    warn_constant_target(&mut ctx, y_true, true);
+    let mut pairs: Vec<(f64, f64)> = y_true
+        .as_slice()
+        .iter()
+        .zip(scores.as_slice())
+        .filter(|(y, s)| y.is_finite() && s.is_finite())
+        .map(|(y, s)| (*s, *y))
+        .collect();
+    pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let n_pos = pairs.iter().filter(|(_, y)| *y >= 0.5).count() as f64;
+    if n_pos <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyClass)
+                .message("average_precision has no positive labels")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let mut tp = 0.0;
+    let mut fp = 0.0;
+    let mut ap = 0.0;
+    let mut prev_rec = 0.0;
+    for (_, y) in pairs {
+        if y >= 0.5 {
+            tp += 1.0;
+        } else {
+            fp += 1.0;
+        }
+        let rec = tp / n_pos;
+        let prec = tp / (tp + fp).max(1e-15);
+        ap += (rec - prev_rec) * prec;
+        prev_rec = rec;
+    }
+    ctx.finish(ap)
+}
+
+/// Explained variance \(1 - \mathrm{Var}(y-\hat y)/\mathrm{Var}(y)\).
+pub fn explained_variance(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "explained_variance") {
+        return ctx.finish(f64::NAN);
+    }
+    warn_constant_target(&mut ctx, y_true, false);
+    let (sst, _) = sst_of(y_true);
+    if sst <= ctx.policy.r2_zero_tol {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("SST≈0; explained variance is undefined")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "explained variance",
+                    "a constant target makes Var(y)=0",
+                    "do not report explained_variance",
+                ))
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let resid = Vector::from_iter(
+        y_true
+            .as_slice()
+            .iter()
+            .zip(y_pred.as_slice())
+            .map(|(a, b)| a - b),
+    );
+    let (ssr, _) = sst_of(&resid);
+    ctx.finish(1.0 - ssr / sst)
+}
+
+/// Hamming loss (fraction of labels that differ after rounding).
+pub fn hamming(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "hamming") {
+        return ctx.finish(f64::NAN);
+    }
+    warn_constant_target(&mut ctx, y_true, true);
+    let mut bad = 0.0;
+    let mut n = 0.0;
+    for i in 0..y_true.len() {
+        if !y_true[i].is_finite() || !y_pred[i].is_finite() {
+            continue;
+        }
+        if y_true[i].round() != y_pred[i].round() {
+            bad += 1.0;
+        }
+        n += 1.0;
+    }
+    ctx.finish(if n > 0.0 { bad / n } else { f64::NAN })
+}
+
+/// Discrete mutual information of rounded labels (nats).
+pub fn mutual_info(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !scan_pair(&mut ctx, y_true, y_pred, "mutual_info") {
+        return ctx.finish(f64::NAN);
+    }
+    let _ = inspect_classes(&mut ctx.report, y_true, &ctx.policy);
+    let mut joint: Vec<((i64, i64), f64)> = Vec::new();
+    let mut py: Vec<(i64, f64)> = Vec::new();
+    let mut pz: Vec<(i64, f64)> = Vec::new();
+    let mut n = 0.0;
+    for i in 0..y_true.len() {
+        if !y_true[i].is_finite() || !y_pred[i].is_finite() {
+            continue;
+        }
+        let a = y_true[i].round() as i64;
+        let b = y_pred[i].round() as i64;
+        bump(&mut joint, (a, b));
+        bump(&mut py, a);
+        bump(&mut pz, b);
+        n += 1.0;
+    }
+    if n <= 0.0 {
+        return ctx.finish(f64::NAN);
+    }
+    let mut mi = 0.0;
+    for ((a, b), c) in &joint {
+        let pab = *c / n;
+        let pa = py
+            .iter()
+            .find(|(k, _)| *k == *a)
+            .map(|(_, v)| *v / n)
+            .unwrap_or(0.0);
+        let pb = pz
+            .iter()
+            .find(|(k, _)| *k == *b)
+            .map(|(_, v)| *v / n)
+            .unwrap_or(0.0);
+        if pab > 0.0 && pa > 0.0 && pb > 0.0 {
+            mi += pab * (pab / (pa * pb)).ln();
+        }
+    }
+    ctx.finish(mi)
+}
+
+fn bump<K: PartialEq>(xs: &mut Vec<(K, f64)>, key: K) {
+    if let Some(e) = xs.iter_mut().find(|(k, _)| *k == key) {
+        e.1 += 1.0;
+    } else {
+        xs.push((key, 1.0));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,5 +960,25 @@ mod tests {
         assert!(mae(&y2, &h2, &Session::new("m", "mae")).unwrap().value > 0.0);
         assert!(mape(&y2, &h2, &Session::new("m", "mape")).unwrap().value > 0.0);
         assert!(medae(&y2, &h2, &Session::new("m", "med")).unwrap().value >= 0.0);
+        let br = brier(&y, &p, &Session::new("m", "brier")).unwrap().value;
+        assert!(br > 0.0 && br < 0.1);
+        let ap = average_precision(&y, &p, &Session::new("m", "ap"))
+            .unwrap()
+            .value;
+        assert!(ap > 0.8);
+        let ev = explained_variance(&y2, &h2, &Session::new("m", "ev"))
+            .unwrap()
+            .value;
+        assert!(ev.is_finite());
+        let ham = hamming(
+            &y,
+            &Vector::from_slice(&[0.0, 1.0, 1.0, 0.0]),
+            &Session::new("m", "ham"),
+        )
+        .unwrap()
+        .value;
+        assert!(ham.abs() < 1e-12);
+        let mi = mutual_info(&y, &y, &Session::new("m", "mi")).unwrap().value;
+        assert!(mi > 0.0);
     }
 }

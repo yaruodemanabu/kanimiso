@@ -134,6 +134,25 @@ fn unit_weights(n: usize) -> Vec<f64> {
     vec![1.0; n]
 }
 
+fn weighted_bootstrap(w: &[f64], rng: &mut Rng) -> Vec<usize> {
+    let n = w.len();
+    let mut cdf = vec![0.0; n];
+    let mut acc = 0.0;
+    for i in 0..n {
+        acc += w[i].max(0.0);
+        cdf[i] = acc;
+    }
+    if acc <= 0.0 || n == 0 {
+        return (0..n).collect();
+    }
+    (0..n)
+        .map(|_| {
+            let u = rng.uniform() * acc;
+            cdf.iter().position(|&c| c >= u).unwrap_or(n - 1)
+        })
+        .collect()
+}
+
 /// Classification tree node.
 #[derive(Clone, Debug)]
 enum ClassNode {
@@ -2004,6 +2023,197 @@ impl Fit for AdaBoostClassifier {
     }
 }
 
+/// AdaBoost.R2 regressor (Drucker 1997).
+#[derive(Clone, Debug)]
+pub struct AdaBoostRegressor {
+    /// Number of weak learners.
+    pub n_estimators: usize,
+    /// Shrinkage on \(\ln(1/\beta)\).
+    pub learning_rate: f64,
+    /// Weak-learner depth.
+    pub max_depth: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for AdaBoostRegressor {
+    fn default() -> Self {
+        Self {
+            n_estimators: 30,
+            learning_rate: 1.0,
+            max_depth: 3,
+            seed: 0,
+        }
+    }
+}
+
+impl AdaBoostRegressor {
+    /// Default AdaBoost.R2.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted AdaBoost.R2 model.
+#[derive(Clone, Debug)]
+pub struct FittedAdaBoostRegressor {
+    trees: Vec<RegNode>,
+    /// Stage weights \(\ln(1/\beta_m)\).
+    pub alphas: Vec<f64>,
+    /// Training feature count.
+    pub n_features: usize,
+}
+
+impl FittedAdaBoostRegressor {
+    fn predict_vec(&self, x: &Matrix) -> Vector {
+        Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut pairs: Vec<(f64, f64)> = self
+                .trees
+                .iter()
+                .zip(&self.alphas)
+                .map(|(t, a)| (predict_reg_one(t, x, i), *a))
+                .collect();
+            if pairs.is_empty() {
+                return 0.0;
+            }
+            pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let tot: f64 = pairs.iter().map(|(_, a)| *a).sum();
+            let mut acc = 0.0;
+            for (v, a) in pairs {
+                acc += a;
+                if acc >= 0.5 * tot {
+                    return v;
+                }
+            }
+            0.0
+        }))
+    }
+}
+
+impl Predict for FittedAdaBoostRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        predict_shape_guard(&mut ctx, x, self.n_features);
+        ctx.finish(self.predict_vec(x))
+    }
+}
+
+impl Fit for AdaBoostRegressor {
+    type Fitted = FittedAdaBoostRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedAdaBoostRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let n = x.nrows();
+        if n == 0 || ctx.report.contains(IssueCode::ConstantTarget) {
+            return ctx.finish(FittedAdaBoostRegressor {
+                trees: Vec::new(),
+                alphas: Vec::new(),
+                n_features: x.ncols(),
+            });
+        }
+        let ys = y.as_slice().to_vec();
+        let mut w = vec![1.0 / n as f64; n];
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        let mut alphas = Vec::new();
+        for m in 0..self.n_estimators.max(1) {
+            let mut trng = Rng::new(rng.next_u64());
+            let sample = weighted_bootstrap(&w, &mut trng);
+            let unit = vec![1.0; n];
+            let tree = grow_reg(
+                x,
+                &ys,
+                &sample,
+                &unit,
+                0,
+                self.max_depth,
+                2,
+                None,
+                false,
+                &mut trng,
+                ctx.policy.near_zero_variance,
+            );
+            let pred = predict_reg_vec(&tree, x);
+            let mut max_e = 0.0;
+            let mut err = vec![0.0; n];
+            for i in 0..n {
+                err[i] = (ys[i] - pred[i]).abs();
+                if err[i] > max_e {
+                    max_e = err[i];
+                }
+            }
+            if max_e <= ctx.policy.near_zero_variance {
+                ctx.session.step(m as u64, 0.0, Some(f64::INFINITY));
+                trees.push(tree);
+                alphas.push(1.0);
+                break;
+            }
+            let mut lbar = 0.0;
+            for i in 0..n {
+                lbar += w[i] * (err[i] / max_e);
+            }
+            if lbar >= 0.5 {
+                if trees.is_empty() {
+                    ctx.push(
+                        Issue::builder(IssueCode::MeaninglessFit)
+                            .message(format!(
+                                "AdaBoost.R2 stage {m} has weighted loss {lbar:.4} ≥ 1/2; β is undefined"
+                            ))
+                            .meaninglessness(Meaninglessness::vacuous(
+                                "AdaBoost.R2 stage weight",
+                                "the weak learner is not better than the median-absolute-error null",
+                                "use deeper trees or a smoother target",
+                            ))
+                            .build(),
+                    );
+                } else {
+                    ctx.push(
+                        Issue::builder(IssueCode::DidNotConverge)
+                            .message(format!(
+                                "AdaBoost.R2 stopped at stage {m}: weighted loss {lbar:.4} ≥ 1/2"
+                            ))
+                            .build(),
+                    );
+                }
+                break;
+            }
+            let beta = (lbar / (1.0 - lbar).max(1e-15)).max(1e-12);
+            let alpha = self.learning_rate * (1.0 / beta).ln();
+            for i in 0..n {
+                w[i] *= beta.powf(1.0 - err[i] / max_e);
+            }
+            let z: f64 = w.iter().sum::<f64>().max(1e-15);
+            for wi in &mut w {
+                *wi /= z;
+            }
+            ctx.session.step(m as u64, lbar, Some(alpha));
+            trees.push(tree);
+            alphas.push(alpha);
+        }
+        if trees.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("AdaBoost.R2 produced no usable weak learners")
+                    .build(),
+            );
+        }
+        let fitted = FittedAdaBoostRegressor {
+            trees,
+            alphas,
+            n_features: x.ncols(),
+        };
+        let pred = fitted.predict_vec(x);
+        diagnose_constant_predictions(&mut ctx, &pred, y);
+        ctx.finish(fitted)
+    }
+}
+
 /// Isolation Forest (Liu, Ting, Zhou): random-split path-length anomaly scores.
 ///
 /// The later `anomaly` module reuses [`FittedIsolationForest`] scores.
@@ -2347,6 +2557,34 @@ mod tests {
         }
         assert!(
             sse / (y.len() as f64) < 0.5,
+            "mse={}",
+            sse / (y.len() as f64)
+        );
+    }
+
+    #[test]
+    fn adaboost_r2_fits_a_line() {
+        let x = Matrix::from_fn(16, 1, |i, _| i as f64);
+        let y = Vector::from_iter((0..16).map(|i| 0.4 * i as f64 + 0.1 * ((i % 3) as f64)));
+        let q = AdaBoostRegressor {
+            n_estimators: 25,
+            max_depth: 4,
+            ..AdaBoostRegressor::default()
+        }
+        .fit(&x, &y, &Session::new("abr", "fit"))
+        .expect("abr");
+        let pred = q
+            .value
+            .predict(&x, &Session::new("abr", "p"))
+            .unwrap()
+            .value;
+        let mut sse = 0.0;
+        for i in 0..y.len() {
+            let e = pred[i] - y[i];
+            sse += e * e;
+        }
+        assert!(
+            sse / (y.len() as f64) < 1.0,
             "mse={}",
             sse / (y.len() as f64)
         );

@@ -12,17 +12,18 @@ use crate::validate::{inspect_classes, inspect_xy};
 use ojizou_san::Session;
 use signlred::{Issue, IssueCode, Qualified, Result};
 
+pub use crate::glm::{FittedGlm, ProbitRegression, SgdClassifier, SgdLoss};
 pub use crate::histgb::{FittedHistGbc, HistGradientBoostingClassifier};
 pub use crate::linear_model::{FittedLogistic, LogisticRegression};
 pub use crate::naive_bayes::{
-    BernoulliNB, ComplementNB, FittedBernoulliNB, FittedDiscreteNB, FittedGaussianNB, GaussianNB,
-    MultinomialNB,
+    BernoulliNB, CategoricalNB, ComplementNB, FittedBernoulliNB, FittedCategoricalNB,
+    FittedDiscreteNB, FittedGaussianNB, GaussianNB, MultinomialNB,
 };
 pub use crate::svm::{FittedLinearSvc, FittedSvc, LinearSvc, Svc};
 pub use crate::tree::{
-    AdaBoostClassifier, DecisionTreeClassifier, ExtraTreesClassifier, FittedAdaBoost,
-    FittedForestClassifier, FittedGbc, FittedTreeClassifier, GradientBoostingClassifier,
-    RandomForestClassifier,
+    AdaBoostClassifier, AdaBoostRegressor, DecisionTreeClassifier, ExtraTreesClassifier,
+    FittedAdaBoost, FittedAdaBoostRegressor, FittedForestClassifier, FittedGbc,
+    FittedTreeClassifier, GradientBoostingClassifier, RandomForestClassifier,
 };
 
 fn labels_of(y: &Vector) -> Vec<i64> {
