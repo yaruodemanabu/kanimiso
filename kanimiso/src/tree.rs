@@ -1455,6 +1455,59 @@ impl Fit for ExtraTreesRegressor {
     }
 }
 
+/// Single extremely randomized MSE tree (sklearn `ExtraTreeRegressor`).
+///
+/// This is [`ExtraTreesRegressor`] with one tree. Feature subsample size is
+/// not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ExtraTreeRegressor {
+    /// Maximum tree depth.
+    pub max_depth: usize,
+    /// Minimum samples required to attempt a split.
+    pub min_samples_split: usize,
+    /// Feature subsample size (`None` ⇒ all features).
+    pub max_features: Option<usize>,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for ExtraTreeRegressor {
+    fn default() -> Self {
+        Self {
+            max_depth: 8,
+            min_samples_split: 2,
+            max_features: None,
+            seed: 0,
+        }
+    }
+}
+
+impl ExtraTreeRegressor {
+    /// Default single extra-tree regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for ExtraTreeRegressor {
+    type Fitted = FittedForestRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedForestRegressor>> {
+        ExtraTreesRegressor {
+            n_estimators: 1,
+            max_depth: self.max_depth,
+            min_samples_split: self.min_samples_split,
+            max_features: self.max_features,
+            seed: self.seed,
+        }
+        .fit(x, y, session)
+    }
+}
+
 /// Friedman gradient boosting for squared error.
 #[derive(Clone, Debug)]
 pub struct GradientBoostingRegressor {
@@ -2611,6 +2664,18 @@ mod tests {
         }
         .fit(&x, &y, &Session::new("gbr", "fit"))
         .expect("gbr");
+        let etr = ExtraTreeRegressor {
+            seed: 3,
+            ..ExtraTreeRegressor::default()
+        }
+        .fit(&x, &y, &Session::new("etr", "fit"))
+        .expect("etr");
+        let etp = etr
+            .value
+            .predict(&x, &Session::new("etr", "predict"))
+            .unwrap()
+            .value;
+        assert_eq!(etp.len(), y.len());
         let pred = q
             .value
             .predict(&x, &Session::new("gbr", "predict"))

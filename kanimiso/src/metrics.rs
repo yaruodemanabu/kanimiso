@@ -1777,6 +1777,57 @@ pub fn precision_recall_fscore_support(
     precision_recall_f1(y_true, y_pred, session)
 }
 
+/// Alias of the binary/macro F1 in [`precision_recall_f1`] (sklearn `f1_score`).
+pub fn f1_score(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    Ok(precision_recall_f1(y_true, y_pred, session)?.map(|v| v.f1))
+}
+
+/// Alias of the binary/macro precision in [`precision_recall_f1`] (sklearn `precision_score`).
+pub fn precision_score(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    Ok(precision_recall_f1(y_true, y_pred, session)?.map(|v| v.precision))
+}
+
+/// Alias of the binary/macro recall in [`precision_recall_f1`] (sklearn `recall_score`).
+pub fn recall_score(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    Ok(precision_recall_f1(y_true, y_pred, session)?.map(|v| v.recall))
+}
+
+/// Alias of [`roc_auc`] (sklearn `auc` on an ROC curve).
+pub fn auc(y_true: &Vector, scores: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    roc_auc(y_true, scores, session)
+}
+
+/// Alias of [`average_precision`] (sklearn `average_precision_score`).
+pub fn average_precision_score(
+    y_true: &Vector,
+    scores: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    average_precision(y_true, scores, session)
+}
+
+/// Alias of [`explained_variance`] (sklearn `explained_variance_score`).
+pub fn explained_variance_score(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    explained_variance(y_true, y_pred, session)
+}
+
+/// Alias of [`adjusted_rand`] (sklearn `adjusted_rand_score`).
+pub fn adjusted_rand_score(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    adjusted_rand(y_true, y_pred, session)
+}
+
 /// Nearest neighbour plus its Euclidean distance (sklearn `pairwise_distances_argmin_min`).
 ///
 /// Columns are `(index, distance)`. Neighbor count is not identification `p`.
@@ -4742,5 +4793,43 @@ mod tests {
             .unwrap()
             .value;
         assert!(peu[1].abs() < 1e-12);
+        let f1s = f1_score(
+            &y,
+            &Vector::from_slice(&[0.0, 1.0, 1.0, 0.0]),
+            &Session::new("m", "f1s"),
+        )
+        .unwrap()
+        .value;
+        assert!((f1s - 1.0).abs() < 1e-12);
+        let ps = precision_score(
+            &y,
+            &Vector::from_slice(&[0.0, 1.0, 1.0, 0.0]),
+            &Session::new("m", "ps"),
+        )
+        .unwrap()
+        .value;
+        assert!((ps - 1.0).abs() < 1e-12);
+        let rs = recall_score(
+            &y,
+            &Vector::from_slice(&[0.0, 1.0, 1.0, 0.0]),
+            &Session::new("m", "rs"),
+        )
+        .unwrap()
+        .value;
+        assert!((rs - 1.0).abs() < 1e-12);
+        let au = auc(&y, &p, &Session::new("m", "auc")).unwrap().value;
+        assert!(au > 0.8);
+        let aps = average_precision_score(&y, &p, &Session::new("m", "aps"))
+            .unwrap()
+            .value;
+        assert!(aps > 0.8);
+        let evs = explained_variance_score(&y2, &h2, &Session::new("m", "evs"))
+            .unwrap()
+            .value;
+        assert!(evs.is_finite());
+        let ars = adjusted_rand_score(&y, &y, &Session::new("m", "ars"))
+            .unwrap()
+            .value;
+        assert!((ars - 1.0).abs() < 1e-12);
     }
 }

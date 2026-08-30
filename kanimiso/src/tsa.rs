@@ -23,6 +23,76 @@ use signlred::{
     Report, Result, Severity,
 };
 
+/// Relative forecast steps (sktime `ForecastingHorizon`).
+///
+/// Horizon length is not identification `p`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForecastingHorizon {
+    /// 1-based relative steps.
+    pub steps: Vec<usize>,
+}
+
+impl ForecastingHorizon {
+    /// Steps `1, …, h`.
+    pub fn relative(h: usize) -> Self {
+        let n = h.max(1);
+        Self {
+            steps: (1..=n).collect(),
+        }
+    }
+
+    /// Number of forecast steps.
+    pub fn len(&self) -> usize {
+        self.steps.len()
+    }
+
+    /// Whether the horizon is empty.
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+}
+
+/// Causal train/test cut of a series (sktime `temporal_train_test_split`).
+///
+/// Split sizes are not identification `p`.
+pub fn temporal_train_test_split(
+    y: &Vector,
+    test_size: f64,
+    session: &Session,
+) -> Result<Qualified<(Vector, Vector)>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let n = y.len();
+    if n < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("temporal_train_test_split needs at least two observations")
+                .build(),
+        );
+        return ctx.finish((y.clone(), Vector::zeros(0)));
+    }
+    let frac = if test_size.is_finite() && test_size > 0.0 && test_size < 1.0 {
+        test_size
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "temporal_train_test_split test_size={test_size}; using 0.25"
+                ))
+                .build(),
+        );
+        0.25
+    };
+    let mut n_test = (n as f64 * frac).round() as usize;
+    n_test = n_test.clamp(1, n - 1);
+    let n_train = n - n_test;
+    let train = Vector::from_iter((0..n_train).map(|i| y[i]));
+    let test = Vector::from_iter((n_train..n).map(|i| y[i]));
+    ctx.finish((train, test))
+}
+
 /// Sample autocorrelation `ρ_0, …, ρ_{nlags}` (biased, mean-corrected).
 pub fn acf(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
@@ -8007,6 +8077,11 @@ mod tests {
         let q = m.fit_series(&y, &session).expect("naive fit");
         let f = q.value.forecast(3, &session).expect("naive forecast");
         assert_eq!(f.value.as_slice(), &[4.0, 4.0, 4.0]);
+        let fh = ForecastingHorizon::relative(3);
+        assert_eq!(fh.len(), 3);
+        let split = temporal_train_test_split(&y, 0.25, &Session::new("tts", "t")).expect("tts");
+        assert_eq!(split.value.0.len() + split.value.1.len(), y.len());
+        assert!(!split.value.1.is_empty());
     }
 
     #[test]

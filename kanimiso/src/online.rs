@@ -16564,6 +16564,341 @@ impl Predict for NormReco {
     }
 }
 
+/// Nadam linear regressor (river `optim.Nadam`).
+///
+/// Nesterov look-ahead on the Adam first moment.
+#[derive(Clone, Debug)]
+pub struct NadamRegressor {
+    /// Step \(\eta\).
+    pub learning_rate: f64,
+    /// First-moment decay.
+    pub beta1: f64,
+    /// Second-moment decay.
+    pub beta2: f64,
+    /// Diagonal floor.
+    pub eps: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    m: Vector,
+    v: Vector,
+    t: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for NadamRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            m: Vector::zeros(0),
+            v: Vector::zeros(0),
+            t: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl NadamRegressor {
+    /// Default Nadam regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for NadamRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.m = Vector::zeros(dim);
+            self.v = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message("NadamRegressor feature dim changed")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.coef.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let b1 = self.beta1.clamp(0.0, 0.999);
+        let b2 = self.beta2.clamp(0.0, 0.999);
+        let eps = if self.eps.is_finite() && self.eps > 0.0 {
+            self.eps
+        } else {
+            1e-8
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            self.t += 1.0;
+            let corr1 = 1.0 - b1.powf(self.t);
+            let corr2 = 1.0 - b2.powf(self.t);
+            for j in 0..dim {
+                let g = err * z[j];
+                self.m[j] = b1 * self.m[j] + (1.0 - b1) * g;
+                self.v[j] = b2 * self.v[j] + (1.0 - b2) * g * g;
+                let mhat = self.m[j] / corr1.max(1e-18);
+                let vhat = self.v[j] / corr2.max(1e-18);
+                let nest = b1 * mhat + (1.0 - b1) * g / corr1.max(1e-18);
+                self.coef[j] -= eta * nest / (vhat.sqrt() + eps);
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "Nadam linear weights",
+            "Nesterov look-ahead on the bias-corrected Adam first moment",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+/// AdamW linear regressor (river `optim.Adam` with decoupled weight decay).
+#[derive(Clone, Debug)]
+pub struct AdamWRegressor {
+    /// Step \(\eta\).
+    pub learning_rate: f64,
+    /// Decoupled L2 decay.
+    pub weight_decay: f64,
+    /// First-moment decay.
+    pub beta1: f64,
+    /// Second-moment decay.
+    pub beta2: f64,
+    /// Diagonal floor.
+    pub eps: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    m: Vector,
+    v: Vector,
+    t: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for AdamWRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            weight_decay: 1e-4,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            m: Vector::zeros(0),
+            v: Vector::zeros(0),
+            t: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl AdamWRegressor {
+    /// Default AdamW regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for AdamWRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.m = Vector::zeros(0);
+            self.v = Vector::zeros(0);
+            self.m = Vector::zeros(dim);
+            self.v = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message("AdamWRegressor feature dim changed")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.coef.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let wd = if self.weight_decay.is_finite() && self.weight_decay >= 0.0 {
+            self.weight_decay
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "AdamW weight_decay={} is invalid; using 0",
+                        self.weight_decay
+                    ))
+                    .build(),
+            );
+            0.0
+        };
+        let b1 = self.beta1.clamp(0.0, 0.999);
+        let b2 = self.beta2.clamp(0.0, 0.999);
+        let eps = if self.eps.is_finite() && self.eps > 0.0 {
+            self.eps
+        } else {
+            1e-8
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            self.t += 1.0;
+            let corr1 = 1.0 - b1.powf(self.t);
+            let corr2 = 1.0 - b2.powf(self.t);
+            for j in 0..dim {
+                let g = err * z[j];
+                self.m[j] = b1 * self.m[j] + (1.0 - b1) * g;
+                self.v[j] = b2 * self.v[j] + (1.0 - b2) * g * g;
+                let mhat = self.m[j] / corr1.max(1e-18);
+                let vhat = self.v[j] / corr2.max(1e-18);
+                self.coef[j] -= eta * mhat / (vhat.sqrt() + eps);
+                if j > 0 || !self.fit_intercept {
+                    self.coef[j] *= 1.0 - eta * wd;
+                }
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "AdamW linear weights",
+            "Adam step plus decoupled weight decay (intercept is not decayed)",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
 impl Predict for AdaBoundRegressor {
     type Output = Vector;
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
@@ -17021,6 +17356,12 @@ mod tests {
         NormReco::new()
             .partial_fit(&xui, Some(&y), &session)
             .expect("normreco");
+        NadamRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("nadam");
+        AdamWRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("adamw");
 
         let n_expl = session
             .ledger()

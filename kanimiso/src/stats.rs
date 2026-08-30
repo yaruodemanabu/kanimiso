@@ -1597,6 +1597,24 @@ pub fn het_white(
     })
 }
 
+/// Alias of [`breusch_pagan`] (statsmodels `het_breuschpagan`).
+pub fn het_breuschpagan(
+    resid: &Vector,
+    design: &Matrix,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    breusch_pagan(resid, design, session)
+}
+
+/// Alias of [`ljung_box`] (statsmodels `acorr_ljungbox`).
+pub fn acorr_ljungbox(
+    x: &Vector,
+    lags: usize,
+    session: &Session,
+) -> Result<Qualified<LjungBoxResult>> {
+    ljung_box(x, lags, session)
+}
+
 /// Ljung–Box `Q` test on the first `lags` autocorrelations of `x`.
 pub fn ljung_box(x: &Vector, lags: usize, session: &Session) -> Result<Qualified<LjungBoxResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
@@ -8874,5 +8892,9 @@ mod tests {
         assert_eq!(mi.value.len(), 2);
         assert!(mi.value[0].get(2, 1).is_finite());
         assert!(mi.value[1].get(5, 0).is_finite());
+        let hbp = het_breuschpagan(&e, &design, &Session::new("hbp", "t")).expect("hbp");
+        assert!(hbp.value.statistic.is_finite() || hbp.value.pvalue.is_nan());
+        let lbq = acorr_ljungbox(&e, 2, &Session::new("alb", "t")).expect("alb");
+        assert!(lbq.value.stat.is_finite() || lbq.value.pvalue.is_nan());
     }
 }

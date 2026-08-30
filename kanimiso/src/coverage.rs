@@ -3605,6 +3605,59 @@ const INVENTORY: &[Algorithm] = &[
     a("online.NormReco", "river.reco.Norm", "online"),
     a("bandit.Exp3", "river.bandit.Exp3", "online"),
     a("hmm.CategoricalHmm", "hmmlearn.hmm.CategoricalHMM", "hmm"),
+    a(
+        "tree.ExtraTreeRegressor",
+        "sklearn.tree.ExtraTreeRegressor",
+        "estimator",
+    ),
+    a("metrics.f1_score", "sklearn.metrics.f1_score", "metric"),
+    a(
+        "metrics.precision_score",
+        "sklearn.metrics.precision_score",
+        "metric",
+    ),
+    a("metrics.recall_score", "sklearn.metrics.recall_score", "metric"),
+    a("metrics.auc", "sklearn.metrics.auc", "metric"),
+    a(
+        "metrics.average_precision_score",
+        "sklearn.metrics.average_precision_score",
+        "metric",
+    ),
+    a(
+        "metrics.explained_variance_score",
+        "sklearn.metrics.explained_variance_score",
+        "metric",
+    ),
+    a(
+        "metrics.adjusted_rand_score",
+        "sklearn.metrics.adjusted_rand_score",
+        "metric",
+    ),
+    a(
+        "stats.het_breuschpagan",
+        "statsmodels.stats.diagnostic.het_breuschpagan",
+        "stats",
+    ),
+    a(
+        "stats.acorr_ljungbox",
+        "statsmodels.stats.diagnostic.acorr_ljungbox",
+        "stats",
+    ),
+    a("feature.RFE", "sklearn.feature_selection.RFE", "estimator"),
+    a("feature.RFECV", "sklearn.feature_selection.RFECV", "estimator"),
+    a(
+        "tsa.ForecastingHorizon",
+        "sktime.forecasting.base.ForecastingHorizon",
+        "forecast",
+    ),
+    a(
+        "tsa.temporal_train_test_split",
+        "sktime.forecasting.model_selection.temporal_train_test_split",
+        "forecast",
+    ),
+    a("online.NadamRegressor", "river.optim.Nadam", "online"),
+    a("online.AdamWRegressor", "river.optim.Adam", "online"),
+    a("bandit.BayesianUcb", "river.bandit.BayesUCB", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -3774,6 +3827,11 @@ mod tests {
             "tslearn.MlpTimeClassifier",
             "online.NewtonRegressor",
             "bandit.Exp3",
+            "metrics.f1_score",
+            "stats.het_breuschpagan",
+            "tsa.ForecastingHorizon",
+            "online.NadamRegressor",
+            "bandit.BayesianUcb",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

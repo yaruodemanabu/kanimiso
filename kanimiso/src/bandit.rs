@@ -1086,6 +1086,160 @@ impl PartialFit for Exp3 {
     }
 }
 
+/// Bayesian UCB on Bernoulli arms (river `bandit.BayesUCB`).
+///
+/// Each arm holds a `Beta(α, β)` posterior. The index is a Gaussian
+/// approximation to the posterior quantile. Arm count is not identification
+/// `p`.
+#[derive(Clone, Debug)]
+pub struct BayesianUcb {
+    n_arms: usize,
+    alpha: Vec<f64>,
+    beta: Vec<f64>,
+    updates: u64,
+    n_seen: u64,
+}
+
+impl BayesianUcb {
+    /// `k` arms, uniform Beta(1, 1) priors.
+    pub fn new(n_arms: usize) -> Self {
+        let k = n_arms.max(1);
+        Self {
+            n_arms: k,
+            alpha: vec![1.0; k],
+            beta: vec![1.0; k],
+            updates: 0,
+            n_seen: 0,
+        }
+    }
+
+    fn index(&self, arm: usize) -> f64 {
+        let a = self.alpha[arm].max(1e-8);
+        let b = self.beta[arm].max(1e-8);
+        let s = a + b;
+        let mu = a / s;
+        let var = a * b / (s * s * (s + 1.0));
+        let t = self.n_seen.max(1) as f64;
+        let z = (2.0 * t.ln()).sqrt().max(1.0);
+        mu + z * var.max(0.0).sqrt()
+    }
+
+    /// Choose the arm with the largest Bayesian UCB index.
+    pub fn pull(&mut self, session: &Session) -> Result<Qualified<(usize, IncrementalExplain)>> {
+        let mut ctx = FitCtx::with_session(session.child("pull"));
+        let mut arm = 0usize;
+        let mut best = f64::NEG_INFINITY;
+        let mut indexes = vec![0.0; self.n_arms];
+        for a in 0..self.n_arms {
+            if self.alpha[a] + self.beta[a] <= 2.0 + 1e-12 {
+                ctx.push(
+                    Issue::builder(IssueCode::WarmupIncomplete)
+                        .message(format!("BayesUCB arm {a} is still the prior"))
+                        .build(),
+                );
+            }
+            let idx = self.index(a);
+            indexes[a] = idx;
+            if idx > best {
+                best = idx;
+                arm = a;
+            }
+        }
+        let mut q = IncrementalQuality::new(self.updates, 1, self.n_seen);
+        q.warmup = self
+            .alpha
+            .iter()
+            .zip(&self.beta)
+            .any(|(&a, &b)| a + b <= 2.0 + 1e-12);
+        q.still_identified = !q.warmup;
+        q.explanation = format!("BayesUCB chose {arm} indexes={indexes:?}");
+        let expl = IncrementalExplain::from_quality(
+            q,
+            format!("pull arm {arm}"),
+            "argmax of a Gaussian approximation to the Beta posterior quantile",
+            format!("alpha={:?} beta={:?}", self.alpha, self.beta),
+            format!("ucb={indexes:?}"),
+        );
+        ctx.session.record_incremental(expl.clone());
+        ctx.finish((arm, expl))
+    }
+}
+
+impl PartialFit for BayesianUcb {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish(
+                &ctx,
+                reject(self.updates, 0, self.n_seen, "BayesUCB needs rewards"),
+            );
+        };
+        let before: Vec<f64> = (0..self.n_arms)
+            .map(|a| self.alpha[a] / (self.alpha[a] + self.beta[a]))
+            .collect();
+        let mut dsum = 0.0;
+        for i in 0..y.len() {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let arm = if x.ncols() == 0 || x.nrows() == 0 {
+                0
+            } else {
+                x.get(i.min(x.nrows() - 1), 0).round().abs() as usize
+            };
+            if arm >= self.n_arms {
+                ctx.push(
+                    Issue::builder(IssueCode::DimensionMismatch)
+                        .severity(Severity::Warning)
+                        .message(format!("BayesUCB arm {arm} is outside 0..{}", self.n_arms))
+                        .build(),
+                );
+                continue;
+            }
+            let r = if y[i] >= 0.5 { 1.0 } else { 0.0 };
+            self.alpha[arm] += r;
+            self.beta[arm] += 1.0 - r;
+            self.counts_bump();
+            dsum += 1.0;
+        }
+        let after: Vec<f64> = (0..self.n_arms)
+            .map(|a| self.alpha[a] / (self.alpha[a] + self.beta[a]))
+            .collect();
+        let identified = self
+            .alpha
+            .iter()
+            .zip(&self.beta)
+            .all(|(&a, &b)| a + b > 2.0 + 1e-12);
+        let expl = pack_bandit(
+            &mut ctx,
+            self.updates,
+            y.len(),
+            self.n_seen,
+            dsum,
+            identified,
+            !identified,
+            &before,
+            &after,
+            "BayesUCB Beta means",
+            "Bernoulli update of Beta(α,β); arm count is not p",
+        );
+        finish(&ctx, expl)
+    }
+}
+
+impl BayesianUcb {
+    fn counts_bump(&mut self) {
+        self.n_seen += 1;
+        self.updates += 1;
+    }
+}
+
 fn sample_beta(rng: &mut Rng, alpha: f64, beta: f64) -> f64 {
     // Gamma(k,1) ≈ sum of k exponentials for integer shape; otherwise Jöhnk.
     let x = sample_gamma(rng, alpha.max(1e-6));
@@ -1248,6 +1402,9 @@ mod tests {
         assert!(!q.value.narrative.is_empty());
         let mut exp3 = Exp3::new(2);
         let q = exp3.partial_fit(&x, Some(&y), &session).expect("exp3");
+        assert!(!q.value.narrative.is_empty());
+        let mut bu = BayesianUcb::new(2);
+        let q = bu.partial_fit(&x, Some(&y), &session).expect("bayesucb");
         assert!(!q.value.narrative.is_empty());
     }
 }

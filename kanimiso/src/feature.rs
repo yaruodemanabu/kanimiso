@@ -223,6 +223,9 @@ impl Default for Rfe {
     }
 }
 
+/// sklearn spelling of [`Rfe`].
+pub type RFE = Rfe;
+
 impl Rfe {
     /// Eliminate down to `n_features_to_select` columns.
     pub fn new(n_features_to_select: usize) -> Self {
@@ -430,6 +433,9 @@ pub struct RfeCv {
     n_features: usize,
     fitted: bool,
 }
+
+/// sklearn spelling of [`RfeCv`].
+pub type RFECV = RfeCv;
 
 impl Default for RfeCv {
     fn default() -> Self {
@@ -2764,6 +2770,10 @@ mod tests {
         let mut guni = GenericUnivariateSelect::new(UnivariateMode::KBest, 1.0);
         guni.fit(&x, &y, &Session::new("guni", "fit")).unwrap();
         assert!(guni.support().iter().any(|s| *s));
+        let mut rcv = RFECV::new(3);
+        rcv.fit(&x, &y, &Session::new("rfcv", "fit")).unwrap();
+        assert!(rcv.support().iter().any(|s| *s));
+        let _rfe = RFE::new(1);
         let zh = FeatureHasher::new(8)
             .transform(&xnn, &Session::new("fh", "t"))
             .unwrap()
