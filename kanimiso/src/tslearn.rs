@@ -2412,6 +2412,291 @@ pub fn dba(x: &Matrix, max_iter: usize, session: &Session) -> Result<Qualified<V
     dtw_barycenter(x, max_iter, session)
 }
 
+/// Euclidean barycentre (column means of the row-as-series matrix).
+pub fn euclidean_barycenter(x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    if x.nrows() == 0 || x.ncols() == 0 {
+        return ctx.finish(Vector::zeros(0));
+    }
+    ctx.finish(Vector::from_iter(
+        (0..x.ncols()).map(|j| x.column(j).mean()),
+    ))
+}
+
+/// LB_Keogh lower bound on DTW (tslearn `lb_keogh`).
+///
+/// Window width is not identification `p`.
+pub fn lb_keogh(
+    query: &Vector,
+    candidate: &Vector,
+    r: usize,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if query.is_empty() || candidate.is_empty() {
+        ctx.push(Issue::builder(IssueCode::EmptyMatrix).build());
+        return ctx.finish(f64::NAN);
+    }
+    if query.len() != candidate.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("lb_keogh requires equal-length series")
+                .build(),
+        );
+    }
+    let n = query.len().min(candidate.len());
+    let w = r.max(1);
+    let mut lb = 0.0;
+    for i in 0..n {
+        let a = i.saturating_sub(w);
+        let b = (i + w + 1).min(n);
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for t in a..b {
+            lo = lo.min(query[t]);
+            hi = hi.max(query[t]);
+        }
+        let c = candidate[i];
+        if c > hi {
+            let d = c - hi;
+            lb += d * d;
+        } else if c < lo {
+            let d = lo - c;
+            lb += d * d;
+        }
+    }
+    ctx.finish(lb)
+}
+
+/// Edit Distance with Real Penalty (tslearn `erp`).
+///
+/// The gap value `g` is not identification `p`.
+pub fn erp(a: &Vector, b: &Vector, g: f64, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if !g.is_finite() {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("erp gap g={g} is not finite; using 0"))
+                .build(),
+        );
+    }
+    let g = if g.is_finite() { g } else { 0.0 };
+    if a.is_empty() || b.is_empty() {
+        ctx.push(Issue::builder(IssueCode::EmptyMatrix).build());
+        return ctx.finish(f64::NAN);
+    }
+    let n = a.len();
+    let m = b.len();
+    let mut dp = vec![0.0; (n + 1) * (m + 1)];
+    let at = |i: usize, j: usize| i * (m + 1) + j;
+    for i in 1..=n {
+        dp[at(i, 0)] = dp[at(i - 1, 0)] + (a[i - 1] - g).abs();
+    }
+    for j in 1..=m {
+        dp[at(0, j)] = dp[at(0, j - 1)] + (b[j - 1] - g).abs();
+    }
+    for i in 1..=n {
+        for j in 1..=m {
+            let match_c = dp[at(i - 1, j - 1)] + (a[i - 1] - b[j - 1]).abs();
+            let del = dp[at(i - 1, j)] + (a[i - 1] - g).abs();
+            let ins = dp[at(i, j - 1)] + (b[j - 1] - g).abs();
+            dp[at(i, j)] = match_c.min(del).min(ins);
+        }
+    }
+    ctx.finish(dp[at(n, m)])
+}
+
+/// Linear resampler of each row to `n_out` samples (tslearn `TimeSeriesResampler`).
+#[derive(Clone, Debug)]
+pub struct TimeSeriesResampler {
+    /// Output length.
+    pub n_out: usize,
+}
+
+impl Default for TimeSeriesResampler {
+    fn default() -> Self {
+        Self { n_out: 8 }
+    }
+}
+
+impl TimeSeriesResampler {
+    /// Resample to `n_out` columns.
+    pub fn new(n_out: usize) -> Self {
+        Self {
+            n_out: n_out.max(1),
+        }
+    }
+}
+
+impl Transform for TimeSeriesResampler {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t = x.ncols();
+        let out_n = self.n_out.max(1);
+        if t == 0 {
+            return ctx.finish(Matrix::zeros(x.nrows(), out_n));
+        }
+        if t == 1 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message("TimeSeriesResampler on length-1 series repeats the sample")
+                    .build(),
+            );
+        }
+        let out = Matrix::from_fn(x.nrows(), out_n, |i, j| {
+            if out_n == 1 || t == 1 {
+                return x.get(i, 0);
+            }
+            let pos = j as f64 * (t - 1) as f64 / (out_n - 1) as f64;
+            let lo = pos.floor() as usize;
+            let hi = (lo + 1).min(t - 1);
+            let f = pos - lo as f64;
+            x.get(i, lo) * (1.0 - f) + x.get(i, hi) * f
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Catch22 + ridge classifier (sktime `Catch22Classifier`).
+///
+/// Feature count is not identification `p`; the ridge path is penalized.
+#[derive(Clone, Debug)]
+pub struct Catch22Classifier {
+    /// Ridge penalty.
+    pub alpha: f64,
+}
+
+impl Default for Catch22Classifier {
+    fn default() -> Self {
+        Self { alpha: 0.1 }
+    }
+}
+
+impl Catch22Classifier {
+    /// Catch22 classifier with ridge penalty `alpha`.
+    pub fn new(alpha: f64) -> Self {
+        Self { alpha }
+    }
+}
+
+/// Fitted Catch22 classifier.
+#[derive(Clone, Debug)]
+pub struct FittedCatch22Classifier {
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+fn catch22_rows(x: &Matrix, session: &Session, ctx: &mut FitCtx) -> Matrix {
+    let mut rows = Vec::with_capacity(x.nrows());
+    let mut width = 0usize;
+    for i in 0..x.nrows() {
+        let row = x.row(i);
+        match crate::feature::catch22(&row, &session.child(format!("c22_{i}"))) {
+            Ok(q) => {
+                width = q.value.len();
+                rows.push(q.value);
+            }
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                ) {
+                    ctx.push(e.primary);
+                }
+                rows.push(Vector::zeros(width.max(12)));
+                width = width.max(12);
+            }
+        }
+    }
+    let p = width.max(1);
+    Matrix::from_fn(x.nrows(), p, |i, j| {
+        if j < rows[i].len() {
+            rows[i][j]
+        } else {
+            0.0
+        }
+    })
+}
+
+impl Fit for Catch22Classifier {
+    type Fitted = FittedCatch22Classifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCatch22Classifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let z = catch22_rows(x, session, &mut ctx);
+        let classes: Vec<i64> = {
+            let mut c: Vec<i64> = y
+                .as_slice()
+                .iter()
+                .filter(|v| v.is_finite())
+                .map(|v| v.round() as i64)
+                .collect();
+            c.sort_unstable();
+            c.dedup();
+            c
+        };
+        let pm = Vector::from_iter(y.as_slice().iter().map(|&v| {
+            let lab = v.round() as i64;
+            if classes.len() >= 2 && lab == classes[classes.len() - 1] {
+                1.0
+            } else {
+                -1.0
+            }
+        }));
+        let mut scratch = signlred::Report::new("c22clf", "ridge");
+        let design = z.with_intercept();
+        let beta = ridge_solve(&mut scratch, &design, &pm, self.alpha.max(0.0), &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(design.ncols()));
+        ctx.finish(FittedCatch22Classifier {
+            inner: crate::classification::FittedRidgeClassifier::from_penalized(
+                FittedPenalized {
+                    coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                    intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+                    alpha: self.alpha,
+                    l1_ratio: 0.0,
+                },
+                if classes.len() >= 2 {
+                    classes
+                } else {
+                    vec![0, 1]
+                },
+            ),
+        })
+    }
+}
+
+impl Predict for FittedCatch22Classifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let z = catch22_rows(x, session, &mut ctx);
+        match self.inner.predict(&z, &session.child("ridge")) {
+            Ok(q) => ctx.finish(q.value),
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::RankZero
+                ) {
+                    ctx.push(e.primary);
+                }
+                ctx.finish(Vector::zeros(x.nrows()))
+            }
+        }
+    }
+}
+
 /// Per-series min–max scaler (tslearn `TimeSeriesScalerMinMax`).
 #[derive(Clone, Debug, Default)]
 pub struct TimeSeriesScalerMinMax;
@@ -3503,5 +3788,32 @@ mod tests {
         let bary = dba(&x, 8, &Session::new("ts", "dba")).unwrap().value;
         assert_eq!(bary.len(), x.ncols());
         assert!(bary.as_slice().iter().all(|v| v.is_finite()));
+        let euc = euclidean_barycenter(&x, &Session::new("ts", "euc"))
+            .unwrap()
+            .value;
+        assert_eq!(euc.len(), x.ncols());
+        let q0 = x.row(0);
+        let lb = lb_keogh(&q0, &q0, 2, &Session::new("ts", "lb"))
+            .unwrap()
+            .value;
+        assert!(lb.abs() < 1e-12);
+        let er = erp(&q0, &q0, 0.0, &Session::new("ts", "erp"))
+            .unwrap()
+            .value;
+        assert!(er.abs() < 1e-12);
+        let rs = TimeSeriesResampler::new(4)
+            .transform(&x, &Session::new("ts", "rs"))
+            .unwrap()
+            .value;
+        assert_eq!(rs.ncols(), 4);
+        let c22 = Catch22Classifier::new(0.1)
+            .fit(&x, &yb, &Session::new("ts", "c22"))
+            .unwrap();
+        let cp = c22
+            .value
+            .predict(&x, &Session::new("ts", "c22p"))
+            .unwrap()
+            .value;
+        assert_eq!(cp.len(), 6);
     }
 }

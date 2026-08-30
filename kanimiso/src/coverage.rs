@@ -2418,6 +2418,91 @@ const INVENTORY: &[Algorithm] = &[
         "river.feature_selection.SelectKBest",
         "online",
     ),
+    a(
+        "iv.hc1",
+        "statsmodels.stats.sandwich_covariance.cov_hc1",
+        "function",
+    ),
+    a(
+        "iv.hc2",
+        "statsmodels.stats.sandwich_covariance.cov_hc2",
+        "function",
+    ),
+    a(
+        "iv.hc4",
+        "statsmodels.stats.sandwich_covariance.cov_hc4",
+        "function",
+    ),
+    a(
+        "linear_model.RollingWls",
+        "statsmodels.regression.rolling.RollingWLS",
+        "estimator",
+    ),
+    a(
+        "stats.manova",
+        "statsmodels.multivariate.manova.MANOVA",
+        "stats",
+    ),
+    a(
+        "tslearn.euclidean_barycenter",
+        "tslearn.barycentres.euclidean_barycenter",
+        "timeseries",
+    ),
+    a("tslearn.lb_keogh", "tslearn.metrics.lb_keogh", "timeseries"),
+    a("tslearn.erp", "tslearn.metrics.erp", "timeseries"),
+    a(
+        "tslearn.TimeSeriesResampler",
+        "tslearn.preprocessing.TimeSeriesResampler",
+        "timeseries",
+    ),
+    a(
+        "tslearn.Catch22Classifier",
+        "sktime.classification.feature_based.Catch22Classifier",
+        "timeseries",
+    ),
+    a(
+        "tsa.LogTransformer",
+        "sktime.transformations.series.boxcox.LogTransformer",
+        "forecast",
+    ),
+    a(
+        "tsa.TimeSince",
+        "sktime.transformations.series.time_since.TimeSince",
+        "forecast",
+    ),
+    a(
+        "model_selection.CutoffSplitter",
+        "sktime.split.CutoffSplitter",
+        "splitter",
+    ),
+    a(
+        "model_selection.SingleWindowSplitter",
+        "sktime.split.SingleWindowSplitter",
+        "splitter",
+    ),
+    a("online.OnlineMae", "river.metrics.MAE", "online"),
+    a("online.OnlineLogLoss", "river.metrics.LogLoss", "online"),
+    a("online.OnlineRocAuc", "river.metrics.ROCAUC", "online"),
+    a(
+        "online.OnlineMultinomialNb",
+        "river.naive_bayes.MultinomialNB",
+        "online",
+    ),
+    a(
+        "online.PreviousImputer",
+        "river.imputation.PreviousImputer",
+        "online",
+    ),
+    a(
+        "online.AdaptiveStandardScaler",
+        "river.preprocessing.AdaptiveStandardScaler",
+        "online",
+    ),
+    a(
+        "online.GaussianScorer",
+        "river.anomaly.GaussianScorer",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -2503,6 +2588,12 @@ mod tests {
             "online.OnlineTfidf",
             "stats.anova_twoway",
             "iv.WindmeijerGmm",
+            "stats.manova",
+            "linear_model.RollingWls",
+            "tslearn.Catch22Classifier",
+            "online.OnlineMultinomialNb",
+            "tsa.LogTransformer",
+            "iv.hc1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

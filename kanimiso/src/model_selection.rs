@@ -3578,6 +3578,123 @@ pub fn permutation_test_score(
     })
 }
 
+/// Cutoff-origin splitter (sktime `CutoffSplitter`).
+///
+/// Train is `[0, cutoff)`, test is `[cutoff, cutoff+fh)`. Cutoff count is not
+/// identification `p`.
+#[derive(Clone, Debug)]
+pub struct CutoffSplitter {
+    /// Forecast horizon.
+    pub fh: usize,
+    /// Inclusive origins at which the test window starts.
+    pub cutoffs: Vec<usize>,
+}
+
+impl CutoffSplitter {
+    /// Splitter with horizon `fh` at the given cutoffs.
+    pub fn new(fh: usize, cutoffs: Vec<usize>) -> Self {
+        Self { fh, cutoffs }
+    }
+
+    /// Materialize one fold per cutoff that fits in `n`.
+    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let h = self.fh.max(1);
+        if self.fh == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message("CutoffSplitter.fh=0; using 1")
+                    .build(),
+            );
+        }
+        let mut folds = Vec::new();
+        for &c in &self.cutoffs {
+            if c == 0 || c + h > n {
+                ctx.push(
+                    Issue::builder(IssueCode::InsufficientSample)
+                        .severity(Severity::Warning)
+                        .message(format!(
+                            "CutoffSplitter cutoff={c} fh={h} does not fit n={n}"
+                        ))
+                        .build(),
+                );
+                continue;
+            }
+            folds.push(Split {
+                train: (0..c).collect(),
+                test: (c..c + h).collect(),
+            });
+        }
+        if folds.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("CutoffSplitter produced no folds")
+                    .build(),
+            );
+        }
+        ctx.finish(folds)
+    }
+}
+
+/// Single causal window (sktime `SingleWindowSplitter`).
+#[derive(Clone, Debug)]
+pub struct SingleWindowSplitter {
+    /// Training window length.
+    pub window_length: usize,
+    /// Forecast horizon.
+    pub fh: usize,
+}
+
+impl Default for SingleWindowSplitter {
+    fn default() -> Self {
+        Self {
+            window_length: 8,
+            fh: 1,
+        }
+    }
+}
+
+impl SingleWindowSplitter {
+    /// One window of length `window_length` and horizon `fh`.
+    pub fn new(window_length: usize, fh: usize) -> Self {
+        Self { window_length, fh }
+    }
+
+    /// The last admissible causal window on `n` rows.
+    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let w = self.window_length.max(1);
+        let h = self.fh.max(1);
+        if self.window_length < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!(
+                        "SingleWindowSplitter.window_length={} < 2",
+                        self.window_length
+                    ))
+                    .build(),
+            );
+        }
+        if w + h > n {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "SingleWindowSplitter window={w} fh={h} does not fit n={n}"
+                    ))
+                    .build(),
+            );
+            return ctx.finish(Vec::new());
+        }
+        let start = n - w - h;
+        ctx.finish(vec![Split {
+            train: (start..start + w).collect(),
+            test: (start + w..start + w + h).collect(),
+        }])
+    }
+}
+
 /// Fit a column standardizer on **all** rows of `X` and transform them.
 ///
 /// This is the helper that documents the leakage anti-pattern. The scale is
@@ -3916,5 +4033,18 @@ mod tests {
         assert!(pts.value.score.is_finite());
         assert_eq!(pts.value.permutation_scores.len(), 8);
         assert!(pts.value.pvalue <= 1.0);
+        let cut = CutoffSplitter::new(2, vec![8, 12])
+            .split(20, &Session::new("ms", "cut"))
+            .unwrap()
+            .value;
+        assert_eq!(cut.len(), 2);
+        assert!(cut[0].train.iter().max().unwrap() < cut[0].test.iter().min().unwrap());
+        let sw1 = SingleWindowSplitter::new(8, 2)
+            .split(20, &Session::new("ms", "sw1"))
+            .unwrap()
+            .value;
+        assert_eq!(sw1.len(), 1);
+        assert_eq!(sw1[0].train.len(), 8);
+        assert_eq!(sw1[0].test.len(), 2);
     }
 }

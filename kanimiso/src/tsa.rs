@@ -5717,6 +5717,89 @@ impl DateTimeFeatures {
     }
 }
 
+/// Natural-log map (sktime `LogTransformer`).
+///
+/// Non-positive samples are clamped and recorded; [`IssueCode::NonPositiveSeries`]
+/// is lowered to a warning so a mixed series still transforms.
+#[derive(Clone, Debug, Default)]
+pub struct LogTransformer;
+
+impl LogTransformer {
+    /// Default log map.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// \(\log(\max(y, \varepsilon))\).
+    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_univariate(&mut ctx, y);
+        let mut clamped = 0usize;
+        let z = Vector::from_iter(y.as_slice().iter().map(|&v| {
+            if v.is_finite() && v > 0.0 {
+                v.ln()
+            } else {
+                clamped += 1;
+                1e-12_f64.ln()
+            }
+        }));
+        if clamped > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "LogTransformer clamped {clamped} non-positive samples to ε"
+                    ))
+                    .compromise(NumericalCompromise::new(
+                        "strictly positive series",
+                        "ln(max(y, 1e-12))",
+                        "the log is undefined at 0 and on the negatives",
+                        "do not treat clamped logs as observations of the original scale",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(z)
+    }
+}
+
+/// Time-since-origin features (sktime `TimeSince`).
+///
+/// Origin is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct TimeSince {
+    /// Index treated as time 0.
+    pub origin: usize,
+}
+
+impl Default for TimeSince {
+    fn default() -> Self {
+        Self { origin: 0 }
+    }
+}
+
+impl TimeSince {
+    /// Features relative to `origin`.
+    pub fn new(origin: usize) -> Self {
+        Self { origin }
+    }
+
+    /// Map `t = 0..n-1` to `[t−origin, (t−origin)₊]`.
+    pub fn transform(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
+        let ctx = FitCtx::with_session(session.child("transform"));
+        let o = self.origin as f64;
+        let out = Matrix::from_fn(n, 2, |t, j| {
+            let d = t as f64 - o;
+            if j == 0 {
+                d
+            } else {
+                d.max(0.0)
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
 /// One univariate forecaster per column (sktime `ColumnEnsembleForecaster`).
 #[derive(Clone, Debug)]
 pub struct ColumnEnsembleForecaster {
@@ -7312,6 +7395,18 @@ mod tests {
             .expect("dtf")
             .value;
         assert_eq!(cal.shape(), (20, 4));
+        let lg = LogTransformer::new()
+            .transform(&ypos, &Session::new("logt", "t"))
+            .expect("logt")
+            .value;
+        assert_eq!(lg.len(), ypos.len());
+        assert!(lg.as_slice().iter().all(|v| v.is_finite()));
+        let tsince = TimeSince::new(4)
+            .transform(12, &Session::new("tsince", "t"))
+            .expect("tsince")
+            .value;
+        assert_eq!(tsince.shape(), (12, 2));
+        assert!((tsince.get(4, 0)).abs() < 1e-12);
         let col = ColumnEnsembleForecaster::new(1)
             .fit(&y2, &Session::new("col", "fit"))
             .expect("colens");

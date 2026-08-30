@@ -3519,6 +3519,208 @@ impl ExpandingOls {
     }
 }
 
+/// Rolling-window WLS (statsmodels `RollingWLS`).
+///
+/// Window length is not identification `p`. Inner windows use a scratch
+/// report so a single singular slice does not abort the path.
+#[derive(Clone, Debug)]
+pub struct RollingWls {
+    /// Window length.
+    pub window: usize,
+    /// Prepend an intercept.
+    pub fit_intercept: bool,
+}
+
+impl Default for RollingWls {
+    fn default() -> Self {
+        Self {
+            window: 12,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl RollingWls {
+    /// Rolling WLS with the given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+            fit_intercept: true,
+        }
+    }
+
+    /// Fit a weighted coefficient path, one row per complete window.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        weights: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRollingOls>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if weights.len() != y.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("RollingWls: weights length ≠ n")
+                    .build(),
+            );
+        }
+        let n = x.nrows().min(y.len()).min(weights.len());
+        let wlen = self.window.max(2);
+        if n < wlen {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!("RollingWls window {wlen} > n={n}"))
+                    .build(),
+            );
+        }
+        let p_design = x.ncols() + if self.fit_intercept { 1 } else { 0 };
+        let ends: Vec<usize> = (wlen..=n).collect();
+        let n_win = ends.len();
+        let mut coef = Matrix::zeros(n_win, x.ncols());
+        let mut intercept = Vector::zeros(n_win);
+        let mut r2v = Vector::zeros(n_win);
+        for (k, &end) in ends.iter().enumerate() {
+            let start = end.saturating_sub(wlen);
+            let nn = end.saturating_sub(start);
+            if nn == 0 {
+                continue;
+            }
+            let mut xs = Matrix::zeros(nn, x.ncols() + if self.fit_intercept { 1 } else { 0 });
+            let mut ys = Vector::zeros(nn);
+            let mut used = 0usize;
+            for i in 0..nn {
+                let wi = weights[start + i];
+                if !wi.is_finite() || wi < 0.0 {
+                    ctx.push(
+                        Issue::builder(IssueCode::InvalidWeight)
+                            .severity(Severity::Warning)
+                            .message(format!("RollingWls weight[{}]={wi} skipped", start + i))
+                            .build(),
+                    );
+                    continue;
+                }
+                let s = wi.sqrt();
+                ys[used] = y[start + i] * s;
+                let mut c = 0usize;
+                if self.fit_intercept {
+                    xs.set(used, 0, s);
+                    c = 1;
+                }
+                for j in 0..x.ncols() {
+                    xs.set(used, c + j, x.get(start + i, j) * s);
+                }
+                used += 1;
+            }
+            if used < 2 {
+                continue;
+            }
+            let design = Matrix::from_fn(used, xs.ncols(), |i, j| xs.get(i, j));
+            let yw = Vector::from_iter((0..used).map(|i| ys[i]));
+            if (used as f64) < ctx.policy.min_samples_per_parameter * p_design as f64 {
+                ctx.push(
+                    Issue::builder(IssueCode::InsufficientSample)
+                        .severity(Severity::Warning)
+                        .message(format!(
+                            "RollingWls window [{start},{end}) has n={used} p={p_design}"
+                        ))
+                        .build(),
+                );
+            }
+            let mut scratch = signlred::Report::new("rwls", "wls");
+            let Some(beta) = least_squares(&mut scratch, &design, &yw, &ctx.policy) else {
+                continue;
+            };
+            for issue in scratch.issues() {
+                if matches!(
+                    issue.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::PerfectCollinearity
+                        | IssueCode::R2IsOne
+                        | IssueCode::RankZero
+                ) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            let (b0, slopes) = if self.fit_intercept {
+                (
+                    beta.as_slice().first().copied().unwrap_or(0.0),
+                    Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                )
+            } else {
+                (0.0, beta.clone())
+            };
+            intercept[k] = b0;
+            for j in 0..slopes.len().min(x.ncols()) {
+                coef.set(k, j, slopes[j]);
+            }
+            let mut sse = 0.0;
+            let mut wsum = 0.0;
+            let mut ywsum = 0.0;
+            for i in 0..used {
+                let s = if self.fit_intercept {
+                    design.get(i, 0)
+                } else {
+                    1.0
+                };
+                let wi = s * s;
+                let mut yhat = b0;
+                for j in 0..slopes.len() {
+                    let xij = if self.fit_intercept {
+                        design.get(i, 1 + j) / s.max(1e-12)
+                    } else {
+                        design.get(i, j) / s.max(1e-12)
+                    };
+                    yhat += slopes[j] * xij;
+                }
+                let yi = yw[i] / s.max(1e-12);
+                let e = yi - yhat;
+                sse += wi * e * e;
+                wsum += wi;
+                ywsum += wi * yi;
+            }
+            let ym = if wsum > 0.0 { ywsum / wsum } else { 0.0 };
+            let mut sst = 0.0;
+            for i in 0..used {
+                let s = if self.fit_intercept {
+                    design.get(i, 0)
+                } else {
+                    1.0
+                };
+                let wi = s * s;
+                let yi = yw[i] / s.max(1e-12);
+                sst += wi * (yi - ym) * (yi - ym);
+            }
+            r2v[k] = if sst > ctx.policy.r2_zero_tol {
+                1.0 - sse / sst
+            } else {
+                f64::NAN
+            };
+        }
+        ctx.push(
+            Issue::builder(IssueCode::IllConditioned)
+                .severity(Severity::Advisory)
+                .message("RollingWLS SEs are not returned; coefficients are √w-scaled OLS")
+                .compromise(NumericalCompromise::new(
+                    "model-based WLS covariance path",
+                    "scratch √w OLS in each window",
+                    "weights are treated as known",
+                    "do not read window R² as a heteroskedasticity-robust inference",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedRollingOls {
+            coef,
+            intercept,
+            r2: r2v,
+            window: wlen,
+        })
+    }
+}
+
 /// Brown–Durbin–Evans recursive residuals (statsmodels `RecursiveLS`).
 ///
 /// Each prefix OLS uses a scratch report. Prefix length is not passed as
@@ -4005,6 +4207,12 @@ mod tests {
             .expect("roll");
         assert!(roll.value.coef.nrows() >= 10);
         assert!((roll.value.coef.get(roll.value.coef.nrows() - 1, 0) - 2.0).abs() < 0.05);
+        let w = Vector::from_iter((0..24).map(|_| 1.0));
+        let rw = RollingWls::new(12)
+            .fit(&x, &y, &w, &Session::new("rwls", "fit"))
+            .expect("rwls");
+        assert!(rw.value.coef.nrows() >= 10);
+        assert!((rw.value.coef.get(rw.value.coef.nrows() - 1, 0) - 2.0).abs() < 0.05);
         let exp = ExpandingOls::new(12)
             .fit(&x, &y, &Session::new("exp", "fit"))
             .expect("exp");

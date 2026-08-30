@@ -1727,8 +1727,14 @@ pub struct CointResult {
 pub enum SandwichKind {
     /// HC0: \(\mathrm{meat} = \sum e_i^2 x_i x_i'\).
     Hc0,
+    /// HC1: HC0 times \(n/(n-p)\).
+    Hc1,
+    /// HC2: divide by \(1-h_{ii}\).
+    Hc2,
     /// HC3: divide by \((1-h_{ii})^2\).
     Hc3,
+    /// HC4: divide by \((1-h_{ii})^{\delta_i}\), \(\delta_i=\min(4, nh_{ii}/p)\).
+    Hc4,
 }
 
 /// OLS sandwich covariance \((X'X)^{-1} \mathrm{meat} (X'X)^{-1}\).
@@ -1807,16 +1813,28 @@ pub fn sandwich_hc(
             h += x.get(i, a) * s;
         }
         let mut e2 = resid[i] * resid[i];
-        if kind == SandwichKind::Hc3 {
-            let den = (1.0 - h).max(1e-12);
-            if (1.0 - h).abs() < 1e-8 {
-                ctx.push(
-                    Issue::builder(IssueCode::LeveragePoint)
-                        .message(format!("row {i} has leverage h={h:.4}; HC3 is inflated"))
-                        .build(),
-                );
+        let one_h = (1.0 - h).max(1e-12);
+        if matches!(
+            kind,
+            SandwichKind::Hc2 | SandwichKind::Hc3 | SandwichKind::Hc4
+        ) && (1.0 - h).abs() < 1e-8
+        {
+            ctx.push(
+                Issue::builder(IssueCode::LeveragePoint)
+                    .message(format!(
+                        "row {i} has leverage h={h:.4}; {kind:?} is inflated"
+                    ))
+                    .build(),
+            );
+        }
+        match kind {
+            SandwichKind::Hc0 | SandwichKind::Hc1 => {}
+            SandwichKind::Hc2 => e2 /= one_h,
+            SandwichKind::Hc3 => e2 /= one_h * one_h,
+            SandwichKind::Hc4 => {
+                let delta = (n as f64 * h / p.max(1) as f64).min(4.0);
+                e2 /= one_h.powf(delta);
             }
-            e2 /= den * den;
         }
         for a in 0..p {
             for b in 0..p {
@@ -1838,12 +1856,34 @@ pub fn sandwich_hc(
             out.set(a, b, s);
         }
     }
+    if kind == SandwichKind::Hc1 {
+        let df = (n as f64 - p as f64).max(1.0);
+        if n <= p {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!("HC1 n={n} ≤ p={p}; the dof factor is floored at 1"))
+                    .build(),
+            );
+        }
+        let scale = n as f64 / df;
+        for a in 0..p {
+            for b in 0..p {
+                out.set(a, b, out.get(a, b) * scale);
+            }
+        }
+    }
     ctx.push(
         Issue::builder(IssueCode::Heteroscedasticity)
             .severity(signlred::Severity::Advisory)
             .message(match kind {
                 SandwichKind::Hc0 => "HC0 sandwich is not the OLS information covariance",
+                SandwichKind::Hc1 => {
+                    "HC1 is HC0 times n/(n−p); it is not the model-based OLS covariance"
+                }
+                SandwichKind::Hc2 => "HC2 inflates levered rows by 1/(1−h); it is not HC0 or OLS",
                 SandwichKind::Hc3 => "HC3 sandwich inflates levered rows; it is not HC0 or OLS",
+                SandwichKind::Hc4 => "HC4 uses a leverage-adaptive exponent; it is not HC3 or OLS",
             })
             .compromise(NumericalCompromise::new(
                 "model-based OLS covariance σ²(X'X)⁻¹",
@@ -1861,9 +1901,24 @@ pub fn hc0(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Ma
     sandwich_hc(x, resid, SandwichKind::Hc0, session)
 }
 
+/// HC1 sandwich.
+pub fn hc1(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+    sandwich_hc(x, resid, SandwichKind::Hc1, session)
+}
+
+/// HC2 sandwich.
+pub fn hc2(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+    sandwich_hc(x, resid, SandwichKind::Hc2, session)
+}
+
 /// HC3 sandwich.
 pub fn hc3(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
     sandwich_hc(x, resid, SandwichKind::Hc3, session)
+}
+
+/// HC4 sandwich.
+pub fn hc4(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+    sandwich_hc(x, resid, SandwichKind::Hc4, session)
 }
 
 #[cfg(test)]
@@ -1898,6 +1953,12 @@ mod tests {
         assert!(q.value.get(0, 0) >= 0.0);
         let q3 = hc3(&x, &e, &Session::new("hc", "3")).expect("hc3");
         assert_eq!(q3.value.shape(), (2, 2));
+        let q1 = hc1(&x, &e, &Session::new("hc", "1")).expect("hc1");
+        assert!(q1.value.get(0, 0) >= q.value.get(0, 0) - 1e-12);
+        let q2 = hc2(&x, &e, &Session::new("hc", "2")).expect("hc2");
+        assert!(q2.value.get(0, 0).is_finite());
+        let q4 = hc4(&x, &e, &Session::new("hc", "4")).expect("hc4");
+        assert_eq!(q4.value.shape(), (2, 2));
     }
 
     #[test]

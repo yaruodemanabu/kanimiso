@@ -11,6 +11,7 @@ use crate::linalg::{chol_solve, least_squares};
 use crate::rng::Rng;
 use crate::special::{chi2_pvalue, f_pvalue, ln_gamma, norm_cdf, student_t_cdf, student_t_pvalue};
 use crate::validate::{inspect_identification, inspect_xy};
+use faer::Mat;
 use ojizou_san::Session;
 use signlred::{
     scan_finite, slice_stats, Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified,
@@ -4948,6 +4949,212 @@ pub fn anova_twoway(
     })
 }
 
+/// One-way MANOVA (statsmodels `multivariate.manova.MANOVA`) via Pillai's trace.
+///
+/// Group and response counts are **not** identification `p`. A singular
+/// total SSP is recorded; it does not reuse a cluster/`p` gate.
+#[derive(Clone, Debug)]
+pub struct ManovaResult {
+    /// Pillai's trace \(\mathrm{tr}((B+W)^{-1}B)\).
+    pub pillai: f64,
+    /// Approximate upper-tail *F* *p* for the Pillai statistic.
+    pub pvalue: f64,
+    /// Hypothesis degrees of freedom \(k-1\).
+    pub df_hypothesis: f64,
+    /// Error degrees of freedom \(n-k\).
+    pub df_error: f64,
+    /// Number of groups.
+    pub n_groups: usize,
+    /// Number of response columns.
+    pub n_responses: usize,
+}
+
+/// One-way MANOVA of the columns of `y` on integer-coded `groups`.
+pub fn manova(y: &Matrix, groups: &Vector, session: &Session) -> Result<Qualified<ManovaResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+    if groups.len() != y.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("manova: groups length ≠ n")
+                .build(),
+        );
+    }
+    let n = y.nrows().min(groups.len());
+    let q = y.ncols();
+    let ids = unique_int_labels(groups);
+    let k = ids.len();
+    if k < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message(format!("MANOVA needs ≥2 groups (got {k})"))
+                .build(),
+        );
+        return ctx.finish(ManovaResult {
+            pillai: f64::NAN,
+            pvalue: f64::NAN,
+            df_hypothesis: 0.0,
+            df_error: n as f64,
+            n_groups: k,
+            n_responses: q,
+        });
+    }
+    if n >= 5 * q.max(1) {
+        inspect_identification(&mut ctx.report, n, q, &ctx.policy);
+    }
+    let mut grand = Vector::zeros(q);
+    let mut ntot = 0.0;
+    for i in 0..n {
+        if !groups[i].is_finite() {
+            continue;
+        }
+        ntot += 1.0;
+        for j in 0..q {
+            grand[j] += y.get(i, j);
+        }
+    }
+    if ntot > 0.0 {
+        for j in 0..q {
+            grand[j] /= ntot;
+        }
+    }
+    let mut means = vec![Vector::zeros(q); k];
+    let mut ns = vec![0.0; k];
+    for i in 0..n {
+        if !groups[i].is_finite() {
+            continue;
+        }
+        let Some(gi) = ids.iter().position(|&v| v == groups[i].round() as i64) else {
+            continue;
+        };
+        ns[gi] += 1.0;
+        for j in 0..q {
+            means[gi][j] += y.get(i, j);
+        }
+    }
+    for g in 0..k {
+        if ns[g] > 0.0 {
+            for j in 0..q {
+                means[g][j] /= ns[g];
+            }
+        }
+    }
+    let mut b = Matrix::zeros(q, q);
+    let mut w = Matrix::zeros(q, q);
+    for g in 0..k {
+        for a in 0..q {
+            for c in 0..=a {
+                let d = ns[g] * (means[g][a] - grand[a]) * (means[g][c] - grand[c]);
+                b.set(a, c, b.get(a, c) + d);
+                b.set(c, a, b.get(a, c));
+            }
+        }
+    }
+    for i in 0..n {
+        if !groups[i].is_finite() {
+            continue;
+        }
+        let Some(gi) = ids.iter().position(|&v| v == groups[i].round() as i64) else {
+            continue;
+        };
+        for a in 0..q {
+            for c in 0..=a {
+                let d = (y.get(i, a) - means[gi][a]) * (y.get(i, c) - means[gi][c]);
+                w.set(a, c, w.get(a, c) + d);
+                w.set(c, a, w.get(a, c));
+            }
+        }
+    }
+    let mut tmat = Mat::<f64>::zeros(q, q);
+    for a in 0..q {
+        for c in 0..q {
+            tmat[(a, c)] = b.get(a, c) + w.get(a, c);
+        }
+        tmat[(a, a)] += 1e-12;
+    }
+    let mut tinv = Matrix::zeros(q, q);
+    let mut ok = true;
+    for j in 0..q {
+        let ej = Vector::from_iter((0..q).map(|i| if i == j { 1.0 } else { 0.0 }));
+        let mut scratch = Report::new("manova", "tinv");
+        match chol_solve(&mut scratch, &tmat, &ej, &ctx.policy) {
+            Some(sol) => {
+                for i in 0..q {
+                    tinv.set(i, j, sol[i]);
+                }
+            }
+            None => {
+                ok = false;
+                break;
+            }
+        }
+    }
+    let df_h = (k - 1) as f64;
+    let df_e = (ntot - k as f64).max(0.0);
+    if !ok {
+        ctx.push(
+            Issue::builder(IssueCode::CholeskyFailed)
+                .severity(Severity::Warning)
+                .message("MANOVA total SSP was not SPD; Pillai is undefined")
+                .compromise(NumericalCompromise::new(
+                    "invertible B+W",
+                    "undefined Pillai trace",
+                    "the total sum-of-squares-and-products was singular at working precision",
+                    "do not read a missing Pillai as evidence of no multivariate effect",
+                ))
+                .build(),
+        );
+        return ctx.finish(ManovaResult {
+            pillai: f64::NAN,
+            pvalue: f64::NAN,
+            df_hypothesis: df_h,
+            df_error: df_e,
+            n_groups: k,
+            n_responses: q,
+        });
+    }
+    let mut pillai = 0.0;
+    for a in 0..q {
+        for c in 0..q {
+            pillai += tinv.get(a, c) * b.get(c, a);
+        }
+    }
+    let s = df_h.min(q as f64).max(1.0);
+    let m = ((q as f64 - df_h).abs() - 1.0) / 2.0;
+    let nn = (df_e - q as f64 - 1.0) / 2.0;
+    let (f, pvalue) = if nn > 0.0 && pillai.is_finite() && pillai < s {
+        let f = ((2.0 * nn + s + 1.0) / (2.0 * m + s + 1.0).max(1e-8))
+            * (pillai / (s - pillai).max(1e-8));
+        let dfn = s * (2.0 * m + s + 1.0);
+        let dfd = s * (2.0 * nn + s + 1.0);
+        (f, f_pvalue(f.max(0.0), dfn.max(1.0), dfd.max(1.0)))
+    } else {
+        (f64::NAN, f64::NAN)
+    };
+    let _ = f;
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .severity(Severity::Advisory)
+            .message("MANOVA p uses the Pillai F approximation, not exact Wilks tables")
+            .compromise(NumericalCompromise::new(
+                "exact multivariate F or permutation MANOVA",
+                "Pillai trace with the classical F transform",
+                "the approximation degrades when n is close to q+k",
+                "treat p as a screening statistic",
+            ))
+            .build(),
+    );
+    ctx.finish(ManovaResult {
+        pillai,
+        pvalue,
+        df_hypothesis: df_h,
+        df_error: df_e,
+        n_groups: k,
+        n_responses: q,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5147,5 +5354,18 @@ mod tests {
         assert!(tw.value.f_a > 10.0, "Fa={}", tw.value.f_a);
         assert!(tw.value.p_a < 0.05);
         assert!(tw.value.ss_error.is_finite());
+        let ym = Matrix::from_fn(32, 2, |i, j| {
+            let a = if i < 16 { 0.0 } else { 3.0 };
+            if j == 0 {
+                a + 0.05 * ((i % 5) as f64)
+            } else {
+                a * 0.4 + 0.1 * ((i % 3) as f64)
+            }
+        });
+        let gm = Vector::from_iter((0..32).map(|i| if i < 16 { 0.0 } else { 1.0 }));
+        let mv = manova(&ym, &gm, &Session::new("man", "t")).expect("manova");
+        assert!(mv.value.pillai.is_finite());
+        assert!(mv.value.pillai > 0.2, "pillai={}", mv.value.pillai);
+        assert_eq!(mv.value.n_groups, 2);
     }
 }
