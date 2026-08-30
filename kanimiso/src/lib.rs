@@ -39,6 +39,7 @@ pub mod neural;
 pub mod online;
 pub mod preprocess;
 pub mod rng;
+pub mod robust;
 pub mod semi;
 pub mod special;
 pub mod stats;

@@ -97,6 +97,42 @@ const INVENTORY: &[Algorithm] = &[
         "sklearn.dummy.DummyRegressor",
         "estimator",
     ),
+    a(
+        "robust.RansacRegressor",
+        "sklearn.linear_model.RANSACRegressor",
+        "estimator",
+    ),
+    a(
+        "robust.TheilSenRegressor",
+        "sklearn.linear_model.TheilSenRegressor",
+        "estimator",
+    ),
+    a(
+        "robust.Gls",
+        "statsmodels.regression.linear_model.GLS",
+        "estimator",
+    ),
+    a(
+        "robust.GammaRegressor",
+        "sklearn.linear_model.GammaRegressor",
+        "estimator",
+    ),
+    a(
+        "robust.OrthogonalMatchingPursuit",
+        "sklearn.linear_model.OrthogonalMatchingPursuit",
+        "estimator",
+    ),
+    a(
+        "cluster.MeanShift",
+        "sklearn.cluster.MeanShift",
+        "estimator",
+    ),
+    a("cluster.Optics", "sklearn.cluster.OPTICS", "estimator"),
+    a(
+        "tslearn.Rocket",
+        "sktime.transformations.panel.rocket.Rocket",
+        "timeseries",
+    ),
     // classification extras
     a(
         "classification.RidgeClassifier",

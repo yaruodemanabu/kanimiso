@@ -753,6 +753,114 @@ impl Fit for TimeSeriesSvm {
     }
 }
 
+/// Mini-ROCKET-style random convolutional features (sktime / tslearn ROCKET).
+#[derive(Clone, Debug)]
+pub struct Rocket {
+    /// Number of random kernels.
+    pub n_kernels: usize,
+    /// Kernel length.
+    pub kernel_len: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for Rocket {
+    fn default() -> Self {
+        Self {
+            n_kernels: 32,
+            kernel_len: 7,
+            seed: 7,
+        }
+    }
+}
+
+impl Rocket {
+    /// ROCKET with `k` kernels.
+    pub fn new(n_kernels: usize) -> Self {
+        Self {
+            n_kernels,
+            ..Self::default()
+        }
+    }
+
+    /// Transform each row (series) into PPV + max features per kernel.
+    pub fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let n = x.nrows();
+        let t = x.ncols();
+        if t < self.kernel_len {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!(
+                        "series length {t} < kernel length {}",
+                        self.kernel_len
+                    ))
+                    .build(),
+            );
+        }
+        let mut rng = crate::rng::Rng::new(self.seed);
+        let k = self.n_kernels;
+        let w = self.kernel_len.min(t.max(1));
+        let mut kernels = vec![vec![0.0; w]; k];
+        for ker in kernels.iter_mut() {
+            let mut s = 0.0;
+            for v in ker.iter_mut() {
+                *v = rng.standard_normal();
+                s += *v;
+            }
+            let mean = s / w as f64;
+            for v in ker.iter_mut() {
+                *v -= mean;
+            }
+        }
+        let out_p = k * 2;
+        let feat = Matrix::from_fn(n, out_p, |i, j| {
+            let kid = j / 2;
+            let want_ppv = j % 2 == 0;
+            let ker = &kernels[kid];
+            let last = t.saturating_sub(w) + 1;
+            let mut mx = f64::NEG_INFINITY;
+            let mut pos = 0.0;
+            let mut cnt = 0.0;
+            for start in 0..last {
+                let mut acc = 0.0;
+                for u in 0..w {
+                    acc += ker[u] * x.get(i, start + u);
+                }
+                if acc > mx {
+                    mx = acc;
+                }
+                if acc > 0.0 {
+                    pos += 1.0;
+                }
+                cnt += 1.0;
+            }
+            if want_ppv {
+                if cnt > 0.0 {
+                    pos / cnt
+                } else {
+                    0.0
+                }
+            } else if mx.is_finite() {
+                mx
+            } else {
+                0.0
+            }
+        });
+        if out_p > n {
+            ctx.push(
+                Issue::builder(IssueCode::PolynomialExplosion)
+                    .message(format!(
+                        "ROCKET features {out_p} > n={n}; this is interpolation"
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(feat)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

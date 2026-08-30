@@ -1941,6 +1941,271 @@ impl FitUnsupervised for AffinityPropagation {
     }
 }
 
+/// Mean-shift clustering (flat kernel).
+#[derive(Clone, Debug)]
+pub struct MeanShift {
+    /// Kernel bandwidth.
+    pub bandwidth: f64,
+    /// Max shift iterations.
+    pub max_iter: usize,
+    /// Merge distance for modes.
+    pub merge: f64,
+}
+
+impl Default for MeanShift {
+    fn default() -> Self {
+        Self {
+            bandwidth: 1.0,
+            max_iter: 40,
+            merge: 0.25,
+        }
+    }
+}
+
+impl MeanShift {
+    /// Mean-shift with the given bandwidth.
+    pub fn new(bandwidth: f64) -> Self {
+        Self {
+            bandwidth,
+            ..Self::default()
+        }
+    }
+
+    /// Fit.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedMeanShift>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows();
+        let p = x.ncols();
+        if self.bandwidth <= 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .message("mean-shift bandwidth must be positive")
+                    .build(),
+            );
+        }
+        let mut modes = Matrix::from_fn(n, p, |i, j| x.get(i, j));
+        let bw2 = self.bandwidth * self.bandwidth;
+        for it in 0..self.max_iter {
+            let mut max_shift = 0.0;
+            let mut next = modes.clone();
+            for i in 0..n {
+                let mut num = vec![0.0; p];
+                let mut den = 0.0;
+                for t in 0..n {
+                    let mut d2 = 0.0;
+                    for j in 0..p {
+                        let d = modes.get(i, j) - x.get(t, j);
+                        d2 += d * d;
+                    }
+                    if d2 <= bw2 {
+                        den += 1.0;
+                        for j in 0..p {
+                            num[j] += x.get(t, j);
+                        }
+                    }
+                }
+                if den <= 0.0 {
+                    ctx.push(
+                        Issue::builder(IssueCode::EmptyCluster)
+                            .message(format!("mean-shift point {i} has an empty neighborhood"))
+                            .build(),
+                    );
+                    continue;
+                }
+                let mut sh = 0.0;
+                for j in 0..p {
+                    let m = num[j] / den;
+                    sh += (m - modes.get(i, j)).abs();
+                    next.set(i, j, m);
+                }
+                if sh > max_shift {
+                    max_shift = sh;
+                }
+            }
+            modes = next;
+            ctx.session.step(it as u64, max_shift, None);
+            if max_shift < 1e-6 {
+                ctx.session.converged("mean-shift modes stable", it as u64);
+                break;
+            }
+        }
+        // Merge modes
+        let mut centers: Vec<Vec<f64>> = Vec::new();
+        let mut labels = Vector::zeros(n);
+        for i in 0..n {
+            let row: Vec<f64> = (0..p).map(|j| modes.get(i, j)).collect();
+            let mut found = None;
+            for (c, ctr) in centers.iter().enumerate() {
+                let mut d2 = 0.0;
+                for j in 0..p {
+                    let d = row[j] - ctr[j];
+                    d2 += d * d;
+                }
+                if d2.sqrt() <= self.merge {
+                    found = Some(c);
+                    break;
+                }
+            }
+            let id = match found {
+                Some(c) => c,
+                None => {
+                    centers.push(row);
+                    centers.len() - 1
+                }
+            };
+            labels[i] = id as f64;
+        }
+        if centers.len() <= 1 && n > 1 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateClusters)
+                    .message("mean-shift collapsed to one mode")
+                    .build(),
+            );
+        }
+        let k = centers.len();
+        let ctr = Matrix::from_fn(k, p, |i, j| centers[i][j]);
+        ctx.finish(FittedMeanShift {
+            labels,
+            centers: ctr,
+        })
+    }
+}
+
+/// Fitted mean-shift.
+#[derive(Clone, Debug)]
+pub struct FittedMeanShift {
+    /// Labels.
+    pub labels: Vector,
+    /// Distinct modes.
+    pub centers: Matrix,
+}
+
+/// OPTICS reachability (simplified; extracts DBSCAN-like clusters from the ordering).
+#[derive(Clone, Debug)]
+pub struct Optics {
+    /// Neighborhood radius.
+    pub eps: f64,
+    /// Min points to be a core.
+    pub min_samples: usize,
+}
+
+impl Default for Optics {
+    fn default() -> Self {
+        Self {
+            eps: 0.5,
+            min_samples: 5,
+        }
+    }
+}
+
+impl Optics {
+    /// OPTICS with `eps` and `min_samples`.
+    pub fn new(eps: f64, min_samples: usize) -> Self {
+        Self { eps, min_samples }
+    }
+
+    /// Fit: produce an ordering and extract clusters where reachability ≤ eps.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedOptics>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let n = x.nrows();
+        let mut reach = vec![f64::INFINITY; n];
+        let mut core = vec![f64::INFINITY; n];
+        let mut processed = vec![false; n];
+        let mut order = Vec::new();
+        let dist = |a: usize, b: usize| {
+            let mut s = 0.0;
+            for j in 0..x.ncols() {
+                let d = x.get(a, j) - x.get(b, j);
+                s += d * d;
+            }
+            s.sqrt()
+        };
+        for i in 0..n {
+            let mut neigh = Vec::new();
+            for j in 0..n {
+                let d = dist(i, j);
+                if d <= self.eps {
+                    neigh.push((d, j));
+                }
+            }
+            neigh.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            if neigh.len() >= self.min_samples {
+                core[i] = neigh[self.min_samples - 1].0;
+            }
+        }
+        for seed in 0..n {
+            if processed[seed] {
+                continue;
+            }
+            let mut seeds = vec![seed];
+            while let Some(p) = seeds.pop() {
+                if processed[p] {
+                    continue;
+                }
+                processed[p] = true;
+                order.push(p);
+                if !core[p].is_finite() {
+                    continue;
+                }
+                for j in 0..n {
+                    if processed[j] {
+                        continue;
+                    }
+                    let d = dist(p, j);
+                    if d > self.eps {
+                        continue;
+                    }
+                    let r = core[p].max(d);
+                    if r < reach[j] {
+                        reach[j] = r;
+                        seeds.push(j);
+                    }
+                }
+            }
+        }
+        let mut labels = Vector::filled(n, -1.0);
+        let mut cid = 0.0;
+        let mut in_cluster = false;
+        for &i in &order {
+            if reach[i] <= self.eps || core[i].is_finite() {
+                if !in_cluster {
+                    cid += 1.0;
+                    in_cluster = true;
+                }
+                labels[i] = cid;
+            } else {
+                in_cluster = false;
+            }
+        }
+        if cid <= 0.0 && n > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateClusters)
+                    .message("OPTICS extracted no clusters at this eps")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedOptics {
+            labels,
+            ordering: Vector::from_iter(order.iter().map(|i| *i as f64)),
+            reachability: Vector::from_iter(reach),
+        })
+    }
+}
+
+/// Fitted OPTICS.
+#[derive(Clone, Debug)]
+pub struct FittedOptics {
+    /// Cluster labels (−1 = noise).
+    pub labels: Vector,
+    /// Processing order (indices).
+    pub ordering: Vector,
+    /// Reachability distances.
+    pub reachability: Vector,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
