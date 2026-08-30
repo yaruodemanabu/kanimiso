@@ -2196,10 +2196,63 @@ fn finish_explain(ctx: FitCtx, expl: IncrementalExplain) -> Result<Qualified<Inc
     ctx.finish(expl)
 }
 
+/// One-hot / label-indicator map (sklearn `LabelBinarizer`).
+#[derive(Clone, Debug, Default)]
+pub struct LabelBinarizer {
+    classes: Vec<i64>,
+    fitted: bool,
+}
+
+impl LabelBinarizer {
+    /// Empty binarizer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sorted class ids.
+    pub fn classes(&self) -> &[i64] {
+        &self.classes
+    }
+}
+
+impl FitSeries for LabelBinarizer {
+    type Fitted = Self;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        self.classes = counts.into_iter().map(|(k, _)| k).collect();
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for LabelBinarizer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), 0));
+        }
+        let k = self.classes.len();
+        if k == 0 {
+            return ctx.finish(Matrix::zeros(x.nrows(), 0));
+        }
+        let out = Matrix::from_fn(x.nrows(), k, |i, c| {
+            let lab = x.get(i, 0).round() as i64;
+            if self.classes[c] == lab {
+                1.0
+            } else {
+                0.0
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::traits::{FitUnsupervised, Transform};
+    use crate::traits::{FitSeries, FitUnsupervised, Transform};
     use ojizou_san::Session;
     use signlred::IssueCode;
 
@@ -2265,5 +2318,15 @@ mod tests {
                 assert!(filled.get(i, j).is_finite(), "imputed ({i},{j})");
             }
         }
+        let yb = Vector::from_iter((0..20).map(|i| if i < 10 { 0.0 } else { 1.0 }));
+        let mut lb = LabelBinarizer::new();
+        lb.fit_series(&yb, &Session::new("lb", "fit")).unwrap();
+        let oh = lb
+            .transform(&Matrix::from_vector(&yb), &Session::new("lb", "t"))
+            .unwrap()
+            .value;
+        assert_eq!(oh.ncols(), 2);
+        assert!((oh.get(0, 0) - 1.0).abs() < 1e-12);
+        assert!((oh.get(15, 1) - 1.0).abs() < 1e-12);
     }
 }

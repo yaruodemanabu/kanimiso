@@ -4864,6 +4864,214 @@ impl Predict for CluStream {
     }
 }
 
+/// Extremely Fast Decision Tree (Hoeffding AnyTime Tree) lite.
+///
+/// Same VFDT sufficient statistics as [`HoeffdingTree`], but splits are
+/// considered earlier (`min_samples` is smaller and `tau` is larger). A
+/// re-split of an existing node is not implemented — documented as a
+/// compromise versus Manapragada, Webb & Salehi.
+#[derive(Clone, Debug)]
+pub struct ExtremelyFastDecisionTree {
+    tree: HoeffdingTree,
+}
+
+impl Default for ExtremelyFastDecisionTree {
+    fn default() -> Self {
+        let mut tree = HoeffdingTree::new();
+        tree.min_samples = 5;
+        tree.tau = 0.15;
+        Self { tree }
+    }
+}
+
+impl ExtremelyFastDecisionTree {
+    /// Eager VFDT.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for ExtremelyFastDecisionTree {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let q = self.tree.partial_fit(x, y, session)?;
+        let mut ctx = FitCtx::with_session(session.child("efdt"));
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .severity(Severity::Advisory)
+                .message("EFDT-lite uses an eager Hoeffding bound; it does not re-evaluate existing splits")
+                .build(),
+        );
+        ctx.finish(q.value)
+    }
+}
+
+impl Predict for ExtremelyFastDecisionTree {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.tree.predict(x, session)
+    }
+}
+
+/// Biased matrix factorization: `μ + b_u + b_i` (river `reco.BiasedMF`).
+#[derive(Clone, Debug)]
+pub struct BiasedMf {
+    /// SGD step.
+    pub learning_rate: f64,
+    /// ℓ2 on biases.
+    pub l2: f64,
+    mu: f64,
+    bu: Vec<f64>,
+    bi: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for BiasedMf {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            l2: 0.01,
+            mu: 0.0,
+            bu: Vec::new(),
+            bi: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl BiasedMf {
+    /// Default biased MF.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn grow(&mut self, u: usize, i: usize) {
+        while self.bu.len() <= u {
+            self.bu.push(0.0);
+        }
+        while self.bi.len() <= i {
+            self.bi.push(0.0);
+        }
+    }
+
+    fn pred(&self, u: usize, i: usize) -> f64 {
+        let mut s = self.mu;
+        if u < self.bu.len() {
+            s += self.bu[u];
+        }
+        if i < self.bi.len() {
+            s += self.bi[i];
+        }
+        s
+    }
+}
+
+impl PartialFit for BiasedMf {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("BiasedMF needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let lr = self.learning_rate.max(1e-6);
+        let l2 = self.l2.max(0.0);
+        let mut sse = 0.0;
+        let mut dsum = 0.0;
+        for r in 0..x.nrows().min(y.len()) {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.grow(u, i);
+            let pred = self.pred(u, i);
+            let e = y[r] - pred;
+            sse += e * e;
+            self.mu += lr * e;
+            let bu = self.bu[u];
+            let bi = self.bi[i];
+            self.bu[u] += lr * (e - l2 * bu);
+            self.bi[i] += lr * (e - l2 * bi);
+            dsum += (self.bu[u] - bu).abs() + (self.bi[i] - bi).abs();
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        let warmup = self.n_seen < 8;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.still_identified = !warmup;
+        q.warmup = warmup;
+        q.explanation = format!(
+            "BiasedMF SGD: ||Δb||₁={dsum:.4e}, SSE={sse:.4e}, users={}, items={}",
+            self.bu.len(),
+            self.bi.len()
+        );
+        if warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("BiasedMF is still warming up")
+                    .build(),
+            );
+        }
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("SGD on {} ratings", x.nrows()),
+                "μ, b_u, b_i only (no latent factors)",
+                "pre-batch biases",
+                format!("μ={:.4e} SSE={sse:.4e}", self.mu),
+            ),
+        )
+    }
+}
+
+impl Predict for BiasedMf {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("BiasedMF predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::filled(x.nrows(), self.mu));
+        }
+        let y = Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.pred(u, i)
+        }));
+        ctx.finish(y)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5017,6 +5225,12 @@ mod tests {
         CluStream::new(4)
             .partial_fit(&x, None, &session)
             .expect("clustream");
+        ExtremelyFastDecisionTree::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("efdt");
+        BiasedMf::new()
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("biasedmf");
 
         let n_expl = session
             .ledger()
@@ -5025,7 +5239,7 @@ mod tests {
             .filter(|e| e.kind == EventKind::IncrementalExplanation)
             .count();
         assert!(
-            n_expl >= 29,
+            n_expl >= 31,
             "expected an IncrementalExplanation per partial_fit, got {n_expl}"
         );
     }

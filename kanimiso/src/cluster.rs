@@ -14,7 +14,9 @@ use crate::traits::{FitUnsupervised, PartialFit, Predict};
 use crate::validate::{inspect_identification, inspect_xy};
 use faer::Mat;
 use ojizou_san::{IncrementalExplain, Session};
-use signlred::{IncrementalQuality, Issue, IssueCode, Meaninglessness, Qualified, Result};
+use signlred::{
+    IncrementalQuality, Issue, IssueCode, Meaninglessness, Qualified, Result, Severity,
+};
 
 const COV_FLOOR: f64 = 1e-6;
 const EMPTY_RESEED_TOL: f64 = 1e-15;
@@ -1753,6 +1755,193 @@ impl Predict for FittedGmm {
     }
 }
 
+/// Variational / MAP diagonal Bayesian Gaussian mixture (sklearn
+/// `BayesianGaussianMixture`).
+///
+/// Weights have a Dirichlet prior; means shrink toward the data mean. This is
+/// a mean-field MAP-EM, not a full collapsed Gibbs sampler — recorded as a
+/// numerical compromise. Do not pass `n_components` as `p` to
+/// [`inspect_identification`]: a 2-component mixture on 40 rows is identified.
+#[derive(Clone, Debug)]
+pub struct BayesianGaussianMixture {
+    /// Number of mixture components.
+    pub n_components: usize,
+    /// Dirichlet concentration (`α₀`).
+    pub weight_concentration: f64,
+    /// EM iteration cap.
+    pub max_iter: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for BayesianGaussianMixture {
+    fn default() -> Self {
+        Self {
+            n_components: 2,
+            weight_concentration: 1.0,
+            max_iter: 80,
+            seed: 2,
+        }
+    }
+}
+
+impl BayesianGaussianMixture {
+    /// `k` components with `α₀ = 1`.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+impl FitUnsupervised for BayesianGaussianMixture {
+    type Fitted = FittedGmm;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (n, p) = x.shape();
+        let k = self.n_components.max(1).min(n.max(1));
+        if n == 0 || p == 0 {
+            return ctx.finish(FittedGmm {
+                labels: Vector::zeros(0),
+                weights: Vector::zeros(self.n_components),
+                means: Matrix::zeros(self.n_components, p),
+                covariances: Matrix::zeros(self.n_components, p),
+                loglik: f64::NAN,
+            });
+        }
+        if all_rows_identical(x, ctx.policy.near_zero_variance) {
+            ctx.push(degenerate_cluster_issue(
+                "Bayesian GMM data have zero spread; component covariances collapse",
+            ));
+        }
+        if k < self.n_components {
+            ctx.push(
+                Issue::builder(IssueCode::Overparameterized)
+                    .message("BayesianGaussianMixture n_components exceeds n; clamping")
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .severity(Severity::Advisory)
+                .message("BayesianGaussianMixture uses MAP-EM, not a full variational posterior")
+                .build(),
+        );
+        let alpha0 = self.weight_concentration.max(1e-3);
+        let mut rng = Rng::new(self.seed | 5);
+        let mut means = kmeans_plus_plus(x, k, &mut rng);
+        let mut weights = Vector::filled(k, 1.0 / k as f64);
+        let mut vars = Matrix::zeros(k, p);
+        let mut prior_mean = Vector::zeros(p);
+        for j in 0..p {
+            let col = x.column(j);
+            prior_mean[j] = col.mean();
+            let v = col.std().max(COV_FLOOR);
+            for c in 0..k {
+                vars.set(c, j, v * v);
+            }
+        }
+        let mut loglik = f64::NEG_INFINITY;
+        let mut resp = vec![vec![0.0; k]; n];
+        for it in 0..self.max_iter.max(1) {
+            let mut ll = 0.0;
+            for i in 0..n {
+                let mut logp = vec![0.0; k];
+                for c in 0..k {
+                    let lw = if weights[c] > 0.0 {
+                        weights[c].ln()
+                    } else {
+                        f64::NEG_INFINITY
+                    };
+                    logp[c] = lw + diag_gauss_logpdf(x, i, &means, c, &vars);
+                }
+                let lse = logsumexp(&logp);
+                ll += lse;
+                for c in 0..k {
+                    resp[i][c] = if lse.is_finite() {
+                        (logp[c] - lse).exp()
+                    } else {
+                        1.0 / k as f64
+                    };
+                }
+            }
+            loglik = ll / n as f64;
+            ctx.session.step(it as u64, -loglik, None);
+            let mut nk = vec![0.0; k];
+            for i in 0..n {
+                for c in 0..k {
+                    nk[c] += resp[i][c];
+                }
+            }
+            let den = n as f64 + k as f64 * alpha0;
+            for c in 0..k {
+                weights[c] = (nk[c] + alpha0) / den;
+                if nk[c] <= 1e-8 {
+                    ctx.push(
+                        Issue::builder(IssueCode::MixtureWeightCollapsed)
+                            .severity(Severity::Warning)
+                            .message(format!("Bayesian GMM component {c} weight collapsed"))
+                            .metric("component", c as f64)
+                            .build(),
+                    );
+                    copy_row(&mut means, c, x, rng.below(n));
+                    continue;
+                }
+                let shrink = nk[c] / (nk[c] + 1.0);
+                for j in 0..p {
+                    let mut m = 0.0;
+                    for i in 0..n {
+                        m += resp[i][c] * x.get(i, j);
+                    }
+                    let mle = m / nk[c];
+                    means.set(c, j, shrink * mle + (1.0 - shrink) * prior_mean[j]);
+                }
+                for j in 0..p {
+                    let mut s = 0.0;
+                    for i in 0..n {
+                        let d = x.get(i, j) - means.get(c, j);
+                        s += resp[i][c] * d * d;
+                    }
+                    vars.set(c, j, (s / nk[c]).max(COV_FLOOR));
+                }
+            }
+            let wsum: f64 = (0..k).map(|c| weights[c]).sum();
+            if wsum > 0.0 {
+                for c in 0..k {
+                    weights[c] /= wsum;
+                }
+            }
+        }
+        let mut labels = Vector::zeros(n);
+        for i in 0..n {
+            let mut b = 0usize;
+            let mut bv = f64::NEG_INFINITY;
+            for c in 0..k {
+                if resp[i][c] > bv {
+                    bv = resp[i][c];
+                    b = c;
+                }
+            }
+            labels[i] = b as f64;
+        }
+        push_if_nonfinite_vec(&mut ctx, &labels, "bgmm labels");
+        ctx.finish(FittedGmm {
+            labels,
+            weights,
+            means,
+            covariances: vars,
+            loglik,
+        })
+    }
+}
+
 /// Spectral clustering: Gaussian affinity → Laplacian eigenmap → k-means.
 #[derive(Clone, Debug)]
 pub struct SpectralClustering {
@@ -2915,5 +3104,16 @@ mod tests {
         if q.value.n_clusters >= 2 {
             assert_ne!(lab[0], lab[20], "blobs must differ: {lab:?}");
         }
+    }
+
+    #[test]
+    fn bayesian_gmm_separates_two_blobs() {
+        let x = two_blobs();
+        let q = BayesianGaussianMixture::new(2)
+            .fit(&x, &Session::new("bgmm", "fit"))
+            .expect("bgmm");
+        let lab = q.value.labels.as_slice();
+        assert_ne!(lab[0], lab[20], "blobs must differ: {lab:?}");
+        assert_eq!(q.value.weights.len(), 2);
     }
 }

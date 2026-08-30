@@ -2408,6 +2408,104 @@ impl Fit for LassoLars {
     }
 }
 
+/// Information criterion used by [`LassoLarsIc`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IcKind {
+    /// AIC: \(n\log(\mathrm{SSE}/n)+2k\).
+    Aic,
+    /// BIC: \(n\log(\mathrm{SSE}/n)+k\log n\).
+    Bic,
+}
+
+/// LassoLars path scored by AIC/BIC (sklearn `LassoLarsIC`).
+///
+/// The grid is a documented compromise versus the exact LARS knots.
+#[derive(Clone, Debug)]
+pub struct LassoLarsIc {
+    /// AIC or BIC.
+    pub criterion: IcKind,
+}
+
+impl Default for LassoLarsIc {
+    fn default() -> Self {
+        Self {
+            criterion: IcKind::Aic,
+        }
+    }
+}
+
+impl LassoLarsIc {
+    /// AIC-scored LassoLars.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for LassoLarsIc {
+    type Fitted = FittedLars;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLars>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if ctx.report.contains(IssueCode::ConstantTarget) {
+            return ctx.finish(FittedLars {
+                coef: Vector::zeros(x.ncols()),
+                intercept: y.mean(),
+                active: Vec::new(),
+            });
+        }
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .severity(Severity::Advisory)
+                .message("LassoLarsIC scores a coarse α grid, not the exact LARS knots")
+                .compromise(NumericalCompromise::new(
+                    "IC along the full LARS path",
+                    "AIC/BIC on α ∈ {0, 0.01, 0.1, 1} × σ_y",
+                    "the grid may skip the IC-optimal knot",
+                    "treat the selected α as a discrete approximation",
+                ))
+                .build(),
+        );
+        let scale = y.std().max(1e-6);
+        let alphas = [0.0, 0.01 * scale, 0.1 * scale, scale];
+        let n = y.len().max(1) as f64;
+        let mut best: Option<(f64, FittedLars)> = None;
+        for (k, &a) in alphas.iter().enumerate() {
+            match LassoLars::new(a).fit(x, y, &session.child(format!("llarsic_{k}"))) {
+                Ok(q) => {
+                    let pred = x.matvec(&q.value.coef);
+                    let mut sse = 0.0;
+                    for i in 0..y.len() {
+                        let e = y[i] - (pred[i] + q.value.intercept);
+                        sse += e * e;
+                    }
+                    let nnz = q
+                        .value
+                        .coef
+                        .as_slice()
+                        .iter()
+                        .filter(|v| v.abs() > 1e-10)
+                        .count() as f64
+                        + 1.0;
+                    let ic = match self.criterion {
+                        IcKind::Aic => n * (sse / n).max(1e-15).ln() + 2.0 * nnz,
+                        IcKind::Bic => n * (sse / n).max(1e-15).ln() + nnz * n.ln(),
+                    };
+                    if best.as_ref().map(|(b, _)| ic < *b).unwrap_or(true) {
+                        best = Some((ic, q.value));
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+        let fitted = best.map(|(_, m)| m).unwrap_or(FittedLars {
+            coef: Vector::zeros(x.ncols()),
+            intercept: y.mean(),
+            active: Vec::new(),
+        });
+        ctx.finish(fitted)
+    }
+}
+
 /// Tweedie GLM with log link and variance \(\mu^p\) (sklearn `TweedieRegressor`).
 ///
 /// \(p=0\) is Gaussian, \(p=1\) Poisson, \(p=2\) Gamma, \(1<p<2\) compound
@@ -3529,6 +3627,10 @@ mod tests {
             .fit(&x, &ym, &Session::new("mte", "fit"))
             .expect("mte");
         assert_eq!(mte.value.coef.shape(), (1, 2));
+        let ic = LassoLarsIc::new()
+            .fit(&x, &y, &Session::new("llic", "fit"))
+            .expect("llic");
+        assert!(ic.value.coef.as_slice().iter().any(|v| v.abs() > 1e-6));
     }
 
     #[test]

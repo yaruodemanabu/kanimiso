@@ -3544,6 +3544,51 @@ fn student_t_ppf(p: f64, df: f64) -> f64 {
     t
 }
 
+/// Tricube locally-linear smooth used by STL (no quality report of its own).
+pub(crate) fn lowess_raw(x: &[f64], y: &[f64], frac: f64) -> Vec<f64> {
+    let n = x.len().min(y.len());
+    if n == 0 {
+        return Vec::new();
+    }
+    let span = ((frac.clamp(1e-3, 1.0) * n as f64).ceil() as usize).clamp(2, n);
+    let mut out = vec![0.0; n];
+    for i in 0..n {
+        let mut dist: Vec<(f64, usize)> = (0..n).map(|j| ((x[j] - x[i]).abs(), j)).collect();
+        dist.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let maxd = dist[span - 1].0.max(1e-15);
+        let mut sw = 0.0;
+        let mut swx = 0.0;
+        let mut swy = 0.0;
+        let mut swxx = 0.0;
+        let mut swxy = 0.0;
+        for &(d, j) in dist.iter().take(span) {
+            let u = d / maxd;
+            let w = if u >= 1.0 {
+                0.0
+            } else {
+                let t = 1.0 - u * u * u;
+                t * t * t
+            };
+            sw += w;
+            swx += w * x[j];
+            swy += w * y[j];
+            swxx += w * x[j] * x[j];
+            swxy += w * x[j] * y[j];
+        }
+        let det = sw * swxx - swx * swx;
+        out[i] = if det.abs() > 1e-18 {
+            let a = (swy * swxx - swx * swxy) / det;
+            let b = (sw * swxy - swx * swy) / det;
+            a + b * x[i]
+        } else if sw > 0.0 {
+            swy / sw
+        } else {
+            y[i]
+        };
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3643,5 +3688,9 @@ mod tests {
         let e = Vector::from_iter((0..40).map(|i| 0.2 * ((i as f64).sin())));
         let arch = arch_lm(&e, 2, &Session::new("arch", "t")).expect("arch");
         assert!(arch.value.df > 0.0);
+        let xs = Vector::from_iter((0..20).map(|i| i as f64));
+        let ys = Vector::from_iter((0..20).map(|i| 2.0 * i as f64));
+        let sm = lowess(&xs, &ys, 0.4, &Session::new("lo", "t")).expect("lowess");
+        assert!((sm.value[10] - 20.0).abs() < 1.0);
     }
 }

@@ -443,6 +443,197 @@ impl FirstDifferenceOls {
     }
 }
 
+/// Pooled OLS: ignore the group structure except for a thin-panel warning.
+#[derive(Clone, Debug, Default)]
+pub struct PooledOls {
+    /// Include an intercept.
+    pub fit_intercept: bool,
+}
+
+impl PooledOls {
+    /// Intercept-on pooled OLS.
+    pub fn new() -> Self {
+        Self {
+            fit_intercept: true,
+        }
+    }
+
+    /// Fit pooled OLS of `y` on `X`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPanel>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let sizes = group_sizes(groups);
+        warn_panel_groups(&mut ctx, &sizes, "PooledOLS");
+        let design = if self.fit_intercept {
+            x.with_intercept()
+        } else {
+            x.clone()
+        };
+        let mut scratch = signlred::Report::new("pooled", "ols");
+        let Some(beta) = least_squares(&mut scratch, &design, y, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("pooled OLS failed")
+                    .build(),
+            );
+            return ctx.finish(empty_panel(x.ncols()));
+        };
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let (intercept, coef) = if self.fit_intercept {
+            (
+                beta.as_slice().first().copied().unwrap_or(0.0),
+                Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            )
+        } else {
+            (0.0, beta)
+        };
+        ctx.finish(FittedPanel {
+            coef,
+            intercept,
+            n_groups: sizes.len(),
+            n_eff: y.len(),
+        })
+    }
+}
+
+/// Swamy–Arora random-effects GLS (linearmodels `RandomEffects` lite).
+///
+/// `θ` is computed from within and between residual scales. A collapsed
+/// `σ_α²` is a warning that the GLS is pooled OLS.
+#[derive(Clone, Debug, Default)]
+pub struct RandomEffects;
+
+impl RandomEffects {
+    /// Default RE estimator.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit quasi-demeaned GLS.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPanel>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let sizes = group_sizes(groups);
+        warn_panel_groups(&mut ctx, &sizes, "RandomEffects");
+        if sizes.len() <= 1 {
+            return ctx.finish(empty_panel(x.ncols()));
+        }
+        let fe = match PanelFe::new().fit(x, y, groups, &session.child("re-fe")) {
+            Ok(q) => q.value,
+            Err(_) => {
+                ctx.push(
+                    Issue::builder(IssueCode::UnidentifiedModel)
+                        .severity(signlred::Severity::Warning)
+                        .message("RE within step failed; falling back to pooled OLS")
+                        .build(),
+                );
+                return PooledOls::new().fit(x, y, groups, session);
+            }
+        };
+        let be = match BetweenOls::new().fit(x, y, groups, &session.child("re-be")) {
+            Ok(q) => q.value,
+            Err(_) => {
+                return PooledOls::new().fit(x, y, groups, session);
+            }
+        };
+        let n = y.len().min(x.nrows()).min(groups.len());
+        let p = x.ncols();
+        let n_g = sizes.len().max(1);
+        let t_bar = n as f64 / n_g as f64;
+        let (mx, my) = group_means(x, y, groups, &sizes);
+        let mut sse_w = 0.0;
+        for i in 0..n {
+            let g = groups[i].round() as i64;
+            let gy = my.get(&g).copied().unwrap_or(0.0);
+            let mut fit = 0.0;
+            for j in 0..p {
+                let m = mx.get(&g).map(|v| v[j]).unwrap_or(0.0);
+                fit += fe.coef[j] * (x.get(i, j) - m);
+            }
+            let e = (y[i] - gy) - fit;
+            sse_w += e * e;
+        }
+        let df_w = (n as f64 - n_g as f64 - p as f64).max(1.0);
+        let sig_e2 = (sse_w / df_w).max(1e-12);
+        let mut sse_b = 0.0;
+        for (&g, gx) in &mx {
+            let gy = my.get(&g).copied().unwrap_or(0.0);
+            let mut fit = be.intercept;
+            for j in 0..p {
+                fit += be.coef[j] * gx[j];
+            }
+            let e = gy - fit;
+            sse_b += e * e;
+        }
+        let df_b = (n_g as f64 - p as f64 - 1.0).max(1.0);
+        let sig_b2 = sse_b / df_b;
+        let sig_a2 = (sig_b2 - sig_e2 / t_bar.max(1.0)).max(0.0);
+        if sig_a2 <= ctx.policy.near_zero_variance {
+            ctx.push(
+                Issue::builder(IssueCode::NearZeroVariance)
+                    .message("RE between variance collapsed; θ≈0 (pooled)")
+                    .build(),
+            );
+        }
+        let mut xq = Matrix::zeros(n, p);
+        let mut yq = Vector::zeros(n);
+        let mut theta_mean = 0.0;
+        for i in 0..n {
+            let g = groups[i].round() as i64;
+            let t_i = *sizes.get(&g).unwrap_or(&1) as f64;
+            let theta = 1.0 - (sig_e2 / (t_i * sig_a2 + sig_e2)).sqrt();
+            theta_mean += theta;
+            let gy = my.get(&g).copied().unwrap_or(0.0);
+            yq[i] = y[i] - theta * gy;
+            for j in 0..p {
+                let m = mx.get(&g).map(|v| v[j]).unwrap_or(0.0);
+                xq.set(i, j, x.get(i, j) - theta * m);
+            }
+        }
+        let _ = theta_mean / n as f64;
+        let design = xq.with_intercept();
+        let mut scratch = signlred::Report::new("re", "gls");
+        let Some(beta) = least_squares(&mut scratch, &design, &yq, &ctx.policy) else {
+            return PooledOls::new().fit(x, y, groups, session);
+        };
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedPanel {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            coef: Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            n_groups: n_g,
+            n_eff: n,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,6 +673,18 @@ mod tests {
             (fd.value.coef[0] - 2.0).abs() < 1e-8,
             "fd={}",
             fd.value.coef[0]
+        );
+        let po = PooledOls::new()
+            .fit(&x, &y, &g, &Session::new("po", "fit"))
+            .expect("pooled");
+        assert!(po.value.coef[0].is_finite());
+        let re = RandomEffects::new()
+            .fit(&x, &y, &g, &Session::new("re", "fit"))
+            .expect("re");
+        assert!(
+            (re.value.coef[0] - 2.0).abs() < 0.5,
+            "re={}",
+            re.value.coef[0]
         );
     }
 }

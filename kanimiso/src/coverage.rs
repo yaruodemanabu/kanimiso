@@ -1580,6 +1580,98 @@ const INVENTORY: &[Algorithm] = &[
     ),
     a("online.FunkMf", "river.reco.FunkMF", "online"),
     a("online.CluStream", "river.cluster.CluStream", "online"),
+    a(
+        "multiclass.OneVsRestClassifier",
+        "sklearn.multiclass.OneVsRestClassifier",
+        "estimator",
+    ),
+    a(
+        "multiclass.OneVsOneClassifier",
+        "sklearn.multiclass.OneVsOneClassifier",
+        "estimator",
+    ),
+    a(
+        "random_projection.GaussianRandomProjection",
+        "sklearn.random_projection.GaussianRandomProjection",
+        "transformer",
+    ),
+    a(
+        "random_projection.SparseRandomProjection",
+        "sklearn.random_projection.SparseRandomProjection",
+        "transformer",
+    ),
+    a(
+        "cluster.BayesianGaussianMixture",
+        "sklearn.mixture.BayesianGaussianMixture",
+        "estimator",
+    ),
+    a(
+        "feature.SelectFpr",
+        "sklearn.feature_selection.SelectFpr",
+        "transformer",
+    ),
+    a(
+        "feature.SelectFdr",
+        "sklearn.feature_selection.SelectFdr",
+        "transformer",
+    ),
+    a(
+        "preprocess.LabelBinarizer",
+        "sklearn.preprocessing.LabelBinarizer",
+        "transformer",
+    ),
+    a(
+        "robust.Rlm",
+        "statsmodels.robust.robust_linear_model.RLM",
+        "estimator",
+    ),
+    a(
+        "panel.PooledOls",
+        "linearmodels.panel.model.PooledOLS",
+        "estimator",
+    ),
+    a(
+        "panel.RandomEffects",
+        "linearmodels.panel.model.RandomEffects",
+        "estimator",
+    ),
+    a("tsa.Stl", "statsmodels.tsa.seasonal.STL", "forecast"),
+    a(
+        "tsa.Detrender",
+        "sktime.transformations.series.detrend.Detrender",
+        "forecast",
+    ),
+    a(
+        "tsa.Deseasonalizer",
+        "sktime.transformations.series.detrend.Deseasonalizer",
+        "forecast",
+    ),
+    a(
+        "tsa.PolynomialTrendForecaster",
+        "sktime.forecasting.trend.PolynomialTrendForecaster",
+        "forecast",
+    ),
+    a(
+        "tsa.MarkovRegression",
+        "statsmodels.tsa.regime_switching.markov_regression.MarkovRegression",
+        "forecast",
+    ),
+    a(
+        "linear_model.LassoLarsIc",
+        "sklearn.linear_model.LassoLarsIC",
+        "estimator",
+    ),
+    a(
+        "tslearn.LearningShapelets",
+        "tslearn.shapelets.LearningShapelets",
+        "timeseries",
+    ),
+    a(
+        "online.ExtremelyFastDecisionTree",
+        "river.tree.ExtremelyFastDecisionTreeClassifier",
+        "online",
+    ),
+    a("online.BiasedMf", "river.reco.BiasedMF", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -1625,6 +1717,10 @@ mod tests {
             "tsa.Sarimax",
             "hmm.VariationalCategoricalHmm",
             "online.FunkMf",
+            "multiclass.OneVsRestClassifier",
+            "cluster.BayesianGaussianMixture",
+            "tsa.Stl",
+            "online.BiasedMf",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

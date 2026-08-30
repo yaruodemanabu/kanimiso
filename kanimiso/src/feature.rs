@@ -640,6 +640,217 @@ impl Transform for SequentialFeatureSelector {
     }
 }
 
+fn apply_univariate_mask(
+    scores: &FeatureScores,
+    keep: impl Fn(usize, f64) -> bool,
+    ctx: &mut FitCtx,
+) -> Vec<bool> {
+    let p = scores.pvalues.len();
+    let mut support = vec![false; p];
+    for j in 0..p {
+        if keep(j, scores.pvalues[j]) {
+            support[j] = true;
+        }
+    }
+    if support.iter().all(|s| !*s) && p > 0 {
+        let mut best = 0usize;
+        let mut bp = f64::INFINITY;
+        for j in 0..p {
+            if scores.pvalues[j] < bp {
+                bp = scores.pvalues[j];
+                best = j;
+            }
+        }
+        support[best] = true;
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("no feature passed the p-value cutoff; keeping the smallest p")
+                .build(),
+        );
+    }
+    support
+}
+
+/// Keep columns with F-test p-value below `alpha` (sklearn `SelectFpr`).
+#[derive(Clone, Debug)]
+pub struct SelectFpr {
+    /// Family-wise type-I rate for a single test.
+    pub alpha: f64,
+    support: Vec<bool>,
+    fitted: bool,
+}
+
+impl Default for SelectFpr {
+    fn default() -> Self {
+        Self {
+            alpha: 0.05,
+            support: Vec::new(),
+            fitted: false,
+        }
+    }
+}
+
+impl SelectFpr {
+    /// FPR selector with the given `α`.
+    pub fn new(alpha: f64) -> Self {
+        Self {
+            alpha,
+            ..Self::default()
+        }
+    }
+
+    /// Mask of kept columns.
+    pub fn support(&self) -> &[bool] {
+        &self.support
+    }
+}
+
+impl Fit for SelectFpr {
+    type Fitted = Self;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let alpha = if self.alpha.is_finite() && self.alpha > 0.0 && self.alpha < 1.0 {
+            self.alpha
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "SelectFpr α={} not in (0, 1); using 0.05",
+                        self.alpha
+                    ))
+                    .build(),
+            );
+            0.05
+        };
+        let scores = match f_regression(x, y, &session.child("fpr")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                self.support = vec![true; x.ncols().min(1)];
+                self.fitted = true;
+                return ctx.finish(self.clone());
+            }
+        };
+        self.support = apply_univariate_mask(&scores, |_, p| p <= alpha, &mut ctx);
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for SelectFpr {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(x.clone());
+        }
+        ctx.finish(select_columns(x, &self.support))
+    }
+}
+
+/// Benjamini–Hochberg FDR control (sklearn `SelectFdr`).
+#[derive(Clone, Debug)]
+pub struct SelectFdr {
+    /// Target false-discovery rate.
+    pub alpha: f64,
+    support: Vec<bool>,
+    fitted: bool,
+}
+
+impl Default for SelectFdr {
+    fn default() -> Self {
+        Self {
+            alpha: 0.05,
+            support: Vec::new(),
+            fitted: false,
+        }
+    }
+}
+
+impl SelectFdr {
+    /// FDR selector with the given `α`.
+    pub fn new(alpha: f64) -> Self {
+        Self {
+            alpha,
+            ..Self::default()
+        }
+    }
+
+    /// Mask of kept columns.
+    pub fn support(&self) -> &[bool] {
+        &self.support
+    }
+}
+
+impl Fit for SelectFdr {
+    type Fitted = Self;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let alpha = if self.alpha.is_finite() && self.alpha > 0.0 && self.alpha < 1.0 {
+            self.alpha
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "SelectFdr α={} not in (0, 1); using 0.05",
+                        self.alpha
+                    ))
+                    .build(),
+            );
+            0.05
+        };
+        let scores = match f_regression(x, y, &session.child("fdr")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                self.support = vec![x.ncols() > 0];
+                if x.ncols() > 1 {
+                    self.support.resize(x.ncols(), false);
+                }
+                self.fitted = true;
+                return ctx.finish(self.clone());
+            }
+        };
+        let p = scores.pvalues.len();
+        let mut order: Vec<usize> = (0..p).collect();
+        order.sort_by(|a, b| {
+            scores.pvalues[*a]
+                .partial_cmp(&scores.pvalues[*b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut cutoff = None;
+        for (rank, &j) in order.iter().enumerate() {
+            let thresh = alpha * (rank + 1) as f64 / p.max(1) as f64;
+            if scores.pvalues[j] <= thresh {
+                cutoff = Some(rank);
+            }
+        }
+        let mut keep_idx = vec![false; p];
+        if let Some(last) = cutoff {
+            for &j in order.iter().take(last + 1) {
+                keep_idx[j] = true;
+            }
+        }
+        self.support = apply_univariate_mask(&scores, |j, _| keep_idx[j], &mut ctx);
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for SelectFdr {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(x.clone());
+        }
+        ctx.finish(select_columns(x, &self.support))
+    }
+}
+
 /// Random Fourier features for an RBF kernel (Rahimi & Recht).
 #[derive(Clone, Debug)]
 pub struct RbfSampler {
@@ -1835,5 +2046,11 @@ mod tests {
         let mut rfecv = RfeCv::new(3);
         rfecv.fit(&x, &y, &Session::new("rfecv", "fit")).unwrap();
         assert!(rfecv.support().iter().any(|s| *s));
+        let mut fpr = SelectFpr::new(0.05);
+        fpr.fit(&x, &y, &Session::new("fpr", "fit")).unwrap();
+        assert!(fpr.support()[0]);
+        let mut fdr = SelectFdr::new(0.05);
+        fdr.fit(&x, &y, &Session::new("fdr", "fit")).unwrap();
+        assert!(fdr.support()[0]);
     }
 }

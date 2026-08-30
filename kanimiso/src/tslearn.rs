@@ -12,7 +12,7 @@ use crate::special::norm_cdf;
 use crate::traits::{Fit, FitUnsupervised, Predict, Transform};
 use crate::validate::{inspect_classes, inspect_xy};
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Qualified, Result, Severity};
+use signlred::{Issue, IssueCode, NumericalCompromise, Qualified, Result, Severity};
 use std::collections::BTreeMap;
 
 fn series_ok(a: &Vector) -> bool {
@@ -2098,6 +2098,162 @@ impl Fit for Weasel {
     }
 }
 
+/// Random-shapelet transform + ridge (tslearn `LearningShapelets` lite).
+///
+/// Shapelets are sampled, not gradient-learned — recorded as a compromise.
+/// Do not pass `n_shapelets` as `p` to identification: 10 series and 4
+/// shapelets is a feature map, not an overparameterized linear model.
+#[derive(Clone, Debug)]
+pub struct LearningShapelets {
+    /// Number of random shapelets.
+    pub n_shapelets: usize,
+    /// Shapelet length.
+    pub length: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for LearningShapelets {
+    fn default() -> Self {
+        Self {
+            n_shapelets: 4,
+            length: 4,
+            seed: 3,
+        }
+    }
+}
+
+impl LearningShapelets {
+    /// `k` shapelets of length `length`.
+    pub fn new(n_shapelets: usize, length: usize) -> Self {
+        Self {
+            n_shapelets: n_shapelets.max(1),
+            length: length.max(2),
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted shapelet ridge.
+#[derive(Clone, Debug)]
+pub struct FittedShapelets {
+    /// Shapelets (`k` × `L`).
+    pub shapelets: Matrix,
+    /// Ridge on min-distance features.
+    pub ridge: FittedPenalized,
+}
+
+fn min_shapelet_dist(row: &Matrix, i: usize, shape: &Matrix, s: usize) -> f64 {
+    let tlen = row.ncols();
+    let slen = shape.ncols();
+    if slen == 0 || tlen < slen {
+        return f64::INFINITY;
+    }
+    let mut best = f64::INFINITY;
+    for start in 0..=tlen - slen {
+        let mut d = 0.0;
+        for u in 0..slen {
+            let e = row.get(i, start + u) - shape.get(s, u);
+            d += e * e;
+        }
+        best = best.min(d);
+    }
+    best.sqrt()
+}
+
+impl Fit for LearningShapelets {
+    type Fitted = FittedShapelets;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedShapelets>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let _ = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let l = self.length.min(x.ncols().max(2)).max(2);
+        if x.ncols() < l {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .severity(Severity::Warning)
+                    .message(format!("LearningShapelets length={l} > T={}", x.ncols()))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .severity(Severity::Advisory)
+                .message("LearningShapelets samples random windows; it is not gradient shapelet learning")
+                .compromise(NumericalCompromise::new(
+                    "learned shapelets (Grabocka et al.)",
+                    "random subsequences + min-distance + ridge",
+                    "shapelets are not optimized against the classification loss",
+                    "treat the features as a random convolutional sketch",
+                ))
+                .build(),
+        );
+        let k = self.n_shapelets.max(1);
+        let mut rng = Rng::new(self.seed | 7);
+        let slen = l.min(x.ncols().max(1));
+        let shapelets = Matrix::from_fn(k, slen, |_, _| 0.0);
+        let mut shapelets = shapelets;
+        if x.nrows() > 0 && x.ncols() >= slen {
+            for s in 0..k {
+                let row = rng.below(x.nrows());
+                let start = if x.ncols() > slen {
+                    rng.below(x.ncols() - slen + 1)
+                } else {
+                    0
+                };
+                for u in 0..slen {
+                    shapelets.set(s, u, x.get(row, start + u));
+                }
+            }
+        }
+        let feat = Matrix::from_fn(x.nrows(), k, |i, s| min_shapelet_dist(x, i, &shapelets, s));
+        let ypm = Vector::from_iter(
+            y.as_slice()
+                .iter()
+                .map(|&v| if v >= 0.5 { 1.0 } else { -1.0 }),
+        );
+        let mut scratch = signlred::Report::new("shapelet", "ridge");
+        let coef = ridge_solve(&mut scratch, &feat, &ypm, 0.5, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(k));
+        ctx.finish(FittedShapelets {
+            shapelets,
+            ridge: FittedPenalized {
+                coef,
+                intercept: 0.0,
+                alpha: 0.5,
+                l1_ratio: 0.0,
+            },
+        })
+    }
+}
+
+impl Predict for FittedShapelets {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let k = self.shapelets.nrows();
+        let feat = Matrix::from_fn(x.nrows(), k, |i, s| {
+            min_shapelet_dist(x, i, &self.shapelets, s)
+        });
+        let raw = if feat.ncols() == self.ridge.coef.len() {
+            feat.matvec(&self.ridge.coef)
+        } else {
+            Vector::zeros(x.nrows())
+        };
+        let y = Vector::from_iter(
+            raw.as_slice()
+                .iter()
+                .map(|&s| if s >= 0.0 { 1.0 } else { 0.0 }),
+        );
+        ctx.finish(y)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2309,5 +2465,14 @@ mod tests {
         .fit(&x, &yb, &Session::new("ts", "weasel"))
         .unwrap();
         assert!(!wsl.value.vocab.is_empty() || x.nrows() > 0);
+        let sh = LearningShapelets::new(4, 3)
+            .fit(&x, &yb, &Session::new("ts", "shp"))
+            .unwrap();
+        let sp = sh
+            .value
+            .predict(&x, &Session::new("ts", "shpp"))
+            .unwrap()
+            .value;
+        assert_eq!(sp.len(), 6);
     }
 }

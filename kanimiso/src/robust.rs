@@ -8,7 +8,9 @@ use crate::rng::Rng;
 use crate::traits::{Fit, Predict};
 use crate::validate::{inspect_identification, inspect_xy};
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result};
+use signlred::{
+    Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result, Severity,
+};
 
 /// RANSAC wrapper around OLS.
 #[derive(Clone, Debug)]
@@ -753,6 +755,136 @@ impl Predict for FittedOmp {
     }
 }
 
+/// Huber M-estimator (statsmodels `RLM`) via IRLS on a scratch report.
+///
+/// Inner weighted OLS issues that would abort a valid M-step
+/// (`NearSingular`, `ResidualTooLarge`) are not promoted.
+#[derive(Clone, Debug)]
+pub struct Rlm {
+    /// Huber cutoff in residual MAD units.
+    pub k: f64,
+    /// IRLS iteration cap.
+    pub max_iter: usize,
+}
+
+impl Default for Rlm {
+    fn default() -> Self {
+        Self {
+            k: 1.345,
+            max_iter: 40,
+        }
+    }
+}
+
+impl Rlm {
+    /// Default Huber RLM.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted robust slopes.
+#[derive(Clone, Debug)]
+pub struct FittedRlm {
+    /// Slopes.
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+}
+
+impl Fit for Rlm {
+    type Fitted = FittedRlm;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if ctx.report.contains(IssueCode::ConstantTarget) {
+            return ctx.finish(FittedRlm {
+                coef: Vector::zeros(x.ncols()),
+                intercept: y.mean(),
+            });
+        }
+        let design = x.with_intercept();
+        let mut scratch = signlred::Report::new("rlm", "ols");
+        let Some(mut beta) = least_squares(&mut scratch, &design, y, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("RLM seed OLS failed")
+                    .build(),
+            );
+            return ctx.finish(FittedRlm {
+                coef: Vector::zeros(x.ncols()),
+                intercept: y.mean(),
+            });
+        };
+        let k = if self.k.is_finite() && self.k > 0.0 {
+            self.k
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "RLM k={} is not a positive finite Huber cutoff",
+                        self.k
+                    ))
+                    .build(),
+            );
+            1.345
+        };
+        for it in 0..self.max_iter.max(1) {
+            let pred = design.matvec(&beta);
+            let resid = y.sub(&pred);
+            let mut abs: Vec<f64> = resid.as_slice().iter().map(|v| v.abs()).collect();
+            abs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mad = if abs.is_empty() {
+                1.0
+            } else {
+                abs[abs.len() / 2].max(1e-12)
+            };
+            let scale = (mad / 0.6745).max(1e-12);
+            let mut xs = Matrix::zeros(design.nrows(), design.ncols());
+            let mut ys = Vector::zeros(y.len());
+            for i in 0..y.len() {
+                let u = resid[i] / (k * scale);
+                let w = if u.abs() <= 1.0 { 1.0 } else { 1.0 / u.abs() };
+                let sw = w.sqrt();
+                ys[i] = y[i] * sw;
+                for j in 0..design.ncols() {
+                    xs.set(i, j, design.get(i, j) * sw);
+                }
+            }
+            let mut step_rep = signlred::Report::new("rlm", "irls");
+            let Some(next) = least_squares(&mut step_rep, &xs, &ys, &ctx.policy) else {
+                break;
+            };
+            let d = next.sub(&beta).norm();
+            beta = next;
+            ctx.session.step(it as u64, d, None);
+            if d < 1e-8 {
+                break;
+            }
+        }
+        let intercept = beta.as_slice().first().copied().unwrap_or(0.0);
+        let coef = Vector::from_iter((1..beta.len()).map(|j| beta[j]));
+        ctx.finish(FittedRlm { coef, intercept })
+    }
+}
+
+impl Predict for FittedRlm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let mut y = if x.ncols() == self.coef.len() {
+            x.matvec(&self.coef)
+        } else {
+            Vector::zeros(x.nrows())
+        };
+        for i in 0..y.len() {
+            y[i] += self.intercept;
+        }
+        ctx.finish(y)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,5 +931,16 @@ mod tests {
             .fit(&x, &y, &Session::new("omp", "fit"))
             .expect("omp");
         assert_eq!(q.value.support, vec![1]);
+    }
+
+    #[test]
+    fn rlm_recovers_a_line_with_an_outlier() {
+        let x = Matrix::from_fn(16, 1, |i, _| i as f64);
+        let mut y = Vector::from_iter((0..16).map(|i| 2.0 * i as f64));
+        y[15] = 400.0;
+        let q = Rlm::new()
+            .fit(&x, &y, &Session::new("rlm", "fit"))
+            .expect("rlm");
+        assert!((q.value.coef[0] - 2.0).abs() < 0.3, "b={}", q.value.coef[0]);
     }
 }

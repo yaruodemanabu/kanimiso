@@ -2641,6 +2641,387 @@ fn garch_nll(e: &[f64], omega: f64, alpha: f64, beta: f64) -> f64 {
     nll
 }
 
+/// Seasonal-trend LOESS decomposition (statsmodels `STL`, sktime `STLTransformer`).
+#[derive(Clone, Debug)]
+pub struct Stl {
+    /// Seasonal period.
+    pub period: usize,
+}
+
+impl Default for Stl {
+    fn default() -> Self {
+        Self { period: 4 }
+    }
+}
+
+impl Stl {
+    /// STL with the given period.
+    pub fn new(period: usize) -> Self {
+        Self {
+            period: period.max(2),
+        }
+    }
+}
+
+impl FitSeries for Stl {
+    type Fitted = SeasonalDecomposition;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<SeasonalDecomposition>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let period = self.period.max(2);
+        if y.len() < 2 * period {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSeasonalCycles)
+                    .severity(Severity::Warning)
+                    .message(format!("STL n={} < 2s with s={period}", y.len()))
+                    .build(),
+            );
+        }
+        let n = y.len();
+        let t = (0..n).map(|i| i as f64).collect::<Vec<_>>();
+        let trend0 = crate::stats::lowess_raw(&t, y.as_slice(), 0.35);
+        let mut seas = vec![0.0; n];
+        let mut count = vec![0.0; period];
+        let mut acc = vec![0.0; period];
+        for i in 0..n {
+            let s = i % period;
+            acc[s] += y[i] - trend0.get(i).copied().unwrap_or(0.0);
+            count[s] += 1.0;
+        }
+        let mean_s: f64 = acc
+            .iter()
+            .zip(&count)
+            .map(|(a, c)| if *c > 0.0 { a / c } else { 0.0 })
+            .sum::<f64>()
+            / period as f64;
+        for i in 0..n {
+            let s = i % period;
+            seas[i] = if count[s] > 0.0 {
+                acc[s] / count[s] - mean_s
+            } else {
+                0.0
+            };
+        }
+        let dest = Vector::from_iter((0..n).map(|i| y[i] - seas[i]));
+        let trend = crate::stats::lowess_raw(&t, dest.as_slice(), 0.4);
+        let resid = Vector::from_iter(
+            (0..n).map(|i| y[i] - trend.get(i).copied().unwrap_or(0.0) - seas[i]),
+        );
+        ctx.finish(SeasonalDecomposition {
+            observed: y.clone(),
+            trend: Vector::from_iter(trend),
+            seasonal: Vector::from_iter(seas),
+            resid,
+            period,
+        })
+    }
+}
+
+/// Subtract a linear time trend (sktime `Detrender`).
+#[derive(Clone, Debug, Default)]
+pub struct Detrender {
+    slope: f64,
+    intercept: f64,
+    fitted: bool,
+}
+
+impl Detrender {
+    /// Default linear detrender.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl FitSeries for Detrender {
+    type Fitted = Self;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        let x = Matrix::from_fn(n, 1, |i, _| i as f64);
+        let mut scratch = Report::new("detrend", "ols");
+        if let Some(b) =
+            crate::linalg::least_squares(&mut scratch, &x.with_intercept(), y, &ctx.policy)
+        {
+            self.intercept = b.as_slice().first().copied().unwrap_or(0.0);
+            self.slope = b.as_slice().get(1).copied().unwrap_or(0.0);
+        }
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Detrender {
+    /// Subtract the fitted trend.
+    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(y.clone());
+        }
+        let z = Vector::from_iter(
+            y.as_slice()
+                .iter()
+                .enumerate()
+                .map(|(i, v)| v - self.intercept - self.slope * i as f64),
+        );
+        ctx.finish(z)
+    }
+}
+
+/// Subtract seasonal means (sktime `Deseasonalizer`).
+#[derive(Clone, Debug)]
+pub struct Deseasonalizer {
+    /// Seasonal period.
+    pub period: usize,
+    /// Seasonal means (`length = period`).
+    pub means: Vec<f64>,
+    fitted: bool,
+}
+
+impl Default for Deseasonalizer {
+    fn default() -> Self {
+        Self {
+            period: 4,
+            means: Vec::new(),
+            fitted: false,
+        }
+    }
+}
+
+impl Deseasonalizer {
+    /// Deseasonalizer with period `s`.
+    pub fn new(period: usize) -> Self {
+        Self {
+            period: period.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Subtract stored seasonal means.
+    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted || self.means.is_empty() {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(y.clone());
+        }
+        let s = self.means.len();
+        let z = Vector::from_iter(
+            y.as_slice()
+                .iter()
+                .enumerate()
+                .map(|(i, v)| v - self.means[i % s]),
+        );
+        ctx.finish(z)
+    }
+}
+
+impl FitSeries for Deseasonalizer {
+    type Fitted = Self;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let period = self.period.max(2);
+        if y.len() < 2 * period {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSeasonalCycles)
+                    .severity(Severity::Warning)
+                    .message(format!("Deseasonalizer n={} < 2s", y.len()))
+                    .build(),
+            );
+        }
+        let mut acc = vec![0.0; period];
+        let mut cnt = vec![0.0; period];
+        for (i, &v) in y.as_slice().iter().enumerate() {
+            if v.is_finite() {
+                acc[i % period] += v;
+                cnt[i % period] += 1.0;
+            }
+        }
+        self.means = acc
+            .iter()
+            .zip(&cnt)
+            .map(|(a, c)| if *c > 0.0 { a / c } else { 0.0 })
+            .collect();
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+/// Polynomial trend forecaster (sktime `PolynomialTrendForecaster`).
+#[derive(Clone, Debug)]
+pub struct PolynomialTrendForecaster {
+    /// Polynomial degree (`1` = linear).
+    pub degree: usize,
+}
+
+impl Default for PolynomialTrendForecaster {
+    fn default() -> Self {
+        Self { degree: 1 }
+    }
+}
+
+impl PolynomialTrendForecaster {
+    /// Degree-`d` trend.
+    pub fn new(degree: usize) -> Self {
+        Self {
+            degree: degree.max(1),
+        }
+    }
+}
+
+/// Fitted polynomial trend.
+#[derive(Clone, Debug)]
+pub struct FittedPolyTrend {
+    /// Coefficients on `[1, t, t², …]`.
+    pub coef: Vector,
+    /// Training length.
+    pub n: usize,
+}
+
+impl FittedPolyTrend {
+    /// `h`-step forecast.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        let p = self.coef.len();
+        let y = Vector::from_iter((0..h).map(|s| {
+            let t = (self.n + s) as f64;
+            let mut v = 0.0;
+            let mut pw = 1.0;
+            for j in 0..p {
+                v += self.coef[j] * pw;
+                pw *= t;
+            }
+            v
+        }));
+        ctx.finish(y)
+    }
+}
+
+impl FitSeries for PolynomialTrendForecaster {
+    type Fitted = FittedPolyTrend;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedPolyTrend>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let d = self.degree.max(1);
+        let p = d + 1;
+        let n = y.len();
+        let x = Matrix::from_fn(n, p, |i, j| {
+            let mut v = 1.0;
+            for _ in 0..j {
+                v *= i as f64;
+            }
+            v
+        });
+        let mut scratch = Report::new("polytrend", "ols");
+        let coef = crate::linalg::least_squares(&mut scratch, &x, y, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(p));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedPolyTrend { coef, n })
+    }
+}
+
+/// Two-regime switching regression (statsmodels `MarkovRegression` lite).
+///
+/// States are an independent mixture of OLS, not a filtered Markov chain —
+/// recorded as a numerical compromise.
+#[derive(Clone, Debug, Default)]
+pub struct MarkovRegression {
+    /// EM iterations.
+    pub max_iter: usize,
+}
+
+impl MarkovRegression {
+    /// Two-regime mixture of regressions.
+    pub fn new() -> Self {
+        Self { max_iter: 20 }
+    }
+}
+
+/// Fitted two-regime slopes.
+#[derive(Clone, Debug)]
+pub struct FittedMarkovReg {
+    /// Intercept and slopes in regime 0.
+    pub beta0: Vector,
+    /// Intercept and slopes in regime 1.
+    pub beta1: Vector,
+    /// Soft assignment of each row to regime 1.
+    pub regime: Vector,
+}
+
+impl MarkovRegression {
+    /// Fit `y | X` with two intercept+slope regimes.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMarkovReg>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .severity(Severity::Advisory)
+                .message("MarkovRegression uses an i.i.d. mixture, not Hamilton filtering")
+                .compromise(NumericalCompromise::new(
+                    "Hamilton-filtered Markov switching regression",
+                    "two-regime mixture of OLS with independent states",
+                    "transition probabilities are not identified",
+                    "do not read the assignments as a Markov chain",
+                ))
+                .build(),
+        );
+        let n = y.len().min(x.nrows());
+        let design = x.with_intercept();
+        let p = design.ncols();
+        let mut z = Vector::from_iter((0..n).map(|i| if i * 2 < n { 0.1 } else { 0.9 }));
+        let mut beta0 = Vector::zeros(p);
+        let mut beta1 = Vector::zeros(p);
+        for it in 0..self.max_iter.max(1) {
+            let w0 = Vector::from_iter((0..n).map(|i| (1.0 - z[i]).sqrt()));
+            let w1 = Vector::from_iter((0..n).map(|i| z[i].sqrt()));
+            let x0 = Matrix::from_fn(n, p, |i, j| design.get(i, j) * w0[i]);
+            let x1 = Matrix::from_fn(n, p, |i, j| design.get(i, j) * w1[i]);
+            let y0 = Vector::from_iter((0..n).map(|i| y[i] * w0[i]));
+            let y1 = Vector::from_iter((0..n).map(|i| y[i] * w1[i]));
+            let mut s0 = Report::new("ms", "r0");
+            let mut s1 = Report::new("ms", "r1");
+            if let Some(b) = crate::linalg::least_squares(&mut s0, &x0, &y0, &ctx.policy) {
+                beta0 = b;
+            }
+            if let Some(b) = crate::linalg::least_squares(&mut s1, &x1, &y1, &ctx.policy) {
+                beta1 = b;
+            }
+            let f0 = design.matvec(&beta0);
+            let f1 = design.matvec(&beta1);
+            for i in 0..n {
+                let e0 = (y[i] - f0[i]).abs();
+                let e1 = (y[i] - f1[i]).abs();
+                let d = e0 + e1 + 1e-12;
+                z[i] = e0 / d;
+            }
+            ctx.session.step(it as u64, z.mean(), None);
+        }
+        ctx.finish(FittedMarkovReg {
+            beta0,
+            beta1,
+            regime: z,
+        })
+    }
+}
+
 fn inspect_univariate(ctx: &mut FitCtx, y: &Vector) {
     inspect_xy(&mut ctx.report, &Matrix::from_vector(y), None, &ctx.policy);
     if let Some(issue) = scan_finite(y.as_slice()).to_issue("y") {
@@ -2899,5 +3280,34 @@ mod tests {
             .fit_series(&ypos, &Session::new("ttf", "fit"))
             .expect("ttf");
         assert!(ttf.value.log);
+        let stl = Stl::new(4)
+            .fit_series(&y, &Session::new("stl", "fit"))
+            .expect("stl");
+        assert_eq!(stl.value.trend.len(), 40);
+        let mut dt = Detrender::new();
+        dt.fit_series(&y, &Session::new("dt", "fit")).expect("dt");
+        let dz = dt
+            .transform(&y, &Session::new("dt", "t"))
+            .expect("dtt")
+            .value;
+        assert!(dz.std() < y.std());
+        let mut ds = Deseasonalizer::new(4);
+        ds.fit_series(&y, &Session::new("ds", "fit")).expect("ds");
+        assert_eq!(ds.means.len(), 4);
+        let pt = PolynomialTrendForecaster::new(1)
+            .fit_series(&y, &Session::new("pt", "fit"))
+            .expect("pt");
+        assert_eq!(
+            pt.value
+                .forecast(3, &Session::new("pt", "fc"))
+                .expect("ptf")
+                .value
+                .len(),
+            3
+        );
+        let mr = MarkovRegression::new()
+            .fit(&x, &y, &Session::new("mr", "fit"))
+            .expect("mr");
+        assert_eq!(mr.value.regime.len(), 40);
     }
 }
