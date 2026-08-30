@@ -20,6 +20,7 @@ use signlred::{
     scan_finite, slice_stats, Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified,
     Report, Result, Severity,
 };
+use std::collections::BTreeMap;
 
 /// Descriptive moments of a numeric sample.
 #[derive(Clone, Debug, PartialEq)]
@@ -10583,6 +10584,1042 @@ pub fn sur(
     })
 }
 
+/// Additive Denton first-difference temporal disaggregation (statsmodels `denton`).
+///
+/// `indicator` is high-frequency; `period` of its values sum to one entry of
+/// `totals`. Period and year counts are not identification `p`. Annual totals
+/// may be level-stationary — they are not inspected as a regression target.
+pub fn denton(
+    indicator: &Vector,
+    totals: &Vector,
+    period: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(indicator),
+        None,
+        &ctx.policy,
+    );
+    let s = period.max(2);
+    if period < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("Denton period={period} is <2; using 2"))
+                .build(),
+        );
+    }
+    let m = totals.len();
+    let need = m.saturating_mul(s);
+    if indicator.len() != need {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "Denton indicator n={} ≠ period {s} × {} totals",
+                    indicator.len(),
+                    m
+                ))
+                .build(),
+        );
+    }
+    let n = indicator.len().min(need);
+    let years = if s == 0 { 0 } else { n / s };
+    if years == 0 || m == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Denton needs at least one complete low-frequency period")
+                .build(),
+        );
+        return ctx.finish(Vector::from_iter(indicator.as_slice().iter().copied()));
+    }
+    let mut y = vec![0.0; years * s];
+    for t in 0..years {
+        let mut xs = 0.0;
+        for q in 0..s {
+            xs += indicator[t * s + q];
+        }
+        let yt = totals.as_slice().get(t).copied().unwrap_or(0.0);
+        if xs.abs() < 1e-15 {
+            ctx.push(
+                Issue::builder(IssueCode::ScaleFactorZero)
+                    .severity(Severity::Warning)
+                    .message(format!("Denton indicator sum is 0 in period {t}; using equal shares"))
+                    .compromise(NumericalCompromise::new(
+                        "proportional allocation on a non-zero indicator",
+                        "equal split of the annual total",
+                        "the high-frequency indicator vanished in this period",
+                        "do not read a flat intra-year path as a unique Denton solution",
+                    ))
+                    .build(),
+            );
+            let share = yt / s as f64;
+            for q in 0..s {
+                y[t * s + q] = share;
+            }
+        } else {
+            let scale = yt / xs;
+            for q in 0..s {
+                y[t * s + q] = indicator[t * s + q] * scale;
+            }
+        }
+    }
+    let mut z = vec![0.0; y.len()];
+    for t in 0..years {
+        let mut r = totals.as_slice().get(t).copied().unwrap_or(0.0);
+        for q in 0..s {
+            r -= y[t * s + q];
+        }
+        let add = r / s as f64;
+        for q in 0..s {
+            z[t * s + q] = add;
+        }
+    }
+    for _ in 0..48 {
+        let nn = z.len();
+        let mut g = vec![0.0; nn];
+        if nn >= 2 {
+            g[0] = z[0] - z[1];
+            g[nn - 1] = z[nn - 1] - z[nn - 2];
+            for t in 1..nn - 1 {
+                g[t] = 2.0 * z[t] - z[t - 1] - z[t + 1];
+            }
+        }
+        for t in 0..years {
+            let mut mg = 0.0;
+            for q in 0..s {
+                mg += g[t * s + q];
+            }
+            mg /= s as f64;
+            for q in 0..s {
+                z[t * s + q] -= 0.25 * (g[t * s + q] - mg);
+            }
+        }
+        for t in 0..years {
+            let mut sum = 0.0;
+            for q in 0..s {
+                sum += y[t * s + q] + z[t * s + q];
+            }
+            let yt = totals.as_slice().get(t).copied().unwrap_or(0.0);
+            let add = (yt - sum) / s as f64;
+            for q in 0..s {
+                z[t * s + q] += add;
+            }
+        }
+    }
+    for i in 0..y.len() {
+        y[i] += z[i];
+    }
+    ctx.finish(Vector::from_iter(y))
+}
+
+/// Chow–Lin temporal disaggregation (statsmodels `chow_lin`).
+///
+/// Low-frequency OLS of `totals` on the aggregated `indicator`, then AR(1)
+/// residual distribution. Period is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ChowLinResult {
+    /// High-frequency series.
+    pub series: Vector,
+    /// Intercept of the low-frequency regression.
+    pub intercept: f64,
+    /// Slope on the aggregated indicator.
+    pub slope: f64,
+    /// Residual AR(1).
+    pub rho: f64,
+}
+
+/// Chow–Lin disaggregation of `totals` using `indicator` at `period`.
+pub fn chow_lin(
+    indicator: &Vector,
+    totals: &Vector,
+    period: usize,
+    session: &Session,
+) -> Result<Qualified<ChowLinResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(indicator),
+        None,
+        &ctx.policy,
+    );
+    let s = period.max(2);
+    let m = totals.len();
+    let n = indicator.len().min(m.saturating_mul(s));
+    let years = if s == 0 { 0 } else { n / s };
+    if years < 3 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Chow–Lin needs at least three low-frequency observations")
+                .build(),
+        );
+    }
+    if years == 0 {
+        return ctx.finish(ChowLinResult {
+            series: Vector::from_iter(indicator.as_slice().iter().copied()),
+            intercept: 0.0,
+            slope: 0.0,
+            rho: 0.0,
+        });
+    }
+    let xagg = Vector::from_iter((0..years).map(|t| {
+        let mut xs = 0.0;
+        for q in 0..s {
+            xs += indicator[t * s + q];
+        }
+        xs
+    }));
+    let yagg = Vector::from_iter(totals.as_slice().iter().take(years).copied());
+    let design = Matrix::from_fn(years, 2, |i, j| if j == 0 { 1.0 } else { xagg[i] });
+    let mut scratch = Report::new("chow_lin", "ols");
+    let beta = least_squares(&mut scratch, &design, &yagg, &ctx.policy).unwrap_or_else(|| {
+        Vector::from_slice(&[yagg.mean(), 0.0])
+    });
+    for issue in scratch.issues() {
+        if matches!(
+            issue.code,
+            IssueCode::ResidualTooLarge
+                | IssueCode::NearSingular
+                | IssueCode::RankZero
+                | IssueCode::R2IsOne
+        ) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let intercept = beta.as_slice().first().copied().unwrap_or(0.0);
+    let slope = beta.as_slice().get(1).copied().unwrap_or(0.0);
+    let fit = design.matvec(&beta);
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for t in 1..years {
+        num += (yagg[t] - fit[t]) * (yagg[t - 1] - fit[t - 1]);
+        den += (yagg[t - 1] - fit[t - 1]) * (yagg[t - 1] - fit[t - 1]);
+    }
+    let rho = if den > 1e-18 {
+        (num / den).clamp(-0.95, 0.95)
+    } else {
+        0.0
+    };
+    let mut series = Vector::from_iter((0..n).map(|i| intercept / s as f64 + slope * indicator[i]));
+    let mut resid = Vector::zeros(years);
+    for t in 0..years {
+        let mut pred = 0.0;
+        for q in 0..s {
+            pred += series[t * s + q];
+        }
+        resid[t] = yagg[t] - pred;
+    }
+    let mut cvc = Mat::<f64>::zeros(years, years);
+    for a in 0..years {
+        for b in 0..years {
+            let mut acc = 0.0;
+            for i in 0..s {
+                for j in 0..s {
+                    let di = (a * s + i) as i32 - (b * s + j) as i32;
+                    acc += rho.abs().powi(di.unsigned_abs() as i32);
+                }
+            }
+            cvc[(a, b)] = acc;
+        }
+    }
+    let mut scr2 = Report::new("chow_lin", "cvc");
+    let lam = chol_solve(&mut scr2, &cvc, &resid, &ctx.policy).unwrap_or_else(|| {
+        Vector::from_iter((0..years).map(|t| resid[t] / s as f64))
+    });
+    for i in 0..n {
+        let mut add = 0.0;
+        for t in 0..years {
+            let mut w = 0.0;
+            for q in 0..s {
+                let di = i as i32 - (t * s + q) as i32;
+                w += rho.abs().powi(di.unsigned_abs() as i32);
+            }
+            add += w * lam[t];
+        }
+        series[i] += add;
+    }
+    for t in 0..years {
+        let mut pred = 0.0;
+        for q in 0..s {
+            pred += series[t * s + q];
+        }
+        let add = (yagg[t] - pred) / s as f64;
+        for q in 0..s {
+            series[t * s + q] += add;
+        }
+    }
+    ctx.finish(ChowLinResult {
+        series,
+        intercept,
+        slope,
+        rho,
+    })
+}
+
+/// Litterman temporal disaggregation (random-walk residuals).
+///
+/// Period is not identification `p`.
+pub fn litterman(
+    indicator: &Vector,
+    totals: &Vector,
+    period: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let q = chow_lin(indicator, totals, period, session)?;
+    let ctx = FitCtx::with_session(session.child("litterman"));
+    let s = period.max(2);
+    let n = q.value.series.len();
+    let years = if s == 0 { 0 } else { n / s };
+    if years == 0 {
+        return ctx.finish(q.value.series);
+    }
+    let mut series = Vector::from_iter((0..n).map(|i| {
+        q.value.intercept / s as f64 + q.value.slope * indicator.as_slice().get(i).copied().unwrap_or(0.0)
+    }));
+    let yagg = Vector::from_iter(totals.as_slice().iter().take(years).copied());
+    let mut resid = Vector::zeros(years);
+    for t in 0..years {
+        let mut pred = 0.0;
+        for qq in 0..s {
+            pred += series[t * s + qq];
+        }
+        resid[t] = yagg[t] - pred;
+    }
+    let mut cvc = Mat::<f64>::zeros(years, years);
+    for a in 0..years {
+        for b in 0..years {
+            let mut acc = 0.0;
+            for i in 0..s {
+                for j in 0..s {
+                    let ti = a * s + i;
+                    let tj = b * s + j;
+                    acc += (ti.min(tj) + 1) as f64;
+                }
+            }
+            cvc[(a, b)] = acc;
+        }
+    }
+    let mut scratch = Report::new("litterman", "cvc");
+    let lam = chol_solve(&mut scratch, &cvc, &resid, &ctx.policy).unwrap_or_else(|| {
+        Vector::from_iter((0..years).map(|t| resid[t] / s as f64))
+    });
+    for i in 0..n {
+        let mut add = 0.0;
+        for t in 0..years {
+            let mut w = 0.0;
+            for qq in 0..s {
+                let tj = t * s + qq;
+                w += (i.min(tj) + 1) as f64;
+            }
+            add += w * lam[t];
+        }
+        series[i] += add;
+    }
+    for t in 0..years {
+        let mut pred = 0.0;
+        for qq in 0..s {
+            pred += series[t * s + qq];
+        }
+        let add = (yagg[t] - pred) / s as f64;
+        for qq in 0..s {
+            series[t * s + qq] += add;
+        }
+    }
+    ctx.finish(series)
+}
+
+/// Fitted Farlie–Gumbel–Morgenstern copula (statsmodels `FGMCopula`).
+#[derive(Clone, Debug)]
+pub struct FgmCopula {
+    /// Dependence \(\theta \in [-1, 1]\).
+    pub theta: f64,
+    /// Copula log-likelihood.
+    pub loglik: f64,
+}
+
+fn fgm_ll(u: &[f64], v: &[f64], theta: f64) -> f64 {
+    if !(-1.0..=1.0).contains(&theta) {
+        return f64::NEG_INFINITY;
+    }
+    let mut ll = 0.0;
+    for i in 0..u.len() {
+        let dens = 1.0 + theta * (1.0 - 2.0 * u[i]) * (1.0 - 2.0 * v[i]);
+        if !dens.is_finite() || dens <= 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        ll += dens.ln();
+    }
+    ll
+}
+
+/// Fit a bivariate FGM copula by a \(\theta\) grid on ranks.
+///
+/// Pair count is not identification `p`.
+pub fn fgm_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<FgmCopula>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let n = y1.len().min(y2.len());
+    let x = Matrix::from_fn(n, 2, |i, j| if j == 0 { y1[i] } else { y2[i] });
+    inspect_xy(&mut ctx.report, &x, None, &ctx.policy);
+    let (u, v) = copula_uv(y1, y2);
+    if u.len() < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("FGM copula needs n≥4 pairs")
+                .build(),
+        );
+        return ctx.finish(FgmCopula {
+            theta: 0.0,
+            loglik: f64::NAN,
+        });
+    }
+    let mut best_th = 0.0_f64;
+    let mut best_ll = f64::NEG_INFINITY;
+    for step in 0..11 {
+        let th = -1.0 + 0.2 * step as f64;
+        let ll = fgm_ll(&u, &v, th);
+        if ll > best_ll {
+            best_ll = ll;
+            best_th = th;
+        }
+    }
+    ctx.finish(FgmCopula {
+        theta: best_th,
+        loglik: best_ll,
+    })
+}
+
+/// Empirical / rank copula summary (statsmodels `EmpiricalCopula`).
+#[derive(Clone, Debug)]
+pub struct EmpiricalCopula {
+    /// Finite pair count.
+    pub n: usize,
+    /// Mean of \(C_n(U_i,V_i)\). Independence is near \(1/4\); comonotonic near \(1/3\).
+    pub mean_mass: f64,
+}
+
+/// Evaluate the bivariate empirical copula on the sample ranks.
+///
+/// Pair count is not identification `p`.
+pub fn empirical_copula(
+    y1: &Vector,
+    y2: &Vector,
+    session: &Session,
+) -> Result<Qualified<EmpiricalCopula>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    let n = y1.len().min(y2.len());
+    let x = Matrix::from_fn(n, 2, |i, j| if j == 0 { y1[i] } else { y2[i] });
+    inspect_xy(&mut ctx.report, &x, None, &ctx.policy);
+    let (u, v) = copula_uv(y1, y2);
+    if u.len() < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("empirical copula needs n≥4 pairs")
+                .build(),
+        );
+        return ctx.finish(EmpiricalCopula {
+            n: u.len(),
+            mean_mass: f64::NAN,
+        });
+    }
+    let m = u.len();
+    let mut acc = 0.0;
+    for i in 0..m {
+        let mut c = 0.0;
+        for j in 0..m {
+            if u[j] <= u[i] && v[j] <= v[i] {
+                c += 1.0;
+            }
+        }
+        acc += c / m as f64;
+    }
+    ctx.finish(EmpiricalCopula {
+        n: m,
+        mean_mass: acc / m as f64,
+    })
+}
+
+fn pairwise_abs(a: &[f64], i: usize, j: usize) -> f64 {
+    (a[i] - a[j]).abs()
+}
+
+fn double_center(d: &mut [f64], n: usize) {
+    let mut row = vec![0.0; n];
+    let mut col = vec![0.0; n];
+    let mut grand = 0.0;
+    for i in 0..n {
+        for j in 0..n {
+            let v = d[i * n + j];
+            row[i] += v;
+            col[j] += v;
+            grand += v;
+        }
+    }
+    let nf = n as f64;
+    for i in 0..n {
+        row[i] /= nf;
+        col[i] /= nf;
+    }
+    grand /= nf * nf;
+    for i in 0..n {
+        for j in 0..n {
+            d[i * n + j] = d[i * n + j] - row[i] - col[j] + grand;
+        }
+    }
+}
+
+/// Distance correlation (Szekely / scipy `distance_correlation`).
+///
+/// Pair count is not identification `p`.
+pub fn distance_corr(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_pair(&mut ctx, x, y);
+    let n = x.len().min(y.len());
+    if n < 3 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("distance correlation needs n≥3")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let mut dx = vec![0.0; n * n];
+    let mut dy = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            dx[i * n + j] = pairwise_abs(x.as_slice(), i, j);
+            dy[i * n + j] = pairwise_abs(y.as_slice(), i, j);
+        }
+    }
+    double_center(&mut dx, n);
+    double_center(&mut dy, n);
+    let mut dcov = 0.0;
+    let mut dvx = 0.0;
+    let mut dvy = 0.0;
+    for i in 0..n * n {
+        dcov += dx[i] * dy[i];
+        dvx += dx[i] * dx[i];
+        dvy += dy[i] * dy[i];
+    }
+    let nf = (n * n) as f64;
+    dcov /= nf;
+    dvx /= nf;
+    dvy /= nf;
+    let den = (dvx * dvy).sqrt();
+    let r = if den < 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::NearZeroVariance)
+                .severity(Severity::Warning)
+                .message("distance variance vanished; dCor is undefined")
+                .build(),
+        );
+        0.0
+    } else {
+        (dcov / den).clamp(0.0, 1.0).sqrt()
+    };
+    ctx.finish(r)
+}
+
+/// Energy distance between two samples (scipy `energy_distance`).
+///
+/// Sample sizes are not identification `p`.
+pub fn energy_distance(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(x),
+        None,
+        &ctx.policy,
+    );
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y),
+        None,
+        &ctx.policy,
+    );
+    if x.is_empty() || y.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("energy distance needs two non-empty samples")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let mut xy = 0.0;
+    for xi in x.as_slice() {
+        for yj in y.as_slice() {
+            xy += (xi - yj).abs();
+        }
+    }
+    xy /= (x.len() * y.len()) as f64;
+    let mut xx = 0.0;
+    let xs = x.as_slice();
+    for i in 0..xs.len() {
+        for j in 0..xs.len() {
+            xx += (xs[i] - xs[j]).abs();
+        }
+    }
+    xx /= (xs.len() * xs.len()) as f64;
+    let mut yy = 0.0;
+    let ys = y.as_slice();
+    for i in 0..ys.len() {
+        for j in 0..ys.len() {
+            yy += (ys[i] - ys[j]).abs();
+        }
+    }
+    yy /= (ys.len() * ys.len()) as f64;
+    ctx.finish((2.0 * xy - xx - yy).max(0.0))
+}
+
+/// One-sample Cramér–von Mises normality statistic (scipy `cramervonmises`).
+pub fn cramer_von_mises(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, x);
+    let st = slice_stats(x.as_slice());
+    if st.count < 8 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Cramér–von Mises n<8; the p-value is a χ² sketch")
+                .build(),
+        );
+    }
+    if st.is_constant(ctx.policy.near_zero_variance) {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("Cramér–von Mises of a constant sample is undefined")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "normality after studentization",
+                    "σ = 0; every z-score is 0/0",
+                    "do not report ω² on a degenerate sample",
+                ))
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: st.count as f64,
+        });
+    }
+    let mut z: Vec<f64> = x
+        .as_slice()
+        .iter()
+        .filter(|v| v.is_finite())
+        .map(|v| (v - st.mean) / st.std().max(1e-12))
+        .collect();
+    z.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = z.len() as f64;
+    let mut w2 = 1.0 / (12.0 * n);
+    for (i, &zi) in z.iter().enumerate() {
+        let f = norm_cdf(zi).clamp(1e-15, 1.0 - 1e-15);
+        let e = (2.0 * i as f64 + 1.0) / (2.0 * n);
+        w2 += (f - e) * (f - e);
+    }
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .severity(Severity::Advisory)
+            .message("Cramér–von Mises p uses a χ²(1) sketch, not Anderson tables")
+            .build(),
+    );
+    ctx.finish(HypothesisTest {
+        statistic: w2,
+        pvalue: chi2_pvalue(w2.max(0.0), 1.0).clamp(0.0, 1.0),
+        df: 1.0,
+        nobs: n,
+    })
+}
+
+/// k-sample Anderson–Darling (scipy `anderson_ksamp` / Scholz–Stephens).
+///
+/// Group count is not identification `p`.
+pub fn anderson_ksamp(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if groups.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("anderson_ksamp needs at least two groups")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: 0.0,
+        });
+    }
+    let mut pooled = Vec::new();
+    let mut ns = Vec::new();
+    for g in groups {
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_vector(g),
+            None,
+            &ctx.policy,
+        );
+        let vals: Vec<f64> = g.as_slice().iter().copied().filter(|v| v.is_finite()).collect();
+        ns.push(vals.len());
+        pooled.extend(vals);
+    }
+    let n = pooled.len();
+    if n < 6 || ns.iter().any(|k| *k < 2) {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("anderson_ksamp needs ≥2 finite observations per group")
+                .build(),
+        );
+    }
+    let mut order = pooled.clone();
+    order.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut a2 = 0.0;
+    for (gi, g) in groups.iter().enumerate() {
+        let ni = ns[gi] as f64;
+        if ni < 1.0 {
+            continue;
+        }
+        for j in 0..n.saturating_sub(1) {
+            let zj = order[j];
+            let m = g
+                .as_slice()
+                .iter()
+                .filter(|v| v.is_finite() && **v <= zj)
+                .count() as f64;
+            let h = (j + 1) as f64;
+            let den = h * (n as f64 - h);
+            if den > 1e-12 {
+                let num = n as f64 * m - h * ni;
+                a2 += (1.0 / ni) * num * num / den;
+            }
+        }
+    }
+    a2 /= n.max(1) as f64;
+    let df = (groups.len().saturating_sub(1)) as f64;
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .severity(Severity::Advisory)
+            .message("k-sample AD p uses a χ²(k−1) sketch, not Scholz tables")
+            .build(),
+    );
+    ctx.finish(HypothesisTest {
+        statistic: a2,
+        pvalue: chi2_pvalue(a2.max(0.0), df.max(1.0)).clamp(0.0, 1.0),
+        df,
+        nobs: n as f64,
+    })
+}
+
+/// Brunner–Munzel two-sample test (scipy `brunnermunzel`).
+pub fn brunner_munzel(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(x),
+        None,
+        &ctx.policy,
+    );
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y),
+        None,
+        &ctx.policy,
+    );
+    let xs: Vec<f64> = x.as_slice().iter().copied().filter(|v| v.is_finite()).collect();
+    let ys: Vec<f64> = y.as_slice().iter().copied().filter(|v| v.is_finite()).collect();
+    let n1 = xs.len();
+    let n2 = ys.len();
+    if n1 < 2 || n2 < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Brunner–Munzel needs n1,n2≥2")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: (n1 + n2) as f64,
+        });
+    }
+    let mut all = Vec::with_capacity(n1 + n2);
+    all.extend(xs.iter().copied());
+    all.extend(ys.iter().copied());
+    let mut idx: Vec<usize> = (0..all.len()).collect();
+    idx.sort_by(|a, b| all[*a].partial_cmp(&all[*b]).unwrap_or(std::cmp::Ordering::Equal));
+    let mut rank = vec![0.0; all.len()];
+    let mut i = 0;
+    while i < idx.len() {
+        let mut j = i + 1;
+        while j < idx.len() && (all[idx[j]] - all[idx[i]]).abs() < 1e-15 {
+            j += 1;
+        }
+        let avg = (i + j + 1) as f64 / 2.0;
+        for k in i..j {
+            rank[idx[k]] = avg;
+        }
+        i = j;
+    }
+    let r1: f64 = rank.iter().take(n1).sum();
+    let pxy = (r1 / n1 as f64 - (n1 as f64 + 1.0) / 2.0) / n2 as f64;
+    let mut s1 = 0.0;
+    for r in rank.iter().take(n1) {
+        let e = r - r1 / n1 as f64;
+        s1 += e * e;
+    }
+    s1 /= (n1.saturating_sub(1)).max(1) as f64;
+    let r2: f64 = rank.iter().skip(n1).sum();
+    let mut s2 = 0.0;
+    for r in rank.iter().skip(n1) {
+        let e = r - r2 / n2 as f64;
+        s2 += e * e;
+    }
+    s2 /= (n2.saturating_sub(1)).max(1) as f64;
+    let se = ((s1 / (n1 as f64 * n2 as f64 * n2 as f64)) + (s2 / (n2 as f64 * n1 as f64 * n1 as f64)))
+        .sqrt();
+    let stat = if se < 1e-18 {
+        0.0
+    } else {
+        (pxy - 0.5) / se
+    };
+    let df_num = se.powi(4);
+    let df_den = s1.powi(2) / ((n1 as f64).powi(2) * (n2 as f64).powi(4) * (n1.saturating_sub(1)).max(1) as f64)
+        + s2.powi(2) / ((n2 as f64).powi(2) * (n1 as f64).powi(4) * (n2.saturating_sub(1)).max(1) as f64);
+    let df = if df_den < 1e-18 { 1.0 } else { df_num / df_den };
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: student_t_pvalue(stat, df.max(1.0)).clamp(0.0, 1.0),
+        df,
+        nobs: (n1 + n2) as f64,
+    })
+}
+
+/// Jonckheere–Terpstra ordered-alternative test (statsmodels `jonckheere`).
+///
+/// Group count is not identification `p`. Groups are taken in the given order.
+pub fn jonckheere(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if groups.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Jonckheere–Terpstra needs at least two ordered groups")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: 0.0,
+        });
+    }
+    let cleaned: Vec<Vec<f64>> = groups
+        .iter()
+        .map(|g| {
+            inspect_xy(
+                &mut ctx.report,
+                &Matrix::from_vector(g),
+                None,
+                &ctx.policy,
+            );
+            g.as_slice().iter().copied().filter(|v| v.is_finite()).collect()
+        })
+        .collect();
+    let n: usize = cleaned.iter().map(|g| g.len()).sum();
+    let mut t = 0.0;
+    let mut et = 0.0;
+    for i in 0..cleaned.len() {
+        for j in (i + 1)..cleaned.len() {
+            let ni = cleaned[i].len() as f64;
+            let nj = cleaned[j].len() as f64;
+            et += ni * nj / 2.0;
+            for &a in &cleaned[i] {
+                for &b in &cleaned[j] {
+                    if a < b {
+                        t += 1.0;
+                    } else if (a - b).abs() < 1e-15 {
+                        t += 0.5;
+                    }
+                }
+            }
+        }
+    }
+    let mut vt = 0.0;
+    for g in &cleaned {
+        let ni = g.len() as f64;
+        vt += ni * ni * (2.0 * ni + 3.0);
+    }
+    let nf = n as f64;
+    let var = ((nf * nf * (2.0 * nf + 3.0) - vt) / 72.0).max(0.0);
+    let se = var.sqrt();
+    let z = if se < 1e-18 { 0.0 } else { (t - et) / se };
+    ctx.finish(HypothesisTest {
+        statistic: z,
+        pvalue: (2.0 * (1.0 - norm_cdf(z.abs()))).clamp(0.0, 1.0),
+        df: f64::NAN,
+        nobs: nf,
+    })
+}
+
+fn paired_labels(y1: &Vector, y2: &Vector) -> (Vec<i64>, usize) {
+    let mut keys = BTreeMap::new();
+    let n = y1.len().min(y2.len());
+    for i in 0..n {
+        if y1[i].is_finite() && y2[i].is_finite() {
+            keys.insert(y1[i].round() as i64, ());
+            keys.insert(y2[i].round() as i64, ());
+        }
+    }
+    (keys.keys().copied().collect(), n)
+}
+
+fn square_counts(y1: &Vector, y2: &Vector, labels: &[i64]) -> Matrix {
+    let k = labels.len();
+    let mut tab = Matrix::zeros(k, k);
+    let n = y1.len().min(y2.len());
+    for i in 0..n {
+        if !y1[i].is_finite() || !y2[i].is_finite() {
+            continue;
+        }
+        let a = y1[i].round() as i64;
+        let b = y2[i].round() as i64;
+        let ia = labels.iter().position(|v| *v == a);
+        let ib = labels.iter().position(|v| *v == b);
+        if let (Some(r), Some(c)) = (ia, ib) {
+            tab.set(r, c, tab.get(r, c) + 1.0);
+        }
+    }
+    tab
+}
+
+/// Bowker symmetry test on paired categorical labels (statsmodels `bowker`).
+///
+/// Category count is not identification `p`.
+pub fn bowker(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_pair(&mut ctx, y1, y2);
+    let (labels, n) = paired_labels(y1, y2);
+    if labels.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Bowker needs at least two categories")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: n as f64,
+        });
+    }
+    let tab = square_counts(y1, y2, &labels);
+    let k = labels.len();
+    let mut stat = 0.0_f64;
+    let mut df = 0.0_f64;
+    for i in 0..k {
+        for j in (i + 1)..k {
+            let a = tab.get(i, j);
+            let b = tab.get(j, i);
+            if a + b > 0.0 {
+                stat += (a - b) * (a - b) / (a + b);
+                df += 1.0;
+            }
+        }
+    }
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: chi2_pvalue(stat.max(0.0), df.max(1.0)).clamp(0.0, 1.0),
+        df,
+        nobs: n as f64,
+    })
+}
+
+/// Stuart–Maxwell marginal-homogeneity test (statsmodels `stuart_maxwell`).
+///
+/// Category count is not identification `p`.
+pub fn stuart_maxwell(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_pair(&mut ctx, y1, y2);
+    let (labels, n) = paired_labels(y1, y2);
+    if labels.len() < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("Stuart–Maxwell needs at least two categories")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: n as f64,
+        });
+    }
+    let tab = square_counts(y1, y2, &labels);
+    let k = labels.len();
+    let km = k.saturating_sub(1);
+    let mut d = Vector::zeros(km);
+    let mut s = Mat::<f64>::zeros(km, km);
+    for i in 0..km {
+        let mut ri = 0.0;
+        let mut ci = 0.0;
+        for j in 0..k {
+            ri += tab.get(i, j);
+            ci += tab.get(j, i);
+        }
+        d[i] = ri - ci;
+        for j in 0..km {
+            let nij = tab.get(i, j);
+            let nji = tab.get(j, i);
+            if i == j {
+                let mut off = 0.0;
+                for t in 0..k {
+                    if t != i {
+                        off += tab.get(i, t) + tab.get(t, i);
+                    }
+                }
+                s[(i, j)] = off;
+            } else {
+                s[(i, j)] = -(nij + nji);
+            }
+        }
+    }
+    let mut scratch = Report::new("stuart_maxwell", "chol");
+    let lam = chol_solve(&mut scratch, &s, &d, &ctx.policy);
+    let stat = if let Some(sol) = lam {
+        let mut q = 0.0;
+        for i in 0..km {
+            q += d[i] * sol[i];
+        }
+        q
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InformationMatrixSingular)
+                .severity(Severity::Warning)
+                .message("Stuart–Maxwell covariance was not SPD; using Bowker fallback")
+                .build(),
+        );
+        let b = bowker(y1, y2, session)?;
+        return ctx.finish(b.value);
+    };
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: chi2_pvalue(stat.max(0.0), km.max(1) as f64).clamp(0.0, 1.0),
+        df: km as f64,
+        nobs: n as f64,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11021,5 +12058,45 @@ mod tests {
         let sr = sur(&y, &y2c, &x, &Session::new("sur", "t")).expect("sur");
         assert!(sr.value.beta1.as_slice().iter().all(|v| v.is_finite()));
         assert!(sr.value.sigma.get(0, 1).is_finite());
+        let fgm = fgm_copula(&y, &y2c, &Session::new("fgm", "t")).expect("fgm");
+        assert!((-1.0..=1.0).contains(&fgm.value.theta));
+        let ec = empirical_copula(&y, &y2c, &Session::new("ecop", "t")).expect("ecop");
+        assert!(ec.value.mean_mass > 0.27, "C_n={}", ec.value.mean_mass);
+        let dc = distance_corr(&y, &y2c, &Session::new("dcor", "t")).expect("dcor");
+        assert!(dc.value > 0.8, "dCor={}", dc.value);
+        let ed0 = energy_distance(&y, &y, &Session::new("ed0", "t")).expect("ed0");
+        assert!(ed0.value.abs() < 1e-9, "E(y,y)={}", ed0.value);
+        let ed = energy_distance(&a, &b, &Session::new("ed", "t")).expect("ed");
+        assert!(ed.value > 0.0);
+        let cvm = cramer_von_mises(&y, &Session::new("cvm", "t")).expect("cvm");
+        assert!(cvm.value.statistic.is_finite());
+        let aks = anderson_ksamp(&[&a, &b, &c], &Session::new("aks", "t")).expect("aks");
+        assert!(aks.value.statistic.is_finite());
+        let bm = brunner_munzel(&a, &b, &Session::new("bm", "t")).expect("bm");
+        assert!(bm.value.statistic.is_finite() || bm.value.pvalue.is_nan());
+        let jt = jonckheere(&[&a, &b, &c], &Session::new("jt", "t")).expect("jt");
+        assert!(jt.value.statistic > 0.0);
+        let bw = bowker(&y1, &y2, &Session::new("bow", "t")).expect("bow");
+        assert!(bw.value.statistic.is_finite() || bw.value.pvalue.is_nan());
+        let smx = stuart_maxwell(&y1, &y2, &Session::new("smx", "t")).expect("smx");
+        assert!(smx.value.statistic.is_finite() || smx.value.pvalue.is_nan());
+        let totals = Vector::from_iter((0..10).map(|t| {
+            (0..4).map(|q| y[t * 4 + q]).sum::<f64>()
+        }));
+        let den = denton(&y, &totals, 4, &Session::new("den", "t")).expect("denton");
+        assert_eq!(den.value.len(), 40);
+        for t in 0..10 {
+            let s = (0..4).map(|q| den.value[t * 4 + q]).sum::<f64>();
+            assert!((s - totals[t]).abs() < 1e-6, "denton year {t} sum={s}");
+        }
+        let cln = chow_lin(&y, &totals, 4, &Session::new("cln", "t")).expect("cln");
+        assert_eq!(cln.value.series.len(), 40);
+        assert!(cln.value.slope.is_finite());
+        for t in 0..10 {
+            let s = (0..4).map(|q| cln.value.series[t * 4 + q]).sum::<f64>();
+            assert!((s - totals[t]).abs() < 1e-5, "chowlin year {t}");
+        }
+        let lit = litterman(&y, &totals, 4, &Session::new("lit", "t")).expect("lit");
+        assert_eq!(lit.value.len(), 40);
     }
 }

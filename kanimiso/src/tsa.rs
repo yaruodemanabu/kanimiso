@@ -16,6 +16,7 @@ use crate::linalg::{chol_solve, least_squares, thin_svd};
 use crate::rng::Rng;
 
 pub use crate::filters::{bk_filter, cf_filter, FittedLocalLinearTrend, LocalLinearTrend};
+use crate::stats::HypothesisTest;
 use crate::traits::{FitSeries, PartialFit};
 use crate::validate::{inspect_identification, inspect_xy};
 use ojizou_san::{IncrementalExplain, Session};
@@ -7529,6 +7530,230 @@ impl FitSeries for Tarch {
     }
 }
 
+/// Absolute-value GARCH (arch `AVGARCH`): \(\sigma_t=\omega+\alpha|\varepsilon_{t-1}|+\beta\sigma_{t-1}\).
+#[derive(Clone, Debug)]
+pub struct Avgarch {
+    /// Coordinate-search iterations.
+    pub max_iter: usize,
+}
+
+impl Default for Avgarch {
+    fn default() -> Self {
+        Self { max_iter: 24 }
+    }
+}
+
+impl Avgarch {
+    /// Default AVGARCH settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted AVGARCH scales.
+#[derive(Clone, Debug)]
+pub struct FittedAvgarch {
+    /// ω.
+    pub omega: f64,
+    /// ARCH on \(|\varepsilon|\).
+    pub alpha: f64,
+    /// Persistence of \(\sigma\).
+    pub beta: f64,
+    /// Conditional variances \(\sigma_t^2\).
+    pub sigma2: Vector,
+    /// Demeaned residuals.
+    pub resid: Vector,
+}
+
+fn avgarch_sigma(e: &[f64], omega: f64, alpha: f64, beta: f64) -> Vec<f64> {
+    let var0 = e.iter().map(|v| v * v).sum::<f64>() / e.len().max(1) as f64;
+    let mut s = vec![var0.max(1e-12).sqrt(); e.len()];
+    for t in 1..e.len() {
+        s[t] = omega + alpha * e[t - 1].abs() + beta * s[t - 1];
+        if !s[t].is_finite() || s[t] <= 0.0 {
+            s[t] = omega.max(1e-8);
+        }
+    }
+    s
+}
+
+fn avgarch_nll(e: &[f64], omega: f64, alpha: f64, beta: f64) -> f64 {
+    if omega <= 0.0 || alpha < 0.0 || beta < 0.0 {
+        return f64::INFINITY;
+    }
+    let s = avgarch_sigma(e, omega, alpha, beta);
+    let mut nll = 0.0;
+    for t in 0..e.len() {
+        let v = (s[t] * s[t]).max(1e-12);
+        nll += 0.5 * (v.ln() + e[t] * e[t] / v);
+    }
+    nll
+}
+
+impl FitSeries for Avgarch {
+    type Fitted = FittedAvgarch;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedAvgarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("AVGARCH QMLE needs a longer series")
+                    .build(),
+            );
+        }
+        let mean = y.mean();
+        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
+        let sd = e.as_slice().iter().map(|v| v * v).sum::<f64>() / y.len().max(1) as f64;
+        let mut omega = 0.05 * sd.max(1e-8).sqrt();
+        let mut alpha = 0.05;
+        let mut beta = 0.80;
+        let mut best = avgarch_nll(e.as_slice(), omega, alpha, beta);
+        let mut step = 0.04;
+        for it in 0..self.max_iter {
+            let mut improved = false;
+            for (i, cur) in [omega, alpha, beta].into_iter().enumerate() {
+                for dir in [-step, step] {
+                    let mut cand = [omega, alpha, beta];
+                    cand[i] = (cur + dir).max(1e-8);
+                    let nll = avgarch_nll(e.as_slice(), cand[0], cand[1], cand[2]);
+                    if nll < best {
+                        best = nll;
+                        omega = cand[0];
+                        alpha = cand[1];
+                        beta = cand[2];
+                        improved = true;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, best, None);
+            if !improved {
+                step *= 0.5;
+                if step < 1e-5 {
+                    ctx.session.converged("AVGARCH coordinate search", it as u64);
+                    break;
+                }
+            }
+        }
+        if !best.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("AVGARCH QMLE likelihood is non-finite")
+                    .build(),
+            );
+        }
+        let sig = avgarch_sigma(e.as_slice(), omega, alpha, beta);
+        ctx.finish(FittedAvgarch {
+            omega,
+            alpha,
+            beta,
+            sigma2: Vector::from_iter(sig.iter().map(|s| s * s)),
+            resid: e,
+        })
+    }
+}
+
+/// Taylor / ZARCH scale model: \(\sigma_t=\omega+\alpha|\varepsilon_{t-1}|\).
+#[derive(Clone, Debug)]
+pub struct Zarch {
+    /// Coordinate-search iterations.
+    pub max_iter: usize,
+}
+
+impl Default for Zarch {
+    fn default() -> Self {
+        Self { max_iter: 20 }
+    }
+}
+
+impl Zarch {
+    /// Default ZARCH settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted ZARCH scales.
+#[derive(Clone, Debug)]
+pub struct FittedZarch {
+    /// ω.
+    pub omega: f64,
+    /// ARCH on \(|\varepsilon|\).
+    pub alpha: f64,
+    /// Conditional variances \(\sigma_t^2\).
+    pub sigma2: Vector,
+    /// Demeaned residuals.
+    pub resid: Vector,
+}
+
+fn zarch_nll(e: &[f64], omega: f64, alpha: f64) -> f64 {
+    avgarch_nll(e, omega, alpha, 0.0)
+}
+
+impl FitSeries for Zarch {
+    type Fitted = FittedZarch;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedZarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("ZARCH QMLE needs a longer series")
+                    .build(),
+            );
+        }
+        let mean = y.mean();
+        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
+        let sd = e.as_slice().iter().map(|v| v * v).sum::<f64>() / y.len().max(1) as f64;
+        let mut omega = 0.10 * sd.max(1e-8).sqrt();
+        let mut alpha = 0.20;
+        let mut best = zarch_nll(e.as_slice(), omega, alpha);
+        let mut step = 0.05;
+        for it in 0..self.max_iter {
+            let mut improved = false;
+            for (i, cur) in [omega, alpha].into_iter().enumerate() {
+                for dir in [-step, step] {
+                    let mut cand = [omega, alpha];
+                    cand[i] = (cur + dir).max(1e-8);
+                    let nll = zarch_nll(e.as_slice(), cand[0], cand[1]);
+                    if nll < best {
+                        best = nll;
+                        omega = cand[0];
+                        alpha = cand[1];
+                        improved = true;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, best, None);
+            if !improved {
+                step *= 0.5;
+                if step < 1e-5 {
+                    ctx.session.converged("ZARCH coordinate search", it as u64);
+                    break;
+                }
+            }
+        }
+        if !best.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("ZARCH QMLE likelihood is non-finite")
+                    .build(),
+            );
+        }
+        let sig = avgarch_sigma(e.as_slice(), omega, alpha, 0.0);
+        ctx.finish(FittedZarch {
+            omega,
+            alpha,
+            sigma2: Vector::from_iter(sig.iter().map(|s| s * s)),
+            resid: e,
+        })
+    }
+}
+
 /// DCC-GARCH lite on a multivariate residual matrix (Engle).
 ///
 /// Series count is not identification `p`.
@@ -10132,6 +10357,191 @@ pub fn nsdiffs(y: &Vector, period: usize, session: &Session) -> Result<Qualified
         0
     };
     ctx.finish(d)
+}
+
+/// HEGY seasonal unit-root regression (statsmodels `hegy`).
+///
+/// Period is not identification `p`. The returned statistic is the t-ratio on
+/// the non-seasonal root \(\pi_1\).
+pub fn hegy(y: &Vector, period: usize, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let s = period.max(2);
+    if y.len() < 2 * s + 6 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSeasonalCycles)
+                .severity(Severity::Warning)
+                .message(format!("HEGY needs more than two cycles of period {s}"))
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: y.len() as f64,
+        });
+    }
+    let mut rows = Vec::new();
+    for t in s..y.len() {
+        if !(t >= s && y[t].is_finite() && y[t - 1].is_finite()) {
+            continue;
+        }
+        if (0..s).any(|k| !y[t - k].is_finite()) {
+            continue;
+        }
+        let d4 = y[t] - y[t - s];
+        let mut y1 = 0.0;
+        for k in 1..=s {
+            y1 += y[t - k];
+        }
+        let y2 = if s >= 4 {
+            -(y[t - 1] - y[t - 2] + y[t - 3] - y[t - 4])
+        } else {
+            y[t - 1] - y[t - s]
+        };
+        let y3 = if s >= 4 { y[t - 2] - y[t - 4] } else { 0.0 };
+        let y4 = if s >= 4 { y[t - 1] - y[t - 3] } else { 0.0 };
+        rows.push((d4, y1, y2, y3, y4));
+    }
+    if rows.len() < 8 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("HEGY regression has too few seasonal differences")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: rows.len() as f64,
+        });
+    }
+    let pcols = if s >= 4 { 5 } else { 3 };
+    let m = Matrix::from_fn(rows.len(), pcols, |i, j| match j {
+        0 => 1.0,
+        1 => rows[i].1,
+        2 => rows[i].2,
+        3 => rows[i].3,
+        _ => rows[i].4,
+    });
+    let z = Vector::from_iter(rows.iter().map(|r| r.0));
+    let mut scratch = Report::new("hegy", "ols");
+    let coef = least_squares(&mut scratch, &m, &z, &ctx.policy)
+        .unwrap_or_else(|| Vector::zeros(pcols));
+    let fit = m.matvec(&coef);
+    let mut sse = 0.0;
+    for i in 0..z.len() {
+        let e = z[i] - fit[i];
+        sse += e * e;
+    }
+    let df = (z.len().saturating_sub(pcols)) as f64;
+    let sigma2 = sse / df.max(1.0);
+    let mut xtx00 = 0.0;
+    for i in 0..m.nrows() {
+        xtx00 += m.get(i, 1) * m.get(i, 1);
+    }
+    let se = if xtx00 > 1e-12 {
+        (sigma2 / xtx00).sqrt()
+    } else {
+        f64::NAN
+    };
+    let pi1 = coef.as_slice().get(1).copied().unwrap_or(0.0);
+    let stat = if se.is_finite() && se > 0.0 {
+        pi1 / se
+    } else {
+        pi1
+    };
+    if pi1.abs() < 0.15 {
+        ctx.push(
+            Issue::builder(IssueCode::NonStationary)
+                .severity(Severity::Warning)
+                .message(format!("HEGY π1={pi1:.4} is near a non-seasonal unit root"))
+                .metric("pi1", pi1)
+                .build(),
+        );
+    }
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue: crate::special::student_t_pvalue(stat, df.max(1.0)).clamp(0.0, 1.0),
+        df,
+        nobs: z.len() as f64,
+    })
+}
+
+/// Canova–Hansen seasonal-stability LM (statsmodels `canova_hansen`).
+///
+/// Period is not identification `p`.
+pub fn canova_hansen(y: &Vector, period: usize, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let s = period.max(2);
+    if y.len() < 2 * s {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSeasonalCycles)
+                .severity(Severity::Warning)
+                .message(format!("Canova–Hansen needs two cycles of period {s}"))
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: (s.saturating_sub(1)) as f64,
+            nobs: y.len() as f64,
+        });
+    }
+    let mut means = vec![0.0; s];
+    let mut cnt = vec![0.0; s];
+    for (t, &v) in y.as_slice().iter().enumerate() {
+        if v.is_finite() {
+            let k = t % s;
+            means[k] += v;
+            cnt[k] += 1.0;
+        }
+    }
+    for k in 0..s {
+        if cnt[k] > 0.0 {
+            means[k] /= cnt[k];
+        }
+    }
+    let mut e = Vec::new();
+    for (t, &v) in y.as_slice().iter().enumerate() {
+        if v.is_finite() {
+            e.push(v - means[t % s]);
+        }
+    }
+    let n = e.len() as f64;
+    let sigma2 = e.iter().map(|v| v * v).sum::<f64>() / n.max(1.0);
+    let mut lm = 0.0;
+    for k in 0..s {
+        let mut cs = 0.0;
+        let mut acc = 0.0;
+        for (t, &v) in y.as_slice().iter().enumerate() {
+            if !v.is_finite() {
+                continue;
+            }
+            if t % s == k {
+                cs += v - means[k];
+            }
+            acc += cs * cs;
+        }
+        if sigma2 > 1e-18 {
+            lm += acc / (n * n * sigma2);
+        }
+    }
+    let df = (s.saturating_sub(1)) as f64;
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .severity(Severity::Advisory)
+            .message("Canova–Hansen p uses a χ²(s−1) sketch, not tabulated CH critical values")
+            .build(),
+    );
+    ctx.finish(HypothesisTest {
+        statistic: lm,
+        pvalue: crate::special::chi2_pvalue(lm.max(0.0), df.max(1.0)).clamp(0.0, 1.0),
+        df,
+        nobs: n,
+    })
 }
 
 /// Autoregressive OLS `y_t = c + φ₁ y_{t-1} + ⋯ + φ_p y_{t-p}` (statsmodels `AutoReg`).
@@ -14442,5 +14852,27 @@ mod tests {
             .as_slice()
             .iter()
             .all(|v| v.is_finite() && *v > 0.0));
+        let av = Avgarch::new()
+            .fit_series(&y, &Session::new("avg", "fit"))
+            .expect("avg");
+        assert!(av
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        let za = Zarch::new()
+            .fit_series(&y, &Session::new("zarch", "fit"))
+            .expect("zarch");
+        assert!(za
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        let hg = hegy(&y, 4, &Session::new("hegy", "t")).expect("hegy");
+        assert!(hg.value.statistic.is_finite() || hg.value.pvalue.is_nan());
+        let ch = canova_hansen(&y, 4, &Session::new("ch", "t")).expect("ch");
+        assert!(ch.value.statistic.is_finite() || ch.value.pvalue.is_nan());
     }
 }

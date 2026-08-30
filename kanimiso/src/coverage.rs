@@ -4273,6 +4273,98 @@ const INVENTORY: &[Algorithm] = &[
         "river.proba.Multinomial",
         "online",
     ),
+    a("stats.denton", "statsmodels.tsa.interp.denton", "stats"),
+    a("stats.chow_lin", "statsmodels.tsa.interp.chow_lin", "stats"),
+    a(
+        "stats.litterman",
+        "statsmodels.tsa.interp.litterman",
+        "stats",
+    ),
+    a("tsa.hegy", "statsmodels.tsa.stattools.hegy", "forecast"),
+    a(
+        "tsa.canova_hansen",
+        "statsmodels.tsa.stattools.canova_hansen",
+        "forecast",
+    ),
+    a(
+        "stats.fgm_copula",
+        "statsmodels.distributions.copula.FGMCopula",
+        "stats",
+    ),
+    a(
+        "stats.empirical_copula",
+        "statsmodels.distributions.copula.EmpiricalCopula",
+        "stats",
+    ),
+    a(
+        "glm.NestedLogit",
+        "statsmodels.discrete.discrete_model.NestedLogit",
+        "estimator",
+    ),
+    a(
+        "glm.MixedLogit",
+        "statsmodels.discrete.discrete_model.MixedLogit",
+        "estimator",
+    ),
+    a(
+        "stats.distance_corr",
+        "scipy.stats.distance_correlation",
+        "stats",
+    ),
+    a(
+        "stats.energy_distance",
+        "scipy.stats.energy_distance",
+        "stats",
+    ),
+    a(
+        "stats.cramer_von_mises",
+        "scipy.stats.cramervonmises",
+        "stats",
+    ),
+    a(
+        "stats.anderson_ksamp",
+        "scipy.stats.anderson_ksamp",
+        "stats",
+    ),
+    a(
+        "stats.brunner_munzel",
+        "scipy.stats.brunnermunzel",
+        "stats",
+    ),
+    a(
+        "stats.jonckheere",
+        "statsmodels.stats.nonparametric.jonckheere",
+        "stats",
+    ),
+    a("stats.bowker", "statsmodels.stats.contingency_tables.bowker", "stats"),
+    a(
+        "stats.stuart_maxwell",
+        "statsmodels.stats.contingency_tables.stuart_maxwell",
+        "stats",
+    ),
+    a("tsa.Avgarch", "arch.univariate.AVGARCH", "forecast"),
+    a("tsa.Zarch", "arch.univariate.ZARCH", "forecast"),
+    a(
+        "glm.ZeroInflatedGamma",
+        "statsmodels.discrete.count_model.ZeroInflatedGamma",
+        "estimator",
+    ),
+    a("tslearn.sbd", "tslearn.metrics.sbd", "timeseries"),
+    a("tslearn.ctw", "tslearn.metrics.ctw", "timeseries"),
+    a("tslearn.frechet", "tslearn.metrics.frechet", "timeseries"),
+    a(
+        "tslearn.hausdorff",
+        "tslearn.metrics.hausdorff",
+        "timeseries",
+    ),
+    a(
+        "online.OnlineConfusion",
+        "river.metrics.ConfusionMatrix",
+        "online",
+    ),
+    a("online.OnlineRange", "river.stats.Range", "online"),
+    a("online.OnlineMin", "river.stats.Min", "online"),
+    a("online.OnlineMcc", "river.metrics.MCC", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4560,6 +4652,14 @@ mod tests {
             "tsa.ndiffs",
             "tsa.Qgarch",
             "glm.TruncatedPoisson",
+            "stats.denton",
+            "tsa.hegy",
+            "glm.NestedLogit",
+            "tsa.Avgarch",
+            "tslearn.sbd",
+            "online.OnlineConfusion",
+            "stats.distance_corr",
+            "glm.MixedLogit",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

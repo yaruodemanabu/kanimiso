@@ -3503,6 +3503,544 @@ impl Fit for NegativeBinomialP {
     }
 }
 
+fn binary_irls(
+    design: &Matrix,
+    y: &Vector,
+    policy: &signlred::Policy,
+    max_iter: usize,
+) -> Vector {
+    let mut beta = Vector::zeros(design.ncols());
+    if !beta.is_empty() {
+        let p = y.as_slice().iter().filter(|v| **v > 0.5).count() as f64 / y.len().max(1) as f64;
+        beta[0] = (p.clamp(1e-3, 1.0 - 1e-3) / (1.0 - p.clamp(1e-3, 1.0 - 1e-3))).ln();
+    }
+    for _ in 0..max_iter.max(1) {
+        let mut xs = Matrix::zeros(design.nrows(), design.ncols());
+        let mut rhs = Vector::zeros(design.nrows());
+        for i in 0..design.nrows() {
+            let mut eta = 0.0;
+            for j in 0..design.ncols() {
+                eta += design.get(i, j) * beta[j];
+            }
+            let p = sigmoid(eta).clamp(1e-6, 1.0 - 1e-6);
+            let w = (p * (1.0 - p)).max(1e-12);
+            let sw = w.sqrt();
+            rhs[i] = (eta + (y[i] - p) / w) * sw;
+            for j in 0..design.ncols() {
+                xs.set(i, j, design.get(i, j) * sw);
+            }
+        }
+        let mut scratch = signlred::Report::new("logit_irls", "irls");
+        let Some(next) = least_squares(&mut scratch, &xs, &rhs, policy) else {
+            break;
+        };
+        let d = next.sub(&beta).norm();
+        beta = next;
+        if d < 1e-7 {
+            break;
+        }
+    }
+    beta
+}
+
+/// Nested logit (statsmodels `NestedLogit`): two-level sequential GEV with \(\lambda=1\).
+///
+/// Sorted unique labels are split into two nests (first half vs rest). Nest
+/// count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct NestedLogit {
+    /// IRLS cycles per nest.
+    pub max_iter: usize,
+}
+
+impl Default for NestedLogit {
+    fn default() -> Self {
+        Self { max_iter: 20 }
+    }
+}
+
+impl NestedLogit {
+    /// Default two-nest sequential logit.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted nested logit.
+#[derive(Clone, Debug)]
+pub struct FittedNestedLogit {
+    /// Sorted unique class labels.
+    pub classes: Vector,
+    /// Nest index per class (`0` or `1`).
+    pub nest: Vector,
+    /// Nest-choice coefficients (including intercept).
+    pub nest_beta: Vector,
+    /// Within-nest-0 coefficients (including intercept); empty if the nest is a singleton.
+    pub within0: Vector,
+    /// Within-nest-1 coefficients.
+    pub within1: Vector,
+}
+
+impl FittedNestedLogit {
+    /// Predicted class labels.
+    pub fn predict_label(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let p = self.nest_beta.len().saturating_sub(1);
+        if x.ncols() != p {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("nested logit predict column count ≠ nest_beta")
+                    .build(),
+            );
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut eta_n = self.nest_beta.as_slice().first().copied().unwrap_or(0.0);
+            for j in 0..p.min(x.ncols()) {
+                eta_n += self.nest_beta.as_slice().get(j + 1).copied().unwrap_or(0.0) * x.get(i, j);
+            }
+            let p_nest1 = sigmoid(eta_n);
+            let mut best_c = self.classes.as_slice().first().copied().unwrap_or(0.0);
+            let mut best_p = -1.0;
+            for (k, &c) in self.classes.as_slice().iter().enumerate() {
+                let nest = self.nest.as_slice().get(k).copied().unwrap_or(0.0);
+                let p_nest = if nest > 0.5 { p_nest1 } else { 1.0 - p_nest1 };
+                let wb = if nest > 0.5 {
+                    &self.within1
+                } else {
+                    &self.within0
+                };
+                let p_within = if wb.is_empty() {
+                    1.0
+                } else {
+                    let mut eta = wb.as_slice().first().copied().unwrap_or(0.0);
+                    for j in 0..p.min(x.ncols()) {
+                        eta += wb.as_slice().get(j + 1).copied().unwrap_or(0.0) * x.get(i, j);
+                    }
+                    let same_nest: Vec<usize> = (0..self.nest.len())
+                        .filter(|&t| {
+                            (self.nest.as_slice().get(t).copied().unwrap_or(0.0) - nest).abs() < 0.5
+                        })
+                        .collect();
+                    if same_nest.len() <= 1 {
+                        1.0
+                    } else {
+                        let last = *same_nest.last().unwrap_or(&k);
+                        if k == last {
+                            sigmoid(eta)
+                        } else {
+                            1.0 - sigmoid(eta)
+                        }
+                    }
+                };
+                let pk = p_nest * p_within;
+                if pk > best_p {
+                    best_p = pk;
+                    best_c = c;
+                }
+            }
+            best_c
+        }));
+        ctx.finish(out)
+    }
+}
+
+impl Fit for NestedLogit {
+    type Fitted = FittedNestedLogit;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedNestedLogit>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let design = x.with_intercept();
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let mut classes: Vec<f64> = Vec::new();
+        for &yi in y.as_slice() {
+            if !yi.is_finite() {
+                continue;
+            }
+            if !classes.iter().any(|c| (c - yi).abs() < 1e-12) {
+                classes.push(yi);
+            }
+        }
+        classes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        if classes.len() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::SingleClass)
+                    .message("nested logit needs at least two classes")
+                    .build(),
+            );
+            return ctx.finish(FittedNestedLogit {
+                classes: Vector::from_iter(classes),
+                nest: Vector::zeros(0),
+                nest_beta: Vector::zeros(design.ncols()),
+                within0: Vector::zeros(0),
+                within1: Vector::zeros(0),
+            });
+        }
+        let split = classes.len() / 2;
+        let nest = Vector::from_iter((0..classes.len()).map(|k| if k >= split { 1.0 } else { 0.0 }));
+        let y_nest = Vector::from_iter(y.as_slice().iter().map(|yi| {
+            let k = classes.iter().position(|c| (c - *yi).abs() < 1e-12).unwrap_or(0);
+            nest[k]
+        }));
+        let nest_beta = binary_irls(&design, &y_nest, &ctx.policy, self.max_iter);
+        let mut within = |nest_id: f64| -> Vector {
+            let members: Vec<f64> = classes
+                .iter()
+                .enumerate()
+                .filter(|(k, _)| (nest[*k] - nest_id).abs() < 0.5)
+                .map(|(_, c)| *c)
+                .collect();
+            if members.len() < 2 {
+                return Vector::zeros(0);
+            }
+            let last = *members.last().unwrap_or(&0.0);
+            let mut rows = Vec::new();
+            for i in 0..y.len() {
+                if members.iter().any(|c| (c - y[i]).abs() < 1e-12) {
+                    rows.push(i);
+                }
+            }
+            if rows.len() < 4 {
+                ctx.push(
+                    Issue::builder(IssueCode::InsufficientSample)
+                        .severity(Severity::Warning)
+                        .message("nested logit within-nest sample is short")
+                        .build(),
+                );
+                return Vector::zeros(0);
+            }
+            let xd = Matrix::from_fn(rows.len(), design.ncols(), |r, j| design.get(rows[r], j));
+            let yd = Vector::from_iter(rows.iter().map(|&i| if (y[i] - last).abs() < 1e-12 { 1.0 } else { 0.0 }));
+            binary_irls(&xd, &yd, &ctx.policy, self.max_iter)
+        };
+        let within0 = within(0.0);
+        let within1 = within(1.0);
+        ctx.finish(FittedNestedLogit {
+            classes: Vector::from_iter(classes),
+            nest,
+            nest_beta,
+            within0,
+            within1,
+        })
+    }
+}
+
+/// Mixed / random-coefficient logit (statsmodels `MixedLogit`).
+///
+/// Binary mixed logit with a random intercept; draws are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MixedLogit {
+    /// IRLS cycles.
+    pub max_iter: usize,
+    /// Simulation draws for the random intercept.
+    pub n_draws: usize,
+}
+
+impl Default for MixedLogit {
+    fn default() -> Self {
+        Self {
+            max_iter: 20,
+            n_draws: 8,
+        }
+    }
+}
+
+impl MixedLogit {
+    /// Default mixed logit.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted mixed logit.
+#[derive(Clone, Debug)]
+pub struct FittedMixedLogit {
+    /// Mean slopes (no intercept).
+    pub coef: Vector,
+    /// Mean intercept.
+    pub intercept: f64,
+    /// Random-intercept standard deviation.
+    pub sigma: f64,
+}
+
+impl Predict for FittedMixedLogit {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() != self.coef.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("mixed logit predict column count ≠ coef")
+                    .build(),
+            );
+        }
+        let mut y = x.matvec(&self.coef);
+        for i in 0..y.len() {
+            y[i] += self.intercept;
+        }
+        ctx.finish(y)
+    }
+}
+
+impl Fit for MixedLogit {
+    type Fitted = FittedMixedLogit;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMixedLogit>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let design = x.with_intercept();
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let y01 = Vector::from_iter(y.as_slice().iter().map(|v| if *v > 0.5 { 1.0 } else { 0.0 }));
+        let beta0 = binary_irls(&design, &y01, &ctx.policy, self.max_iter);
+        let mut rng = crate::rng::Rng::new(3);
+        let nd = self.n_draws.max(4);
+        let draws: Vec<f64> = (0..nd).map(|_| rng.standard_normal()).collect();
+        let mut best_sig = 0.25_f64;
+        let mut best_ll = f64::NEG_INFINITY;
+        let mut best_beta = beta0.clone();
+        for step in 0..6 {
+            let sig = 0.05 + 0.35 * step as f64;
+            let mut beta = beta0.clone();
+            for _ in 0..self.max_iter.max(1) {
+                let mut xs = Matrix::zeros(design.nrows(), design.ncols());
+                let mut rhs = Vector::zeros(design.nrows());
+                for i in 0..design.nrows() {
+                    let mut eta0 = 0.0;
+                    for j in 0..design.ncols() {
+                        eta0 += design.get(i, j) * beta[j];
+                    }
+                    let mut p = 0.0;
+                    for &z in &draws {
+                        p += sigmoid(eta0 + sig * z);
+                    }
+                    p = (p / nd as f64).clamp(1e-6, 1.0 - 1e-6);
+                    let w = (p * (1.0 - p)).max(1e-12);
+                    let sw = w.sqrt();
+                    rhs[i] = (eta0 + (y01[i] - p) / w) * sw;
+                    for j in 0..design.ncols() {
+                        xs.set(i, j, design.get(i, j) * sw);
+                    }
+                }
+                let mut scratch = signlred::Report::new("mixed_logit", "irls");
+                let Some(next) = least_squares(&mut scratch, &xs, &rhs, &ctx.policy) else {
+                    break;
+                };
+                let d = next.sub(&beta).norm();
+                beta = next;
+                if d < 1e-7 {
+                    break;
+                }
+            }
+            let mut ll = 0.0;
+            for i in 0..design.nrows() {
+                let mut eta0 = 0.0;
+                for j in 0..design.ncols() {
+                    eta0 += design.get(i, j) * beta[j];
+                }
+                let mut p = 0.0;
+                for &z in &draws {
+                    p += sigmoid(eta0 + sig * z);
+                }
+                p = (p / nd as f64).clamp(1e-12, 1.0 - 1e-12);
+                ll += if y01[i] > 0.5 { p.ln() } else { (1.0 - p).ln() };
+            }
+            if ll > best_ll {
+                best_ll = ll;
+                best_sig = sig;
+                best_beta = beta;
+            }
+        }
+        if !best_ll.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("mixed logit simulated likelihood is non-finite")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedMixedLogit {
+            intercept: best_beta.as_slice().first().copied().unwrap_or(0.0),
+            coef: Vector::from_iter((1..best_beta.len()).map(|j| best_beta[j])),
+            sigma: best_sig,
+        })
+    }
+}
+
+/// Zero-inflated gamma (statsmodels `ZeroInflatedGamma`): point mass at 0 + gamma mean.
+#[derive(Clone, Debug)]
+pub struct ZeroInflatedGamma {
+    /// EM / IRLS cycles.
+    pub max_iter: usize,
+    /// Gamma-model intercept.
+    pub fit_intercept: bool,
+}
+
+impl Default for ZeroInflatedGamma {
+    fn default() -> Self {
+        Self {
+            max_iter: 25,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl ZeroInflatedGamma {
+    /// Default ZI-gamma.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted zero-inflated gamma.
+#[derive(Clone, Debug)]
+pub struct FittedZig {
+    /// Gamma slopes.
+    pub coef: Vector,
+    /// Gamma intercept (log-mean).
+    pub intercept: f64,
+    /// Structural-zero probability.
+    pub inflate_pi: f64,
+}
+
+impl Predict for FittedZig {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() != self.coef.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ZI-gamma predict column count ≠ coef")
+                    .build(),
+            );
+        }
+        let mut y = x.matvec(&self.coef);
+        for i in 0..y.len() {
+            let mu = (y[i] + self.intercept).exp().max(1e-12);
+            y[i] = (1.0 - self.inflate_pi) * mu;
+        }
+        ctx.finish(y)
+    }
+}
+
+impl Fit for ZeroInflatedGamma {
+    type Fitted = FittedZig;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedZig>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        for (i, &yi) in y.as_slice().iter().enumerate() {
+            if yi < 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .message(format!("ZI-gamma y[{i}]={yi} < 0"))
+                        .build(),
+                );
+                break;
+            }
+        }
+        let design = if self.fit_intercept {
+            x.with_intercept()
+        } else {
+            x.clone()
+        };
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let n = y.len();
+        let n0 = y.as_slice().iter().filter(|v| **v <= 0.0).count() as f64;
+        let mut pi = (n0 / n.max(1) as f64).clamp(0.0, 0.95);
+        if n0 == n as f64 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateDistribution)
+                    .message("ZI-gamma: every observation is zero")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "ZI-gamma mean",
+                        "a zero series does not identify a gamma mean",
+                        "collect positive observations",
+                    ))
+                    .build(),
+            );
+        }
+        if n0 == 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::MixtureWeightCollapsed)
+                    .message("ZI-gamma inflate is unidentified: there are no zeros")
+                    .build(),
+            );
+            pi = 0.0;
+        }
+        let pos: Vec<usize> = (0..n).filter(|&i| y[i] > 0.0).collect();
+        let mut beta = Vector::zeros(design.ncols());
+        if self.fit_intercept && !beta.is_empty() {
+            let m = if pos.is_empty() {
+                1.0
+            } else {
+                pos.iter().map(|&i| y[i]).sum::<f64>() / pos.len() as f64
+            };
+            beta[0] = m.max(1e-6).ln();
+        }
+        if !pos.is_empty() {
+            let xd = Matrix::from_fn(pos.len(), design.ncols(), |r, j| design.get(pos[r], j));
+            for it in 0..self.max_iter.max(1) {
+                let mut xs = Matrix::zeros(pos.len(), design.ncols());
+                let mut rhs = Vector::zeros(pos.len());
+                for r in 0..pos.len() {
+                    let mut eta = 0.0;
+                    for j in 0..design.ncols() {
+                        eta += xd.get(r, j) * beta[j];
+                    }
+                    let mu = eta.exp().max(1e-12);
+                    let yi = y[pos[r]];
+                    rhs[r] = eta + (yi - mu) / mu;
+                    for j in 0..design.ncols() {
+                        xs.set(r, j, xd.get(r, j));
+                    }
+                }
+                let mut scratch = signlred::Report::new("zig", "irls");
+                let Some(next) = least_squares(&mut scratch, &xs, &rhs, &ctx.policy) else {
+                    break;
+                };
+                for issue in scratch.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                let d = next.sub(&beta).norm();
+                beta = next;
+                ctx.session.step(it as u64, d, Some(pi));
+                if d < 1e-7 {
+                    ctx.session.converged("ZI-gamma IRLS", it as u64);
+                    break;
+                }
+            }
+        }
+        let (intercept, coef) = if self.fit_intercept {
+            (
+                beta.as_slice().first().copied().unwrap_or(0.0),
+                Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            )
+        } else {
+            (0.0, beta)
+        };
+        ctx.finish(FittedZig {
+            coef,
+            intercept,
+            inflate_pi: pi,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3534,6 +4072,22 @@ mod tests {
             }
         }
         assert!(ok >= 20, "ok={ok}");
+        let mx = MixedLogit::new()
+            .fit(&x, &y, &Session::new("mixl", "fit"))
+            .expect("mixl");
+        let mscore = mx
+            .value
+            .predict(&x, &Session::new("mixl", "p"))
+            .unwrap()
+            .value;
+        let mut mok = 0;
+        for i in 0..24 {
+            let pred = if mscore[i] >= 0.0 { 1.0 } else { 0.0 };
+            if (pred - y[i]).abs() < 0.5 {
+                mok += 1;
+            }
+        }
+        assert!(mok >= 20, "mixed logit ok={mok}");
         let cl = Cloglog::new()
             .fit(&x, &y, &Session::new("cloglog", "fit"))
             .expect("cloglog");
@@ -3618,6 +4172,17 @@ mod tests {
         let m0 = (0..8).map(|i| opp[i]).sum::<f64>() / 8.0;
         let m2 = (16..24).map(|i| opp[i]).sum::<f64>() / 8.0;
         assert!(m2 > m0, "ordered probit means m0={m0} m2={m2}");
+        let nl = NestedLogit::new()
+            .fit(&x, &y, &Session::new("nl", "fit"))
+            .expect("nl");
+        let nlp = nl
+            .value
+            .predict_label(&x, &Session::new("nl", "p"))
+            .unwrap()
+            .value;
+        let nm0 = (0..8).map(|i| nlp[i]).sum::<f64>() / 8.0;
+        let nm2 = (16..24).map(|i| nlp[i]).sum::<f64>() / 8.0;
+        assert!(nm2 > nm0, "nested logit means m0={nm0} m2={nm2}");
     }
 
     #[test]
@@ -3733,5 +4298,10 @@ mod tests {
             .expect("tp");
         assert!(tp.value.coef[0].is_finite());
         assert!(tp.value.intercept.is_finite());
+        let zig = ZeroInflatedGamma::new()
+            .fit(&x, &y, &Session::new("zig", "fit"))
+            .expect("zig");
+        assert!(zig.value.inflate_pi >= 0.0 && zig.value.inflate_pi < 1.0);
+        assert!(zig.value.coef[0].is_finite());
     }
 }

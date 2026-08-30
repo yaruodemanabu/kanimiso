@@ -250,6 +250,136 @@ pub fn gak(a: &Vector, b: &Vector, sigma: f64, session: &Session) -> Result<Qual
     ctx.finish((-d / s).exp())
 }
 
+fn zscore_series(s: &[f64]) -> Vec<f64> {
+    let n = s.len().max(1) as f64;
+    let mean = s.iter().sum::<f64>() / n;
+    let var = s.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n;
+    let sd = var.sqrt().max(1e-12);
+    s.iter().map(|v| (v - mean) / sd).collect()
+}
+
+/// Shape-based distance (Paparrizos / tslearn `sbd`).
+///
+/// \(1 - \max_w \mathrm{NCC}_w(\tilde a,\tilde b)\). Identical series score 0.
+pub fn sbd(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("sbd.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("sbd.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("SBD on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let za = zscore_series(a.as_slice());
+    let zb = zscore_series(b.as_slice());
+    let na = za.len();
+    let nb = zb.len();
+    let mut best = f64::NEG_INFINITY;
+    for shift in -(nb as i32 - 1)..=(na as i32 - 1) {
+        let mut num = 0.0;
+        for i in 0..na {
+            let j = i as i32 - shift;
+            if j >= 0 && (j as usize) < nb {
+                num += za[i] * zb[j as usize];
+            }
+        }
+        if num > best {
+            best = num;
+        }
+    }
+    let ncc = best / na.max(nb) as f64;
+    ctx.finish((1.0 - ncc).max(0.0))
+}
+
+/// Pairwise canonical time warping (tslearn `ctw`).
+pub fn ctw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    canonical_time_warping(a, b, session)
+}
+
+/// Discrete Fréchet distance (tslearn `frechet`).
+///
+/// Identical series score 0.
+pub fn frechet(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("frechet.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("frechet.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("Fréchet on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let n = a.len();
+    let m = b.len();
+    let mut dp = vec![0.0; n * m];
+    let at = |i: usize, j: usize| i * m + j;
+    dp[0] = (a[0] - b[0]).abs();
+    for i in 1..n {
+        dp[at(i, 0)] = dp[at(i - 1, 0)].max((a[i] - b[0]).abs());
+    }
+    for j in 1..m {
+        dp[at(0, j)] = dp[at(0, j - 1)].max((a[0] - b[j]).abs());
+    }
+    for i in 1..n {
+        for j in 1..m {
+            let prev = dp[at(i - 1, j)].min(dp[at(i, j - 1)]).min(dp[at(i - 1, j - 1)]);
+            dp[at(i, j)] = prev.max((a[i] - b[j]).abs());
+        }
+    }
+    ctx.finish(dp[at(n - 1, m - 1)])
+}
+
+/// Hausdorff distance between two series as point sets (tslearn `hausdorff`).
+///
+/// Identical series score 0.
+pub fn hausdorff(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("hausdorff.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("hausdorff.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("Hausdorff on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let mut ab = 0.0_f64;
+    for &ai in a.as_slice() {
+        let mut best = f64::INFINITY;
+        for &bj in b.as_slice() {
+            best = best.min((ai - bj).abs());
+        }
+        ab = ab.max(best);
+    }
+    let mut ba = 0.0_f64;
+    for &bj in b.as_slice() {
+        let mut best = f64::INFINITY;
+        for &ai in a.as_slice() {
+            best = best.min((ai - bj).abs());
+        }
+        ba = ba.max(best);
+    }
+    ctx.finish(ab.max(ba))
+}
+
 fn embed_series(s: &[f64], d: usize) -> Matrix {
     let d = d.max(1);
     let n = s.len().saturating_sub(d - 1).max(1);
@@ -9855,6 +9985,14 @@ mod tests {
         assert!(sh.abs() < 1e-12, "shape_dtw={sh}");
         let gk = gak(&a, &a, 1.0, &Session::new("ts", "gak")).unwrap().value;
         assert!(gk.is_finite() && gk > 0.0);
+        let sb = sbd(&a, &a, &Session::new("ts", "sbd")).unwrap().value;
+        assert!(sb.abs() < 1e-9, "sbd={sb}");
+        let cw = ctw(&a, &a, &Session::new("ts", "ctw")).unwrap().value;
+        assert!(cw.abs() < 1e-12, "ctw={cw}");
+        let fr = frechet(&a, &a, &Session::new("ts", "fr")).unwrap().value;
+        assert!(fr.abs() < 1e-12, "frechet={fr}");
+        let hd = hausdorff(&a, &a, &Session::new("ts", "hd")).unwrap().value;
+        assert!(hd.abs() < 1e-12, "hausdorff={hd}");
     }
 
     #[test]

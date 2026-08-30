@@ -14194,6 +14194,354 @@ impl PartialFit for MultinomialProba {
     }
 }
 
+/// Streaming 2×2 confusion matrix (river `metrics.ConfusionMatrix`).
+///
+/// `x` is the prediction, `y` the label. Class count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineConfusion {
+    tp: u64,
+    fp: u64,
+    tn: u64,
+    fn_: u64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl OnlineConfusion {
+    /// Empty confusion matrix.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Accuracy, or NaN before the first labelled pair.
+    pub fn score(&self) -> f64 {
+        let n = self.tp + self.fp + self.tn + self.fn_;
+        if n == 0 {
+            f64::NAN
+        } else {
+            (self.tp + self.tn) as f64 / n as f64
+        }
+    }
+}
+
+impl PartialFit for OnlineConfusion {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let before = self.score();
+        let fallback = Vector::from_iter((0..x.nrows()).map(|i| x.get(i, 0)));
+        let labels = y.unwrap_or(&fallback);
+        for i in 0..x.nrows().min(labels.len()) {
+            let pred = x.get(i, 0);
+            let truth = labels[i];
+            if !pred.is_finite() || !truth.is_finite() {
+                continue;
+            }
+            let p = pred.round() > 0.5;
+            let t = truth.round() > 0.5;
+            match (p, t) {
+                (true, true) => self.tp += 1,
+                (true, false) => self.fp += 1,
+                (false, false) => self.tn += 1,
+                (false, true) => self.fn_ += 1,
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 1;
+        q.explanation = format!(
+            "OnlineConfusion acc={after:.6e} tp={} fp={}",
+            self.tp, self.fp
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "streaming confusion matrix",
+                "increment TP/FP/TN/FN from rounded pred vs label",
+                format!("acc={before:.6e}"),
+                format!("acc={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Expanding range max−min (river `stats.Range`).
+#[derive(Clone, Debug)]
+pub struct OnlineRange {
+    min: f64,
+    max: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OnlineRange {
+    fn default() -> Self {
+        Self {
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlineRange {
+    /// Empty range tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current max−min, or NaN before the first finite value.
+    pub fn score(&self) -> f64 {
+        if self.n_seen == 0 {
+            f64::NAN
+        } else {
+            self.max - self.min
+        }
+    }
+}
+
+impl PartialFit for OnlineRange {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            if v < self.min {
+                self.min = v;
+            }
+            if v > self.max {
+                self.max = v;
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("OnlineRange={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "expanding range",
+                "running max(column 0) − min(column 0)",
+                format!("range={before:.6e}"),
+                format!("range={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Expanding minimum (river `stats.Min`).
+#[derive(Clone, Debug)]
+pub struct OnlineMin {
+    min: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OnlineMin {
+    fn default() -> Self {
+        Self {
+            min: f64::INFINITY,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlineMin {
+    /// Empty min tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current min, or NaN before the first finite value.
+    pub fn score(&self) -> f64 {
+        if self.n_seen == 0 {
+            f64::NAN
+        } else {
+            self.min
+        }
+    }
+}
+
+impl PartialFit for OnlineMin {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.score();
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            if v < self.min {
+                self.min = v;
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 1;
+        q.warmup = self.n_seen < 1;
+        q.explanation = format!("OnlineMin={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "expanding min",
+                "running minimum of column 0",
+                format!("min={before:.6e}"),
+                format!("min={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming Matthews correlation (river `metrics.MCC`).
+///
+/// `x` is the prediction, `y` the label.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineMcc {
+    tp: f64,
+    fp: f64,
+    tn: f64,
+    fn_: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl OnlineMcc {
+    /// Empty MCC tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current MCC, or NaN before the first labelled pair.
+    pub fn score(&self) -> f64 {
+        let n = self.tp + self.fp + self.tn + self.fn_;
+        if n <= 0.0 {
+            return f64::NAN;
+        }
+        let den = ((self.tp + self.fp)
+            * (self.tp + self.fn_)
+            * (self.tn + self.fp)
+            * (self.tn + self.fn_))
+            .sqrt();
+        if den < 1e-18 {
+            0.0
+        } else {
+            (self.tp * self.tn - self.fp * self.fn_) / den
+        }
+    }
+}
+
+impl PartialFit for OnlineMcc {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let before = self.score();
+        let fallback = Vector::from_iter((0..x.nrows()).map(|i| x.get(i, 0)));
+        let labels = y.unwrap_or(&fallback);
+        for i in 0..x.nrows().min(labels.len()) {
+            let pred = x.get(i, 0);
+            let truth = labels[i];
+            if !pred.is_finite() || !truth.is_finite() {
+                continue;
+            }
+            let p = pred.round() > 0.5;
+            let t = truth.round() > 0.5;
+            match (p, t) {
+                (true, true) => self.tp += 1.0,
+                (true, false) => self.fp += 1.0,
+                (false, false) => self.tn += 1.0,
+                (false, true) => self.fn_ += 1.0,
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self.score();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("OnlineMcc={after:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "streaming Matthews correlation",
+                "MCC from an expanding 2×2 confusion matrix",
+                format!("mcc={before:.6e}"),
+                format!("mcc={after:.6e}"),
+            ),
+        )
+    }
+}
+
 /// Rolling mean (river `stats.RollingMean`).
 #[derive(Clone, Debug, Default)]
 pub struct RollingMean {
@@ -22832,6 +23180,18 @@ mod tests {
         MultinomialProba::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("mproba");
+        OnlineConfusion::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("ocm");
+        OnlineRange::new()
+            .partial_fit(&x, None, &session)
+            .expect("orange");
+        OnlineMin::new()
+            .partial_fit(&x, None, &session)
+            .expect("omin");
+        OnlineMcc::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("omcc");
 
         let n_expl = session
             .ledger()
