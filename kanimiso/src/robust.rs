@@ -643,6 +643,112 @@ impl Fit for GammaRegressor {
     }
 }
 
+/// Inverse-Gaussian GLM with a log link (sklearn `TweedieRegressor(power=3)` / statsmodels `GLM`).
+///
+/// Variance \(\mu^3\). The IRLS working weight is \(1/\mu\).
+#[derive(Clone, Debug)]
+pub struct InverseGaussianRegressor {
+    /// ℓ₂ penalty.
+    pub alpha: f64,
+    /// Max IRLS iterations.
+    pub max_iter: usize,
+    /// Intercept.
+    pub fit_intercept: bool,
+}
+
+impl Default for InverseGaussianRegressor {
+    fn default() -> Self {
+        Self {
+            alpha: 0.0,
+            max_iter: 40,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl InverseGaussianRegressor {
+    /// Default inverse-Gaussian GLM.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for InverseGaussianRegressor {
+    type Fitted = FittedLinear;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLinear>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        for (i, &yi) in y.as_slice().iter().enumerate() {
+            if yi <= 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .message(format!("InverseGaussian y[{i}]={yi} is not positive"))
+                        .build(),
+                );
+                break;
+            }
+        }
+        let design = if self.fit_intercept {
+            x.with_intercept()
+        } else {
+            x.clone()
+        };
+        let mut beta = Vector::zeros(design.ncols());
+        beta[0] = y.mean().max(1e-6).ln();
+        for it in 0..self.max_iter {
+            let mut xs = Matrix::zeros(design.nrows(), design.ncols());
+            let mut z = Vector::zeros(y.len());
+            for i in 0..y.len() {
+                let mut eta = 0.0;
+                for j in 0..design.ncols() {
+                    eta += design.get(i, j) * beta[j];
+                }
+                let mu = eta.exp().max(1e-12);
+                let w = (1.0 / mu).sqrt();
+                z[i] = (eta + (y[i] - mu) / mu) * w;
+                for j in 0..design.ncols() {
+                    xs.set(i, j, design.get(i, j) * w);
+                }
+            }
+            let next_opt = if self.alpha > 0.0 {
+                ridge_solve(&mut ctx.report, &xs, &z, self.alpha, &ctx.policy)
+            } else {
+                least_squares(&mut ctx.report, &xs, &z, &ctx.policy)
+            };
+            let Some(next) = next_opt else {
+                break;
+            };
+            let d = next.sub(&beta).norm();
+            beta = next;
+            ctx.session.step(it as u64, d, None);
+            if d < 1e-8 {
+                ctx.session.converged("InverseGaussian IRLS", it as u64);
+                break;
+            }
+        }
+        drop(ctx);
+        LinearRegression {
+            fit_intercept: self.fit_intercept,
+        }
+        .fit(x, y, session)
+        .map(|mut q| {
+            if self.fit_intercept {
+                q.value.intercept = beta[0];
+                q.value.coef = Vector::from_iter((1..beta.len()).map(|i| beta[i]));
+            } else {
+                q.value.coef = beta.clone();
+            }
+            q.value.beta = beta;
+            q
+        })
+    }
+}
+
 /// Orthogonal matching pursuit.
 #[derive(Clone, Debug)]
 pub struct OrthogonalMatchingPursuit {
@@ -942,5 +1048,10 @@ mod tests {
             .fit(&x, &y, &Session::new("rlm", "fit"))
             .expect("rlm");
         assert!((q.value.coef[0] - 2.0).abs() < 0.3, "b={}", q.value.coef[0]);
+        let yp = Vector::from_iter((0..16).map(|i| (1.0 + 0.15 * i as f64).exp()));
+        let ig = InverseGaussianRegressor::new()
+            .fit(&x, &yp, &Session::new("ig", "fit"))
+            .expect("ig");
+        assert!(ig.value.coef.as_slice().iter().all(|v| v.is_finite()));
     }
 }

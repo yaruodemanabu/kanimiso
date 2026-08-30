@@ -23,7 +23,7 @@ use ojizou_san::{IncrementalExplain, Session};
 use signlred::{
     IncrementalQuality, Issue, IssueCode, NumericalCompromise, Qualified, Result, Severity,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub use crate::linear_model::SgdRegressor;
 
@@ -17536,6 +17536,135 @@ impl PartialFit for OnlineOneVsRest {
     }
 }
 
+/// Distinct hashed-row set (river `sketch.Set`).
+///
+/// Stored cardinality is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct SketchSet {
+    keys: HashSet<u64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl SketchSet {
+    /// Empty set sketch.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Distinct hashed keys seen so far.
+    pub fn cardinality(&self) -> usize {
+        self.keys.len()
+    }
+}
+
+impl PartialFit for SketchSet {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("sketch_set"));
+        inspect_online_xy(&mut ctx, x, y);
+        let before = self.keys.len();
+        for i in 0..x.nrows() {
+            self.keys.insert(row_hash(x, i, 17));
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.keys.len() as f64;
+        q.information_gain = Some((self.keys.len() - before) as f64);
+        q.still_identified = true;
+        q.explanation = format!("sketch set cardinality={}", self.keys.len());
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("set grew {before} → {}", self.keys.len()),
+                "river.sketch.Set stores distinct hashed rows exactly",
+                format!("card={before}"),
+                format!("card={}", self.keys.len()),
+            ),
+        )
+    }
+}
+
+/// Online output-code ensemble (river `multiclass.OutputCodeClassifier`).
+///
+/// Code-bit count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct OnlineOutputCode {
+    bits: Vec<Perceptron>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OnlineOutputCode {
+    fn default() -> Self {
+        Self {
+            bits: vec![Perceptron::new(), Perceptron::new(), Perceptron::new()],
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OnlineOutputCode {
+    /// Three-bit output code.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for OnlineOutputCode {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("online_output_code"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        for (b, member) in self.bits.iter_mut().enumerate() {
+            let code = Vector::from_iter((0..y.len()).map(|i| {
+                let lab = y[i].round() as i64;
+                if ((lab >> (b % 8)) & 1) == 1 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }));
+            member.partial_fit(x, Some(&code), session)?;
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen > 1;
+        q.explanation = format!("output-code bits={} n={}", self.bits.len(), self.n_seen);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("updated {} ECOC bits", self.bits.len()),
+                "river OutputCode trains one binary member per code bit",
+                "previous ECOC state",
+                format!("n_seen={}", self.n_seen),
+            ),
+        )
+    }
+}
+
 fn online_linear_dim(fit_intercept: bool, p: usize) -> usize {
     p + if fit_intercept { 1 } else { 0 }
 }
@@ -21958,6 +22087,12 @@ mod tests {
         OnlineOneVsRest::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("ovr");
+        SketchSet::new()
+            .partial_fit(&x, None, &session)
+            .expect("sset");
+        OnlineOutputCode::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("ooc");
 
         let n_expl = session
             .ledger()

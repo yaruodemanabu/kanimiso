@@ -4172,6 +4172,38 @@ const INVENTORY: &[Algorithm] = &[
         "river.multiclass.OneVsRestClassifier",
         "online",
     ),
+    a(
+        "robust.InverseGaussianRegressor",
+        "sklearn.linear_model.TweedieRegressor",
+        "estimator",
+    ),
+    a(
+        "tsa.simulation_smoother",
+        "statsmodels.tsa.statespace.simulation_smoother.SimulationSmoother",
+        "forecast",
+    ),
+    a(
+        "tsa.statespace_news",
+        "statsmodels.tsa.statespace.news.NewsResults",
+        "forecast",
+    ),
+    a(
+        "stats.kde_multivariate",
+        "statsmodels.nonparametric.kernel_density.KDEMultivariate",
+        "stats",
+    ),
+    a(
+        "stats.empirical_likelihood_mean",
+        "statsmodels.emplike.DescStatUV",
+        "stats",
+    ),
+    a("stats.sur", "statsmodels.sandbox.sysreg.SUR", "stats"),
+    a("online.SketchSet", "river.sketch.Set", "online"),
+    a(
+        "online.OnlineOutputCode",
+        "river.multiclass.OutputCodeClassifier",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4447,6 +4479,9 @@ mod tests {
             "tsa.RecursiveTabularForecaster",
             "stats.frank_copula",
             "online.HeavyHitters",
+            "stats.sur",
+            "tsa.simulation_smoother",
+            "robust.InverseGaussianRegressor",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

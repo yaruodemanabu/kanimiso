@@ -4591,6 +4591,34 @@ pub fn kalman_level(y: &Vector, session: &Session) -> Result<Qualified<KalmanLev
     })
 }
 
+/// Disturbance simulation smoother for the local-level model (statsmodels `simulation_smoother`).
+///
+/// Draw count is not identification `p`.
+pub fn simulation_smoother(
+    y: &Vector,
+    seed: u64,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let kf = kalman_level(y, session)?;
+    let mut rng = Rng::new(seed | 3);
+    let sd = kf.value.q.max(1e-12).sqrt();
+    let sim = Vector::from_iter((0..kf.value.level.len()).map(|t| {
+        kf.value.level[t] + sd * rng.standard_normal()
+    }));
+    ctx.finish(sim)
+}
+
+/// Kalman one-step news / prediction error (statsmodels `news`).
+pub fn statespace_news(y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    let kf = kalman_level(y, session)?;
+    let news = Vector::from_iter((0..y.len()).map(|t| y[t] - kf.value.predicted[t]));
+    ctx.finish(news)
+}
+
 /// Hodrick–Prescott filter: SPD solve `(I + λ D'D) τ = y`.
 ///
 /// Returns `(trend, cycle)` with `cycle = y − trend`.
@@ -13476,5 +13504,11 @@ mod tests {
             .iter()
             .all(|v| v.is_finite() && *v > 0.0));
         assert!(rg.value.gamma.is_finite());
+        let sm = simulation_smoother(&y, 3, &Session::new("simsm", "t")).expect("simsm");
+        assert_eq!(sm.value.len(), y.len());
+        assert!(sm.value.as_slice().iter().all(|v| v.is_finite()));
+        let nw = statespace_news(&y, &Session::new("news", "t")).expect("news");
+        assert_eq!(nw.value.len(), y.len());
+        assert!(nw.value.as_slice().iter().all(|v| v.is_finite()));
     }
 }

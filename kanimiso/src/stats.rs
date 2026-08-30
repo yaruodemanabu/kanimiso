@@ -9873,6 +9873,218 @@ impl FittedUnivariateGam {
     }
 }
 
+/// Product-kernel multivariate KDE (statsmodels `KDEMultivariate`).
+///
+/// Dimension is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct KdeMultivariate {
+    /// Density at each training row.
+    pub density: Vector,
+    /// Per-column Scott bandwidth.
+    pub bandwidth: Vector,
+}
+
+/// Gaussian-product KDE on the rows of `x`.
+pub fn kde_multivariate(x: &Matrix, session: &Session) -> Result<Qualified<KdeMultivariate>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    let (n, k) = x.shape();
+    if n < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("multivariate KDE needs n≥2")
+                .build(),
+        );
+    }
+    let mut bw = Vector::zeros(k);
+    for j in 0..k {
+        let s = x.column(j).std().max(1e-8);
+        bw[j] = s * (n.max(1) as f64).powf(-1.0 / (k.max(1) as f64 + 4.0));
+    }
+    let dens = Vector::from_iter((0..n).map(|i| {
+        let mut acc = 0.0;
+        for t in 0..n {
+            let mut logk = 0.0;
+            for j in 0..k {
+                let h = bw[j].max(1e-8);
+                let z = (x.get(i, j) - x.get(t, j)) / h;
+                logk += -0.5 * z * z - h.ln() - 0.5 * (2.0 * std::f64::consts::PI).ln();
+            }
+            acc += logk.exp();
+        }
+        acc / n.max(1) as f64
+    }));
+    ctx.finish(KdeMultivariate {
+        density: dens,
+        bandwidth: bw,
+    })
+}
+
+/// Empirical-likelihood test of a scalar mean (statsmodels `emplike`).
+///
+/// The implied Lagrange multiplier is not identification `p`.
+pub fn empirical_likelihood_mean(
+    y: &Vector,
+    mu0: f64,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, &Matrix::from_vector(y), None, &ctx.policy);
+    let vals: Vec<f64> = y
+        .as_slice()
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
+    let n = vals.len();
+    if n < 3 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("empirical likelihood needs n≥3")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: n as f64,
+        });
+    }
+    let d: Vec<f64> = vals.iter().map(|v| v - mu0).collect();
+    let mut lo = -1.0 / d.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1e-8);
+    let mut hi = -lo;
+    let g = |lam: f64| {
+        let mut s = 0.0;
+        for &di in &d {
+            let den = 1.0 + lam * di;
+            if den <= 1e-12 {
+                return f64::NAN;
+            }
+            s += di / den;
+        }
+        s
+    };
+    for _ in 0..40 {
+        let mid = 0.5 * (lo + hi);
+        let gm = g(mid);
+        if !gm.is_finite() {
+            hi = mid;
+            continue;
+        }
+        if gm > 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let lam = 0.5 * (lo + hi);
+    let mut w = 0.0;
+    let mut ok = true;
+    for &di in &d {
+        let den = 1.0 + lam * di;
+        if den <= 1e-12 {
+            ok = false;
+            break;
+        }
+        w += 2.0 * den.ln();
+    }
+    if !ok || !w.is_finite() {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("empirical-likelihood Lagrange step left the unit simplex")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 1.0,
+            nobs: n as f64,
+        });
+    }
+    let p = chi2_pvalue(w.max(0.0), 1.0);
+    ctx.finish(HypothesisTest {
+        statistic: w,
+        pvalue: p.clamp(0.0, 1.0),
+        df: 1.0,
+        nobs: n as f64,
+    })
+}
+
+/// Two-equation SUR (statsmodels `SUR`): OLS margins plus residual covariance.
+///
+/// Equation count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SurResult {
+    /// First-equation coefficients (including intercept if `x` has none).
+    pub beta1: Vector,
+    /// Second-equation coefficients.
+    pub beta2: Vector,
+    /// Residual covariance (`2` × `2`).
+    pub sigma: Matrix,
+}
+
+/// Fit a two-equation seemingly unrelated regression on a shared design.
+pub fn sur(
+    y1: &Vector,
+    y2: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<SurResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y1), &ctx.policy);
+    inspect_xy(&mut ctx.report, x, Some(y2), &ctx.policy);
+    let n = x.nrows().min(y1.len()).min(y2.len());
+    if n < 4 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("SUR needs n≥4")
+                .build(),
+        );
+    }
+    let design = x.with_intercept();
+    let y1n = Vector::from_iter(y1.as_slice().iter().take(n).copied());
+    let y2n = Vector::from_iter(y2.as_slice().iter().take(n).copied());
+    let d = Matrix::from_fn(n, design.ncols(), |i, j| design.get(i, j));
+    let mut scratch = Report::new("sur", "ols");
+    let b1 = least_squares(&mut scratch, &d, &y1n, &ctx.policy).unwrap_or_else(|| {
+        let mut v = Vector::zeros(d.ncols());
+        v[0] = y1n.mean();
+        v
+    });
+    let b2 = least_squares(&mut scratch, &d, &y2n, &ctx.policy).unwrap_or_else(|| {
+        let mut v = Vector::zeros(d.ncols());
+        v[0] = y2n.mean();
+        v
+    });
+    let f1 = d.matvec(&b1);
+    let f2 = d.matvec(&b2);
+    let mut s11 = 0.0;
+    let mut s22 = 0.0;
+    let mut s12 = 0.0;
+    for i in 0..n {
+        let e1 = y1n[i] - f1[i];
+        let e2 = y2n[i] - f2[i];
+        s11 += e1 * e1;
+        s22 += e2 * e2;
+        s12 += e1 * e2;
+    }
+    let den = n.max(1) as f64;
+    let sigma = Matrix::from_fn(2, 2, |i, j| match (i, j) {
+        (0, 0) => s11 / den,
+        (1, 1) => s22 / den,
+        _ => s12 / den,
+    });
+    ctx.finish(SurResult {
+        beta1: b1,
+        beta2: b2,
+        sigma,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10287,5 +10499,18 @@ mod tests {
             .expect("gamp")
             .value;
         assert!((gamp[10] - 20.0).abs() < 2.0, "gam[10]={}", gamp[10]);
+        let kmv = kde_multivariate(&x, &Session::new("kdemv", "t")).expect("kdemv");
+        assert_eq!(kmv.value.density.len(), 40);
+        assert!(kmv
+            .value
+            .density
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v >= 0.0));
+        let el = empirical_likelihood_mean(&y, y.mean(), &Session::new("el", "t")).expect("el");
+        assert!(el.value.pvalue.is_finite() || el.value.statistic.is_nan());
+        let sr = sur(&y, &y2c, &x, &Session::new("sur", "t")).expect("sur");
+        assert!(sr.value.beta1.as_slice().iter().all(|v| v.is_finite()));
+        assert!(sr.value.sigma.get(0, 1).is_finite());
     }
 }
