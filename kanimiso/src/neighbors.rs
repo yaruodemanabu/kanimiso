@@ -192,6 +192,75 @@ impl FittedNearestNeighbors {
     }
 }
 
+/// k-NN graph transformer (sklearn `KNeighborsTransformer`).
+///
+/// Neighbor count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct KNeighborsTransformer {
+    /// Neighbors marked as 1 in the graph.
+    pub n_neighbors: usize,
+}
+
+impl Default for KNeighborsTransformer {
+    fn default() -> Self {
+        Self { n_neighbors: 5 }
+    }
+}
+
+impl KNeighborsTransformer {
+    /// Graph with `k` neighbors.
+    pub fn new(k: usize) -> Self {
+        Self {
+            n_neighbors: k.max(1),
+        }
+    }
+}
+
+/// Fitted k-NN graph transformer.
+#[derive(Clone, Debug)]
+pub struct FittedKNeighborsTransformer {
+    inner: FittedNearestNeighbors,
+}
+
+impl FitUnsupervised for KNeighborsTransformer {
+    type Fitted = FittedKNeighborsTransformer;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKNeighborsTransformer>> {
+        let mut nn = NearestNeighbors::new(self.n_neighbors.max(1));
+        let q = nn.fit_unsupervised(x, session)?;
+        Ok(q.map(|inner| FittedKNeighborsTransformer { inner }))
+    }
+}
+
+impl Transform for FittedKNeighborsTransformer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let g = match self.inner.kneighbors(x, session) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                return ctx.finish(Matrix::zeros(x.nrows(), self.inner.x_train.nrows()));
+            }
+        };
+        let n_ref = self.inner.x_train.nrows();
+        let mut out = Matrix::zeros(x.nrows(), n_ref);
+        for i in 0..x.nrows() {
+            if let Some(idx) = g.indices.get(i) {
+                for &j in idx {
+                    if j < n_ref {
+                        out.set(i, j, 1.0);
+                    }
+                }
+            }
+        }
+        ctx.finish(out)
+    }
+}
+
 impl FitUnsupervised for NearestNeighbors {
     type Fitted = FittedNearestNeighbors;
     fn fit_unsupervised(
@@ -1390,5 +1459,15 @@ mod tests {
         assert_eq!(g.indices.len(), 8);
         assert_eq!(g.indices[0][0], 0);
         assert!(g.distances.get(0, 0).abs() < 1e-12);
+        let knnt = KNeighborsTransformer::new(2)
+            .fit_unsupervised(&x, &Session::new("knntr", "fit"))
+            .expect("knntr");
+        let graph = knnt
+            .value
+            .transform(&x, &Session::new("knntr", "t"))
+            .expect("knntrt")
+            .value;
+        assert_eq!(graph.shape(), (8, 8));
+        assert!((graph.get(0, 0) - 1.0).abs() < 1e-12);
     }
 }

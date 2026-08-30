@@ -11796,6 +11796,107 @@ impl Transform for HashingTrick {
     }
 }
 
+/// Hashed bag-of-values (river `feature_extraction.BagOfWords`).
+///
+/// Finite entries of `X` are hashed into `n_features` count bins.
+/// Bin count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct BagOfWords {
+    /// Hash-bin count.
+    pub n_features: usize,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for BagOfWords {
+    fn default() -> Self {
+        Self {
+            n_features: 8,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl BagOfWords {
+    /// Bag with `n_features` bins.
+    pub fn new(n_features: usize) -> Self {
+        Self {
+            n_features: n_features.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn bin(bits: u64, col: usize, n: usize) -> usize {
+        let h = bits
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add((col as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F));
+        (h as usize) % n.max(1)
+    }
+}
+
+impl PartialFit for BagOfWords {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if self.n_features == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("BagOfWords n_features=0; using 1")
+                    .build(),
+            );
+            self.n_features = 1;
+        }
+        let before = self.n_seen;
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(0.0);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = true;
+        q.warmup = false;
+        q.explanation = format!("BagOfWords bins={}", self.n_features);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "hashed bag-of-values",
+                "each finite entry is folded into a fixed count bag",
+                format!("n={before}"),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Transform for BagOfWords {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        let m = self.n_features.max(1);
+        let mut out = Matrix::zeros(x.nrows(), m);
+        for i in 0..x.nrows() {
+            for j in 0..x.ncols() {
+                let v = x.get(i, j);
+                if !v.is_finite() {
+                    continue;
+                }
+                let b = Self::bin(v.to_bits(), j, m);
+                out.set(i, b, out.get(i, b) + 1.0);
+            }
+        }
+        ctx.finish(out)
+    }
+}
+
 /// Streaming median absolute deviation (river `stats.MAD`).
 #[derive(Clone, Debug, Default)]
 pub struct OnlineMad {
@@ -17961,6 +18062,9 @@ mod tests {
         HoFm::new(2)
             .partial_fit(&x, Some(&y), &session)
             .expect("hofm");
+        BagOfWords::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("bow");
 
         let n_expl = session
             .ledger()

@@ -1226,6 +1226,8 @@ pub struct GmmHmm {
     pub max_iter: usize,
     /// Seed.
     pub seed: u64,
+    /// If true, transitions to earlier states are zeroed (hmmlearn `left_right`).
+    pub left_right: bool,
 }
 
 impl Default for GmmHmm {
@@ -1235,6 +1237,7 @@ impl Default for GmmHmm {
             n_mix: 1,
             max_iter: 40,
             seed: 0,
+            left_right: false,
         }
     }
 }
@@ -1245,6 +1248,16 @@ impl GmmHmm {
         Self {
             n_states,
             n_mix,
+            ..Self::default()
+        }
+    }
+
+    /// Left-right GMM-HMM with `n_states` states and `n_mix` mixtures.
+    pub fn left_right(n_states: usize, n_mix: usize) -> Self {
+        Self {
+            n_states,
+            n_mix,
+            left_right: true,
             ..Self::default()
         }
     }
@@ -1410,12 +1423,17 @@ impl FitUnsupervised for GmmHmm {
         let k = self.n_states.max(1);
         let nm = self.n_mix.max(1);
         if t_len == 0 || d == 0 {
+            let mut start = init_start(k);
+            let mut trans = init_trans(k);
+            if self.left_right {
+                enforce_left_right(&mut start, &mut trans);
+            }
             return ctx.finish(FittedGmmHmm {
                 labels: empty_labels(0),
                 n_states: k,
                 n_mix: nm,
-                start: init_start(k),
-                trans: init_trans(k),
+                start,
+                trans,
                 mix_weights: Matrix::zeros(k, nm),
                 means: Matrix::zeros(k * nm, d),
                 vars: Matrix::zeros(k * nm, d),
@@ -1440,6 +1458,9 @@ impl FitUnsupervised for GmmHmm {
         let mut mix_weights = Matrix::from_fn(k, nm, |_, _| 1.0 / nm as f64);
         let mut start = init_start(k);
         let mut trans = init_trans(k);
+        if self.left_right {
+            enforce_left_right(&mut start, &mut trans);
+        }
         let mut loglik = f64::NEG_INFINITY;
         let mut last_gamma = Vec::new();
         for it in 0..self.max_iter.max(1) {
@@ -1500,7 +1521,14 @@ impl FitUnsupervised for GmmHmm {
                         );
                     }
                 }
-                renormalize_rows(&mut trans, TRANS_FLOOR);
+                if self.left_right {
+                    enforce_left_right(&mut start, &mut trans);
+                } else {
+                    renormalize_rows(&mut trans, TRANS_FLOOR);
+                }
+            }
+            if self.left_right && k > 1 {
+                enforce_left_right(&mut start, &mut trans);
             }
             for j in 0..k {
                 let mut wsum = 0.0;
@@ -1565,6 +1593,9 @@ impl FitUnsupervised for GmmHmm {
             })
             .collect();
         diagnose_chain(&mut ctx, &start, &trans, &occup);
+        if self.left_right {
+            enforce_left_right(&mut start, &mut trans);
+        }
         let fitted_tmp = FittedGmmHmm {
             labels: Vector::zeros(0),
             n_states: k,
@@ -2395,6 +2426,10 @@ mod tests {
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
         assert!(mlr.value.trans.get(1, 0) <= 1e-8);
+        let glr = GmmHmm::left_right(2, 1)
+            .fit(&x, &Session::new("glr_hmm", "fit"))
+            .expect("glr");
+        assert!(glr.value.trans.get(1, 0) <= 1e-8);
     }
 
     #[test]

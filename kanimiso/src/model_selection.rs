@@ -1105,6 +1105,95 @@ pub fn partial_dependence(
     })
 }
 
+/// Individual conditional expectation (sklearn `partial_dependence` kind=`individual`).
+///
+/// Grid length is not identification `p`. Inner Ridge residual issues are not
+/// promoted.
+#[derive(Clone, Debug)]
+pub struct IceResult {
+    /// Grid of the chosen column.
+    pub grid: Vector,
+    /// Per-row predictions (`n` × `n_grid`).
+    pub individual: Matrix,
+    /// Column-wise mean of `individual`.
+    pub average: Vector,
+}
+
+/// ICE curves: pin `feature` to each grid value and predict every row.
+pub fn individual_conditional_expectation(
+    x: &Matrix,
+    y: &Vector,
+    feature: usize,
+    grid: &Vector,
+    session: &Session,
+) -> Result<Qualified<IceResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    ctx.push(
+        Issue::builder(IssueCode::TargetLeakageSuspected)
+            .severity(Severity::Advisory)
+            .message("ICE fits Ridge on the full (X, y)")
+            .build(),
+    );
+    if feature >= x.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!("ICE feature={feature} ≥ p={}", x.ncols()))
+                .build(),
+        );
+        return ctx.finish(IceResult {
+            grid: grid.clone(),
+            individual: Matrix::zeros(x.nrows(), grid.len()),
+            average: Vector::zeros(grid.len()),
+        });
+    }
+    let fitted = match Ridge::new(1e-3).fit(x, y, &session.child("ice_fit")) {
+        Ok(q) => q.value,
+        Err(e) => {
+            if !matches!(
+                e.primary.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::MeaninglessFit
+            ) {
+                ctx.push(e.primary);
+            }
+            return ctx.finish(IceResult {
+                grid: grid.clone(),
+                individual: Matrix::zeros(x.nrows(), grid.len()),
+                average: Vector::zeros(grid.len()),
+            });
+        }
+    };
+    let mut individual = Matrix::zeros(x.nrows(), grid.len());
+    let mut average = Vector::zeros(grid.len());
+    for (t, &g) in grid.as_slice().iter().enumerate() {
+        let xp = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            if j == feature {
+                g
+            } else {
+                x.get(i, j)
+            }
+        });
+        if let Ok(p) = fitted.predict(&xp, &session.child("ice_p")) {
+            let mut s = 0.0;
+            for i in 0..p.value.len().min(x.nrows()) {
+                individual.set(i, t, p.value[i]);
+                s += p.value[i];
+            }
+            average[t] = s / x.nrows().max(1) as f64;
+        }
+    }
+    ctx.finish(IceResult {
+        grid: grid.clone(),
+        individual,
+        average,
+    })
+}
+
 /// sklearn-style grid search over Ridge / Lasso `alpha` using K-fold R².
 ///
 /// Lives here (not `linear_model`) to avoid a module cycle.
@@ -3997,6 +4086,11 @@ mod tests {
         let pd = partial_dependence(&x, &y, 0, &grid, &Session::new("ms", "pd")).unwrap();
         assert_eq!(pd.value.average.len(), 3);
         assert!(pd.value.average.as_slice().iter().all(|v| v.is_finite()));
+        let ice = individual_conditional_expectation(&x, &y, 0, &grid, &Session::new("ms", "ice"))
+            .unwrap();
+        assert_eq!(ice.value.individual.shape(), (x.nrows(), grid.len()));
+        assert_eq!(ice.value.average.len(), 3);
+        assert!(ice.value.average.as_slice().iter().all(|v| v.is_finite()));
         let lpo = LeavePOut::new(2)
             .split(6, &Session::new("ms", "lpo"))
             .unwrap()

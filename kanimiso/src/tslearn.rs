@@ -130,6 +130,124 @@ pub fn matrix_profile(s: &Vector, window: usize, session: &Session) -> Result<Qu
     ctx.finish(mp)
 }
 
+/// STAMP matrix profile plus the nearest-neighbor subsequence index (stumpy `stump`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct StampResult {
+    /// Distance profile (length `n − window + 1`).
+    pub profile: Vector,
+    /// Argmin index of `profile`.
+    pub index: usize,
+}
+
+/// Matrix profile and its nearest-neighbor location.
+pub fn stamp(y: &Vector, window: usize, session: &Session) -> Result<Qualified<StampResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y),
+        Some(y),
+        &ctx.policy,
+    );
+    let mp = match matrix_profile(y, window, &session.child("mp")) {
+        Ok(q) => q.value,
+        Err(e) => {
+            if !matches!(
+                e.primary.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::MeaninglessFit
+            ) {
+                ctx.push(e.primary);
+            }
+            Vector::zeros(0)
+        }
+    };
+    let mut index = 0usize;
+    let mut best = f64::INFINITY;
+    for (i, &v) in mp.as_slice().iter().enumerate() {
+        if v.is_finite() && v < best {
+            best = v;
+            index = i;
+        }
+    }
+    ctx.finish(StampResult { profile: mp, index })
+}
+
+fn finite_median(xs: &[f64]) -> f64 {
+    let mut v: Vec<f64> = xs.iter().copied().filter(|z| z.is_finite()).collect();
+    if v.is_empty() {
+        return f64::NAN;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        0.5 * (v[n / 2 - 1] + v[n / 2])
+    }
+}
+
+/// STRAY-style matrix-profile anomaly scores (sktime `STRAY`).
+///
+/// \((mp − \mathrm{median}) / \mathrm{MAD}\). Window length is not identification `p`.
+pub fn stray(y: &Vector, window: usize, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y),
+        Some(y),
+        &ctx.policy,
+    );
+    let mp = match matrix_profile(y, window, &session.child("stray_mp")) {
+        Ok(q) => q.value,
+        Err(e) => {
+            if !matches!(
+                e.primary.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::MeaninglessFit
+            ) {
+                ctx.push(e.primary);
+            }
+            return ctx.finish(Vector::zeros(0));
+        }
+    };
+    let med = finite_median(mp.as_slice());
+    let absdev: Vec<f64> = mp
+        .as_slice()
+        .iter()
+        .map(|&v| {
+            if v.is_finite() {
+                (v - med).abs()
+            } else {
+                f64::NAN
+            }
+        })
+        .collect();
+    let mut mad = finite_median(&absdev);
+    if !mad.is_finite() || mad <= 1e-15 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("STRAY MAD vanished; scores use a unit scale")
+                .build(),
+        );
+        mad = 1.0;
+    }
+    ctx.finish(Vector::from_iter(mp.as_slice().iter().map(|&v| {
+        if v.is_finite() && med.is_finite() {
+            (v - med) / mad
+        } else {
+            f64::NAN
+        }
+    })))
+}
+
 /// Real-valued edit distance (insert/delete cost 1, replace `|a-b|`).
 pub fn edit_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
@@ -8238,6 +8356,107 @@ impl Predict for FittedClaSPClassifier {
     }
 }
 
+/// Matrix-profile feature ridge classifier (sktime `MatrixProfileClassifier`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct MatrixProfileClassifier {
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Subsequence length for the per-row profile.
+    pub window: usize,
+}
+
+impl Default for MatrixProfileClassifier {
+    fn default() -> Self {
+        Self {
+            alpha: 0.1,
+            window: 2,
+        }
+    }
+}
+
+impl MatrixProfileClassifier {
+    /// Default matrix-profile classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Classifier with subsequence length `window`.
+    pub fn with_window(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted matrix-profile ridge.
+#[derive(Clone, Debug)]
+pub struct FittedMatrixProfileClassifier {
+    inner: crate::classification::FittedRidgeClassifier,
+    window: usize,
+}
+
+fn mp_row_features(row: &Vector, window: usize, session: &Session) -> [f64; 4] {
+    let mean = row.mean();
+    let std = row.std();
+    let (mp_mean, mp_max) = match matrix_profile(row, window, session) {
+        Ok(q) if !q.value.is_empty() => {
+            let sl = q.value.as_slice();
+            let mut s = 0.0_f64;
+            let mut mx = f64::NEG_INFINITY;
+            let mut c = 0.0_f64;
+            for &v in sl {
+                if v.is_finite() {
+                    s += v;
+                    mx = mx.max(v);
+                    c += 1.0;
+                }
+            }
+            if c > 0.0 {
+                (s / c, mx)
+            } else {
+                (0.0, 0.0)
+            }
+        }
+        _ => (0.0, 0.0),
+    };
+    [mean, std, mp_mean, mp_max]
+}
+
+impl Fit for MatrixProfileClassifier {
+    type Fitted = FittedMatrixProfileClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMatrixProfileClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let w = self.window.max(2);
+        let z = Matrix::from_fn(x.nrows(), 4, |i, j| {
+            let f = mp_row_features(&x.row(i), w, &session.child(format!("mp_row{i}")));
+            f[j]
+        });
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "mpclf");
+        ctx.finish(FittedMatrixProfileClassifier { inner, window: w })
+    }
+}
+
+impl Predict for FittedMatrixProfileClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = Matrix::from_fn(x.nrows(), 4, |i, j| {
+            let f = mp_row_features(&x.row(i), self.window, &session.child(format!("mp_pr{i}")));
+            f[j]
+        });
+        self.inner.predict(&z, session)
+    }
+}
+
 /// Greedy Gaussian segmentation (sktime `GreedyGaussianSegmentation`).
 ///
 /// Change-point count is not identification `p`.
@@ -10094,5 +10313,24 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(msp.len(), 6);
+        let stmp = stamp(&yramp, 3, &Session::new("ts", "stamp"))
+            .unwrap()
+            .value;
+        assert_eq!(stmp.profile.len(), 4);
+        assert!(stmp.index < stmp.profile.len() || stmp.profile.is_empty());
+        let sy = stray(&yramp, 3, &Session::new("ts", "stray"))
+            .unwrap()
+            .value;
+        assert_eq!(sy.len(), 4);
+        assert!(sy.as_slice().iter().all(|v| v.is_finite()));
+        let mpc = MatrixProfileClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "mpclf"))
+            .unwrap();
+        let mpp = mpc
+            .value
+            .predict(&x, &Session::new("ts", "mpclfp"))
+            .unwrap()
+            .value;
+        assert_eq!(mpp.len(), 6);
     }
 }

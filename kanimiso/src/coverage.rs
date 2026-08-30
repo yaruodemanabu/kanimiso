@@ -3783,6 +3783,50 @@ const INVENTORY: &[Algorithm] = &[
         "lifelines.AalenAdditiveFitter",
         "stats",
     ),
+    a(
+        "model_selection.individual_conditional_expectation",
+        "sklearn.inspection.partial_dependence",
+        "function",
+    ),
+    a(
+        "neighbors.KNeighborsTransformer",
+        "sklearn.neighbors.KNeighborsTransformer",
+        "transformer",
+    ),
+    a("tsa.Uecm", "statsmodels.tsa.ardl.ecm.UECM", "forecast"),
+    a(
+        "tsa.AutoEnsembleForecaster",
+        "sktime.forecasting.compose.AutoEnsembleForecaster",
+        "forecast",
+    ),
+    a(
+        "tsa.reconcile_bottom_up",
+        "sktime.forecasting.reconcile",
+        "forecast",
+    ),
+    a(
+        "tsa.reconcile_top_down",
+        "sktime.forecasting.reconcile",
+        "forecast",
+    ),
+    a("tslearn.stamp", "stumpy.stump", "timeseries"),
+    a(
+        "tslearn.stray",
+        "sktime.annotation.stray.STRAY",
+        "timeseries",
+    ),
+    a(
+        "tslearn.MatrixProfileClassifier",
+        "sktime.classification.feature_based.MatrixProfileClassifier",
+        "estimator",
+    ),
+    a("bandit.Exp4", "river.bandit.Exp3", "online"),
+    a(
+        "online.BagOfWords",
+        "river.feature_extraction.BagOfWords",
+        "online",
+    ),
+    a("hmm.GmmHmmLeftRight", "hmmlearn.hmm.GMMHMM", "hmm"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -3978,6 +4022,18 @@ mod tests {
             "hmm.MultinomialHmmLeftRight",
             "tsa.StackingForecaster",
             "stats.aalen_additive",
+            "model_selection.individual_conditional_expectation",
+            "neighbors.KNeighborsTransformer",
+            "tsa.Uecm",
+            "tsa.AutoEnsembleForecaster",
+            "tsa.reconcile_bottom_up",
+            "tsa.reconcile_top_down",
+            "tslearn.stamp",
+            "tslearn.stray",
+            "tslearn.MatrixProfileClassifier",
+            "bandit.Exp4",
+            "online.BagOfWords",
+            "hmm.GmmHmmLeftRight",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

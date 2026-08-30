@@ -1218,6 +1218,190 @@ impl PartialFit for Exp3 {
     }
 }
 
+/// Expert-mixture Exp3 (Auer Exp4; river `bandit` peer).
+///
+/// Column 0 is the played arm; extra columns are expert recommendations.
+/// Arm and expert counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Exp4 {
+    /// Exploration mixture \(\gamma \in (0,1]\).
+    pub gamma: f64,
+    n_arms: usize,
+    expert_weights: Vec<f64>,
+    expert_counts: Vec<u64>,
+    updates: u64,
+    n_seen: u64,
+}
+
+impl Exp4 {
+    /// `k` arms, default \(\gamma=0.1\).
+    pub fn new(n_arms: usize) -> Self {
+        Self {
+            gamma: 0.1,
+            n_arms: n_arms.max(1),
+            expert_weights: Vec::new(),
+            expert_counts: Vec::new(),
+            updates: 0,
+            n_seen: 0,
+        }
+    }
+
+    fn ensure_experts(&mut self, ctx: &mut FitCtx, n_exp: usize) {
+        let n = n_exp.max(1);
+        if self.expert_weights.is_empty() {
+            self.expert_weights = vec![1.0; n];
+            self.expert_counts = vec![0; n];
+            return;
+        }
+        if self.expert_weights.len() != n {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "Exp4 expert count changed {} → {n}",
+                        self.expert_weights.len()
+                    ))
+                    .build(),
+            );
+            self.expert_weights.resize(n, 1.0);
+            self.expert_counts.resize(n, 0);
+        }
+    }
+
+    fn mix_probs(&self, recs: &[usize]) -> Vec<f64> {
+        let g = self.gamma.clamp(1e-6, 1.0);
+        let k = self.n_arms.max(1);
+        let sw: f64 = self.expert_weights.iter().copied().sum::<f64>().max(1e-18);
+        let mut p = vec![g / k as f64; k];
+        for (e, &a) in recs.iter().enumerate() {
+            if a < k {
+                let we = self.expert_weights.get(e).copied().unwrap_or(0.0) / sw;
+                p[a] += (1.0 - g) * we;
+            }
+        }
+        p
+    }
+}
+
+impl PartialFit for Exp4 {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish(
+                &ctx,
+                reject(self.updates, 0, self.n_seen, "Exp4 needs rewards"),
+            );
+        };
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("Exp4 has no expert columns; using a single dummy expert")
+                    .build(),
+            );
+        }
+        let n_exp = x.ncols().saturating_sub(1).max(1);
+        self.ensure_experts(&mut ctx, n_exp);
+        let before = self.expert_weights.clone();
+        let g = self.gamma.clamp(1e-6, 1.0);
+        let k_e = n_exp as f64;
+        let mut dsum = 0.0_f64;
+        for i in 0..y.len().min(x.nrows().max(y.len())) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let arm = if x.ncols() == 0 || x.nrows() == 0 {
+                0
+            } else {
+                let a = x.get(i.min(x.nrows() - 1), 0).round().abs() as usize;
+                if a >= self.n_arms {
+                    ctx.push(
+                        Issue::builder(IssueCode::DimensionMismatch)
+                            .severity(Severity::Warning)
+                            .message(format!("Exp4 arm {a} is outside 0..{}", self.n_arms))
+                            .build(),
+                    );
+                    continue;
+                }
+                a
+            };
+            let recs: Vec<usize> = if x.ncols() < 2 {
+                vec![arm]
+            } else {
+                (1..x.ncols())
+                    .map(|j| x.get(i.min(x.nrows() - 1), j).round().abs() as usize)
+                    .collect()
+            };
+            let p = self.mix_probs(&recs);
+            let pa = p
+                .get(arm)
+                .copied()
+                .unwrap_or(1.0 / self.n_arms.max(1) as f64)
+                .max(1e-12);
+            let r = y[i].clamp(0.0, 1.0);
+            let est = r / pa;
+            for (e, &rec) in recs.iter().enumerate() {
+                if rec != arm || e >= self.expert_weights.len() {
+                    continue;
+                }
+                let before_w = self.expert_weights[e];
+                self.expert_weights[e] *= (g * est / k_e).exp();
+                dsum += (self.expert_weights[e] - before_w).abs();
+                self.expert_counts[e] += 1;
+            }
+            if self
+                .expert_weights
+                .iter()
+                .any(|w| !w.is_finite() || *w > 1e12)
+            {
+                ctx.push(
+                    Issue::builder(IssueCode::JitterInjected)
+                        .severity(Severity::Warning)
+                        .message("Exp4 expert weights overflowed; rescaling")
+                        .compromise(NumericalCompromise::new(
+                            "finite expert weights",
+                            "weights were rescaled after overflow",
+                            "the importance-weighted update grew without bound",
+                            "relative expert probabilities are kept; the absolute scale is conventional",
+                        ))
+                        .build(),
+                );
+                let mx = self
+                    .expert_weights
+                    .iter()
+                    .copied()
+                    .fold(0.0_f64, |a, b| a.max(b))
+                    .max(1.0);
+                for w in &mut self.expert_weights {
+                    *w /= mx;
+                }
+            }
+            self.n_seen += 1;
+            self.updates += 1;
+        }
+        let expl = pack_bandit(
+            &mut ctx,
+            self.updates,
+            y.len(),
+            self.n_seen,
+            dsum,
+            self.expert_counts.iter().all(|&c| c > 0),
+            self.expert_counts.iter().any(|&c| c == 0) || self.expert_counts.is_empty(),
+            &before,
+            &self.expert_weights,
+            "Exp4 expert weights",
+            "importance-weighted mixture of expert recommendations; arm/expert counts are not p",
+        );
+        finish(&ctx, expl)
+    }
+}
+
 /// Bayesian UCB on Bernoulli arms (river `bandit.BayesUCB`).
 ///
 /// Each arm holds a `Beta(α, β)` posterior. The index is a Gaussian
@@ -1540,6 +1724,9 @@ mod tests {
         assert!(!q.value.narrative.is_empty());
         let mut ut = UcbTuned::new(2);
         let q = ut.partial_fit(&x, Some(&y), &session).expect("ucbt");
+        assert!(!q.value.narrative.is_empty());
+        let mut exp4 = Exp4::new(2);
+        let q = exp4.partial_fit(&x, Some(&y), &session).expect("exp4");
         assert!(!q.value.narrative.is_empty());
     }
 }

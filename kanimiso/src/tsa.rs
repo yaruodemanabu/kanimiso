@@ -3906,6 +3906,133 @@ impl FitSeries for StackingForecaster {
     }
 }
 
+/// Softmax of in-sample 1-step SSE over Naive / Drift / SES
+/// (sktime `AutoEnsembleForecaster`).
+///
+/// Member count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct AutoEnsembleForecaster;
+
+/// Fitted softmax ensemble of last-value, drift, and SES.
+#[derive(Clone, Debug)]
+pub struct FittedAutoEnsembleForecaster {
+    /// Last observed level (naive member).
+    pub last: f64,
+    /// Drift slope.
+    pub slope: f64,
+    /// Terminal SES level.
+    pub ses_level: f64,
+    /// Softmax weight on the naive member.
+    pub w_naive: f64,
+    /// Softmax weight on the drift member.
+    pub w_drift: f64,
+    /// Softmax weight on SES.
+    pub w_ses: f64,
+}
+
+impl FittedAutoEnsembleForecaster {
+    /// Weighted combination of the three member forecasts.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        ctx.finish(Vector::from_iter((1..=h).map(|k| {
+            let naive = self.last;
+            let drift = self.last + k as f64 * self.slope;
+            let ses = self.ses_level;
+            self.w_naive * naive + self.w_drift * drift + self.w_ses * ses
+        })))
+    }
+}
+
+impl FitSeries for AutoEnsembleForecaster {
+    type Fitted = FittedAutoEnsembleForecaster;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedAutoEnsembleForecaster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let n = y.len();
+        let last = y.as_slice().last().copied().unwrap_or(0.0);
+        if n < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("AutoEnsembleForecaster needs n≥2")
+                    .build(),
+            );
+            return ctx.finish(FittedAutoEnsembleForecaster {
+                last,
+                slope: 0.0,
+                ses_level: last,
+                w_naive: 1.0,
+                w_drift: 0.0,
+                w_ses: 0.0,
+            });
+        }
+        let slope = (y[n - 1] - y[0]) / (n as f64 - 1.0);
+        let mut sse_naive = 0.0_f64;
+        let mut sse_drift = 0.0_f64;
+        for t in 1..n {
+            let e_n = y[t] - y[t - 1];
+            let e_d = y[t] - (y[t - 1] + slope);
+            sse_naive += e_n * e_n;
+            sse_drift += e_d * e_d;
+        }
+        let (sse_ses, ses_level) =
+            match SimpleExpSmoothing::new(None).fit_series(y, &session.child("ses")) {
+                Ok(q) => {
+                    let sse: f64 = q.value.resid.as_slice().iter().map(|e| e * e).sum();
+                    (sse, q.value.level)
+                }
+                Err(e) => {
+                    if !matches!(
+                        e.primary.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::RankZero
+                            | IssueCode::R2IsOne
+                            | IssueCode::MeaninglessFit
+                    ) {
+                        ctx.push(e.primary);
+                    }
+                    (f64::INFINITY, last)
+                }
+            };
+        let nrm = (n - 1) as f64;
+        let scores = [-sse_naive / nrm, -sse_drift / nrm, -sse_ses / nrm];
+        let mx = scores
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .fold(f64::NEG_INFINITY, f64::max);
+        let mut w = [0.0_f64; 3];
+        let mut z = 0.0_f64;
+        if mx.is_finite() {
+            for i in 0..3 {
+                w[i] = if scores[i].is_finite() {
+                    (scores[i] - mx).exp()
+                } else {
+                    0.0
+                };
+                z += w[i];
+            }
+        }
+        if z <= 0.0 {
+            w = [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0];
+            z = 1.0;
+        }
+        ctx.finish(FittedAutoEnsembleForecaster {
+            last,
+            slope,
+            ses_level,
+            w_naive: w[0] / z,
+            w_drift: w[1] / z,
+            w_ses: w[2] / z,
+        })
+    }
+}
+
 /// Seasonal-naive forecaster (repeat the last period).
 #[derive(Clone, Debug)]
 pub struct SeasonalNaive {
@@ -5735,6 +5862,190 @@ impl FittedArdl {
     }
 }
 
+/// Unrestricted error-correction model (statsmodels `UECM`).
+///
+/// \(\Delta y_t\) on \([1, y_{t-1}, x_{t-1}, \Delta y_{t-1}, \Delta x_t]\).
+/// Lag counts are not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct Uecm;
+
+/// Fitted unrestricted ECM.
+#[derive(Clone, Debug)]
+pub struct FittedUecm {
+    /// Intercept of \(\Delta y_t\).
+    pub intercept: f64,
+    /// Coefficient on the lagged level \(y_{t-1}\).
+    pub alpha: f64,
+    /// Coefficients on lagged exogenous levels.
+    pub gamma: Vector,
+    /// Coefficient on \(\Delta y_{t-1}\).
+    pub phi: f64,
+    /// Coefficients on contemporaneous \(\Delta x_t\).
+    pub theta: Vector,
+    /// Last observed \(y\).
+    pub last_y: f64,
+    /// Last observed exogenous row.
+    pub last_x: Vector,
+    /// Last observed \(\Delta y\).
+    pub last_dy: f64,
+}
+
+impl Uecm {
+    /// Default UECM.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit \(\Delta y\) on lagged levels and first differences.
+    pub fn fit(
+        &mut self,
+        y: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUecm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if y.len() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message("UECM y length ≠ X rows")
+                    .build(),
+            );
+        }
+        let n = y.len().min(x.nrows());
+        let k = x.ncols();
+        if n < 4 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!("UECM n={n} is too short for one difference lag"))
+                    .build(),
+            );
+            return ctx.finish(FittedUecm {
+                intercept: 0.0,
+                alpha: 0.0,
+                gamma: Vector::zeros(k),
+                phi: 0.0,
+                theta: Vector::zeros(k),
+                last_y: y.as_slice().last().copied().unwrap_or(0.0),
+                last_x: if n > 0 && k > 0 {
+                    x.row(n - 1)
+                } else {
+                    Vector::zeros(k)
+                },
+                last_dy: if n >= 2 { y[n - 1] - y[n - 2] } else { 0.0 },
+            });
+        }
+        let n_eff = n - 2;
+        let cols = 3 + 2 * k;
+        let design = Matrix::from_fn(n_eff, cols, |i, j| {
+            let t = i + 2;
+            if j == 0 {
+                1.0
+            } else if j == 1 {
+                y[t - 1]
+            } else if j < 2 + k {
+                x.get(t - 1, j - 2)
+            } else if j == 2 + k {
+                y[t - 1] - y[t - 2]
+            } else {
+                let c = j - (3 + k);
+                x.get(t, c) - x.get(t - 1, c)
+            }
+        });
+        let yy = Vector::from_iter((2..n).map(|t| y[t] - y[t - 1]));
+        let beta = statistical_ols(&mut ctx, &design, &yy).unwrap_or_else(|| {
+            let mut b = Vector::zeros(cols);
+            b[0] = yy.mean();
+            b
+        });
+        ctx.finish(FittedUecm {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            alpha: if beta.len() > 1 { beta[1] } else { 0.0 },
+            gamma: Vector::from_iter((0..k).map(|c| {
+                let idx = 2 + c;
+                if idx < beta.len() {
+                    beta[idx]
+                } else {
+                    0.0
+                }
+            })),
+            phi: {
+                let idx = 2 + k;
+                if idx < beta.len() {
+                    beta[idx]
+                } else {
+                    0.0
+                }
+            },
+            theta: Vector::from_iter((0..k).map(|c| {
+                let idx = 3 + k + c;
+                if idx < beta.len() {
+                    beta[idx]
+                } else {
+                    0.0
+                }
+            })),
+            last_y: y[n - 1],
+            last_x: x.row(n - 1),
+            last_dy: y[n - 1] - y[n - 2],
+        })
+    }
+}
+
+impl FittedUecm {
+    /// Iterate the ECM with a future exogenous path (`h × k`).
+    pub fn forecast(&self, x_future: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        let k = self.gamma.len().max(self.theta.len());
+        if x_future.ncols() != k {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "UECM forecast X has {} columns; fitted k={k}",
+                        x_future.ncols()
+                    ))
+                    .build(),
+            );
+        }
+        let h = x_future.nrows();
+        let mut last_y = self.last_y;
+        let mut last_x = self.last_x.as_slice().to_vec();
+        if last_x.len() < k {
+            last_x.resize(k, 0.0);
+        }
+        let mut last_dy = self.last_dy;
+        let mut out = Vector::zeros(h);
+        for t in 0..h {
+            let mut dyhat = self.intercept + self.alpha * last_y + self.phi * last_dy;
+            for c in 0..k {
+                let xt = if c < x_future.ncols() {
+                    x_future.get(t, c)
+                } else {
+                    0.0
+                };
+                let xlag = last_x.get(c).copied().unwrap_or(0.0);
+                let dx = xt - xlag;
+                if c < self.gamma.len() {
+                    dyhat += self.gamma[c] * xlag;
+                }
+                if c < self.theta.len() {
+                    dyhat += self.theta[c] * dx;
+                }
+                if c < last_x.len() {
+                    last_x[c] = xt;
+                }
+            }
+            last_y += dyhat;
+            last_dy = dyhat;
+            out[t] = last_y;
+        }
+        ctx.finish(out)
+    }
+}
+
 /// Fourier seasonal features (sktime `FourierFeatures`): `sin/cos(2π k t / period)`.
 ///
 /// Harmonic count is not an identification `p`.
@@ -6921,6 +7232,137 @@ pub fn reconcile_mint(
         }
     }
     ctx.finish(out)
+}
+
+fn reconcile_bottoms(yhat: &Matrix, summing: &Matrix) -> Matrix {
+    let b = summing.ncols();
+    let m = summing.nrows();
+    let h = yhat.nrows();
+    let mut bottoms = Matrix::zeros(h, b);
+    for j in 0..b {
+        let mut best_i = j.min(yhat.ncols().saturating_sub(1));
+        let mut best_score = f64::INFINITY;
+        for i in 0..m {
+            let mut s = 0.0_f64;
+            for jj in 0..b {
+                let target = if jj == j { 1.0 } else { 0.0 };
+                let e = summing.get(i, jj) - target;
+                s += e * e;
+            }
+            if s < best_score {
+                best_score = s;
+                best_i = i;
+            }
+        }
+        if best_i < yhat.ncols() {
+            for t in 0..h {
+                bottoms.set(t, j, yhat.get(t, best_i));
+            }
+        }
+    }
+    bottoms
+}
+
+fn apply_summing(bottoms: &Matrix, summing: &Matrix) -> Matrix {
+    let h = bottoms.nrows();
+    let m = summing.nrows();
+    let b = summing.ncols();
+    Matrix::from_fn(h, m, |t, i| {
+        let mut s = 0.0_f64;
+        for j in 0..b {
+            s += summing.get(i, j) * bottoms.get(t, j);
+        }
+        s
+    })
+}
+
+/// Bottom-up hierarchical reconciliation (sktime `Reconciler` `bu`).
+///
+/// Bottom nodes are the summing-matrix rows closest to the standard basis.
+/// Node / bottom counts are not identification `p`.
+pub fn reconcile_bottom_up(
+    yhat: &Matrix,
+    summing: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, yhat, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, summing, None, &ctx.policy);
+    if yhat.ncols() != summing.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "reconcile_bottom_up yhat.ncols()={} summing.nrows()={}",
+                    yhat.ncols(),
+                    summing.nrows()
+                ))
+                .build(),
+        );
+        return ctx.finish(yhat.clone());
+    }
+    if summing.nrows() == 0 || summing.ncols() == 0 {
+        return ctx.finish(yhat.clone());
+    }
+    let bottoms = reconcile_bottoms(yhat, summing);
+    ctx.finish(apply_summing(&bottoms, summing))
+}
+
+/// Top-down hierarchical reconciliation (sktime `Reconciler` `td`).
+///
+/// The most aggregated node (largest summing-matrix row sum) is distributed
+/// by that row's shares. Node counts are not identification `p`.
+pub fn reconcile_top_down(
+    yhat: &Matrix,
+    summing: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, yhat, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, summing, None, &ctx.policy);
+    if yhat.ncols() != summing.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "reconcile_top_down yhat.ncols()={} summing.nrows()={}",
+                    yhat.ncols(),
+                    summing.nrows()
+                ))
+                .build(),
+        );
+        return ctx.finish(yhat.clone());
+    }
+    let m = summing.nrows();
+    let b = summing.ncols();
+    if m == 0 || b == 0 {
+        return ctx.finish(yhat.clone());
+    }
+    let mut top = 0usize;
+    let mut top_sum = f64::NEG_INFINITY;
+    for i in 0..m {
+        let mut s = 0.0_f64;
+        for j in 0..b {
+            s += summing.get(i, j).abs();
+        }
+        if s > top_sum {
+            top_sum = s;
+            top = i;
+        }
+    }
+    let denom = if top_sum > 1e-12 { top_sum } else { 1.0 };
+    let mut bottoms = Matrix::zeros(yhat.nrows(), b);
+    for t in 0..yhat.nrows() {
+        let yt = if top < yhat.ncols() {
+            yhat.get(t, top)
+        } else {
+            0.0
+        };
+        for j in 0..b {
+            bottoms.set(t, j, yt * summing.get(top, j).abs() / denom);
+        }
+    }
+    ctx.finish(apply_summing(&bottoms, summing))
 }
 
 /// Innovations-algorithm MA coefficients and innovation variances
@@ -8400,6 +8842,17 @@ mod tests {
             .value;
         assert_eq!(stff.len(), 3);
         assert!(stff.as_slice().iter().all(|v| v.is_finite()));
+        let aef = AutoEnsembleForecaster
+            .fit_series(&y, &Session::new("aef", "fit"))
+            .expect("aef");
+        let aeff = aef
+            .value
+            .forecast(3, &Session::new("aef", "fc"))
+            .expect("aeff")
+            .value;
+        assert_eq!(aeff.len(), 3);
+        assert!(aeff.as_slice().iter().all(|v| v.is_finite()));
+        assert!(aef.value.w_naive + aef.value.w_drift + aef.value.w_ses > 0.99);
     }
 
     #[test]
@@ -8825,6 +9278,26 @@ mod tests {
             .value;
         assert_eq!(mint.shape(), (2, 3));
         assert!(mint.get(0, 0).is_finite() && mint.get(0, 2).is_finite());
+        let ue = Uecm
+            .fit(&y, &x, &Session::new("uecm", "fit"))
+            .expect("uecm");
+        let uef = ue
+            .value
+            .forecast(&xf, &Session::new("uecm", "fc"))
+            .expect("uecmf")
+            .value;
+        assert_eq!(uef.len(), 3);
+        assert!(uef.as_slice().iter().all(|v| v.is_finite()));
+        let bu = reconcile_bottom_up(&yh, &s, &Session::new("rec", "bu"))
+            .expect("bu")
+            .value;
+        assert_eq!(bu.shape(), (2, 3));
+        assert!((bu.get(0, 0) + bu.get(0, 1) - bu.get(0, 2)).abs() < 1e-8);
+        let td = reconcile_top_down(&yh, &s, &Session::new("rec", "td"))
+            .expect("td")
+            .value;
+        assert_eq!(td.shape(), (2, 3));
+        assert!(td.get(0, 0).is_finite() && td.get(0, 2).is_finite());
         let g = acovf(&y, 4, &Session::new("inn", "g"))
             .expect("acovf-inn")
             .value;
