@@ -16395,7 +16395,7 @@ pub fn arma_pacf(
         }
         a[m] = km;
         e *= 1.0 - km * km;
-        pacf[m] = km;
+        pacf[m] = -km;
         if e <= 1e-18 {
             ctx.push(
                 Issue::builder(IssueCode::JitterInjected)
