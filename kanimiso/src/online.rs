@@ -4203,6 +4203,667 @@ impl PartialFit for DenStream {
     }
 }
 
+/// Hoeffding Adaptive Tree: a VFDT plus ADWIN on 0/1 error (Bifet & Gavaldà).
+#[derive(Clone, Debug)]
+pub struct HoeffdingAdaptiveTree {
+    tree: HoeffdingTree,
+    detector: Adwin,
+    n_seen: u64,
+    updates: u64,
+    resets: u64,
+}
+
+impl Default for HoeffdingAdaptiveTree {
+    fn default() -> Self {
+        Self {
+            tree: HoeffdingTree::new(),
+            detector: Adwin::new(0.002),
+            n_seen: 0,
+            updates: 0,
+            resets: 0,
+        }
+    }
+}
+
+impl HoeffdingAdaptiveTree {
+    /// Default HAT.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for HoeffdingAdaptiveTree {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let q = self.tree.partial_fit(x, y, &session.child("tree"))?;
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            return finish_explain(ctx, q.value);
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        let mut drift = 0u64;
+        for i in 0..x.nrows().min(y.len()) {
+            let pred = self.tree.predict_one(x, i);
+            let err = if (pred - as01(y[i])).abs() > 0.5 {
+                1.0
+            } else {
+                0.0
+            };
+            match self.detector.update(err, &session.child("adwin")) {
+                Ok(d) => {
+                    if matches!(d.value, DriftDecision::Drift { .. }) {
+                        self.tree.reset();
+                        self.detector.reset();
+                        self.resets += 1;
+                        drift += 1;
+                        ctx.push(
+                            Issue::builder(IssueCode::ConceptDriftDetected)
+                                .message("HAT reset the Hoeffding tree after an ADWIN cut")
+                                .build(),
+                        );
+                    }
+                }
+                Err(_) => {
+                    self.tree.reset();
+                    self.detector.reset();
+                    self.resets += 1;
+                    drift += 1;
+                    ctx.push(
+                        Issue::builder(IssueCode::ConceptDriftDetected)
+                            .message("HAT reset after ADWIN reported drift as an error")
+                            .build(),
+                    );
+                }
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut iq = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        iq.effective_sample_size = self.n_seen as f64;
+        iq.parameter_delta_norm =
+            Some(drift as f64 + q.value.quality.parameter_delta_norm.unwrap_or(0.0));
+        iq.information_gain = Some(drift as f64 + q.value.quality.information_gain.unwrap_or(0.0));
+        iq.still_identified = self.n_seen >= 15;
+        iq.warmup = self.n_seen < 15;
+        iq.explanation = format!(
+            "HAT: VFDT update then ADWIN on 0/1 error; {drift} resets (total {})",
+            self.resets
+        );
+        if iq.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(iq.clone())
+                    .message("HAT is still warming up")
+                    .build(),
+            );
+        }
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                iq,
+                if drift > 0 {
+                    "tree reset after drift"
+                } else {
+                    "leaf stats updated; no drift"
+                },
+                "Hoeffding split test plus ADWIN on instantaneous error",
+                "pre-batch HAT",
+                "post-batch HAT",
+            ),
+        )
+    }
+}
+
+impl Predict for HoeffdingAdaptiveTree {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.tree.predict(x, session)
+    }
+}
+
+/// Streaming Random Patches: Hoeffding trees on random feature subsets.
+#[derive(Clone, Debug)]
+pub struct StreamingRandomPatches {
+    /// Number of trees.
+    pub n_estimators: usize,
+    trees: Vec<HoeffdingTree>,
+    masks: Vec<Vec<usize>>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+    rng: Rng,
+}
+
+impl Default for StreamingRandomPatches {
+    fn default() -> Self {
+        Self {
+            n_estimators: 3,
+            trees: Vec::new(),
+            masks: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+            rng: Rng::new(19),
+        }
+    }
+}
+
+impl StreamingRandomPatches {
+    /// Forest with `n_estimators` patch trees.
+    pub fn new(n_estimators: usize) -> Self {
+        Self {
+            n_estimators: n_estimators.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn ensure(&mut self, p: usize) {
+        if self.initialized {
+            return;
+        }
+        let k = ((p as f64).sqrt().ceil() as usize).clamp(1, p.max(1));
+        self.masks = (0..self.n_estimators)
+            .map(|_| {
+                let mut idx: Vec<usize> = (0..p).collect();
+                self.rng.shuffle(&mut idx);
+                idx.truncate(k);
+                if idx.is_empty() {
+                    idx.push(0);
+                }
+                idx
+            })
+            .collect();
+        self.trees = (0..self.n_estimators)
+            .map(|_| {
+                let mut t = HoeffdingTree::new();
+                t.min_samples = 15;
+                t.n_features = k;
+                t.root = HtNode::Leaf(HtLeaf::new(0, k));
+                t.initialized = true;
+                t
+            })
+            .collect();
+        self.initialized = true;
+    }
+}
+
+impl PartialFit for StreamingRandomPatches {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        inspect_online_xy(&mut ctx, x, Some(y));
+        self.ensure(x.ncols());
+        let mut n_up = 0u64;
+        for t in 0..self.trees.len() {
+            let mask = &self.masks[t];
+            let xs = Matrix::from_fn(x.nrows(), mask.len(), |i, j| {
+                let c = mask[j];
+                if c < x.ncols() {
+                    x.get(i, c)
+                } else {
+                    0.0
+                }
+            });
+            let _ = self.trees[t].partial_fit(&xs, Some(y), &session.child("patch"));
+            n_up += 1;
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(n_up as f64);
+        q.information_gain = Some(n_up as f64);
+        q.still_identified = self.n_seen >= 15;
+        q.warmup = self.n_seen < 15;
+        q.explanation = format!(
+            "SRP: {} patch trees, each on {} random features",
+            self.trees.len(),
+            self.masks.first().map(|m| m.len()).unwrap_or(0)
+        );
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("SRP is still warming up")
+                    .build(),
+            );
+        }
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("{n_up} patch-tree updates"),
+                "each Hoeffding tree sees a random feature subspace",
+                "pre-batch SRP",
+                "post-batch SRP",
+            ),
+        )
+    }
+}
+
+impl Predict for StreamingRandomPatches {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut c0 = 0usize;
+            let mut c1 = 0usize;
+            for (t, mask) in self.masks.iter().enumerate() {
+                let xs = Matrix::from_fn(1, mask.len(), |_, j| {
+                    let c = mask[j];
+                    if c < x.ncols() {
+                        x.get(i, c)
+                    } else {
+                        0.0
+                    }
+                });
+                if self.trees[t].predict_one(&xs, 0) >= 0.5 {
+                    c1 += 1;
+                } else {
+                    c0 += 1;
+                }
+            }
+            if c1 >= c0 {
+                1.0
+            } else {
+                0.0
+            }
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// Funk / biased SVD matrix factorization (river `reco.FunkMF`).
+///
+/// `X` has two columns: user id and item id (rounded). `y` is the rating.
+#[derive(Clone, Debug)]
+pub struct FunkMf {
+    /// Latent rank.
+    pub n_factors: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    /// ℓ2 on factors and biases.
+    pub l2: f64,
+    mu: f64,
+    bu: Vec<f64>,
+    bi: Vec<f64>,
+    pu: Vec<Vec<f64>>,
+    qi: Vec<Vec<f64>>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for FunkMf {
+    fn default() -> Self {
+        Self {
+            n_factors: 4,
+            learning_rate: 0.05,
+            l2: 0.01,
+            mu: 0.0,
+            bu: Vec::new(),
+            bi: Vec::new(),
+            pu: Vec::new(),
+            qi: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl FunkMf {
+    /// FunkMF with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn grow(&mut self, u: usize, i: usize) {
+        let k = self.n_factors.max(1);
+        while self.bu.len() <= u {
+            self.bu.push(0.0);
+            self.pu.push(vec![0.01; k]);
+        }
+        while self.bi.len() <= i {
+            self.bi.push(0.0);
+            self.qi.push(vec![0.01; k]);
+        }
+    }
+
+    fn pred(&self, u: usize, i: usize) -> f64 {
+        let mut s = self.mu;
+        if u < self.bu.len() {
+            s += self.bu[u];
+        }
+        if i < self.bi.len() {
+            s += self.bi[i];
+        }
+        if u < self.pu.len() && i < self.qi.len() {
+            for f in 0..self.n_factors.min(self.pu[u].len()).min(self.qi[i].len()) {
+                s += self.pu[u][f] * self.qi[i][f];
+            }
+        }
+        s
+    }
+}
+
+impl PartialFit for FunkMf {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("FunkMF needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let lr = self.learning_rate.max(1e-6);
+        let l2 = self.l2.max(0.0);
+        let mut sse = 0.0;
+        let mut dsum = 0.0;
+        for r in 0..x.nrows().min(y.len()) {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.grow(u, i);
+            let pred = self.pred(u, i);
+            let e = y[r] - pred;
+            sse += e * e;
+            self.mu += lr * e;
+            self.bu[u] += lr * (e - l2 * self.bu[u]);
+            self.bi[i] += lr * (e - l2 * self.bi[i]);
+            for f in 0..self.n_factors {
+                let pu = self.pu[u][f];
+                let qi = self.qi[i][f];
+                self.pu[u][f] += lr * (e * qi - l2 * pu);
+                self.qi[i][f] += lr * (e * pu - l2 * qi);
+                dsum += (self.pu[u][f] - pu).abs() + (self.qi[i][f] - qi).abs();
+            }
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        let warmup = self.n_seen < 8;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.loss_before = Some(sse);
+        q.loss_after = Some(sse);
+        q.information_gain = Some(dsum);
+        q.still_identified = !warmup;
+        q.warmup = warmup;
+        q.explanation = format!(
+            "FunkMF SGD: ||ΔP,Q||₁={dsum:.4e}, SSE={sse:.4e}, users={}, items={}",
+            self.bu.len(),
+            self.bi.len()
+        );
+        if warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("FunkMF is still warming up")
+                    .build(),
+            );
+        }
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("SGD on {} ratings", x.nrows()),
+                "biased SVD step: μ, b_u, b_i, p_u, q_i",
+                "pre-batch factors",
+                format!("μ={:.4e} SSE={sse:.4e}", self.mu),
+            ),
+        )
+    }
+}
+
+impl Predict for FunkMf {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("FunkMF predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::filled(x.nrows(), self.mu));
+        }
+        let y = Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.pred(u, i)
+        }));
+        ctx.finish(y)
+    }
+}
+
+/// CluStream-style q-micro-cluster summary (Aggarwal et al.).
+#[derive(Clone, Debug)]
+pub struct CluStream {
+    /// Maximum number of micro-clusters.
+    pub q: usize,
+    /// Assign-to-nearest radius; beyond this a new micro is spawned.
+    pub radius: f64,
+    micros: Vec<(f64, Vector, f64)>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for CluStream {
+    fn default() -> Self {
+        Self {
+            q: 8,
+            radius: 2.0,
+            micros: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl CluStream {
+    /// CluStream with at most `q` micro-clusters.
+    pub fn new(q: usize) -> Self {
+        Self {
+            q: q.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current micro-cluster count.
+    pub fn n_micro(&self) -> usize {
+        self.micros.len()
+    }
+
+    fn center(n: f64, ls: &Vector) -> Vector {
+        if n <= 0.0 {
+            Vector::zeros(ls.len())
+        } else {
+            ls.scale(1.0 / n)
+        }
+    }
+
+    fn merge_nearest(&mut self) {
+        if self.micros.len() < 2 {
+            return;
+        }
+        let mut best = (0usize, 1usize, f64::INFINITY);
+        for a in 0..self.micros.len() {
+            let ca = Self::center(self.micros[a].0, &self.micros[a].1);
+            for b in (a + 1)..self.micros.len() {
+                let cb = Self::center(self.micros[b].0, &self.micros[b].1);
+                let d = ca.sub(&cb).norm();
+                if d < best.2 {
+                    best = (a, b, d);
+                }
+            }
+        }
+        let (a, b, _) = best;
+        let (n2, ls2, ss2) = self.micros.remove(b.max(a));
+        let (n1, ls1, ss1) = self.micros.remove(a.min(b));
+        self.micros.push((n1 + n2, ls1.add(&ls2), ss1 + ss2));
+    }
+}
+
+impl PartialFit for CluStream {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !(self.radius.is_finite() && self.radius > 0.0) {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("CluStream radius={} is not positive", self.radius))
+                    .build(),
+            );
+        }
+        let mut spawned = 0u64;
+        let mut merged = 0u64;
+        for i in 0..x.nrows() {
+            let row = x.row(i);
+            let mut best = None;
+            let mut bd = f64::INFINITY;
+            for (t, (n, ls, _)) in self.micros.iter().enumerate() {
+                let c = Self::center(*n, ls);
+                if c.len() != row.len() {
+                    continue;
+                }
+                let d = c.sub(&row).norm();
+                if d < bd {
+                    bd = d;
+                    best = Some(t);
+                }
+            }
+            if let Some(t) = best {
+                if bd <= self.radius {
+                    let (n, ls, ss) = &mut self.micros[t];
+                    *n += 1.0;
+                    for j in 0..ls.len().min(row.len()) {
+                        ls[j] += row[j];
+                    }
+                    *ss += row.dot(&row);
+                    continue;
+                }
+            }
+            self.micros.push((1.0, row.clone(), row.dot(&row)));
+            spawned += 1;
+            while self.micros.len() > self.q.max(1) {
+                self.merge_nearest();
+                merged += 1;
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let warmup = self.n_seen < 4;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((spawned + merged) as f64);
+        q.information_gain = Some((spawned + merged) as f64);
+        q.still_identified = !warmup;
+        q.warmup = warmup;
+        q.explanation = format!(
+            "CluStream: spawned {spawned}, merged {merged}, micros={}",
+            self.micros.len()
+        );
+        if warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("CluStream has seen fewer than 4 points")
+                    .build(),
+            );
+        }
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("{spawned} new micros, {merged} merges"),
+                "assign to nearest CF if within radius, else spawn and merge the closest pair",
+                "pre-batch micros",
+                format!("micros={}", self.micros.len()),
+            ),
+        )
+    }
+}
+
+impl Predict for CluStream {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.micros.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::filled(x.nrows(), -1.0));
+        }
+        let y = Vector::from_iter((0..x.nrows()).map(|i| {
+            let row = x.row(i);
+            let mut best = 0usize;
+            let mut bd = f64::INFINITY;
+            for (t, (n, ls, _)) in self.micros.iter().enumerate() {
+                let c = Self::center(*n, ls);
+                if c.len() != row.len() {
+                    continue;
+                }
+                let d = c.sub(&row).norm();
+                if d < bd {
+                    bd = d;
+                    best = t;
+                }
+            }
+            best as f64
+        }));
+        ctx.finish(y)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4337,6 +4998,25 @@ mod tests {
         DenStream::new(3.0)
             .partial_fit(&x, None, &session)
             .expect("denstream");
+        HoeffdingAdaptiveTree::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("hat");
+        StreamingRandomPatches::new(2)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("srp");
+        let xui = Matrix::from_fn(12, 2, |i, j| {
+            if j == 0 {
+                (i % 4) as f64
+            } else {
+                (i % 3) as f64
+            }
+        });
+        FunkMf::new(2)
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("funk");
+        CluStream::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("clustream");
 
         let n_expl = session
             .ledger()
@@ -4345,7 +5025,7 @@ mod tests {
             .filter(|e| e.kind == EventKind::IncrementalExplanation)
             .count();
         assert!(
-            n_expl >= 25,
+            n_expl >= 29,
             "expected an IncrementalExplanation per partial_fit, got {n_expl}"
         );
     }

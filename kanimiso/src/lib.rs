@@ -48,6 +48,7 @@ pub mod naive_bayes;
 pub mod neighbors;
 pub mod neural;
 pub mod online;
+pub mod panel;
 pub mod preprocess;
 pub mod reducer;
 pub mod rng;

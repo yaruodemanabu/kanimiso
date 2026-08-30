@@ -2003,6 +2003,249 @@ impl FitUnsupervised for VariationalGaussianHmm {
     }
 }
 
+/// Mean-field variational categorical HMM (Dirichlet on \(\pi\), \(A\), emissions).
+#[derive(Clone, Debug)]
+pub struct VariationalCategoricalHmm {
+    /// Number of hidden states.
+    pub n_states: usize,
+    /// Variational EM iteration cap.
+    pub max_iter: usize,
+}
+
+impl Default for VariationalCategoricalHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl VariationalCategoricalHmm {
+    /// `n_states` variational categoricals.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedVariationalCatHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted variational categorical HMM.
+#[derive(Clone, Debug)]
+pub struct FittedVariationalCatHmm {
+    /// Viterbi path under posterior-mean parameters.
+    pub labels: Vector,
+    /// Number of states.
+    pub n_states: usize,
+    /// Posterior-mean start.
+    pub start: Vector,
+    /// Posterior-mean transitions.
+    pub trans: Matrix,
+    /// Posterior-mean emissions (`n_states` × `n_symbols`).
+    pub emission: Matrix,
+    /// ELBO proxy (expected complete log-likelihood).
+    pub elbo: f64,
+}
+
+impl FittedVariationalCatHmm {
+    fn as_multi(&self) -> FittedMultinomialHmm {
+        FittedMultinomialHmm {
+            labels: self.labels.clone(),
+            n_states: self.n_states,
+            start: self.start.clone(),
+            trans: self.trans.clone(),
+            emission: self.emission.clone(),
+            loglik: self.elbo,
+        }
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.as_multi().decode(x, session)
+    }
+}
+
+impl Predict for FittedVariationalCatHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for VariationalCategoricalHmm {
+    type Fitted = FittedVariationalCatHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedVariationalCatHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let k = self.n_states.max(1);
+        let (codes, n_sym) = codes_from_x(x);
+        let t_len = codes.len();
+        if t_len == 0 {
+            return ctx.finish(FittedVariationalCatHmm {
+                labels: empty_labels(0),
+                n_states: k,
+                start: init_start(k),
+                trans: init_trans(k),
+                emission: Matrix::zeros(k, 0),
+                elbo: f64::NAN,
+            });
+        }
+        if n_sym <= 1 {
+            ctx.push(emission_degenerate_issue(
+                "variational categorical HMM: only one emission symbol",
+            ));
+        }
+        let mut alpha0 = Vector::filled(k, 1.0);
+        let mut alpha_a = Matrix::from_fn(k, k, |_, _| 1.0);
+        let mut alpha_e = Matrix::from_fn(k, n_sym, |_, _| 1.0);
+        let mut elbo = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let mut start = Vector::zeros(k);
+            let sum_a0: f64 = (0..k).map(|j| alpha0[j]).sum();
+            for j in 0..k {
+                start[j] = (digamma(alpha0[j]) - digamma(sum_a0)).exp();
+            }
+            renormalize_vec(&mut start, TRANS_FLOOR);
+            let mut trans = Matrix::zeros(k, k);
+            for i in 0..k {
+                let row_s: f64 = (0..k).map(|j| alpha_a.get(i, j)).sum();
+                for j in 0..k {
+                    trans.set(i, j, (digamma(alpha_a.get(i, j)) - digamma(row_s)).exp());
+                }
+            }
+            renormalize_rows(&mut trans, TRANS_FLOOR);
+            let mut emit = Matrix::zeros(k, n_sym);
+            for i in 0..k {
+                let row_s: f64 = (0..n_sym).map(|j| alpha_e.get(i, j)).sum();
+                for j in 0..n_sym {
+                    emit.set(i, j, (digamma(alpha_e.get(i, j)) - digamma(row_s)).exp());
+                }
+            }
+            renormalize_rows(&mut emit, TRANS_FLOOR);
+            let log_emit: Vec<Vec<f64>> = (0..t_len)
+                .map(|t| {
+                    let o = codes[t].min(n_sym.saturating_sub(1));
+                    (0..k)
+                        .map(|j| {
+                            let p = emit.get(j, o).max(TRANS_FLOOR);
+                            p.ln()
+                        })
+                        .collect()
+                })
+                .collect();
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &log_emit) else {
+                break;
+            };
+            elbo = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -elbo, None);
+            for j in 0..k {
+                alpha0[j] = 1.0 + fb.gamma[0][j];
+            }
+            if t_len > 1 {
+                for i in 0..k {
+                    for j in 0..k {
+                        let mut num = 1.0;
+                        for t in 0..t_len - 1 {
+                            num += fb.xi[t][i][j];
+                        }
+                        alpha_a.set(i, j, num);
+                    }
+                }
+            }
+            for j in 0..k {
+                for s in 0..n_sym {
+                    let mut num = 1.0;
+                    for t in 0..t_len {
+                        if codes[t] == s {
+                            num += fb.gamma[t][j];
+                        }
+                    }
+                    alpha_e.set(j, s, num);
+                }
+            }
+            if it + 1 == self.max_iter {
+                ctx.push(
+                    Issue::builder(IssueCode::MaxIterReached)
+                        .message("variational categorical HMM hit max_iter")
+                        .build(),
+                );
+            }
+        }
+        let occup: Vec<f64> = (0..k)
+            .map(|j| {
+                last_gamma
+                    .iter()
+                    .map(|g| g.get(j).copied().unwrap_or(0.0))
+                    .sum()
+            })
+            .collect();
+        let mut start = Vector::zeros(k);
+        let sum_a0: f64 = (0..k).map(|j| alpha0[j]).sum();
+        for j in 0..k {
+            start[j] = alpha0[j] / sum_a0.max(1e-12);
+        }
+        let mut trans = Matrix::zeros(k, k);
+        for i in 0..k {
+            let row_s: f64 = (0..k).map(|j| alpha_a.get(i, j)).sum();
+            for j in 0..k {
+                trans.set(i, j, alpha_a.get(i, j) / row_s.max(1e-12));
+            }
+        }
+        let mut emission = Matrix::zeros(k, n_sym);
+        for i in 0..k {
+            let row_s: f64 = (0..n_sym).map(|j| alpha_e.get(i, j)).sum();
+            for j in 0..n_sym {
+                emission.set(i, j, alpha_e.get(i, j) / row_s.max(1e-12));
+            }
+        }
+        diagnose_chain(&mut ctx, &start, &trans, &occup);
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .message("variational categorical HMM uses Dirichlet(1) floors")
+                .compromise(NumericalCompromise::new(
+                    "unconstrained variational Bayes",
+                    "Dirichlet(1) on π, A, and emission rows",
+                    "zero cells make the sequence probability vanish",
+                    "posterior means are shrunk; do not treat them as MLEs",
+                ))
+                .build(),
+        );
+        let log_emit: Vec<Vec<f64>> = (0..t_len)
+            .map(|t| {
+                let o = codes[t].min(n_sym.saturating_sub(1));
+                (0..k)
+                    .map(|j| emission.get(j, o).max(TRANS_FLOOR).ln())
+                    .collect()
+            })
+            .collect();
+        let (labels, _) = viterbi_path(&start, &trans, &log_emit);
+        ctx.finish(FittedVariationalCatHmm {
+            labels,
+            n_states: k,
+            start,
+            trans,
+            emission,
+            elbo,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2108,5 +2351,19 @@ mod tests {
             (m1 - 3.0).abs() < 1.2,
             "expected a mean near +3, got {m0} and {m1}"
         );
+    }
+
+    #[test]
+    fn variational_categorical_two_symbols() {
+        let x = Matrix::from_fn(40, 1, |i, _| if i < 20 { 0.0 } else { 1.0 });
+        let q = VariationalCategoricalHmm {
+            n_states: 2,
+            max_iter: 25,
+        }
+        .fit(&x, &Session::new("vchmm", "fit"))
+        .expect("vchmm");
+        assert_eq!(q.value.emission.nrows(), 2);
+        assert_eq!(q.value.labels.len(), 40);
+        assert!(q.value.elbo.is_finite() || q.value.elbo.is_infinite());
     }
 }

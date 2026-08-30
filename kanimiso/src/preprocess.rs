@@ -7,6 +7,7 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
+use crate::linalg::ridge_solve;
 use crate::special::norm_cdf;
 use crate::traits::{Fit, FitSeries, FitUnsupervised, PartialFit, Transform};
 use crate::validate::{inspect_classes, inspect_xy};
@@ -868,6 +869,127 @@ impl Transform for KnnImputer {
             }
         }
         ctx.finish(out)
+    }
+}
+
+/// MICE-style iterative imputation (sklearn `IterativeImputer`).
+///
+/// Missing entries are initialized at the column mean of the observed cells.
+/// Each column is then ridge-regressed on the others using the current fill,
+/// and the missing cells are overwritten. An all-missing column is
+/// [`IssueCode::ImputationUndefined`].
+#[derive(Clone, Debug)]
+pub struct IterativeImputer {
+    /// Ridge penalty on each conditional model.
+    pub alpha: f64,
+    /// Outer cycles over columns.
+    pub max_iter: usize,
+    train: Matrix,
+    fitted: bool,
+}
+
+impl Default for IterativeImputer {
+    fn default() -> Self {
+        Self {
+            alpha: 1e-3,
+            max_iter: 8,
+            train: Matrix::zeros(0, 0),
+            fitted: false,
+        }
+    }
+}
+
+impl IterativeImputer {
+    /// Default iterative imputer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl FitUnsupervised for IterativeImputer {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_columns_for_preprocess(&mut ctx, x);
+        let (n, p) = x.shape();
+        let mut filled = x.clone();
+        let mut means = vec![0.0f64; p];
+        for j in 0..p {
+            let col: Vec<f64> = (0..n).map(|i| x.get(i, j)).collect();
+            let st = slice_stats(&col);
+            means[j] = if st.count > 0 { st.mean } else { 0.0 };
+            for i in 0..n {
+                if !filled.get(i, j).is_finite() {
+                    filled.set(i, j, means[j]);
+                }
+            }
+        }
+        for it in 0..self.max_iter.max(1) {
+            let mut moved: f64 = 0.0;
+            for j in 0..p {
+                let miss: Vec<usize> = (0..n).filter(|&i| !x.get(i, j).is_finite()).collect();
+                if miss.is_empty() {
+                    continue;
+                }
+                let others: Vec<usize> = (0..p).filter(|&k| k != j).collect();
+                if others.is_empty() {
+                    continue;
+                }
+                let z = Matrix::from_fn(n, others.len(), |i, t| filled.get(i, others[t]));
+                let yj = filled.column(j);
+                let mut scratch = signlred::Report::new("iterimp", "ridge");
+                let Some(beta) =
+                    ridge_solve(&mut scratch, &z, &yj, self.alpha.max(0.0), &ctx.policy)
+                else {
+                    continue;
+                };
+                for issue in scratch.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::R2IsOne
+                            | IssueCode::InvalidWeight
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                for &i in &miss {
+                    let mut pred = 0.0;
+                    for t in 0..others.len() {
+                        pred += z.get(i, t) * beta[t];
+                    }
+                    let old = filled.get(i, j);
+                    moved = moved.max((pred - old).abs());
+                    filled.set(i, j, pred);
+                }
+            }
+            ctx.session.step(it as u64, moved, None);
+            if moved < 1e-8 {
+                ctx.session.converged("iterative imputer", it as u64);
+                break;
+            }
+        }
+        self.train = filled;
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for IterativeImputer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(x.clone());
+        }
+        // Re-run a single conditional pass using the fitted complete matrix as the donor.
+        let mut tmp = self.clone();
+        match tmp.fit_unsupervised(x, &session.child("refit")) {
+            Ok(q) => ctx.finish(q.value.train),
+            Err(_) => ctx.finish(self.train.clone()),
+        }
     }
 }
 
@@ -2131,5 +2253,17 @@ mod tests {
         ft.fit_unsupervised(&x, &Session::new("ft", "fit")).unwrap();
         let w = ft.transform(&x, &Session::new("ft", "t")).unwrap().value;
         assert!((w.get(0, 0) - 0.0).abs() < 1e-12);
+        let mut xm = Matrix::from_fn(20, 2, |i, j| if j == 0 { i as f64 } else { 2.0 * i as f64 });
+        xm.set(3, 1, f64::NAN);
+        xm.set(7, 0, f64::NAN);
+        let mut ii = IterativeImputer::new();
+        ii.fit_unsupervised(&xm, &Session::new("ii", "fit"))
+            .unwrap();
+        let filled = ii.transform(&xm, &Session::new("ii", "t")).unwrap().value;
+        for i in 0..filled.nrows() {
+            for j in 0..filled.ncols() {
+                assert!(filled.get(i, j).is_finite(), "imputed ({i},{j})");
+            }
+        }
     }
 }

@@ -10,11 +10,14 @@ use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linalg::{least_squares, symmetric_eigen};
 use crate::rng::Rng;
-use crate::traits::{Fit, FitUnsupervised, Predict};
+use crate::traits::{Fit, FitUnsupervised, PartialFit, Predict};
 use crate::validate::{inspect_classes, inspect_identification, inspect_xy};
 use faer::Mat;
-use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result};
+use ojizou_san::{IncrementalExplain, Session};
+use signlred::{
+    IncrementalQuality, Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result,
+    Severity,
+};
 
 /// Kernel used by dual SVM / SVR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1115,6 +1118,356 @@ impl FitUnsupervised for OneClassSvm {
     }
 }
 
+fn chang_lin_c(nu: f64, n: usize) -> f64 {
+    let nu = if nu.is_finite() && nu > 0.0 && nu <= 1.0 {
+        nu
+    } else {
+        0.5
+    };
+    1.0 / (nu * n.max(1) as f64)
+}
+
+/// ν-SVC via the Chang–Lin equivalence \(C = 1/(\nu n)\) to C-SVM.
+///
+/// This is **not** the ν-dual (`0 ≤ α_i ≤ 1/n`, `∑α_i ≥ ν`) solved from
+/// scratch. The box constraint is rewritten and the C-SVM SMO path is reused.
+#[derive(Clone, Debug)]
+pub struct NuSvc {
+    /// Fraction of support vectors / margin errors, \(\nu \in (0, 1]\).
+    pub nu: f64,
+    /// RBF \(\gamma\).
+    pub gamma: f64,
+    /// Kernel.
+    pub kernel: Kernel,
+    /// SMO passes.
+    pub max_iter: usize,
+}
+
+impl Default for NuSvc {
+    fn default() -> Self {
+        Self {
+            nu: 0.5,
+            gamma: 1.0,
+            kernel: Kernel::Rbf,
+            max_iter: 400,
+        }
+    }
+}
+
+impl NuSvc {
+    /// Default ν-SVC (`ν = 0.5`).
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for NuSvc {
+    type Fitted = FittedSvc;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSvc>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        if !self.nu.is_finite() || self.nu <= 0.0 || self.nu > 1.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("NuSvc ν={} is not in (0, 1]; using 0.5", self.nu))
+                    .build(),
+            );
+        }
+        let c = chang_lin_c(self.nu, x.nrows());
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .message(format!(
+                    "NuSvc uses Chang–Lin C={c:.6e} = 1/(ν n) instead of the ν-dual"
+                ))
+                .compromise(NumericalCompromise::new(
+                    "ν-SVM dual (0 ≤ α_i ≤ 1/n, ∑α_i ≥ ν)",
+                    format!("C-SVM SMO with C=1/(ν n) = {c:.6e}"),
+                    "the ν box and sum constraints are not enforced directly",
+                    "support-vector fraction is only approximately ν; do not treat this as Schölkopf ν-SVM",
+                ))
+                .build(),
+        );
+        let mut inner = Svc {
+            c,
+            gamma: self.gamma,
+            kernel: self.kernel,
+            max_iter: self.max_iter,
+        };
+        let q = inner.fit(x, y, &session.child("c-svm"))?;
+        for issue in q.report.issues() {
+            if issue.code == IssueCode::InvalidWeight {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(q.value)
+    }
+}
+
+/// ν-SVR via Chang–Lin \(C = 1/(\nu n)\).
+#[derive(Clone, Debug)]
+pub struct NuSvr {
+    /// \(\nu \in (0, 1]\).
+    pub nu: f64,
+    /// RBF \(\gamma\).
+    pub gamma: f64,
+    /// Kernel.
+    pub kernel: Kernel,
+    /// Dual passes.
+    pub max_iter: usize,
+    /// Tube width.
+    pub epsilon: f64,
+}
+
+impl Default for NuSvr {
+    fn default() -> Self {
+        Self {
+            nu: 0.5,
+            gamma: 1.0,
+            kernel: Kernel::Linear,
+            max_iter: 400,
+            epsilon: 0.1,
+        }
+    }
+}
+
+impl NuSvr {
+    /// Default ν-SVR.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for NuSvr {
+    type Fitted = FittedSvr;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSvr>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        if !self.nu.is_finite() || self.nu <= 0.0 || self.nu > 1.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("NuSvr ν={} is not in (0, 1]; using 0.5", self.nu))
+                    .build(),
+            );
+        }
+        let c = chang_lin_c(self.nu, x.nrows());
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .message(format!("NuSvr uses Chang–Lin C={c:.6e}"))
+                .compromise(NumericalCompromise::new(
+                    "ν-SVR dual",
+                    format!("ε-SVR SMO with C=1/(ν n) = {c:.6e}"),
+                    "the ν tube-fraction constraint is not the fitted dual",
+                    "ε is still an input; ν only rescales C",
+                ))
+                .build(),
+        );
+        let mut inner = Svr {
+            c,
+            gamma: self.gamma,
+            kernel: self.kernel,
+            max_iter: self.max_iter,
+            epsilon: self.epsilon,
+        };
+        let q = inner.fit(x, y, &session.child("c-svr"))?;
+        for issue in q.report.issues() {
+            if issue.code == IssueCode::InvalidWeight {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(q.value)
+    }
+}
+
+/// Linear SGD one-class SVM (sklearn `SGDOneClassSVM`).
+///
+/// Primal step: if \(w^\top x < \rho\) the point is a margin violator and \(w\)
+/// is pulled toward \(x\); \(\rho\) tracks a ν-quantile of the scores.
+#[derive(Clone, Debug)]
+pub struct SgdOneClassSvm {
+    /// Learning rate.
+    pub learning_rate: f64,
+    /// ν-style quantile of the score used as the offset.
+    pub nu: f64,
+    w: Vector,
+    rho: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for SgdOneClassSvm {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            nu: 0.2,
+            w: Vector::zeros(0),
+            rho: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl SgdOneClassSvm {
+    /// Default one-class SGD.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fitted weight vector.
+    pub fn coef(&self) -> &Vector {
+        &self.w
+    }
+}
+
+impl FitUnsupervised for SgdOneClassSvm {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let q = self.partial_fit(x, None, session)?;
+        let _ = q;
+        let ctx = FitCtx::with_session(session.child("fit"));
+        ctx.finish(self.clone())
+    }
+}
+
+impl PartialFit for SgdOneClassSvm {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_ocsvm(
+                ctx,
+                IncrementalExplain::from_quality(
+                    IncrementalQuality::new(self.updates, x.nrows(), self.n_seen),
+                    "nothing",
+                    "no features",
+                    "invalid",
+                    "invalid",
+                ),
+            );
+        }
+        if !self.initialized {
+            self.w = Vector::zeros(x.ncols());
+            self.initialized = true;
+        } else if x.ncols() != self.w.len() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_ocsvm(
+                ctx,
+                IncrementalExplain::from_quality(
+                    IncrementalQuality::new(self.updates, x.nrows(), self.n_seen),
+                    "nothing",
+                    "feature space changed",
+                    "invalid",
+                    "invalid",
+                ),
+            );
+        }
+        if !self.nu.is_finite() || self.nu <= 0.0 || self.nu > 1.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("SGDOneClassSVM ν={} not in (0, 1]", self.nu))
+                    .build(),
+            );
+        }
+        let lr = self.learning_rate.max(1e-8);
+        let nu = self.nu.clamp(1e-3, 1.0);
+        let mut viol = 0usize;
+        let w_before = self.w.clone();
+        for i in 0..x.nrows() {
+            let mut score = 0.0;
+            for j in 0..x.ncols() {
+                score += self.w[j] * x.get(i, j);
+            }
+            if score < self.rho {
+                viol += 1;
+                for j in 0..x.ncols() {
+                    self.w[j] += lr * x.get(i, j);
+                }
+            }
+            for j in 0..self.w.len() {
+                self.w[j] *= 1.0 - lr * nu;
+            }
+            self.rho += lr * (nu - if score < self.rho { 1.0 } else { 0.0 });
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let delta = self.w.sub(&w_before);
+        let warmup = self.n_seen < 8;
+        if warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message("SGDOneClassSVM has seen fewer than 8 rows")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta.norm());
+        q.information_gain = Some(viol as f64);
+        q.still_identified = !warmup;
+        q.warmup = warmup;
+        q.explanation = format!(
+            "SGDOneClassSVM: {viol} margin violators, ||Δw||={:.4e}, ρ={:.4e}",
+            delta.norm(),
+            self.rho
+        );
+        finish_ocsvm(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("{viol} one-class hinge updates"),
+                "Pegasos-style one-class step: pull w toward violators and decay by ν",
+                format!("ρ={:.4e}", self.rho - lr * nu),
+                format!("ρ={:.4e}", self.rho),
+            ),
+        )
+    }
+}
+
+fn finish_ocsvm(ctx: FitCtx, expl: IncrementalExplain) -> Result<Qualified<IncrementalExplain>> {
+    ctx.session.record_incremental(expl.clone());
+    ctx.finish(expl)
+}
+
+impl Predict for SgdOneClassSvm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::filled(x.nrows(), -1.0));
+        }
+        if x.ncols() != self.w.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("SGDOneClassSVM predict column count ≠ w")
+                    .build(),
+            );
+        }
+        let y = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = 0.0;
+            for j in 0..x.ncols().min(self.w.len()) {
+                s += self.w[j] * x.get(i, j);
+            }
+            if s >= self.rho {
+                1.0
+            } else {
+                -1.0
+            }
+        }));
+        ctx.finish(y)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1212,5 +1565,40 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(y[0], -1.0);
+    }
+
+    #[test]
+    fn nu_svc_svr_and_sgd_ocsvm() {
+        let (x, y) = sep_line(8);
+        let q = NuSvc {
+            nu: 0.4,
+            kernel: Kernel::Linear,
+            max_iter: 200,
+            ..NuSvc::default()
+        }
+        .fit(&x, &y, &Session::new("nusvc", "fit"))
+        .expect("nusvc");
+        let pred = q
+            .value
+            .predict(&x, &Session::new("nusvc", "p"))
+            .unwrap()
+            .value;
+        assert!(accuracy(&pred, &y) >= 0.8, "acc={}", accuracy(&pred, &y));
+        let xr = Matrix::from_fn(16, 1, |i, _| i as f64);
+        let yr = Vector::from_iter((0..16).map(|i| 2.0 * i as f64));
+        let svr = NuSvr::new()
+            .fit(&xr, &yr, &Session::new("nusvr", "fit"))
+            .expect("nusvr");
+        let hat = svr
+            .value
+            .predict(&xr, &Session::new("nusvr", "p"))
+            .unwrap()
+            .value;
+        assert!(hat.as_slice().iter().all(|v| v.is_finite()));
+        let mut oc = SgdOneClassSvm::new();
+        oc.partial_fit(&x, None, &Session::new("ocsgd", "pf"))
+            .expect("oc");
+        let z = oc.predict(&x, &Session::new("ocsgd", "p")).unwrap().value;
+        assert_eq!(z.len(), x.nrows());
     }
 }

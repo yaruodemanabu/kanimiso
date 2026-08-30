@@ -8,6 +8,7 @@ use crate::cluster::Linkage;
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linalg::{least_squares, ridge_solve};
+use crate::model_selection::{take_rows, take_vec, KFold};
 use crate::rng::Rng;
 use crate::special::{chi2_pvalue, f_pvalue};
 use crate::traits::{Fit, FitUnsupervised, Transform};
@@ -294,6 +295,335 @@ impl Fit for Rfe {
 }
 
 impl Transform for Rfe {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(x.clone());
+        }
+        ctx.finish(select_columns(x, &self.support))
+    }
+}
+
+/// Keep the top `percentile` of features by f-regression score.
+#[derive(Clone, Debug)]
+pub struct SelectPercentile {
+    /// Percentile in `(0, 100]`.
+    pub percentile: f64,
+    scores: Vector,
+    support: Vec<bool>,
+    fitted: bool,
+}
+
+impl Default for SelectPercentile {
+    fn default() -> Self {
+        Self {
+            percentile: 50.0,
+            scores: Vector::zeros(0),
+            support: Vec::new(),
+            fitted: false,
+        }
+    }
+}
+
+impl SelectPercentile {
+    /// Keep the top `percentile` percent of columns.
+    pub fn new(percentile: f64) -> Self {
+        Self {
+            percentile,
+            ..Self::default()
+        }
+    }
+
+    /// `corr²` scores.
+    pub fn scores(&self) -> &Vector {
+        &self.scores
+    }
+
+    /// Mask of kept columns.
+    pub fn support(&self) -> &[bool] {
+        &self.support
+    }
+}
+
+impl Fit for SelectPercentile {
+    type Fitted = Self;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if !self.percentile.is_finite() || self.percentile <= 0.0 || self.percentile > 100.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "SelectPercentile percentile={} not in (0, 100]; using 50",
+                        self.percentile
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::TargetLeakageSuspected)
+                .severity(Severity::Advisory)
+                .message("SelectPercentile scored every feature against the full y")
+                .build(),
+        );
+        let (n, p) = x.shape();
+        self.scores = Vector::zeros(p);
+        let yst = slice_stats(y.as_slice());
+        for j in 0..p {
+            let col: Vec<f64> = (0..n).map(|i| x.get(i, j)).collect();
+            let xst = slice_stats(&col);
+            self.scores[j] = pearson_sq(&col, xst, y.as_slice(), yst);
+        }
+        let pct = self.percentile.clamp(1e-6, 100.0);
+        let k = ((p as f64) * pct / 100.0).ceil() as usize;
+        let k = k.clamp(1, p.max(1));
+        let mut order: Vec<usize> = (0..p).collect();
+        order.sort_by(|a, b| {
+            self.scores[*b]
+                .partial_cmp(&self.scores[*a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        self.support = vec![false; p];
+        for &j in order.iter().take(k) {
+            if self.scores[j].is_finite() {
+                self.support[j] = true;
+            }
+        }
+        if self.support.iter().all(|s| !*s) && p > 0 {
+            self.support[order[0]] = true;
+        }
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for SelectPercentile {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(x.clone());
+        }
+        ctx.finish(select_columns(x, &self.support))
+    }
+}
+
+fn ols_mse(x: &Matrix, y: &Vector, policy: &signlred::Policy) -> f64 {
+    let mut scratch = signlred::Report::new("sfs", "ols");
+    match least_squares(&mut scratch, x, y, policy) {
+        Some(beta) => {
+            let r = y.sub(&x.matvec(&beta));
+            r.dot(&r) / y.len().max(1) as f64
+        }
+        None => f64::INFINITY,
+    }
+}
+
+/// Recursive feature elimination with K-fold OLS MSE to pick the subset size.
+#[derive(Clone, Debug)]
+pub struct RfeCv {
+    /// Number of CV folds.
+    pub n_splits: usize,
+    support: Vec<bool>,
+    n_features: usize,
+    fitted: bool,
+}
+
+impl Default for RfeCv {
+    fn default() -> Self {
+        Self {
+            n_splits: 3,
+            support: Vec::new(),
+            n_features: 1,
+            fitted: false,
+        }
+    }
+}
+
+impl RfeCv {
+    /// RFECV with `n_splits` folds.
+    pub fn new(n_splits: usize) -> Self {
+        Self {
+            n_splits: n_splits.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Mask of kept columns.
+    pub fn support(&self) -> &[bool] {
+        &self.support
+    }
+
+    /// Chosen number of features.
+    pub fn n_features(&self) -> usize {
+        self.n_features
+    }
+}
+
+impl Fit for RfeCv {
+    type Fitted = Self;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        ctx.push(
+            Issue::builder(IssueCode::TargetLeakageSuspected)
+                .severity(Severity::Advisory)
+                .message("RFECV still ranks features with full-data OLS between CV scores")
+                .build(),
+        );
+        let p = x.ncols();
+        if p == 0 {
+            self.support.clear();
+            self.fitted = true;
+            return ctx.finish(self.clone());
+        }
+        let kf = KFold::new(self.n_splits.max(2));
+        let folds = match kf.split(x.nrows(), &session.child("kfold")) {
+            Ok(q) => q.value,
+            Err(_) => Vec::new(),
+        };
+        let mut best_k = 1usize;
+        let mut best_mse = f64::INFINITY;
+        for k in 1..=p {
+            let mut mses = Vec::new();
+            for fold in &folds {
+                let xtr = take_rows(x, &fold.train);
+                let ytr = take_vec(y, &fold.train);
+                let xte = take_rows(x, &fold.test);
+                let yte = take_vec(y, &fold.test);
+                let mut rfe = Rfe::new(k);
+                let Ok(q) = rfe.fit(&xtr, &ytr, &session.child("rfe")) else {
+                    continue;
+                };
+                let ztr = select_columns(&xte, q.value.support());
+                if ztr.ncols() == 0 {
+                    continue;
+                }
+                let mut scratch = signlred::Report::new("rfecv", "ols");
+                let Some(beta) = least_squares(
+                    &mut scratch,
+                    &select_columns(&xtr, q.value.support()),
+                    &ytr,
+                    &ctx.policy,
+                ) else {
+                    continue;
+                };
+                let pred = ztr.matvec(&beta);
+                let mut sse = 0.0;
+                for i in 0..yte.len() {
+                    let e = yte[i] - pred[i];
+                    sse += e * e;
+                }
+                mses.push(sse / yte.len().max(1) as f64);
+            }
+            if mses.is_empty() {
+                continue;
+            }
+            let m = mses.iter().sum::<f64>() / mses.len() as f64;
+            if m < best_mse {
+                best_mse = m;
+                best_k = k;
+            }
+        }
+        let mut final_rfe = Rfe::new(best_k);
+        let q = final_rfe.fit(x, y, &session.child("rfe-final"))?;
+        self.support = q.value.support().to_vec();
+        self.n_features = self.support.iter().filter(|s| **s).count().max(1);
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for RfeCv {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(x.clone());
+        }
+        ctx.finish(select_columns(x, &self.support))
+    }
+}
+
+/// Forward sequential selection by in-sample OLS MSE (sklearn `SequentialFeatureSelector`).
+#[derive(Clone, Debug)]
+pub struct SequentialFeatureSelector {
+    /// Features to keep.
+    pub n_features_to_select: usize,
+    support: Vec<bool>,
+    fitted: bool,
+}
+
+impl Default for SequentialFeatureSelector {
+    fn default() -> Self {
+        Self {
+            n_features_to_select: 1,
+            support: Vec::new(),
+            fitted: false,
+        }
+    }
+}
+
+impl SequentialFeatureSelector {
+    /// Keep `n` features.
+    pub fn new(n: usize) -> Self {
+        Self {
+            n_features_to_select: n.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Mask of kept columns.
+    pub fn support(&self) -> &[bool] {
+        &self.support
+    }
+}
+
+impl Fit for SequentialFeatureSelector {
+    type Fitted = Self;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        ctx.push(
+            Issue::builder(IssueCode::TargetLeakageSuspected)
+                .severity(Severity::Advisory)
+                .message("SequentialFeatureSelector scored subsets on the full y")
+                .build(),
+        );
+        let p = x.ncols();
+        let keep = self.n_features_to_select.min(p.max(1));
+        let mut chosen: Vec<usize> = Vec::new();
+        let mut remaining: Vec<usize> = (0..p).collect();
+        while chosen.len() < keep && !remaining.is_empty() {
+            let mut best_j = 0usize;
+            let mut best_mse = f64::INFINITY;
+            for (t, &j) in remaining.iter().enumerate() {
+                let mut cols = chosen.clone();
+                cols.push(j);
+                let sub = take_columns(x, &cols);
+                let mse = ols_mse(&sub, y, &ctx.policy);
+                if mse < best_mse {
+                    best_mse = mse;
+                    best_j = t;
+                }
+            }
+            chosen.push(remaining.remove(best_j));
+        }
+        self.support = vec![false; p];
+        for j in chosen {
+            self.support[j] = true;
+        }
+        if self.support.iter().all(|s| !*s) && p > 0 {
+            self.support[0] = true;
+        }
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for SequentialFeatureSelector {
     fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         if !self.fitted {
@@ -1490,5 +1820,14 @@ mod tests {
         let c = catch22(&yts, &Session::new("c22", "fit")).unwrap().value;
         assert_eq!(c.len(), 12);
         assert!(c.as_slice().iter().all(|v| v.is_finite()));
+        let mut sp = SelectPercentile::new(40.0);
+        sp.fit(&x, &y, &Session::new("sp", "fit")).unwrap();
+        assert!(sp.support()[0]);
+        let mut sfs = SequentialFeatureSelector::new(1);
+        sfs.fit(&x, &y, &Session::new("sfs", "fit")).unwrap();
+        assert!(sfs.support()[0]);
+        let mut rfecv = RfeCv::new(3);
+        rfecv.fit(&x, &y, &Session::new("rfecv", "fit")).unwrap();
+        assert!(rfecv.support().iter().any(|s| *s));
     }
 }

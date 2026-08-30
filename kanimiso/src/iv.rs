@@ -192,6 +192,253 @@ fn empty_2sls(x: &Matrix) -> FittedTwoSls {
     }
 }
 
+fn stage1_xhat(ctx: &mut FitCtx, x: &Matrix, zdes: &Matrix, fit_intercept: bool) -> (Matrix, f64) {
+    let mut xhat = Matrix::zeros(x.nrows(), x.ncols());
+    let mut min_f = f64::INFINITY;
+    for j in 0..x.ncols() {
+        let xj = x.column(j);
+        let mut scratch = signlred::Report::new("3sls", "stage1");
+        let g_opt = least_squares(&mut scratch, zdes, &xj, &ctx.policy);
+        for issue in scratch.issues() {
+            if issue.code == IssueCode::ResidualTooLarge {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let Some(g) = g_opt else {
+            continue;
+        };
+        let fit = zdes.matvec(&g);
+        for i in 0..x.nrows() {
+            xhat.set(i, j, fit[i]);
+        }
+        let mut sse = 0.0;
+        let mut sst = 0.0;
+        let m = xj.mean();
+        for i in 0..xj.len() {
+            let e = xj[i] - fit[i];
+            sse += e * e;
+            let d = xj[i] - m;
+            sst += d * d;
+        }
+        let k = zdes.ncols().saturating_sub(1).max(1) as f64;
+        let df = (x.nrows() as f64 - zdes.ncols() as f64).max(1.0);
+        let f = if sse > 0.0 {
+            ((sst - sse) / k) / (sse / df)
+        } else {
+            f64::INFINITY
+        };
+        min_f = min_f.min(f);
+    }
+    let design = if fit_intercept {
+        xhat.with_intercept()
+    } else {
+        xhat
+    };
+    (design, min_f)
+}
+
+/// Three-stage least squares for a two-equation system (Zellner–Theil).
+///
+/// Each equation is 2SLS-projected, the residual covariance \(\Sigma\) is
+/// formed, and the stacked system is GLS-solved with \(\Sigma^{-1}\).
+#[derive(Clone, Debug, Default)]
+pub struct ThreeSls {
+    /// Intercept in both stages.
+    pub fit_intercept: bool,
+}
+
+impl ThreeSls {
+    /// Default 3SLS.
+    pub fn new() -> Self {
+        Self {
+            fit_intercept: true,
+        }
+    }
+
+    /// Fit `(y1, x1)` and `(y2, x2)` with instruments `z1`, `z2`.
+    pub fn fit(
+        &mut self,
+        y1: &Vector,
+        x1: &Matrix,
+        z1: &Matrix,
+        y2: &Vector,
+        x2: &Matrix,
+        z2: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedThreeSls>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x1, Some(y1), &ctx.policy);
+        inspect_xy(&mut ctx.report, x2, Some(y2), &ctx.policy);
+        inspect_xy(&mut ctx.report, z1, None, &ctx.policy);
+        inspect_xy(&mut ctx.report, z2, None, &ctx.policy);
+        let n = y1.len().min(y2.len()).min(x1.nrows()).min(x2.nrows());
+        if n == 0 {
+            return ctx.finish(FittedThreeSls {
+                eq1: empty_2sls(x1),
+                eq2: empty_2sls(x2),
+                sigma: Matrix::zeros(2, 2),
+            });
+        }
+        let z1d = if self.fit_intercept {
+            z1.with_intercept()
+        } else {
+            z1.clone()
+        };
+        let z2d = if self.fit_intercept {
+            z2.with_intercept()
+        } else {
+            z2.clone()
+        };
+        let (xh1, f1) = stage1_xhat(&mut ctx, x1, &z1d, self.fit_intercept);
+        let (xh2, f2) = stage1_xhat(&mut ctx, x2, &z2d, self.fit_intercept);
+        let min_f = f1.min(f2);
+        if min_f < 10.0 {
+            ctx.push(
+                Issue::builder(IssueCode::CausalClaimUnidentified)
+                    .message(format!(
+                        "3SLS weak instruments: min first-stage F={min_f:.4e}"
+                    ))
+                    .meaninglessness(Meaninglessness::new(
+                        "3SLS coefficients",
+                        "a weak first stage makes the GLS step concentrated-asymptotically biased",
+                        signlred::InterpretiveValue::Misleading,
+                        "report the first-stage F; do not treat 3SLS as identified",
+                    ))
+                    .metric("min_first_stage_F", min_f)
+                    .build(),
+            );
+        }
+        let mut scratch = signlred::Report::new("3sls", "eq");
+        let b1 = least_squares(&mut scratch, &xh1, y1, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(xh1.ncols()));
+        let b2 = least_squares(&mut scratch, &xh2, y2, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(xh2.ncols()));
+        let e1 = y1.sub(&xh1.matvec(&b1));
+        let e2 = y2.sub(&xh2.matvec(&b2));
+        let nf = n as f64;
+        let s11 = e1.dot(&e1) / nf;
+        let s22 = e2.dot(&e2) / nf;
+        let s12 = e1.dot(&e2) / nf;
+        let det = s11 * s22 - s12 * s12;
+        let (w11, w12, w22) = if det.abs() <= 1e-14 {
+            ctx.push(
+                Issue::builder(IssueCode::JitterInjected)
+                    .message("3SLS residual Σ is singular; a 1e-8 jitter was added")
+                    .compromise(NumericalCompromise::new(
+                        "Σ^{-1} GLS",
+                        "Σ + 1e-8 I",
+                        "the two equation residuals are linearly dependent",
+                        "the GLS step is close to equation-by-equation 2SLS",
+                    ))
+                    .build(),
+            );
+            let d = (s11 + 1e-8) * (s22 + 1e-8) - s12 * s12;
+            ((s22 + 1e-8) / d, -s12 / d, (s11 + 1e-8) / d)
+        } else {
+            (s22 / det, -s12 / det, s11 / det)
+        };
+        let p1 = xh1.ncols();
+        let p2 = xh2.ncols();
+        let p = p1 + p2;
+        let mut gram = Mat::<f64>::zeros(p, p);
+        let mut rhs = Vector::zeros(p);
+        for a in 0..p1 {
+            for b in 0..p1 {
+                let mut s = 0.0;
+                for i in 0..n {
+                    s += xh1.get(i, a) * xh1.get(i, b);
+                }
+                gram[(a, b)] += w11 * s;
+            }
+            for b in 0..p2 {
+                let mut s = 0.0;
+                for i in 0..n {
+                    s += xh1.get(i, a) * xh2.get(i, b);
+                }
+                gram[(a, p1 + b)] += w12 * s;
+                gram[(p1 + b, a)] += w12 * s;
+            }
+            let mut s = 0.0;
+            for i in 0..n {
+                s += xh1.get(i, a) * (w11 * y1[i] + w12 * y2[i]);
+            }
+            rhs[a] = s;
+        }
+        for a in 0..p2 {
+            for b in 0..p2 {
+                let mut s = 0.0;
+                for i in 0..n {
+                    s += xh2.get(i, a) * xh2.get(i, b);
+                }
+                gram[(p1 + a, p1 + b)] += w22 * s;
+            }
+            let mut s = 0.0;
+            for i in 0..n {
+                s += xh2.get(i, a) * (w12 * y1[i] + w22 * y2[i]);
+            }
+            rhs[p1 + a] = s;
+        }
+        let mut scratch2 = signlred::Report::new("3sls", "gls");
+        let beta = chol_solve(&mut scratch2, &gram, &rhs, &ctx.policy).unwrap_or_else(|| {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("3SLS GLS Cholesky failed")
+                    .build(),
+            );
+            Vector::zeros(p)
+        });
+        for issue in scratch2.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let (i1, c1) = if self.fit_intercept && p1 > 0 {
+            (beta[0], Vector::from_iter((1..p1).map(|j| beta[j])))
+        } else {
+            (0.0, Vector::from_iter((0..p1).map(|j| beta[j])))
+        };
+        let (i2, c2) = if self.fit_intercept && p2 > 0 {
+            (beta[p1], Vector::from_iter((p1 + 1..p).map(|j| beta[j])))
+        } else {
+            (0.0, Vector::from_iter((p1..p).map(|j| beta[j])))
+        };
+        let mut sigma = Matrix::zeros(2, 2);
+        sigma.set(0, 0, s11);
+        sigma.set(0, 1, s12);
+        sigma.set(1, 0, s12);
+        sigma.set(1, 1, s22);
+        ctx.finish(FittedThreeSls {
+            eq1: FittedTwoSls {
+                coef: c1,
+                intercept: i1,
+                first_stage_f: f1,
+            },
+            eq2: FittedTwoSls {
+                coef: c2,
+                intercept: i2,
+                first_stage_f: f2,
+            },
+            sigma,
+        })
+    }
+}
+
+/// Fitted two-equation 3SLS.
+#[derive(Clone, Debug)]
+pub struct FittedThreeSls {
+    /// First equation.
+    pub eq1: FittedTwoSls,
+    /// Second equation.
+    pub eq2: FittedTwoSls,
+    /// Residual covariance \(\Sigma\).
+    pub sigma: Matrix,
+}
+
 /// Newey–West HAC covariance of OLS scores \(X_i e_i\).
 ///
 /// Returns a \(p \times p\) matrix. The OLS Hessian inverse is **not** applied;
@@ -511,5 +758,25 @@ mod tests {
         assert!(q.value.get(0, 0) >= 0.0);
         let q3 = hc3(&x, &e, &Session::new("hc", "3")).expect("hc3");
         assert_eq!(q3.value.shape(), (2, 2));
+    }
+
+    #[test]
+    fn threesls_recovers_when_z_is_x() {
+        let x = Matrix::from_fn(24, 1, |i, _| i as f64);
+        let y1 = Vector::from_iter((0..24).map(|i| 1.0 + 2.0 * i as f64));
+        let y2 = Vector::from_iter((0..24).map(|i| 0.5 + 1.5 * i as f64));
+        let q = ThreeSls::new()
+            .fit(&y1, &x, &x, &y2, &x, &x, &Session::new("3sls", "fit"))
+            .expect("3sls");
+        assert!(
+            (q.value.eq1.coef[0] - 2.0).abs() < 0.05,
+            "b1={}",
+            q.value.eq1.coef[0]
+        );
+        assert!(
+            (q.value.eq2.coef[0] - 1.5).abs() < 0.05,
+            "b2={}",
+            q.value.eq2.coef[0]
+        );
     }
 }

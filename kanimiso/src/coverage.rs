@@ -1449,6 +1449,137 @@ const INVENTORY: &[Algorithm] = &[
         "sktime.forecasting.compose.EnsembleForecaster",
         "forecast",
     ),
+    a("svm.NuSvc", "sklearn.svm.NuSVC", "estimator"),
+    a("svm.NuSvr", "sklearn.svm.NuSVR", "estimator"),
+    a(
+        "svm.SgdOneClassSvm",
+        "sklearn.linear_model.SGDOneClassSVM",
+        "estimator",
+    ),
+    a(
+        "text.TfidfVectorizer",
+        "sklearn.feature_extraction.text.TfidfVectorizer",
+        "transformer",
+    ),
+    a(
+        "text.HashingVectorizer",
+        "sklearn.feature_extraction.text.HashingVectorizer",
+        "transformer",
+    ),
+    a(
+        "feature.SelectPercentile",
+        "sklearn.feature_selection.SelectPercentile",
+        "transformer",
+    ),
+    a(
+        "feature.RfeCv",
+        "sklearn.feature_selection.RFECV",
+        "transformer",
+    ),
+    a(
+        "feature.SequentialFeatureSelector",
+        "sklearn.feature_selection.SequentialFeatureSelector",
+        "transformer",
+    ),
+    a(
+        "linear_model.LassoLars",
+        "sklearn.linear_model.LassoLars",
+        "estimator",
+    ),
+    a(
+        "linear_model.MultiTaskElasticNet",
+        "sklearn.linear_model.MultiTaskElasticNet",
+        "estimator",
+    ),
+    a(
+        "preprocess.IterativeImputer",
+        "sklearn.impute.IterativeImputer",
+        "transformer",
+    ),
+    a("cluster.Hdbscan", "sklearn.cluster.HDBSCAN", "estimator"),
+    a(
+        "iv.ThreeSls",
+        "statsmodels.sandbox.regression.gmm.IV2SLS",
+        "estimator",
+    ),
+    a(
+        "panel.PanelFe",
+        "linearmodels.panel.model.PanelOLS",
+        "estimator",
+    ),
+    a(
+        "panel.BetweenOls",
+        "linearmodels.panel.model.BetweenOLS",
+        "estimator",
+    ),
+    a(
+        "panel.FirstDifferenceOls",
+        "linearmodels.panel.model.FirstDifferenceOLS",
+        "estimator",
+    ),
+    a(
+        "stats.ramsey_reset",
+        "statsmodels.stats.diagnostic.linear_reset",
+        "stats",
+    ),
+    a(
+        "stats.harvey_collier",
+        "statsmodels.stats.diagnostic.linear_harvey_collier",
+        "stats",
+    ),
+    a(
+        "stats.arch_lm",
+        "statsmodels.stats.diagnostic.het_arch",
+        "stats",
+    ),
+    a(
+        "glm.ZeroInflatedNegativeBinomial",
+        "statsmodels.discrete.count_model.ZeroInflatedNegativeBinomialP",
+        "estimator",
+    ),
+    a(
+        "tsa.Sarimax",
+        "statsmodels.tsa.statespace.sarimax.SARIMAX",
+        "forecast",
+    ),
+    a(
+        "tsa.ForecastingPipeline",
+        "sktime.forecasting.compose.ForecastingPipeline",
+        "forecast",
+    ),
+    a("tsa.Tbats", "sktime.forecasting.tbats.TBATS", "forecast"),
+    a(
+        "tsa.TransformedTargetForecaster",
+        "sktime.forecasting.compose.TransformedTargetForecaster",
+        "forecast",
+    ),
+    a(
+        "tslearn.BossEnsemble",
+        "sktime.classification.dictionary_based.BOSSEnsemble",
+        "timeseries",
+    ),
+    a(
+        "tslearn.Weasel",
+        "sktime.classification.dictionary_based.WEASEL",
+        "timeseries",
+    ),
+    a(
+        "hmm.VariationalCategoricalHmm",
+        "hmmlearn.vhmm.VariationalCategoricalHMM",
+        "hmm",
+    ),
+    a(
+        "online.HoeffdingAdaptiveTree",
+        "river.tree.HoeffdingAdaptiveTree",
+        "online",
+    ),
+    a(
+        "online.StreamingRandomPatches",
+        "river.ensemble.SRPClassifier",
+        "online",
+    ),
+    a("online.FunkMf", "river.reco.FunkMF", "online"),
+    a("online.CluStream", "river.cluster.CluStream", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -1489,6 +1620,11 @@ mod tests {
             "glm.ZeroInflatedPoisson",
             "hmm.VariationalGaussianHmm",
             "online.Snarimax",
+            "svm.NuSvc",
+            "panel.PanelFe",
+            "tsa.Sarimax",
+            "hmm.VariationalCategoricalHmm",
+            "online.FunkMf",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

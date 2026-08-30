@@ -1964,6 +1964,253 @@ pub fn goldfeld_quandt(
     })
 }
 
+/// Ramsey RESET: augment OLS with \(\hat y^2,\hat y^3\) and F-test the extra powers.
+pub fn ramsey_reset(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let n = x.nrows().min(y.len());
+    if n < 8 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(signlred::Severity::Warning)
+                .message("Ramsey RESET needs n≥8")
+                .build(),
+        );
+    }
+    let design = x.with_intercept();
+    let mut scratch = Report::new("reset", "ols");
+    let Some(beta) = crate::linalg::least_squares(&mut scratch, &design, y, &ctx.policy) else {
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: n as f64,
+        });
+    };
+    let yhat = design.matvec(&beta);
+    if yhat.std() <= ctx.policy.near_zero_variance {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .severity(signlred::Severity::Warning)
+                .message("RESET ŷ is constant; powers are unidentified")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 2.0,
+            nobs: n as f64,
+        });
+    }
+    let p0 = design.ncols();
+    let aug = Matrix::from_fn(n, p0 + 2, |i, j| {
+        if j < p0 {
+            design.get(i, j)
+        } else if j == p0 {
+            yhat[i] * yhat[i]
+        } else {
+            yhat[i] * yhat[i] * yhat[i]
+        }
+    });
+    let mut scratch2 = Report::new("reset", "aug");
+    let Some(b2) = crate::linalg::least_squares(&mut scratch2, &aug, y, &ctx.policy) else {
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 2.0,
+            nobs: n as f64,
+        });
+    };
+    let r0 = y.sub(&yhat);
+    let r1 = y.sub(&aug.matvec(&b2));
+    let ssr0 = r0.dot(&r0);
+    let ssr1 = r1.dot(&r1);
+    let q = 2.0;
+    let df = (n as f64 - (p0 + 2) as f64).max(1.0);
+    let stat = if ssr1 > 0.0 {
+        ((ssr0 - ssr1) / q) / (ssr1 / df)
+    } else {
+        f64::INFINITY
+    };
+    let pvalue = if stat.is_finite() {
+        f_pvalue(stat.max(0.0), q, df)
+    } else {
+        f64::NAN
+    };
+    if pvalue.is_finite() && pvalue < 0.05 {
+        ctx.push(
+            Issue::builder(IssueCode::InconsistentSystem)
+                .message(format!(
+                    "Ramsey RESET p={pvalue:.4} rejects the linear specification"
+                ))
+                .metric("f", stat)
+                .build(),
+        );
+    }
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df,
+        nobs: n as f64,
+    })
+}
+
+/// Harvey–Collier: t-test that the mean of OLS recursive residuals is zero.
+pub fn harvey_collier(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let n = x.nrows().min(y.len());
+    let design = x.with_intercept();
+    let p = design.ncols();
+    if n <= p + 3 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(signlred::Severity::Warning)
+                .message("Harvey–Collier needs n > p+3 recursive residuals")
+                .build(),
+        );
+    }
+    let mut w = Vec::new();
+    for t in p.max(2)..n {
+        let xs = Matrix::from_fn(t, p, |i, j| design.get(i, j));
+        let ys = Vector::from_iter((0..t).map(|i| y[i]));
+        let mut scratch = Report::new("hc", "rec");
+        let Some(beta) = crate::linalg::least_squares(&mut scratch, &xs, &ys, &ctx.policy) else {
+            continue;
+        };
+        let xt = Vector::from_iter((0..p).map(|j| design.get(t, j)));
+        let pred = xt.dot(&beta);
+        // Leverage of the new row against the previous Gram.
+        let mut gram = xs.gram();
+        for i in 0..p {
+            gram[(i, i)] += 1e-10;
+        }
+        let mut scratch2 = Report::new("hc", "lev");
+        let h = crate::linalg::chol_solve(&mut scratch2, &gram, &xt, &ctx.policy)
+            .map(|g| xt.dot(&g))
+            .unwrap_or(0.0);
+        let den = (1.0 + h.max(0.0)).sqrt();
+        if den > 0.0 {
+            w.push((y[t] - pred) / den);
+        }
+    }
+    if w.len() < 3 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(signlred::Severity::Warning)
+                .message("Harvey–Collier produced fewer than 3 recursive residuals")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: w.len() as f64 - 1.0,
+            nobs: n as f64,
+        });
+    }
+    let m = w.iter().sum::<f64>() / w.len() as f64;
+    let mut ss = 0.0;
+    for &v in &w {
+        ss += (v - m) * (v - m);
+    }
+    let sd = (ss / (w.len() - 1) as f64).sqrt();
+    let df = (w.len() - 1) as f64;
+    let stat = if sd > 0.0 {
+        m / (sd / (w.len() as f64).sqrt())
+    } else {
+        f64::NAN
+    };
+    let pvalue = if stat.is_finite() {
+        student_t_pvalue(stat, df)
+    } else {
+        f64::NAN
+    };
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df,
+        nobs: n as f64,
+    })
+}
+
+/// Engle ARCH-LM: \(e_t^2\) on lags of itself; \(n R^2 \sim \chi^2_q\).
+pub fn arch_lm(
+    resid: &Vector,
+    lags: usize,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = scan_finite(resid.as_slice()).to_issue("arch_lm.e") {
+        ctx.push(issue);
+    }
+    let e2: Vec<f64> = resid.as_slice().iter().map(|e| e * e).collect();
+    let n = e2.len();
+    let q = lags.max(1);
+    if n <= q + 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(signlred::Severity::Warning)
+                .message(format!("ARCH-LM n={n} is tight for lags={q}"))
+                .build(),
+        );
+    }
+    let m = n.saturating_sub(q);
+    if m == 0 {
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: q as f64,
+            nobs: n as f64,
+        });
+    }
+    let x = Matrix::from_fn(m, q + 1, |i, j| if j == 0 { 1.0 } else { e2[q + i - j] });
+    let y = Vector::from_iter((0..m).map(|i| e2[q + i]));
+    let mut scratch = Report::new("archlm", "ols");
+    let Some(beta) = crate::linalg::least_squares(&mut scratch, &x, &y, &ctx.policy) else {
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: q as f64,
+            nobs: n as f64,
+        });
+    };
+    let fitted = x.matvec(&beta);
+    let mut sse = 0.0;
+    let mut sst = 0.0;
+    let ym = y.mean();
+    for i in 0..m {
+        let e = y[i] - fitted[i];
+        sse += e * e;
+        let d = y[i] - ym;
+        sst += d * d;
+    }
+    let r2 = if sst > 0.0 { 1.0 - sse / sst } else { 0.0 };
+    let stat = m as f64 * r2.max(0.0);
+    let pvalue = chi2_pvalue(stat, q as f64);
+    if pvalue.is_finite() && pvalue < 0.05 {
+        ctx.push(
+            Issue::builder(IssueCode::Heteroscedasticity)
+                .message(format!("ARCH-LM p={pvalue:.4}"))
+                .metric("lm", stat)
+                .build(),
+        );
+    }
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: q as f64,
+        nobs: n as f64,
+    })
+}
+
 /// Breusch–Godfrey LM test for residual autocorrelation of order `lags`.
 pub fn breusch_godfrey(
     resid: &Vector,
@@ -3389,5 +3636,12 @@ mod tests {
         let pp = phillips_perron(&Vector::from_slice(&rw), Some(1), &Session::new("pp", "t"))
             .expect("pp");
         assert!(pp.report.contains(IssueCode::NonStationary) || pp.value.stat.is_finite());
+        let reset = ramsey_reset(&x, &y, &Session::new("reset", "t")).expect("reset");
+        assert!(reset.value.statistic.is_finite() || reset.value.pvalue.is_nan());
+        let hc = harvey_collier(&x, &y, &Session::new("hc", "t")).expect("hc");
+        assert!(hc.value.nobs > 0.0);
+        let e = Vector::from_iter((0..40).map(|i| 0.2 * ((i as f64).sin())));
+        let arch = arch_lm(&e, 2, &Session::new("arch", "t")).expect("arch");
+        assert!(arch.value.df > 0.0);
     }
 }

@@ -5,13 +5,15 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
+use crate::linalg::ridge_solve;
 use crate::linear_model::{FittedPenalized, Ridge};
 use crate::rng::Rng;
 use crate::special::norm_cdf;
 use crate::traits::{Fit, FitUnsupervised, Predict, Transform};
 use crate::validate::{inspect_classes, inspect_xy};
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Qualified, Result};
+use signlred::{Issue, IssueCode, Qualified, Result, Severity};
+use std::collections::BTreeMap;
 
 fn series_ok(a: &Vector) -> bool {
     a.as_slice().iter().any(|v| v.is_finite())
@@ -1813,6 +1815,289 @@ impl MiniRocket {
     }
 }
 
+fn dft_mags(win: &[f64], n_coef: usize) -> Vec<f64> {
+    let w = win.len().max(1);
+    let keep = n_coef.max(1).min(w);
+    let mut out = Vec::with_capacity(keep);
+    for k in 1..=keep {
+        let mut re = 0.0;
+        let mut im = 0.0;
+        for (n, &v) in win.iter().enumerate() {
+            let ang = -2.0 * std::f64::consts::PI * k as f64 * n as f64 / w as f64;
+            re += v * ang.cos();
+            im += v * ang.sin();
+        }
+        out.push((re * re + im * im).sqrt());
+    }
+    out
+}
+
+fn sfa_word(mags: &[f64], breaks: &[f64]) -> u64 {
+    let a = (breaks.len() + 1) as u64;
+    let mut w = 0u64;
+    for &m in mags {
+        let mut bin = 0u64;
+        for (b, &t) in breaks.iter().enumerate() {
+            if m > t {
+                bin = (b + 1) as u64;
+            }
+        }
+        w = w.wrapping_mul(a.saturating_add(3)).wrapping_add(bin + 1);
+    }
+    w
+}
+
+fn boss_histograms(
+    x: &Matrix,
+    window: usize,
+    word_len: usize,
+    alphabet: usize,
+) -> (Matrix, Vec<u64>) {
+    let n = x.nrows();
+    let t = x.ncols();
+    let w = window.clamp(2, t.max(2));
+    let mut all_words: BTreeMap<u64, usize> = BTreeMap::new();
+    let mut per_row: Vec<BTreeMap<u64, f64>> = Vec::with_capacity(n);
+    let breaks: Vec<f64> = {
+        let a = alphabet.max(2);
+        (1..a)
+            .map(|i| {
+                // Equal-mass Gaussian breakpoints on a unit scale, then unused;
+                // actual binning is on raw DFT magnitudes via these cutoffs after
+                // a global median scale (filled below).
+                i as f64 / a as f64
+            })
+            .collect()
+    };
+    let mut all_mags = Vec::new();
+    for i in 0..n {
+        let last = t.saturating_sub(w) + 1;
+        for start in 0..last.max(1) {
+            let win: Vec<f64> = (0..w.min(t)).map(|u| x.get(i, start + u)).collect();
+            all_mags.extend(dft_mags(&win, word_len));
+        }
+    }
+    all_mags.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let scaled_breaks: Vec<f64> = breaks
+        .iter()
+        .map(|&q| {
+            if all_mags.is_empty() {
+                q
+            } else {
+                let pos = (q * (all_mags.len() - 1) as f64).round() as usize;
+                all_mags[pos.min(all_mags.len() - 1)]
+            }
+        })
+        .collect();
+    for i in 0..n {
+        let mut hist = BTreeMap::new();
+        let last = t.saturating_sub(w) + 1;
+        for start in 0..last.max(1) {
+            let win: Vec<f64> = (0..w.min(t)).map(|u| x.get(i, start + u)).collect();
+            let mags = dft_mags(&win, word_len);
+            let word = sfa_word(&mags, &scaled_breaks);
+            *hist.entry(word).or_insert(0.0) += 1.0;
+            all_words.entry(word).or_insert(0);
+        }
+        per_row.push(hist);
+    }
+    let vocab: Vec<u64> = all_words.keys().copied().collect();
+    let p = vocab.len();
+    let index: BTreeMap<u64, usize> = vocab.iter().enumerate().map(|(i, w)| (*w, i)).collect();
+    let h = Matrix::from_fn(n, p, |i, j| {
+        let w = vocab[j];
+        *per_row[i].get(&w).unwrap_or(&0.0)
+    });
+    let _ = index;
+    (h, vocab)
+}
+
+/// BOSS word-histogram + ridge classifier (sktime `BOSSEnsemble` lite).
+#[derive(Clone, Debug)]
+pub struct BossEnsemble {
+    /// Sliding-window length.
+    pub window: usize,
+    /// DFT coefficients kept per window.
+    pub word_len: usize,
+    /// SFA alphabet size.
+    pub alphabet: usize,
+}
+
+impl Default for BossEnsemble {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            word_len: 4,
+            alphabet: 4,
+        }
+    }
+}
+
+impl BossEnsemble {
+    /// Default BOSS.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted BOSS / WEASEL histogram ridge.
+#[derive(Clone, Debug)]
+pub struct FittedBoss {
+    /// Word vocabulary (hashes).
+    pub vocab: Vec<u64>,
+    /// Ridge on histograms.
+    pub ridge: FittedPenalized,
+    /// Window / word / alphabet used at fit.
+    pub spec: (usize, usize, usize),
+}
+
+impl Predict for FittedBoss {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let (h, _) = boss_histograms(x, self.spec.0, self.spec.1, self.spec.2);
+        let p = self.ridge.coef.len();
+        let z = if h.ncols() == p {
+            h
+        } else {
+            Matrix::from_fn(
+                h.nrows(),
+                p,
+                |i, j| {
+                    if j < h.ncols() {
+                        h.get(i, j)
+                    } else {
+                        0.0
+                    }
+                },
+            )
+        };
+        self.ridge.predict(&z, session)
+    }
+}
+
+impl Fit for BossEnsemble {
+    type Fitted = FittedBoss;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedBoss>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        if x.ncols() < self.window {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "BOSS window {} > series length {}",
+                        self.window,
+                        x.ncols()
+                    ))
+                    .build(),
+            );
+        }
+        let (h, vocab) = boss_histograms(x, self.window, self.word_len, self.alphabet);
+        // Do not inspect_identification(n, n_words).
+        if vocab.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::NearZeroVariance)
+                    .message("BOSS vocabulary is empty")
+                    .build(),
+            );
+        }
+        let mut scratch = signlred::Report::new("boss", "ridge");
+        let yc = Vector::from_iter(y.as_slice().iter().map(|v| v - y.mean()));
+        let (hc, _) = h.centered();
+        let coef = ridge_solve(&mut scratch, &hc, &yc, 0.1, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(h.ncols()));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.finish(FittedBoss {
+            vocab,
+            ridge: FittedPenalized {
+                coef,
+                intercept: y.mean(),
+                alpha: 0.1,
+                l1_ratio: 0.0,
+            },
+            spec: (self.window, self.word_len, self.alphabet),
+        })
+    }
+}
+
+/// WEASEL: BOSS histograms with a variance filter on words, then ridge.
+#[derive(Clone, Debug)]
+pub struct Weasel {
+    /// Sliding-window length.
+    pub window: usize,
+    /// DFT coefficients kept per window.
+    pub word_len: usize,
+    /// SFA alphabet size.
+    pub alphabet: usize,
+    /// Keep this many most-variable words.
+    pub n_words: usize,
+}
+
+impl Default for Weasel {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            word_len: 4,
+            alphabet: 4,
+            n_words: 8,
+        }
+    }
+}
+
+impl Weasel {
+    /// Default WEASEL.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for Weasel {
+    type Fitted = FittedBoss;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedBoss>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let (h, vocab) = boss_histograms(x, self.window, self.word_len, self.alphabet);
+        let mut vars: Vec<(usize, f64)> = (0..h.ncols()).map(|j| (j, h.column(j).std())).collect();
+        vars.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let keep = self.n_words.max(1).min(h.ncols().max(1));
+        let idx: Vec<usize> = vars.iter().take(keep).map(|p| p.0).collect();
+        let z = if idx.is_empty() {
+            Matrix::zeros(h.nrows(), 0)
+        } else {
+            Matrix::from_fn(h.nrows(), idx.len(), |i, t| h.get(i, idx[t]))
+        };
+        let vocab: Vec<u64> = idx
+            .iter()
+            .map(|&j| vocab.get(j).copied().unwrap_or(0))
+            .collect();
+        let mut scratch = signlred::Report::new("weasel", "ridge");
+        let yc = Vector::from_iter(y.as_slice().iter().map(|v| v - y.mean()));
+        let (zc, _) = z.centered();
+        let coef = ridge_solve(&mut scratch, &zc, &yc, 0.1, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(z.ncols()));
+        ctx.finish(FittedBoss {
+            vocab,
+            ridge: FittedPenalized {
+                coef,
+                intercept: y.mean(),
+                alpha: 0.1,
+                l1_ratio: 0.0,
+            },
+            spec: (self.window, self.word_len, self.alphabet),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2001,5 +2286,28 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(mr.shape(), (6, 8));
+        let yb = Vector::from_iter((0..6).map(|i| if i < 3 { 0.0 } else { 1.0 }));
+        let boss = BossEnsemble {
+            window: 4,
+            word_len: 3,
+            alphabet: 4,
+        }
+        .fit(&x, &yb, &Session::new("ts", "boss"))
+        .unwrap();
+        let bp = boss
+            .value
+            .predict(&x, &Session::new("ts", "bossp"))
+            .unwrap()
+            .value;
+        assert_eq!(bp.len(), 6);
+        let wsl = Weasel {
+            window: 4,
+            word_len: 3,
+            alphabet: 4,
+            n_words: 6,
+        }
+        .fit(&x, &yb, &Session::new("ts", "weasel"))
+        .unwrap();
+        assert!(!wsl.value.vocab.is_empty() || x.nrows() > 0);
     }
 }

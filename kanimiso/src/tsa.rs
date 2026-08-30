@@ -631,6 +631,427 @@ impl FitSeries for EnsembleForecaster {
     }
 }
 
+/// SARIMAX: OLS on exog, then [`Arima`] on the residual (statsmodels `SARIMAX` lite).
+///
+/// The ARIMA step runs on a scratch report so a short residual series does not
+/// hide a valid exog slope behind [`IssueCode::ShortSeriesForArima`].
+#[derive(Clone, Debug)]
+pub struct Sarimax {
+    /// Non-seasonal \((p,d,q)\).
+    pub order: (usize, usize, usize),
+}
+
+impl Default for Sarimax {
+    fn default() -> Self {
+        Self { order: (1, 0, 0) }
+    }
+}
+
+impl Sarimax {
+    /// `SARIMAX(p,d,q)` without seasonal terms.
+    pub fn new(p: usize, d: usize, q: usize) -> Self {
+        Self { order: (p, d, q) }
+    }
+
+    /// Fit `y` on exog `x`.
+    pub fn fit(
+        &mut self,
+        y: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedSarimax>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.nrows() != y.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("SARIMAX exog rows ≠ n")
+                    .build(),
+            );
+        }
+        let n = y.len().min(x.nrows());
+        let design = x.with_intercept();
+        let Some(beta) = statistical_ols(&mut ctx, &design, y) else {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("SARIMAX exog OLS failed")
+                    .build(),
+            );
+            return ctx.finish(FittedSarimax {
+                coef: Vector::zeros(x.ncols()),
+                intercept: 0.0,
+                inner: empty_arima(&Arima {
+                    p: self.order.0,
+                    d: self.order.1,
+                    q: self.order.2,
+                }),
+            });
+        };
+        let fitted = design.matvec(&beta);
+        let resid = y.sub(&fitted);
+        let mut arima = Arima {
+            p: self.order.0,
+            d: self.order.1,
+            q: self.order.2,
+        };
+        let inner = match arima.fit_series(&resid, &session.child("resid-arima")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::ShortSeriesForArima
+                            | IssueCode::R2IsOne
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                q.value
+            }
+            Err(e) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .severity(Severity::Warning)
+                        .message(format!(
+                            "SARIMAX residual ARIMA failed: {}",
+                            e.primary().code
+                        ))
+                        .build(),
+                );
+                empty_arima(&arima)
+            }
+        };
+        let (intercept, coef) = (
+            beta.as_slice().first().copied().unwrap_or(0.0),
+            Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+        );
+        let _ = n;
+        ctx.finish(FittedSarimax {
+            coef,
+            intercept,
+            inner,
+        })
+    }
+}
+
+/// Fitted SARIMAX.
+#[derive(Clone, Debug)]
+pub struct FittedSarimax {
+    /// Exog slopes.
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+    /// ARIMA on OLS residuals.
+    pub inner: FittedArima,
+}
+
+impl FittedSarimax {
+    /// Forecast `h` steps using future exog `x_future` (`h × p`).
+    pub fn forecast(
+        &self,
+        h: usize,
+        x_future: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        if h == 0 {
+            return ctx.finish(Vector::zeros(0));
+        }
+        if x_future.ncols() != self.coef.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("SARIMAX forecast exog columns ≠ coef")
+                    .build(),
+            );
+        }
+        let ar = match self.inner.forecast(h, &session.child("arima")) {
+            Ok(q) => q.value,
+            Err(_) => Vector::zeros(h),
+        };
+        let y = Vector::from_iter((0..h).map(|t| {
+            let mut s = self.intercept;
+            if t < x_future.nrows() {
+                for j in 0..x_future.ncols().min(self.coef.len()) {
+                    s += x_future.get(t, j) * self.coef[j];
+                }
+            }
+            s + if t < ar.len() { ar[t] } else { 0.0 }
+        }));
+        ctx.finish(y)
+    }
+}
+
+/// Log-then-ARIMA pipeline (sktime `ForecastingPipeline` lite).
+#[derive(Clone, Debug, Default)]
+pub struct ForecastingPipeline {
+    /// Apply `log` before the inner ARIMA (requires `y > 0`).
+    pub log: bool,
+}
+
+impl ForecastingPipeline {
+    /// Log + ARIMA(1,0,1) pipeline.
+    pub fn new() -> Self {
+        Self { log: true }
+    }
+}
+
+/// Fitted forecasting pipeline.
+#[derive(Clone, Debug)]
+pub struct FittedForecastingPipeline {
+    /// Whether the log map was applied.
+    pub log: bool,
+    /// Inner ARIMA.
+    pub inner: FittedArima,
+}
+
+impl FittedForecastingPipeline {
+    /// Forecast and invert the log if it was used.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let q = self.inner.forecast(h, session)?;
+        let ctx = FitCtx::with_session(session.child("pipeline-inv"));
+        let y = if self.log {
+            Vector::from_iter(q.value.as_slice().iter().map(|v| v.exp()))
+        } else {
+            q.value
+        };
+        ctx.finish(y)
+    }
+}
+
+impl FitSeries for ForecastingPipeline {
+    type Fitted = FittedForecastingPipeline;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedForecastingPipeline>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let z = if self.log {
+            reject_nonpositive(&mut ctx, y, "ForecastingPipeline log");
+            Vector::from_iter(y.as_slice().iter().map(|v| v.max(1e-12).ln()))
+        } else {
+            y.clone()
+        };
+        let mut arima = Arima::new(1, 0, 1);
+        let inner = match arima.fit_series(&z, &session.child("inner")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if issue.code == IssueCode::ResidualTooLarge {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                q.value
+            }
+            Err(e) => {
+                for issue in e.report.issues() {
+                    ctx.push(issue.clone());
+                }
+                empty_arima(&arima)
+            }
+        };
+        ctx.finish(FittedForecastingPipeline {
+            log: self.log,
+            inner,
+        })
+    }
+}
+
+/// TBATS-lite: optional log, Fourier seasonal terms, linear trend, AR(1) errors.
+#[derive(Clone, Debug)]
+pub struct Tbats {
+    /// Seasonal period.
+    pub period: usize,
+    /// Fourier harmonics.
+    pub harmonics: usize,
+    /// Log / Box–Cox (λ=0) map.
+    pub use_log: bool,
+}
+
+impl Default for Tbats {
+    fn default() -> Self {
+        Self {
+            period: 4,
+            harmonics: 2,
+            use_log: false,
+        }
+    }
+}
+
+impl Tbats {
+    /// TBATS with the given period.
+    pub fn new(period: usize) -> Self {
+        Self {
+            period: period.max(2),
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted TBATS-lite.
+#[derive(Clone, Debug)]
+pub struct FittedTbats {
+    /// OLS coefficients on `[1, t, sin, cos, …]`.
+    pub coef: Vector,
+    /// AR(1) residual coefficient.
+    pub phi: f64,
+    /// Last residual.
+    pub last_resid: f64,
+    /// Period.
+    pub period: usize,
+    /// Harmonics.
+    pub harmonics: usize,
+    /// Log map.
+    pub use_log: bool,
+    /// Training length (for the trend clock).
+    pub n: usize,
+}
+
+impl FittedTbats {
+    fn design_row(&self, t: usize, p: usize) -> Vector {
+        let mut v = Vector::zeros(p);
+        v[0] = 1.0;
+        if p > 1 {
+            v[1] = t as f64;
+        }
+        let per = self.period.max(2) as f64;
+        let mut k = 2usize;
+        for h in 1..=self.harmonics {
+            if k < p {
+                v[k] = (2.0 * std::f64::consts::PI * h as f64 * t as f64 / per).cos();
+                k += 1;
+            }
+            if k < p {
+                v[k] = (2.0 * std::f64::consts::PI * h as f64 * t as f64 / per).sin();
+                k += 1;
+            }
+        }
+        v
+    }
+
+    /// `h`-step forecast on the original scale.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        let p = self.coef.len();
+        let mut e = self.last_resid;
+        let y = Vector::from_iter((0..h).map(|s| {
+            let t = self.n + s;
+            let row = self.design_row(t, p);
+            let mut mu = 0.0;
+            for j in 0..p {
+                mu += self.coef[j] * row[j];
+            }
+            e *= self.phi;
+            let z = mu + e;
+            if self.use_log {
+                z.exp()
+            } else {
+                z
+            }
+        }));
+        ctx.finish(y)
+    }
+}
+
+impl FitSeries for Tbats {
+    type Fitted = FittedTbats;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedTbats>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let period = self.period.max(2);
+        if y.len() < 2 * period {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSeasonalCycles)
+                    .severity(Severity::Warning)
+                    .message(format!("TBATS n={} < 2s with s={period}", y.len()))
+                    .build(),
+            );
+        }
+        let z = if self.use_log {
+            reject_nonpositive(&mut ctx, y, "TBATS log");
+            Vector::from_iter(y.as_slice().iter().map(|v| v.max(1e-12).ln()))
+        } else {
+            y.clone()
+        };
+        let h = self.harmonics.max(1);
+        let p = 2 + 2 * h;
+        // Do not inspect_identification(n, p) — harmonics are not free parameters
+        // in the same sense as a linear model on small n.
+        let n = z.len();
+        let x = Matrix::from_fn(n, p, |t, j| {
+            let row = FittedTbats {
+                coef: Vector::zeros(p),
+                phi: 0.0,
+                last_resid: 0.0,
+                period,
+                harmonics: h,
+                use_log: self.use_log,
+                n,
+            }
+            .design_row(t, p);
+            row[j]
+        });
+        let Some(coef) = statistical_ols(&mut ctx, &x, &z) else {
+            return ctx.finish(FittedTbats {
+                coef: Vector::zeros(p),
+                phi: 0.0,
+                last_resid: 0.0,
+                period,
+                harmonics: h,
+                use_log: self.use_log,
+                n,
+            });
+        };
+        let fit = x.matvec(&coef);
+        let resid = z.sub(&fit);
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for t in 1..n {
+            num += resid[t] * resid[t - 1];
+            den += resid[t - 1] * resid[t - 1];
+        }
+        let phi = if den > 0.0 {
+            (num / den).clamp(-0.99, 0.99)
+        } else {
+            0.0
+        };
+        ctx.finish(FittedTbats {
+            coef,
+            phi,
+            last_resid: resid.as_slice().last().copied().unwrap_or(0.0),
+            period,
+            harmonics: h,
+            use_log: self.use_log,
+            n,
+        })
+    }
+}
+
+/// Log-target ARIMA (sktime `TransformedTargetForecaster`).
+#[derive(Clone, Debug, Default)]
+pub struct TransformedTargetForecaster;
+
+impl TransformedTargetForecaster {
+    /// Default log-target forecaster.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl FitSeries for TransformedTargetForecaster {
+    type Fitted = FittedForecastingPipeline;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedForecastingPipeline>> {
+        ForecastingPipeline { log: true }.fit_series(y, session)
+    }
+}
+
 /// Seasonal ARIMA: apply seasonal differences, then [`Arima`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sarima {
@@ -2410,5 +2831,49 @@ mod tests {
         assert!(q.value.aic.is_finite());
         assert!(!q.value.scores.is_empty());
         assert!(q.value.fitted.sigma2.is_finite());
+    }
+
+    #[test]
+    fn sarimax_tbats_and_pipelines() {
+        let y = Vector::from_iter((0..40).map(|i| 1.0 + 0.3 * i as f64 + 0.2 * ((i as f64).sin())));
+        let x = Matrix::from_fn(40, 1, |i, _| i as f64);
+        let q = Sarimax::new(1, 0, 0)
+            .fit(&y, &x, &Session::new("sx", "fit"))
+            .expect("sarimax");
+        assert!(
+            (q.value.coef[0] - 0.3).abs() < 0.15,
+            "b={}",
+            q.value.coef[0]
+        );
+        let xf = Matrix::from_fn(4, 1, |i, _| 40.0 + i as f64);
+        let f = q
+            .value
+            .forecast(4, &xf, &Session::new("sx", "fc"))
+            .expect("fc")
+            .value;
+        assert_eq!(f.len(), 4);
+        let ypos = Vector::from_iter((0..40).map(|i| (1.0 + 0.05 * i as f64).exp()));
+        let pipe = ForecastingPipeline::new()
+            .fit_series(&ypos, &Session::new("fp", "fit"))
+            .expect("pipe");
+        let pf = pipe
+            .value
+            .forecast(3, &Session::new("fp", "fc"))
+            .expect("pfc")
+            .value;
+        assert!(pf.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let tb = Tbats::new(4)
+            .fit_series(&y, &Session::new("tb", "fit"))
+            .expect("tbats");
+        let tf = tb
+            .value
+            .forecast(4, &Session::new("tb", "fc"))
+            .expect("tbfc")
+            .value;
+        assert_eq!(tf.len(), 4);
+        let ttf = TransformedTargetForecaster::new()
+            .fit_series(&ypos, &Session::new("ttf", "fit"))
+            .expect("ttf");
+        assert!(ttf.value.log);
     }
 }

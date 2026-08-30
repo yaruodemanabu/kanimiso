@@ -256,6 +256,124 @@ impl Transform for TfidfTransformer {
     }
 }
 
+/// Count + TF–IDF in one step (sklearn `TfidfVectorizer`).
+#[derive(Clone, Debug, Default)]
+pub struct TfidfVectorizer {
+    /// Document-frequency floor forwarded to [`CountVectorizer`].
+    pub min_df: usize,
+    counts: CountVectorizer,
+    tfidf: TfidfTransformer,
+}
+
+impl TfidfVectorizer {
+    /// Default vectorizer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Vocabulary after `fit_docs`.
+    pub fn vocabulary(&self) -> &[String] {
+        self.counts.vocabulary()
+    }
+
+    /// Fit vocabulary and IDF on `docs`.
+    pub fn fit_docs(&mut self, docs: &[&str], session: &Session) -> Result<Qualified<Self>> {
+        self.counts.min_df = self.min_df.max(1);
+        let q = self.counts.fit_docs(docs, &session.child("count"))?;
+        self.counts = q.value;
+        let x = self
+            .counts
+            .transform_docs(docs, &session.child("count-x"))?
+            .value;
+        let t = self.tfidf.fit_unsupervised(&x, &session.child("tfidf"))?;
+        self.tfidf = t.value;
+        let mut ctx = FitCtx::with_session(session.clone());
+        for issue in q.report.issues() {
+            ctx.push(issue.clone());
+        }
+        for issue in t.report.issues() {
+            ctx.push(issue.clone());
+        }
+        ctx.finish(self.clone())
+    }
+
+    /// Transform `docs` to row-normalized TF–IDF.
+    pub fn transform_docs(&self, docs: &[&str], session: &Session) -> Result<Qualified<Matrix>> {
+        let x = self
+            .counts
+            .transform_docs(docs, &session.child("count-t"))?
+            .value;
+        self.tfidf.transform(&x, &session.child("tfidf-t"))
+    }
+}
+
+fn fnv1a(tok: &str) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    for b in tok.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Signed hashing trick (sklearn `HashingVectorizer`). No vocabulary is stored.
+#[derive(Clone, Debug)]
+pub struct HashingVectorizer {
+    /// Number of hash bins.
+    pub n_features: usize,
+}
+
+impl Default for HashingVectorizer {
+    fn default() -> Self {
+        Self { n_features: 16 }
+    }
+}
+
+impl HashingVectorizer {
+    /// Hasher with `n_features` bins.
+    pub fn new(n_features: usize) -> Self {
+        Self {
+            n_features: n_features.max(1),
+        }
+    }
+
+    /// Transform `docs` (stateless).
+    pub fn transform_docs(&self, docs: &[&str], session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        if docs.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .message("HashingVectorizer received 0 documents")
+                    .build(),
+            );
+            return ctx.finish(Matrix::zeros(0, self.n_features.max(1)));
+        }
+        let p = self.n_features.max(1);
+        if p < 8 && docs.len() > 4 {
+            ctx.push(
+                Issue::builder(IssueCode::NearZeroVariance)
+                    .severity(signlred::Severity::Advisory)
+                    .message(format!(
+                        "HashingVectorizer n_features={p} is small relative to the corpus; collisions are likely"
+                    ))
+                    .build(),
+            );
+        }
+        let x = Matrix::from_fn(docs.len(), p, |i, j| {
+            let mut s = 0.0;
+            for tok in tokenize(docs[i]) {
+                let h = fnv1a(&tok);
+                let bin = (h >> 1) as usize % p;
+                if bin == j {
+                    s += if h & 1 == 1 { 1.0 } else { -1.0 };
+                }
+            }
+            s
+        });
+        ctx.finish(x)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,5 +397,17 @@ mod tests {
         assert_eq!(z.shape(), x.shape());
         let n0: f64 = (0..z.ncols()).map(|j| z.get(0, j) * z.get(0, j)).sum();
         assert!((n0.sqrt() - 1.0).abs() < 1e-10, "n0={n0}");
+        let mut tv = TfidfVectorizer::new();
+        tv.fit_docs(&docs, &Session::new("tv", "fit")).unwrap();
+        let z2 = tv
+            .transform_docs(&docs, &Session::new("tv", "t"))
+            .unwrap()
+            .value;
+        assert_eq!(z2.nrows(), 2);
+        let h = HashingVectorizer::new(8)
+            .transform_docs(&docs, &Session::new("hv", "t"))
+            .unwrap()
+            .value;
+        assert_eq!(h.shape(), (2, 8));
     }
 }

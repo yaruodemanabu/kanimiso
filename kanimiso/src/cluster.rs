@@ -1096,6 +1096,190 @@ impl FitUnsupervised for Dbscan {
     }
 }
 
+/// HDBSCAN-lite: mutual-reachability MST, then a single longest-edge split
+/// (Campello / McInnes extraction reduced to the dominant cut).
+///
+/// Core distance is the distance to the `min_samples`-th neighbour. Mutual
+/// reachability is \(\max(d_k(i), d_k(j), d(i,j))\). Components smaller than
+/// `min_cluster_size` are labelled noise (`-1`). Cluster count is **not**
+/// passed to [`inspect_identification`].
+#[derive(Clone, Debug)]
+pub struct Hdbscan {
+    /// Neighbours used for the core distance.
+    pub min_samples: usize,
+    /// Minimum component size to keep as a cluster.
+    pub min_cluster_size: usize,
+}
+
+impl Default for Hdbscan {
+    fn default() -> Self {
+        Self {
+            min_samples: 5,
+            min_cluster_size: 5,
+        }
+    }
+}
+
+impl Hdbscan {
+    /// HDBSCAN with the given core-distance and cluster-size floors.
+    pub fn new(min_samples: usize, min_cluster_size: usize) -> Self {
+        Self {
+            min_samples: min_samples.max(1),
+            min_cluster_size: min_cluster_size.max(1),
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedHdbscan>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted HDBSCAN partition.
+#[derive(Clone, Debug)]
+pub struct FittedHdbscan {
+    /// Cluster ids; noise is `-1.0`.
+    pub labels: Vector,
+    /// Number of non-noise clusters.
+    pub n_clusters: usize,
+}
+
+impl FitUnsupervised for Hdbscan {
+    type Fitted = FittedHdbscan;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedHdbscan>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), 1, &ctx.policy);
+        let n = x.nrows();
+        if n == 0 || x.ncols() == 0 {
+            return ctx.finish(FittedHdbscan {
+                labels: Vector::zeros(0),
+                n_clusters: 0,
+            });
+        }
+        if all_rows_identical(x, ctx.policy.near_zero_variance) && n > 1 {
+            ctx.push(degenerate_cluster_issue("HDBSCAN input rows are identical"));
+            return ctx.finish(FittedHdbscan {
+                labels: Vector::zeros(n),
+                n_clusters: 1,
+            });
+        }
+        let k = self.min_samples.max(1).min(n.saturating_sub(1).max(1));
+        let mut core = vec![0.0f64; n];
+        let mut dist = vec![vec![0.0f64; n]; n];
+        for i in 0..n {
+            let mut row = Vec::with_capacity(n);
+            for j in 0..n {
+                let d = sq_dist_rows(x, i, j).sqrt();
+                dist[i][j] = d;
+                if i != j {
+                    row.push(d);
+                }
+            }
+            row.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            core[i] = row.get(k.saturating_sub(1)).copied().unwrap_or(0.0);
+        }
+        let mut mrd = vec![vec![0.0f64; n]; n];
+        for i in 0..n {
+            for j in i..n {
+                let v = core[i].max(core[j]).max(dist[i][j]);
+                mrd[i][j] = v;
+                mrd[j][i] = v;
+            }
+        }
+        // Prim MST on mutual reachability.
+        let mut in_tree = vec![false; n];
+        let mut parent = vec![0usize; n];
+        let mut best = vec![f64::INFINITY; n];
+        best[0] = 0.0;
+        let mut edges: Vec<(usize, usize, f64)> = Vec::new();
+        for _ in 0..n {
+            let mut u = 0usize;
+            let mut bu = f64::INFINITY;
+            for i in 0..n {
+                if !in_tree[i] && best[i] < bu {
+                    bu = best[i];
+                    u = i;
+                }
+            }
+            in_tree[u] = true;
+            if bu.is_finite() && bu > 0.0 {
+                edges.push((parent[u], u, bu));
+            }
+            for v in 0..n {
+                if !in_tree[v] && mrd[u][v] < best[v] {
+                    best[v] = mrd[u][v];
+                    parent[v] = u;
+                }
+            }
+        }
+        // Remove the longest MST edge if both sides meet min_cluster_size.
+        edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        let min_c = self.min_cluster_size.max(1);
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for &(a, b, _) in &edges {
+            adj[a].push(b);
+            adj[b].push(a);
+        }
+        let mut labels = vec![-1i64; n];
+        let mut n_clusters = 0usize;
+        if let Some(&(a, b, _)) = edges.first() {
+            // Drop the longest edge and grow the two sides.
+            adj[a].retain(|&v| v != b);
+            adj[b].retain(|&v| v != a);
+            for (seed, cid) in [(a, 0i64), (b, 1i64)] {
+                let mut stack = vec![seed];
+                let mut comp = Vec::new();
+                let mut seen = vec![false; n];
+                seen[seed] = true;
+                while let Some(p) = stack.pop() {
+                    comp.push(p);
+                    for &q in &adj[p] {
+                        if !seen[q] {
+                            seen[q] = true;
+                            stack.push(q);
+                        }
+                    }
+                }
+                if comp.len() >= min_c {
+                    for i in comp {
+                        labels[i] = cid;
+                    }
+                    n_clusters += 1;
+                }
+            }
+        }
+        if n_clusters == 0 {
+            // Fallback: one cluster if the whole sample is large enough.
+            if n >= min_c {
+                for i in 0..n {
+                    labels[i] = 0;
+                }
+                n_clusters = 1;
+                ctx.push(
+                    Issue::builder(IssueCode::EmptyCluster)
+                        .message("HDBSCAN found no stable cut; the sample is one cluster")
+                        .build(),
+                );
+            } else {
+                ctx.push(degenerate_cluster_issue(
+                    "HDBSCAN produced only noise at this min_cluster_size",
+                ));
+            }
+        }
+        let lab = Vector::from_iter(labels.iter().map(|v| *v as f64));
+        push_if_nonfinite_vec(&mut ctx, &lab, "hdbscan labels");
+        ctx.finish(FittedHdbscan {
+            labels: lab,
+            n_clusters,
+        })
+    }
+}
+
 /// Hierarchical linkage rule on pairwise Euclidean distances.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Linkage {
@@ -2718,5 +2902,18 @@ mod tests {
         assert!(q.value.n_cf >= 2, "n_cf={}", q.value.n_cf);
         let lab = q.value.labels.as_slice();
         assert_ne!(lab[0], lab[20], "blobs must differ: {lab:?}");
+    }
+
+    #[test]
+    fn hdbscan_separates_two_blobs() {
+        let x = two_blobs();
+        let q = Hdbscan::new(5, 5)
+            .fit(&x, &Session::new("hdb", "fit"))
+            .expect("hdb");
+        assert!(q.value.n_clusters >= 1, "n={}", q.value.n_clusters);
+        let lab = q.value.labels.as_slice();
+        if q.value.n_clusters >= 2 {
+            assert_ne!(lab[0], lab[20], "blobs must differ: {lab:?}");
+        }
     }
 }

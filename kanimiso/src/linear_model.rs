@@ -13,6 +13,7 @@ use crate::validate::{inspect_collinearity, inspect_identification, inspect_xy};
 use ojizou_san::{IncrementalExplain, Session};
 use signlred::{
     IncrementalQuality, Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result,
+    Severity,
 };
 
 /// Ordinary least squares with full inference (statsmodels-style).
@@ -2233,6 +2234,180 @@ impl Predict for FittedLars {
     }
 }
 
+/// LARS-Lasso: the LARS path with the Efron sign-drop modification, stopped
+/// when the equiangular correlation falls to `alpha`.
+#[derive(Clone, Debug)]
+pub struct LassoLars {
+    /// Soft threshold on the LARS correlation (`0` ⇒ full path).
+    pub alpha: f64,
+    /// Center \(X\) and \(y\).
+    pub fit_intercept: bool,
+}
+
+impl Default for LassoLars {
+    fn default() -> Self {
+        Self {
+            alpha: 0.0,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl LassoLars {
+    /// LassoLars with correlation floor `alpha`.
+    pub fn new(alpha: f64) -> Self {
+        Self {
+            alpha,
+            ..Self::default()
+        }
+    }
+}
+
+impl Fit for LassoLars {
+    type Fitted = FittedLars;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLars>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if !self.alpha.is_finite() || self.alpha < 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "LassoLars α={} is not a finite ≥0 value",
+                        self.alpha
+                    ))
+                    .build(),
+            );
+        }
+        if ctx.report.contains(IssueCode::ConstantTarget)
+            || ctx.report.contains(IssueCode::EmptyMatrix)
+        {
+            return ctx.finish(FittedLars {
+                coef: Vector::zeros(x.ncols()),
+                intercept: y.mean(),
+                active: Vec::new(),
+            });
+        }
+        let (n, p) = x.shape();
+        let (xc, xmean) = if self.fit_intercept {
+            x.centered()
+        } else {
+            (x.clone(), Vector::zeros(p))
+        };
+        let ymean = if self.fit_intercept { y.mean() } else { 0.0 };
+        let yc = Vector::from_iter(y.as_slice().iter().map(|&v| v - ymean));
+        let mut beta = Vector::zeros(p);
+        let mut mu = Vector::zeros(n);
+        let mut active: Vec<usize> = Vec::new();
+        let mut signs: Vec<f64> = Vec::new();
+        let alpha = self.alpha.max(0.0);
+        let max_steps = p.min(n.saturating_sub(1)).max(1);
+        for step in 0..max_steps {
+            let resid = yc.sub(&mu);
+            let corr = xc.matvec_t(&resid);
+            let mut cmax = 0.0;
+            let mut jnew = None;
+            for j in 0..p {
+                if active.contains(&j) {
+                    continue;
+                }
+                if corr[j].abs() > cmax {
+                    cmax = corr[j].abs();
+                    jnew = Some(j);
+                }
+            }
+            if cmax <= alpha + 1e-14 {
+                ctx.session
+                    .converged("LassoLars correlation ≤ α", step as u64);
+                break;
+            }
+            let Some(j) = jnew else {
+                break;
+            };
+            active.push(j);
+            signs.push(if corr[j] >= 0.0 { 1.0 } else { -1.0 });
+            let a_n = active.len();
+            let xa = Matrix::from_fn(n, a_n, |i, c| xc.get(i, active[c]) * signs[c]);
+            let ones = Vector::filled(a_n, 1.0);
+            let mut gram = xa.gram();
+            for i in 0..a_n {
+                gram[(i, i)] += 1e-12;
+            }
+            let mut scratch = signlred::Report::new("lassolars", "gram");
+            let Some(ginv1) = crate::linalg::chol_solve(&mut scratch, &gram, &ones, &ctx.policy)
+            else {
+                ctx.push(
+                    Issue::builder(IssueCode::SingularMatrix)
+                        .severity(Severity::Warning)
+                        .message("LassoLars active Gram is singular; path stopped")
+                        .build(),
+                );
+                break;
+            };
+            let aa = ones.dot(&ginv1).max(1e-18).sqrt();
+            let a_dir = 1.0 / aa;
+            let w = ginv1.scale(a_dir);
+            let u = xa.matvec(&w);
+            let a_full = xc.matvec_t(&u);
+            let mut gamma = cmax / a_dir.max(1e-18);
+            for k in 0..p {
+                if active.contains(&k) {
+                    continue;
+                }
+                let den1 = a_dir - a_full[k];
+                let den2 = a_dir + a_full[k];
+                if den1.abs() > 1e-14 {
+                    let g = (cmax - corr[k]) / den1;
+                    if g > 1e-15 && g < gamma {
+                        gamma = g;
+                    }
+                }
+                if den2.abs() > 1e-14 {
+                    let g = (cmax + corr[k]) / den2;
+                    if g > 1e-15 && g < gamma {
+                        gamma = g;
+                    }
+                }
+            }
+            // Lasso modification: drop a variable that would change sign.
+            let mut drop = None;
+            for (c, &jidx) in active.iter().enumerate() {
+                let dir = signs[c] * w[c];
+                if dir.abs() > 1e-15 {
+                    let g = -beta[jidx] / dir;
+                    if g > 1e-15 && g < gamma {
+                        gamma = g;
+                        drop = Some(c);
+                    }
+                }
+            }
+            for i in 0..n {
+                mu[i] += gamma * u[i];
+            }
+            for (c, &jidx) in active.iter().enumerate() {
+                beta[jidx] += gamma * signs[c] * w[c];
+            }
+            if let Some(c) = drop {
+                beta[active[c]] = 0.0;
+                active.remove(c);
+                signs.remove(c);
+            }
+            ctx.session.step(step as u64, resid.norm(), Some(cmax));
+        }
+        let mut intercept = ymean;
+        if self.fit_intercept {
+            for j in 0..p {
+                intercept -= xmean[j] * beta[j];
+            }
+        }
+        ctx.finish(FittedLars {
+            coef: beta,
+            intercept,
+            active,
+        })
+    }
+}
+
 /// Tweedie GLM with log link and variance \(\mu^p\) (sklearn `TweedieRegressor`).
 ///
 /// \(p=0\) is Gaussian, \(p=1\) Poisson, \(p=2\) Gamma, \(1<p<2\) compound
@@ -2570,6 +2745,173 @@ impl FittedMultiTask {
             s
         });
         ctx.finish(out)
+    }
+}
+
+/// Multi-task elastic net: group-ℓ1 plus Frobenius ℓ2 on \(W\).
+#[derive(Clone, Debug)]
+pub struct MultiTaskElasticNet {
+    /// Combined penalty.
+    pub alpha: f64,
+    /// Mixing: 1 = multi-task lasso, 0 = multi-task ridge.
+    pub l1_ratio: f64,
+    /// Coordinate cycles.
+    pub max_iter: usize,
+    /// Coordinate change tolerance.
+    pub tol: f64,
+}
+
+impl Default for MultiTaskElasticNet {
+    fn default() -> Self {
+        Self {
+            alpha: 0.1,
+            l1_ratio: 0.5,
+            max_iter: 200,
+            tol: 1e-6,
+        }
+    }
+}
+
+impl MultiTaskElasticNet {
+    /// Multi-task elastic net with `alpha` and `l1_ratio`.
+    pub fn new(alpha: f64, l1_ratio: f64) -> Self {
+        Self {
+            alpha,
+            l1_ratio,
+            ..Self::default()
+        }
+    }
+
+    /// Fit `Y ~ X` for a multi-column response.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedMultiTask>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        if !(0.0..=1.0).contains(&self.l1_ratio) {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "MultiTaskElasticNet l1_ratio={} not in [0, 1]; clamping",
+                        self.l1_ratio
+                    ))
+                    .build(),
+            );
+        }
+        if x.nrows() != y.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("MultiTaskElasticNet: Y rows ≠ X rows")
+                    .build(),
+            );
+        }
+        let n = x.nrows().min(y.nrows());
+        let p = x.ncols();
+        let t = y.ncols();
+        if n == 0 || p == 0 || t == 0 {
+            return ctx.finish(FittedMultiTask {
+                coef: Matrix::zeros(p, t),
+                intercept: Vector::zeros(t),
+                alpha: self.alpha,
+            });
+        }
+        let (xc, xmean) = x.centered();
+        let mut ymean = Vector::zeros(t);
+        let mut yc = Matrix::zeros(n, t);
+        for j in 0..t {
+            let col = y.column(j);
+            ymean[j] = col.mean();
+            for i in 0..n {
+                yc.set(i, j, y.get(i, j) - ymean[j]);
+            }
+        }
+        let mut col_norm2 = vec![0.0; p];
+        for j in 0..p {
+            let mut s = 0.0;
+            for i in 0..n {
+                let v = xc.get(i, j);
+                s += v * v;
+            }
+            col_norm2[j] = s;
+        }
+        let mut w = Matrix::zeros(p, t);
+        let mut resid = yc.clone();
+        let mut converged = false;
+        let l1 = self.l1_ratio.clamp(0.0, 1.0);
+        let lam1 = (n as f64) * self.alpha.max(0.0) * l1;
+        let lam2 = (n as f64) * self.alpha.max(0.0) * (1.0 - l1);
+        for it in 0..self.max_iter.max(1) {
+            let mut max_d: f64 = 0.0;
+            for j in 0..p {
+                if col_norm2[j] <= ctx.policy.near_zero_variance {
+                    continue;
+                }
+                for task in 0..t {
+                    let wj = w.get(j, task);
+                    for i in 0..n {
+                        resid.set(i, task, resid.get(i, task) + xc.get(i, j) * wj);
+                    }
+                }
+                let mut s_vec = Vector::zeros(t);
+                for task in 0..t {
+                    let mut rho = 0.0;
+                    for i in 0..n {
+                        rho += xc.get(i, j) * resid.get(i, task);
+                    }
+                    s_vec[task] = rho;
+                }
+                let nrm = s_vec.norm();
+                let old: Vec<f64> = (0..t).map(|task| w.get(j, task)).collect();
+                if nrm <= lam1 {
+                    for task in 0..t {
+                        w.set(j, task, 0.0);
+                    }
+                } else {
+                    let scale = (1.0 - lam1 / nrm) / (col_norm2[j] + lam2);
+                    for task in 0..t {
+                        w.set(j, task, scale * s_vec[task]);
+                    }
+                }
+                for task in 0..t {
+                    let wj = w.get(j, task);
+                    max_d = max_d.max((wj - old[task]).abs());
+                    for i in 0..n {
+                        resid.set(i, task, resid.get(i, task) - xc.get(i, j) * wj);
+                    }
+                }
+            }
+            ctx.session.step(it as u64, max_d, None);
+            if max_d < self.tol {
+                ctx.session
+                    .converged("multi-task elastic-net CD", it as u64);
+                converged = true;
+                break;
+            }
+        }
+        if !converged {
+            ctx.push(
+                Issue::builder(IssueCode::MaxIterReached)
+                    .message("MultiTaskElasticNet hit max_iter")
+                    .build(),
+            );
+        }
+        let intercept = Vector::from_iter((0..t).map(|k| {
+            let mut s = ymean[k];
+            for j in 0..p {
+                s -= xmean[j] * w.get(j, k);
+            }
+            s
+        }));
+        ctx.finish(FittedMultiTask {
+            coef: w,
+            intercept,
+            alpha: self.alpha,
+        })
     }
 }
 
@@ -3179,6 +3521,14 @@ mod tests {
             .expect("mt");
         assert_eq!(mt.value.coef.shape(), (1, 2));
         assert!(mt.value.coef.get(0, 0).is_finite());
+        let ll = LassoLars::new(0.0)
+            .fit(&x, &y, &Session::new("llars", "fit"))
+            .expect("llars");
+        assert!(ll.value.coef.as_slice().iter().any(|v| v.abs() > 1e-6));
+        let mte = MultiTaskElasticNet::new(0.01, 0.5)
+            .fit(&x, &ym, &Session::new("mte", "fit"))
+            .expect("mte");
+        assert_eq!(mte.value.coef.shape(), (1, 2));
     }
 
     #[test]

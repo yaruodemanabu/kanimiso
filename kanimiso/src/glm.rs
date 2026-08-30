@@ -1372,6 +1372,198 @@ impl Fit for ZeroInflatedPoisson {
     }
 }
 
+/// Zero-inflated negative binomial (NB2 count + intercept-only inflate).
+#[derive(Clone, Debug)]
+pub struct ZeroInflatedNegativeBinomial {
+    /// EM / IRLS cycles.
+    pub max_iter: usize,
+    /// Count-model intercept.
+    pub fit_intercept: bool,
+}
+
+impl Default for ZeroInflatedNegativeBinomial {
+    fn default() -> Self {
+        Self {
+            max_iter: 25,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl ZeroInflatedNegativeBinomial {
+    /// Default ZINB.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted ZINB.
+#[derive(Clone, Debug)]
+pub struct FittedZinb {
+    /// Count-model slopes.
+    pub coef: Vector,
+    /// Count-model intercept.
+    pub intercept: f64,
+    /// Structural-zero probability.
+    pub inflate_pi: f64,
+    /// NB2 dispersion \(\alpha > 0\) (\(\mathrm{Var}=\mu+\alpha\mu^2\)).
+    pub alpha: f64,
+}
+
+impl Predict for FittedZinb {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() != self.coef.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ZINB predict column count ≠ coef")
+                    .build(),
+            );
+        }
+        let mut y = x.matvec(&self.coef);
+        for i in 0..y.len() {
+            let mu = (y[i] + self.intercept).exp().max(1e-12);
+            y[i] = (1.0 - self.inflate_pi) * mu;
+        }
+        ctx.finish(y)
+    }
+}
+
+impl Fit for ZeroInflatedNegativeBinomial {
+    type Fitted = FittedZinb;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedZinb>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        for (i, &yi) in y.as_slice().iter().enumerate() {
+            if yi < 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .message(format!("ZINB y[{i}]={yi} < 0"))
+                        .build(),
+                );
+                break;
+            }
+        }
+        let design = if self.fit_intercept {
+            x.with_intercept()
+        } else {
+            x.clone()
+        };
+        inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
+        let n = y.len();
+        let n0 = y.as_slice().iter().filter(|v| **v <= 0.0).count() as f64;
+        let mut pi = (n0 / n.max(1) as f64).clamp(0.05, 0.8);
+        let mean = y.mean().max(1e-3);
+        let var = y.std() * y.std();
+        let mut alpha = ((var / mean - 1.0) / mean).clamp(1e-3, 20.0);
+        let mut beta = Vector::zeros(design.ncols());
+        if self.fit_intercept && !beta.is_empty() {
+            beta[0] = mean.ln();
+        }
+        if n0 == n as f64 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateDistribution)
+                    .message("ZINB: every count is zero")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "ZINB rates",
+                        "a zero series does not identify a count mean or α",
+                        "collect positive counts",
+                    ))
+                    .build(),
+            );
+        }
+        if n0 == 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::MixtureWeightCollapsed)
+                    .message("ZINB inflate is unidentified: there are no zeros")
+                    .build(),
+            );
+            pi = 0.0;
+        }
+        for it in 0..self.max_iter.max(1) {
+            let r = 1.0 / alpha.max(1e-6);
+            let mut z = Vector::zeros(n);
+            let mut tau_sum = 0.0;
+            for i in 0..n {
+                let mut eta = 0.0;
+                for j in 0..design.ncols() {
+                    eta += design.get(i, j) * beta[j];
+                }
+                let mu = eta.exp().max(1e-12);
+                if y[i] <= 0.0 {
+                    let p0 = (r / (r + mu)).powf(r);
+                    z[i] = pi / (pi + (1.0 - pi) * p0).max(1e-12);
+                } else {
+                    z[i] = 0.0;
+                }
+                tau_sum += z[i];
+            }
+            pi = (tau_sum / n as f64).clamp(1e-6, 1.0 - 1e-6);
+            let mut xs = Matrix::zeros(n, design.ncols());
+            let mut rhs = Vector::zeros(n);
+            let mut mom_num = 0.0;
+            let mut mom_den = 0.0;
+            for i in 0..n {
+                let mut eta = 0.0;
+                for j in 0..design.ncols() {
+                    eta += design.get(i, j) * beta[j];
+                }
+                let mu = eta.exp().max(1e-12);
+                let var_i = (mu + alpha * mu * mu).max(1e-8);
+                let w = ((1.0 - z[i]) * mu * mu / var_i).max(1e-12);
+                let sw = w.sqrt();
+                rhs[i] = (eta + (y[i] - mu) / mu) * sw;
+                for j in 0..design.ncols() {
+                    xs.set(i, j, design.get(i, j) * sw);
+                }
+                let wi = 1.0 - z[i];
+                mom_num += wi * (y[i] - mu) * (y[i] - mu);
+                mom_den += wi * mu * mu;
+            }
+            if mom_den > 0.0 {
+                alpha = ((mom_num / mom_den.max(1e-8)) - 1.0 / mean)
+                    .abs()
+                    .clamp(1e-4, 20.0);
+            }
+            let mut scratch = signlred::Report::new("zinb", "irls");
+            let Some(next) = least_squares(&mut scratch, &xs, &rhs, &ctx.policy) else {
+                break;
+            };
+            for issue in scratch.issues() {
+                if matches!(
+                    issue.code,
+                    IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+                ) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            let d = next.sub(&beta).norm();
+            beta = next;
+            ctx.session.step(it as u64, d, Some(pi));
+            if d < 1e-7 {
+                ctx.session.converged("ZINB EM", it as u64);
+                break;
+            }
+        }
+        let (intercept, coef) = if self.fit_intercept {
+            (
+                beta.as_slice().first().copied().unwrap_or(0.0),
+                Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            )
+        } else {
+            (0.0, beta)
+        };
+        ctx.finish(FittedZinb {
+            coef,
+            intercept,
+            inflate_pi: pi,
+            alpha,
+        })
+    }
+}
+
 /// Weibull AFT (uncensored): \(\log T = x^\top\beta + \sigma\varepsilon\), \(\varepsilon\sim\) Gumbel.
 #[derive(Clone, Debug)]
 pub struct WeibullAft {
@@ -1731,5 +1923,10 @@ mod tests {
             .unwrap()
             .value;
         assert!(pred.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let zb = ZeroInflatedNegativeBinomial::new()
+            .fit(&x, &y, &Session::new("zinb", "fit"))
+            .expect("zinb");
+        assert!(zb.value.inflate_pi >= 0.0 && zb.value.inflate_pi <= 1.0);
+        assert!(zb.value.alpha > 0.0 && zb.value.alpha.is_finite());
     }
 }
