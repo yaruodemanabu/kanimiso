@@ -5553,6 +5553,24 @@ const INVENTORY: &[Algorithm] = &[
         "sktime.classification.compose.ComposableTimeSeriesForestClassifier",
         "estimator",
     ),
+    a("online.Fhddms", "river.drift.FHDDMS", "online"),
+    a("online.AveragerRegressor", "river.optim.Averager", "online"),
+    a(
+        "online.BayesianLinearRegression",
+        "river.linear_model.BayesianLinearRegression",
+        "online",
+    ),
+    a(
+        "online.StandardAbsoluteDeviation",
+        "river.anomaly.StandardAbsoluteDeviation",
+        "online",
+    ),
+    a("online.HedgeRegressor", "river.optim.Hedge", "online"),
+    a(
+        "tslearn.SfaTransformer",
+        "tslearn.piecewise.SymbolicFourierApproximation",
+        "estimator",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5963,6 +5981,8 @@ mod tests {
             "online.YogiRegressor",
             "online.LionRegressor",
             "tslearn.TimeSeriesPca",
+            "online.BayesianLinearRegression",
+            "tslearn.SfaTransformer",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

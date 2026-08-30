@@ -31992,6 +31992,564 @@ impl PartialFit for AbsMax {
     }
 }
 
+/// Stacked FHDDM (river `drift.FHDDMS`) with a short and a long window.
+///
+/// Window lengths are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Fhddms {
+    short: Fhddm,
+    long: Fhddm,
+    n: u64,
+    updates: u64,
+}
+
+impl Default for Fhddms {
+    fn default() -> Self {
+        Self {
+            short: Fhddm {
+                window: 16,
+                ..Fhddm::default()
+            },
+            long: Fhddm {
+                window: 32,
+                ..Fhddm::default()
+            },
+            n: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl Fhddms {
+    /// Fresh stacked FHDDM.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for Fhddms {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let mut fired = 0.0;
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if let Ok(q) = self.short.update(v, &session.child("fhddms-s")) {
+                if matches!(q.value, DriftDecision::Drift { .. }) {
+                    fired += 1.0;
+                }
+            }
+            if let Ok(q) = self.long.update(v, &session.child("fhddms-l")) {
+                if matches!(q.value, DriftDecision::Drift { .. }) {
+                    fired += 1.0;
+                }
+            }
+            self.n += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n);
+        q.effective_sample_size = self.n as f64;
+        q.information_gain = Some(fired);
+        q.drift_statistic = Some(self.short.p_max.max(self.long.p_max));
+        q.still_identified = self.n >= 16;
+        q.warmup = self.n < 16;
+        q.explanation = format!("FHDDMS drift_cuts={fired} n={}", self.n);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "short and long FHDDM windows",
+                "OR of two Hoeffding error-rate detectors; window length is not p",
+                "previous stacked bounds",
+                format!("n={}", self.n),
+            ),
+        )
+    }
+}
+
+/// Polyak-averaged SGD (river `optim.Averager`).
+///
+/// Coefficient count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct AveragerRegressor {
+    /// Instantaneous step \(\eta\).
+    pub learning_rate: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    coef: Vector,
+    avg: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for AveragerRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            fit_intercept: true,
+            coef: Vector::zeros(0),
+            avg: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl AveragerRegressor {
+    /// Default Polyak averager.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.avg.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.avg[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for AveragerRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.coef = Vector::zeros(dim);
+            self.avg = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self.avg.clone();
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i);
+            let err = pred - y[i];
+            loss_before += err * err;
+            for j in 0..dim {
+                self.coef[j] -= eta * err * z[j];
+            }
+            self.n_seen += 1;
+            let w = 1.0 / self.n_seen as f64;
+            for j in 0..dim {
+                self.avg[j] += w * (self.coef[j] - self.avg[j]);
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+        }
+        self.updates += 1;
+        let delta = self.avg.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "Polyak-averaged linear weights",
+            "SGD path plus a running mean of the iterate",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+/// Online Bayesian linear regression (river `linear_model.BayesianLinearRegression`).
+///
+/// Ridge-prior Gram solve on the accumulated batch; feature count is not
+/// identification `p`. Scratch Cholesky is not used — the Gram is diagonally
+/// loaded.
+#[derive(Clone, Debug)]
+pub struct BayesianLinearRegression {
+    /// Prior precision \(\lambda\).
+    pub alpha: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    xtx: Option<Mat<f64>>,
+    xty: Vector,
+    coef: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for BayesianLinearRegression {
+    fn default() -> Self {
+        Self {
+            alpha: 1.0,
+            fit_intercept: true,
+            xtx: None,
+            xty: Vector::zeros(0),
+            coef: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl BayesianLinearRegression {
+    /// Unit-precision prior.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let n = z.len().min(self.coef.len());
+        let mut s = 0.0;
+        for j in 0..n {
+            s += self.coef[j] * z[j];
+        }
+        s
+    }
+}
+
+impl PartialFit for BayesianLinearRegression {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.xtx = Some(Mat::<f64>::zeros(dim, dim));
+            self.xty = Vector::zeros(dim);
+            self.coef = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.coef.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self.coef.clone();
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        let lam = if self.alpha.is_finite() && self.alpha >= 0.0 {
+            self.alpha
+        } else {
+            1.0
+        };
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let pred = self.predict_row(x, i);
+            loss_before += (pred - y[i]) * (pred - y[i]);
+        }
+        {
+            let xtx = self.xtx.as_mut().expect("initialized Gram");
+            for i in 0..x.nrows().min(y.len()) {
+                if !y[i].is_finite() {
+                    continue;
+                }
+                let z = row_aug(x, i, self.fit_intercept);
+                for a in 0..dim {
+                    self.xty[a] += z[a] * y[i];
+                    for b in 0..dim {
+                        xtx[(a, b)] += z[a] * z[b];
+                    }
+                }
+                self.n_seen += 1;
+            }
+            let mut g = Matrix::zeros(dim, dim);
+            for a in 0..dim {
+                for b in 0..dim {
+                    let mut v = xtx[(a, b)];
+                    if a == b {
+                        v += lam;
+                    }
+                    g.set(a, b, v);
+                }
+            }
+            let mut scratch = signlred::Report::new("bayeslin", "gram");
+            if let Some(sol) = ridge_solve(&mut scratch, &g, &self.xty, 0.0, &ctx.policy) {
+                self.coef = sol;
+            } else {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("BayesianLinearRegression Gram solve failed")
+                        .build(),
+                );
+            }
+        }
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let after = self.predict_row(x, i);
+            let ea = after - y[i];
+            loss_after += ea * ea;
+        }
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "Bayesian linear posterior mean",
+            "ridge-prior normal equations on the accumulated Gram",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+/// Standard absolute deviation scorer (river `anomaly.StandardAbsoluteDeviation`).
+#[derive(Clone, Debug, Default)]
+pub struct StandardAbsoluteDeviation {
+    n: f64,
+    mean: f64,
+    m2: f64,
+    last: f64,
+    updates: u64,
+}
+
+impl StandardAbsoluteDeviation {
+    /// Empty scorer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Latest \(|x-\bar x|/s\).
+    pub fn score(&self) -> f64 {
+        self.last
+    }
+}
+
+impl PartialFit for StandardAbsoluteDeviation {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.last;
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            self.n += 1.0;
+            let d = v - self.mean;
+            self.mean += d / self.n;
+            self.m2 += d * (v - self.mean);
+            let sd = if self.n >= 2.0 {
+                (self.m2 / (self.n - 1.0)).max(0.0).sqrt()
+            } else {
+                0.0
+            };
+            self.last = if sd > 1e-12 {
+                (v - self.mean).abs() / sd
+            } else {
+                0.0
+            };
+        }
+        self.updates += 1;
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some((self.last - before).abs());
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 2.0;
+        q.warmup = self.n < 2.0;
+        q.explanation = format!("SAD score={:.6e}", self.last);
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("StandardAbsoluteDeviation needs two observations")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "standard absolute deviation score",
+                "Welford |x-mean|/std on column 0; the score is not p",
+                format!("sad={before:.6e}"),
+                format!("sad={:.6e}", self.last),
+            ),
+        )
+    }
+}
+
+/// Hedge / multiplicative-weights regressor (river `optim.Hedge`).
+///
+/// Two experts (expanding mean and last observation). Expert count is not `p`.
+#[derive(Clone, Debug)]
+pub struct HedgeRegressor {
+    /// Mix rate \(\eta\).
+    pub learning_rate: f64,
+    w_mean: f64,
+    w_last: f64,
+    mean: f64,
+    last: f64,
+    n: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for HedgeRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.5,
+            w_mean: 1.0,
+            w_last: 1.0,
+            mean: 0.0,
+            last: 0.0,
+            n: 0.0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl HedgeRegressor {
+    /// Default two-expert Hedge.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for HedgeRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let eta = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.5
+        };
+        let before = if self.w_mean + self.w_last > 0.0 {
+            (self.w_mean * self.mean + self.w_last * self.last) / (self.w_mean + self.w_last)
+        } else {
+            0.0
+        };
+        let mut loss_before = 0.0;
+        let mut loss_after = 0.0;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let pred = if self.w_mean + self.w_last > 0.0 {
+                (self.w_mean * self.mean + self.w_last * self.last) / (self.w_mean + self.w_last)
+            } else {
+                0.0
+            };
+            loss_before += (pred - y[i]) * (pred - y[i]);
+            let e_mean = (self.mean - y[i]).abs();
+            let e_last = (self.last - y[i]).abs();
+            self.w_mean *= (-eta * e_mean).exp();
+            self.w_last *= (-eta * e_last).exp();
+            let s = self.w_mean + self.w_last;
+            if s > 0.0 {
+                self.w_mean /= s;
+                self.w_last /= s;
+            } else {
+                self.w_mean = 0.5;
+                self.w_last = 0.5;
+            }
+            self.n += 1.0;
+            self.mean += (y[i] - self.mean) / self.n;
+            self.last = y[i];
+            let after = (self.w_mean * self.mean + self.w_last * self.last)
+                / (self.w_mean + self.w_last).max(1e-18);
+            loss_after += (after - y[i]) * (after - y[i]);
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let dummy = Vector::from_iter([self.w_mean, self.w_last]);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &dummy.sub(&Vector::from_iter([0.5, 0.5])),
+            loss_before,
+            loss_after,
+            self.n_seen >= 2,
+            self.n_seen < 2,
+            "Hedge expert weights",
+            "multiplicative weights on expanding-mean and last-value experts",
+        );
+        let _ = before;
+        finish_explain(ctx, expl)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -32481,6 +33039,21 @@ mod tests {
         AbsMax::new()
             .partial_fit(&x, None, &session)
             .expect("absmax");
+        Fhddms::new()
+            .partial_fit(&x, None, &session)
+            .expect("fhddms");
+        AveragerRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("averager");
+        BayesianLinearRegression::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("bayeslin");
+        StandardAbsoluteDeviation::new()
+            .partial_fit(&x, None, &session)
+            .expect("sad");
+        HedgeRegressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("hedge");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

@@ -13486,6 +13486,76 @@ impl Predict for FittedComposableTimeSeriesForest {
     }
 }
 
+/// SFA word transformer (tslearn `SymbolicFourierApproximation`).
+///
+/// Coefficient / alphabet counts are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SfaTransformer {
+    /// Retained DFT magnitudes.
+    pub n_coefs: usize,
+    /// Alphabet size.
+    pub alphabet: usize,
+}
+
+impl Default for SfaTransformer {
+    fn default() -> Self {
+        Self {
+            n_coefs: 4,
+            alphabet: 4,
+        }
+    }
+}
+
+impl SfaTransformer {
+    /// Default SFA feature map.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted SFA feature map.
+#[derive(Clone, Debug)]
+pub struct FittedSfaTransformer {
+    n_coefs: usize,
+    alphabet: usize,
+}
+
+impl FitUnsupervised for SfaTransformer {
+    type Fitted = FittedSfaTransformer;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedSfaTransformer>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SfaTransformer is magnitude SFA, not a supervised BOSS word")
+                .compromise(NumericalCompromise::new(
+                    "supervised SFA with class-wise ANOVA binning",
+                    "z-norm DFT magnitudes quantized by a Gaussian CDF",
+                    "breakpoints are not fitted to class separation",
+                    "read codes as Fourier bins, not a published WEASEL/SFA word",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedSfaTransformer {
+            n_coefs: self.n_coefs.max(1),
+            alphabet: self.alphabet.max(2),
+        })
+    }
+}
+
+impl Transform for FittedSfaTransformer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(sfa_feature_rows(x, self.n_coefs, self.alphabet))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -13812,6 +13882,16 @@ mod tests {
             .value;
         assert_eq!(pctsf.len(), 8);
         assert!(pctsf.as_slice().iter().all(|v| v.is_finite()));
+        let sfat = SfaTransformer::new()
+            .fit_unsupervised(&x, &Session::new("ts", "sfat"))
+            .unwrap();
+        let zsf = sfat
+            .value
+            .transform(&x, &Session::new("ts", "sfatp"))
+            .unwrap()
+            .value;
+        assert_eq!(zsf.nrows(), 8);
+        assert!(zsf.get(0, 0).is_finite());
         let rst = Rstsf::new()
             .fit(&x, &y, &Session::new("ts", "rstsf"))
             .unwrap();
