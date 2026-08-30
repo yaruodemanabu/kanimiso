@@ -625,6 +625,280 @@ impl FitSeries for Arima {
     }
 }
 
+fn arma_companion_step(
+    z: &[f64],
+    mu: f64,
+    phi: &[f64],
+    theta: &[f64],
+) -> (f64, f64, Vec<f64>, Matrix, Vector) {
+    let p = phi.len();
+    let q = theta.len();
+    let m = p.max(q + 1).max(1);
+    let mut tmat = Matrix::zeros(m, m);
+    for j in 0..p.min(m) {
+        tmat.set(0, j, phi[j]);
+    }
+    for i in 1..m {
+        tmat.set(i, i - 1, 1.0);
+    }
+    let mut r = Vector::zeros(m);
+    r[0] = 1.0;
+    for j in 0..q.min(m.saturating_sub(1)) {
+        r[j + 1] = theta[j];
+    }
+    let mut a = vec![0.0; m];
+    let mut pmat = Matrix::from_fn(m, m, |i, j| if i == j { 1.0e4 } else { 0.0 });
+    let mut ss = 0.0;
+    let mut logf = 0.0;
+    let mut n_used = 0.0;
+    let mut last_v = Vector::zeros(z.len());
+    for (t, &yt) in z.iter().enumerate() {
+        if !yt.is_finite() {
+            continue;
+        }
+        let f = pmat.get(0, 0).max(1e-12);
+        let v = yt - mu - a[0];
+        last_v[t] = v;
+        ss += v * v / f;
+        logf += f.ln();
+        n_used += 1.0;
+        let mut k = Vector::zeros(m);
+        for i in 0..m {
+            k[i] = pmat.get(i, 0) / f;
+        }
+        for i in 0..m {
+            a[i] += k[i] * v;
+        }
+        let mut pnew = Matrix::zeros(m, m);
+        for i in 0..m {
+            for j in 0..m {
+                pnew.set(i, j, pmat.get(i, j) - k[i] * f * k[j]);
+            }
+        }
+        let mut ap = vec![0.0; m];
+        for i in 0..m {
+            for j in 0..m {
+                ap[i] += tmat.get(i, j) * a[j];
+            }
+        }
+        let mut pp = Matrix::zeros(m, m);
+        for i in 0..m {
+            for j in 0..m {
+                let mut s = 0.0;
+                for u in 0..m {
+                    for w in 0..m {
+                        s += tmat.get(i, u) * pnew.get(u, w) * tmat.get(j, w);
+                    }
+                }
+                s += r[i] * r[j];
+                pp.set(i, j, s);
+            }
+        }
+        a = ap;
+        pmat = pp;
+    }
+    let sigma2 = if n_used > 0.0 {
+        (ss / n_used).max(1e-12)
+    } else {
+        1.0
+    };
+    let ll = if n_used > 0.0 {
+        -0.5 * n_used * sigma2.ln() - 0.5 * logf
+    } else {
+        f64::NEG_INFINITY
+    };
+    (ll, sigma2, a, pmat, last_v)
+}
+
+/// ARIMA estimated by a Kalman-filter Gaussian likelihood (statsmodels statespace).
+///
+/// Hannan–Rissanen [`Arima`] remains the CSS/OLS path. This refines \(\phi,\theta\)
+/// on the concentrated Kalman likelihood. A diffuse \(P_0\) is recorded.
+#[derive(Clone, Debug)]
+pub struct ArimaKalman {
+    /// Autoregressive order.
+    pub p: usize,
+    /// Regular differences.
+    pub d: usize,
+    /// Moving-average order.
+    pub q: usize,
+}
+
+impl Default for ArimaKalman {
+    fn default() -> Self {
+        Self { p: 1, d: 0, q: 0 }
+    }
+}
+
+impl ArimaKalman {
+    /// `ARIMA(p,d,q)` Kalman MLE.
+    pub fn new(p: usize, d: usize, q: usize) -> Self {
+        Self { p, d, q }
+    }
+}
+
+/// Fitted Kalman ARIMA.
+#[derive(Clone, Debug)]
+pub struct FittedArimaKalman {
+    /// Specification.
+    pub spec: Arima,
+    /// AR coefficients.
+    pub ar: Vector,
+    /// MA coefficients.
+    pub ma: Vector,
+    /// Intercept on the differenced scale.
+    pub intercept: f64,
+    /// Concentrated innovation variance.
+    pub sigma2: f64,
+    /// Kalman Gaussian log-likelihood (concentrated).
+    pub loglik: f64,
+    /// Last filtered state.
+    pub last_state: Vector,
+    /// Differenced training series.
+    pub last_diff: Vector,
+    /// Pre-difference stages.
+    pub levels: Vec<Vector>,
+}
+
+impl FittedArimaKalman {
+    /// `h`-step forecast on the original scale.
+    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("forecast"));
+        if h == 0 {
+            return ctx.finish(Vector::zeros(0));
+        }
+        let p = self.ar.len();
+        let q = self.ma.len();
+        let mut hist: Vec<f64> = self.last_diff.as_slice().to_vec();
+        let mut zf = Vec::with_capacity(h);
+        for _ in 0..h {
+            let mut yhat = self.intercept;
+            for j in 0..p {
+                if let Some(v) = hist.get(hist.len().saturating_sub(1 + j)) {
+                    yhat += self.ar[j] * *v;
+                }
+            }
+            zf.push(yhat);
+            hist.push(yhat);
+            let _ = q;
+        }
+        let levels: Vec<Vector> = self.levels.clone();
+        ctx.finish(Vector::from_iter(undiff_forecast(&levels, &zf)))
+    }
+}
+
+impl FitSeries for ArimaKalman {
+    type Fitted = FittedArimaKalman;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedArimaKalman>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let p = self.p.min(2);
+        let q = self.q.min(2);
+        let d = self.d.min(2);
+        if self.p > 2 || self.q > 2 {
+            ctx.push(
+                Issue::builder(IssueCode::Overparameterized)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "ArimaKalman caps the companion at p,q≤2 (requested p={} q={})",
+                        self.p, self.q
+                    ))
+                    .build(),
+            );
+        }
+        let (z, stages) = difference_with_history(y.as_slice(), d);
+        if z.len() < 6 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!("ArimaKalman differenced length {} < 6", z.len()))
+                    .build(),
+            );
+        }
+        let mu = z.iter().copied().filter(|v| v.is_finite()).sum::<f64>()
+            / z.iter().filter(|v| v.is_finite()).count().max(1) as f64;
+        let mut best_ll = f64::NEG_INFINITY;
+        let mut best_phi = vec![0.0; p];
+        let mut best_th = vec![0.0; q];
+        let mut best_s2 = 1.0;
+        let mut best_a = Vector::zeros(p.max(q + 1).max(1));
+        let grid = [-0.6, -0.3, 0.0, 0.3, 0.6];
+        let phi_grid: Vec<Vec<f64>> = if p == 0 {
+            vec![Vec::new()]
+        } else if p == 1 {
+            grid.iter().map(|&v| vec![v]).collect()
+        } else {
+            let mut out = Vec::new();
+            for &a in &grid {
+                for &b in &[-0.3, 0.0, 0.3] {
+                    out.push(vec![a, b]);
+                }
+            }
+            out
+        };
+        let th_grid: Vec<Vec<f64>> = if q == 0 {
+            vec![Vec::new()]
+        } else if q == 1 {
+            grid.iter().map(|&v| vec![v]).collect()
+        } else {
+            let mut out = Vec::new();
+            for &a in &grid {
+                for &b in &[-0.3, 0.0, 0.3] {
+                    out.push(vec![a, b]);
+                }
+            }
+            out
+        };
+        for phi in &phi_grid {
+            for th in &th_grid {
+                let (ll, s2, a, _, _) = arma_companion_step(&z, mu, phi, th);
+                if ll > best_ll {
+                    best_ll = ll;
+                    best_phi = phi.clone();
+                    best_th = th.clone();
+                    best_s2 = s2;
+                    best_a = Vector::from_slice(&a);
+                }
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(Severity::Advisory)
+                .message("ArimaKalman uses a diffuse P0 and a coarse φ/θ grid, not exact MLE")
+                .compromise(NumericalCompromise::new(
+                    "exact diffuse Kalman ARIMA MLE",
+                    "concentrated companion Kalman on a φ/θ grid",
+                    "P0 is 1e4 I; the likelihood is not the Ansley/Kohn exact form",
+                    "treat loglik as a relative score on this grid only",
+                ))
+                .build(),
+        );
+        if !best_ll.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("ArimaKalman grid produced no finite likelihood")
+                    .build(),
+            );
+        }
+        let levels = stages.into_iter().map(|s| Vector::from_slice(&s)).collect();
+        ctx.finish(FittedArimaKalman {
+            spec: Arima { p, d, q },
+            ar: Vector::from_slice(&best_phi),
+            ma: Vector::from_slice(&best_th),
+            intercept: mu,
+            sigma2: best_s2,
+            loglik: best_ll,
+            last_state: best_a,
+            last_diff: Vector::from_slice(&z),
+            levels,
+        })
+    }
+}
+
 /// Small \((p,d,q)\) AIC grid over Hannan–Rissanen [`Arima`].
 #[derive(Clone, Debug)]
 pub struct AutoArima {
@@ -2496,6 +2770,286 @@ impl FittedSvarAb {
         }
         let psi = var_psi(&self.reduced, horizon);
         ctx.finish(irf_from_impact(&psi, &impact, sigma))
+    }
+}
+
+fn invert_square(a: &Matrix) -> Option<Matrix> {
+    let n = a.nrows().min(a.ncols());
+    if n == 0 {
+        return None;
+    }
+    if n == 1 {
+        let d = a.get(0, 0);
+        if d.abs() <= 1e-18 {
+            return None;
+        }
+        return Some(Matrix::from_fn(1, 1, |_, _| 1.0 / d));
+    }
+    if n == 2 {
+        let det = a.get(0, 0) * a.get(1, 1) - a.get(0, 1) * a.get(1, 0);
+        if det.abs() <= 1e-18 {
+            return None;
+        }
+        let inv = 1.0 / det;
+        return Some(Matrix::from_fn(2, 2, |i, j| {
+            if i == 0 && j == 0 {
+                a.get(1, 1) * inv
+            } else if i == 0 && j == 1 {
+                -a.get(0, 1) * inv
+            } else if i == 1 && j == 0 {
+                -a.get(1, 0) * inv
+            } else {
+                a.get(0, 0) * inv
+            }
+        }));
+    }
+    let mut aug = Matrix::from_fn(n, 2 * n, |i, j| {
+        if j < n {
+            a.get(i, j)
+        } else if j == n + i {
+            1.0
+        } else {
+            0.0
+        }
+    });
+    for col in 0..n {
+        let mut piv = col;
+        let mut best = aug.get(col, col).abs();
+        for r in (col + 1)..n {
+            let v = aug.get(r, col).abs();
+            if v > best {
+                best = v;
+                piv = r;
+            }
+        }
+        if best <= 1e-18 {
+            return None;
+        }
+        if piv != col {
+            for j in 0..(2 * n) {
+                let tmp = aug.get(col, j);
+                aug.set(col, j, aug.get(piv, j));
+                aug.set(piv, j, tmp);
+            }
+        }
+        let d = aug.get(col, col);
+        for j in 0..(2 * n) {
+            aug.set(col, j, aug.get(col, j) / d);
+        }
+        for r in 0..n {
+            if r == col {
+                continue;
+            }
+            let f = aug.get(r, col);
+            for j in 0..(2 * n) {
+                aug.set(r, j, aug.get(r, j) - f * aug.get(col, j));
+            }
+        }
+    }
+    Some(Matrix::from_fn(n, n, |i, j| aug.get(i, n + j)))
+}
+
+/// Blanchard–Quah long-run SVAR: \(C(1)=(I-\sum A_i)^{-1}P\) is lower triangular.
+///
+/// \(P\) is estimated from the reduced-form VAR, not assumed Cholesky of \(\Sigma_u\).
+/// Lag count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct BlanchardQuah {
+    /// VAR order.
+    pub lags: usize,
+}
+
+impl Default for BlanchardQuah {
+    fn default() -> Self {
+        Self { lags: 1 }
+    }
+}
+
+impl BlanchardQuah {
+    /// Blanchard–Quah SVAR(`lags`).
+    pub fn new(lags: usize) -> Self {
+        Self { lags }
+    }
+
+    /// Fit the reduced-form VAR and the long-run impact \(P\).
+    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedBlanchardQuah>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let q = match Var::new(self.lags).fit(y, &session.child("var")) {
+            Ok(q) => q,
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                ) {
+                    ctx.push(e.primary);
+                }
+                let k = y.ncols();
+                return ctx.finish(FittedBlanchardQuah {
+                    reduced: FittedVar {
+                        lags: self.lags.max(1),
+                        k,
+                        coef: Matrix::zeros(1, k),
+                        intercepts: Vector::zeros(k),
+                        resid: Matrix::zeros(0, k),
+                        last: Matrix::zeros(self.lags.max(1), k),
+                    },
+                    long_run: Matrix::from_fn(k, k, |i, j| if i == j { 1.0 } else { 0.0 }),
+                    impact: Matrix::from_fn(k, k, |i, j| if i == j { 1.0 } else { 0.0 }),
+                });
+            }
+        };
+        for issue in q.report.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let k = q.value.k;
+        let p = q.value.lags.max(1);
+        let mut phi = Matrix::from_fn(k, k, |i, j| if i == j { 1.0 } else { 0.0 });
+        for lag in 1..=p {
+            for eq in 0..k {
+                for var in 0..k {
+                    let row = 1 + (lag - 1) * k + var;
+                    if row < q.value.coef.nrows() {
+                        phi.set(eq, var, phi.get(eq, var) - q.value.coef.get(row, eq));
+                    }
+                }
+            }
+        }
+        let (t_res, _) = q.value.resid.shape();
+        let mut sigma = Matrix::zeros(k, k);
+        if t_res > 0 {
+            for a in 0..k {
+                for b in 0..=a {
+                    let mut s = 0.0;
+                    for i in 0..t_res {
+                        s += q.value.resid.get(i, a) * q.value.resid.get(i, b);
+                    }
+                    let v = s / t_res as f64;
+                    sigma.set(a, b, v);
+                    sigma.set(b, a, v);
+                }
+            }
+        }
+        let long_cov = Matrix::from_fn(k, k, |i, j| {
+            let mut s = 0.0;
+            for r in 0..k {
+                for c in 0..k {
+                    s += phi.get(i, r) * sigma.get(r, c) * phi.get(j, c);
+                }
+            }
+            s
+        });
+        let c_lr = match cholesky_lower(&long_cov) {
+            Some(l) => l,
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::JitterInjected)
+                        .message("Blanchard–Quah long-run covariance was not SPD; using a diagonal")
+                        .compromise(NumericalCompromise::new(
+                            "Cholesky of Φ Σ Φ′",
+                            "diagonal long-run scale",
+                            "the estimated long-run Gram was not positive definite",
+                            "do not read the first shock as a unique demand/supply innovation",
+                        ))
+                        .build(),
+                );
+                Matrix::from_fn(k, k, |i, j| {
+                    if i == j {
+                        long_cov.get(i, i).abs().sqrt().max(1e-6)
+                    } else {
+                        0.0
+                    }
+                })
+            }
+        };
+        let impact = match invert_square(&phi) {
+            Some(inv) => Matrix::from_fn(k, k, |i, j| {
+                let mut s = 0.0;
+                for r in 0..k {
+                    s += inv.get(i, r) * c_lr.get(r, j);
+                }
+                s
+            }),
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::NearSingular)
+                        .severity(Severity::Warning)
+                        .message("Blanchard–Quah Φ = I−∑A is singular; impact falls back to C(1)")
+                        .build(),
+                );
+                c_lr.clone()
+            }
+        };
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message(
+                    "Blanchard–Quah imposes a lower-triangular long-run C(1), not a theory-free P",
+                )
+                .compromise(NumericalCompromise::new(
+                    "just-identified long-run SVAR",
+                    "C(1) = chol(Φ Σ Φ′) and P = Φ⁻¹ C(1)",
+                    "the first shock is the only one with a long-run level effect by construction",
+                    "do not label shocks demand/supply without that restriction being true",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedBlanchardQuah {
+            reduced: q.value,
+            long_run: c_lr,
+            impact,
+        })
+    }
+}
+
+/// Fitted Blanchard–Quah SVAR.
+#[derive(Clone, Debug)]
+pub struct FittedBlanchardQuah {
+    /// Reduced-form VAR.
+    pub reduced: FittedVar,
+    /// Long-run impact \(C(1)\).
+    pub long_run: Matrix,
+    /// Short-run structural impact \(P=\Phi^{-1}C(1)\).
+    pub impact: Matrix,
+}
+
+impl FittedBlanchardQuah {
+    /// Structural IRF / FEVD via the Blanchard–Quah \(P\).
+    pub fn structural_irf(
+        &self,
+        horizon: usize,
+        session: &Session,
+    ) -> Result<Qualified<VarImpulseResponse>> {
+        let ctx = FitCtx::with_session(session.child("irf"));
+        let k = self.reduced.k;
+        let (t_res, _) = self.reduced.resid.shape();
+        let mut sigma = Matrix::zeros(k, k);
+        if t_res > 0 {
+            for a in 0..k {
+                for b in 0..=a {
+                    let mut s = 0.0;
+                    for i in 0..t_res {
+                        s += self.reduced.resid.get(i, a) * self.reduced.resid.get(i, b);
+                    }
+                    let v = s / t_res as f64;
+                    sigma.set(a, b, v);
+                    sigma.set(b, a, v);
+                }
+            }
+        }
+        let psi = var_psi(&self.reduced, horizon);
+        ctx.finish(irf_from_impact(&psi, &self.impact, sigma))
     }
 }
 
@@ -6890,5 +7444,25 @@ mod tests {
             .expect("fgsf")
             .value;
         assert_eq!(fgf.len(), 3);
+        let bq = BlanchardQuah::new(1)
+            .fit(&y2, &Session::new("bq", "fit"))
+            .expect("bq");
+        assert_eq!(bq.value.impact.nrows(), 2);
+        let bqi = bq
+            .value
+            .structural_irf(2, &Session::new("bq", "irf"))
+            .expect("bqi");
+        assert!(!bqi.value.irf.is_empty());
+        let kak = ArimaKalman::new(1, 0, 1)
+            .fit_series(&y, &Session::new("kak", "fit"))
+            .expect("kak");
+        assert!(kak.value.loglik.is_finite());
+        let kakf = kak
+            .value
+            .forecast(3, &Session::new("kak", "fc"))
+            .expect("kakf")
+            .value;
+        assert_eq!(kakf.len(), 3);
+        assert!(kakf.as_slice().iter().all(|v| v.is_finite()));
     }
 }

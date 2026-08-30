@@ -2348,6 +2348,76 @@ const INVENTORY: &[Algorithm] = &[
         "river.preprocessing.OrdinalEncoder",
         "online",
     ),
+    a(
+        "tslearn.dba",
+        "tslearn.barycentres.dtw_barycenter_averaging",
+        "timeseries",
+    ),
+    a(
+        "tsa.BlanchardQuah",
+        "statsmodels.tsa.vector_ar.svar_model.SVAR",
+        "forecast",
+    ),
+    a(
+        "tsa.ArimaKalman",
+        "statsmodels.tsa.statespace.sarimax.SARIMAX",
+        "forecast",
+    ),
+    a(
+        "iv.WindmeijerGmm",
+        "linearmodels.iv.model.IVGMM",
+        "estimator",
+    ),
+    a(
+        "stats.anova_twoway",
+        "statsmodels.stats.anova.anova_lm",
+        "stats",
+    ),
+    a(
+        "model_selection.LeavePOut",
+        "sklearn.model_selection.LeavePOut",
+        "splitter",
+    ),
+    a(
+        "model_selection.PredefinedSplit",
+        "sklearn.model_selection.PredefinedSplit",
+        "splitter",
+    ),
+    a(
+        "model_selection.TemporalTrainTestSplitter",
+        "sktime.split.temporal_train_test_split",
+        "splitter",
+    ),
+    a(
+        "model_selection.LeaveOneGroupOut",
+        "sklearn.model_selection.LeaveOneGroupOut",
+        "splitter",
+    ),
+    a(
+        "model_selection.StratifiedGroupKFold",
+        "sklearn.model_selection.StratifiedGroupKFold",
+        "splitter",
+    ),
+    a(
+        "model_selection.permutation_test_score",
+        "sklearn.model_selection.permutation_test_score",
+        "function",
+    ),
+    a(
+        "online.OnlineTfidf",
+        "river.feature_extraction.TFIDF",
+        "online",
+    ),
+    a(
+        "online.StatImputer",
+        "river.imputation.StatImputer",
+        "online",
+    ),
+    a(
+        "online.OnlineSelectKBest",
+        "river.feature_selection.SelectKBest",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -2427,6 +2497,12 @@ mod tests {
             "tsa.TbatsFull",
             "tsa.SvarAb",
             "online.HoeffdingAdaptiveTreeRegressor",
+            "tsa.BlanchardQuah",
+            "tsa.ArimaKalman",
+            "tslearn.dba",
+            "online.OnlineTfidf",
+            "stats.anova_twoway",
+            "iv.WindmeijerGmm",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

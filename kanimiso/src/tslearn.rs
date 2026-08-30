@@ -2407,6 +2407,11 @@ pub fn global_alignment_kernel(
     ctx.finish((-d / sigma.max(1e-12)).exp())
 }
 
+/// Petitjean DBA alias of [`dtw_barycenter`] (tslearn `dtw_barycenter_averaging`).
+pub fn dba(x: &Matrix, max_iter: usize, session: &Session) -> Result<Qualified<Vector>> {
+    dtw_barycenter(x, max_iter, session)
+}
+
 /// Per-series min–max scaler (tslearn `TimeSeriesScalerMinMax`).
 #[derive(Clone, Debug, Default)]
 pub struct TimeSeriesScalerMinMax;
@@ -3495,5 +3500,8 @@ mod tests {
             .value;
         assert_eq!(z.nrows(), 6);
         assert_eq!(z.ncols(), 3);
+        let bary = dba(&x, 8, &Session::new("ts", "dba")).unwrap().value;
+        assert_eq!(bary.len(), x.ncols());
+        assert!(bary.as_slice().iter().all(|v| v.is_finite()));
     }
 }

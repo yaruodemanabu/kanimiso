@@ -3040,6 +3040,544 @@ impl ExpandingWindowSplitter {
     }
 }
 
+fn combinations_limited(n: usize, p: usize, limit: usize) -> Vec<Vec<usize>> {
+    let mut out = Vec::new();
+    if p == 0 || p > n || limit == 0 {
+        return out;
+    }
+    let mut cur = Vec::with_capacity(p);
+    fn rec(
+        start: usize,
+        n: usize,
+        p: usize,
+        cur: &mut Vec<usize>,
+        out: &mut Vec<Vec<usize>>,
+        limit: usize,
+    ) {
+        if out.len() >= limit {
+            return;
+        }
+        if cur.len() == p {
+            out.push(cur.clone());
+            return;
+        }
+        let need = p - cur.len();
+        if start + need > n {
+            return;
+        }
+        for i in start..=n - need {
+            cur.push(i);
+            rec(i + 1, n, p, cur, out, limit);
+            cur.pop();
+            if out.len() >= limit {
+                return;
+            }
+        }
+    }
+    rec(0, n, p, &mut cur, &mut out, limit);
+    out
+}
+
+/// Leave-`p`-out: every `p`-subset is a test fold (sklearn `LeavePOut`).
+///
+/// Combination count is not identification `p`. More than 128 folds are
+/// truncated and recorded.
+#[derive(Clone, Debug)]
+pub struct LeavePOut {
+    /// Test-set cardinality.
+    pub p: usize,
+}
+
+impl Default for LeavePOut {
+    fn default() -> Self {
+        Self { p: 2 }
+    }
+}
+
+impl LeavePOut {
+    /// Leave-`p`-out splitter.
+    pub fn new(p: usize) -> Self {
+        Self { p }
+    }
+
+    /// Materialize leave-`p`-out folds for `n` rows.
+    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let p = self.p.max(1);
+        if self.p == 0 || self.p >= n {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "LeavePOut.p={} is not in 1..n={n}; using {}",
+                        self.p,
+                        p.min(n.saturating_sub(1).max(1))
+                    ))
+                    .build(),
+            );
+        }
+        let p = p.min(n.saturating_sub(1).max(1));
+        const LIMIT: usize = 128;
+        let combos = combinations_limited(n, p, LIMIT + 1);
+        if combos.len() > LIMIT {
+            ctx.push(
+                Issue::builder(IssueCode::Overparameterized)
+                    .message(format!(
+                        "LeavePOut({p}) on n={n} exceeds {LIMIT} folds; the iterator is truncated"
+                    ))
+                    .build(),
+            );
+        }
+        let folds: Vec<Split> = combos
+            .into_iter()
+            .take(LIMIT)
+            .map(|test| {
+                let train: Vec<usize> = (0..n).filter(|i| !test.contains(i)).collect();
+                Split { train, test }
+            })
+            .collect();
+        if folds.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!("LeavePOut produced no folds for n={n} p={p}"))
+                    .build(),
+            );
+        }
+        ctx.finish(folds)
+    }
+}
+
+/// User-supplied fold ids (sklearn `PredefinedSplit`).
+///
+/// A value of `-1` keeps the row in every training set. Other integers are
+/// test-fold labels. Fold-id cardinality is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct PredefinedSplit {
+    /// Per-row test-fold id (`-1` = always train).
+    pub test_fold: Vector,
+}
+
+impl PredefinedSplit {
+    /// Splitter from a fold-id vector.
+    pub fn new(test_fold: Vector) -> Self {
+        Self { test_fold }
+    }
+
+    /// Materialize one fold per distinct non-negative id.
+    pub fn split(&self, session: &Session) -> Result<Qualified<Vec<Split>>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let n = self.test_fold.len();
+        let mut ids: Vec<i64> = Vec::new();
+        for &v in self.test_fold.as_slice() {
+            if !v.is_finite() {
+                continue;
+            }
+            let lab = v.round() as i64;
+            if lab >= 0 && !ids.contains(&lab) {
+                ids.push(lab);
+            }
+        }
+        ids.sort_unstable();
+        if ids.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("PredefinedSplit has no non-negative fold ids")
+                    .build(),
+            );
+        }
+        let mut folds = Vec::with_capacity(ids.len());
+        for &lab in &ids {
+            let mut test = Vec::new();
+            let mut train = Vec::new();
+            for i in 0..n {
+                let v = self.test_fold[i];
+                if !v.is_finite() {
+                    continue;
+                }
+                let id = v.round() as i64;
+                if id == lab {
+                    test.push(i);
+                } else {
+                    train.push(i);
+                }
+            }
+            folds.push(Split { train, test });
+        }
+        ctx.finish(folds)
+    }
+}
+
+/// Single causal hold-out (sktime `TemporalTrainTestSplitter`).
+///
+/// `test_size` in `(0, 1)` is a fraction; otherwise it is a row count.
+#[derive(Clone, Debug)]
+pub struct TemporalTrainTestSplitter {
+    /// Test length or fraction.
+    pub test_size: f64,
+}
+
+impl Default for TemporalTrainTestSplitter {
+    fn default() -> Self {
+        Self { test_size: 0.25 }
+    }
+}
+
+impl TemporalTrainTestSplitter {
+    /// Causal splitter with the given test size.
+    pub fn new(test_size: f64) -> Self {
+        Self { test_size }
+    }
+
+    /// One expanding-origin hold-out on `n` rows.
+    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        if n < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!("TemporalTrainTestSplitter on n={n} < 2"))
+                    .build(),
+            );
+            return ctx.finish(Vec::new());
+        }
+        let mut h = if self.test_size > 0.0 && self.test_size < 1.0 {
+            (n as f64 * self.test_size).round() as usize
+        } else {
+            self.test_size.round() as usize
+        };
+        if self.test_size <= 0.0 || (self.test_size >= 1.0 && h >= n) {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "TemporalTrainTestSplitter.test_size={} is not a valid hold-out",
+                        self.test_size
+                    ))
+                    .build(),
+            );
+        }
+        h = h.clamp(1, n.saturating_sub(1).max(1));
+        ctx.finish(vec![Split {
+            train: (0..n - h).collect(),
+            test: (n - h..n).collect(),
+        }])
+    }
+}
+
+/// Leave-one-group-out (sklearn `LeaveOneGroupOut`).
+///
+/// Group count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct LeaveOneGroupOut;
+
+impl LeaveOneGroupOut {
+    /// Default LOGO splitter.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// One test fold per distinct group id.
+    pub fn split(&self, groups: &Vector, session: &Session) -> Result<Qualified<Vec<Split>>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let n = groups.len();
+        let mut ids: Vec<i64> = Vec::new();
+        for &g in groups.as_slice() {
+            if !g.is_finite() {
+                continue;
+            }
+            let lab = g.round() as i64;
+            if !ids.contains(&lab) {
+                ids.push(lab);
+            }
+        }
+        ids.sort_unstable();
+        if ids.len() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!("LeaveOneGroupOut has {} groups", ids.len()))
+                    .build(),
+            );
+        }
+        let mut folds = Vec::with_capacity(ids.len());
+        for &lab in &ids {
+            let mut test = Vec::new();
+            let mut train = Vec::new();
+            for i in 0..n {
+                if groups[i].round() as i64 == lab {
+                    test.push(i);
+                } else {
+                    train.push(i);
+                }
+            }
+            folds.push(Split { train, test });
+        }
+        ctx.finish(folds)
+    }
+}
+
+/// Stratified group k-fold (sklearn `StratifiedGroupKFold`).
+///
+/// Whole groups stay together; folds are filled to balance the majority
+/// class of each group. Group count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct StratifiedGroupKFold {
+    /// Number of folds.
+    pub n_splits: usize,
+}
+
+impl Default for StratifiedGroupKFold {
+    fn default() -> Self {
+        Self { n_splits: 5 }
+    }
+}
+
+impl StratifiedGroupKFold {
+    /// `k` stratified group folds.
+    pub fn new(n_splits: usize) -> Self {
+        Self { n_splits }
+    }
+
+    /// Split using labels `y` and group ids `groups`.
+    pub fn split(
+        &self,
+        y: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<Vec<Split>>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let n = y.len().min(groups.len());
+        if y.len() != groups.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("StratifiedGroupKFold: y length ≠ groups length")
+                    .build(),
+            );
+        }
+        let k = self.n_splits.max(2);
+        if self.n_splits < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("StratifiedGroupKFold.n_splits < 2; using 2")
+                    .build(),
+            );
+        }
+        let mut ids: Vec<i64> = Vec::new();
+        for i in 0..n {
+            if !groups[i].is_finite() {
+                continue;
+            }
+            let lab = groups[i].round() as i64;
+            if !ids.contains(&lab) {
+                ids.push(lab);
+            }
+        }
+        if ids.len() < k {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "StratifiedGroupKFold requested {k} folds but only {} groups",
+                        ids.len()
+                    ))
+                    .build(),
+            );
+        }
+        let mut majority: Vec<(i64, i64, usize)> = Vec::new();
+        for &g in &ids {
+            let mut counts: Vec<(i64, usize)> = Vec::new();
+            let mut size = 0usize;
+            for i in 0..n {
+                if groups[i].round() as i64 != g {
+                    continue;
+                }
+                size += 1;
+                if !y[i].is_finite() {
+                    continue;
+                }
+                let lab = y[i].round() as i64;
+                if let Some(slot) = counts.iter_mut().find(|(c, _)| *c == lab) {
+                    slot.1 += 1;
+                } else {
+                    counts.push((lab, 1));
+                }
+            }
+            counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            let maj = counts.first().map(|c| c.0).unwrap_or(0);
+            majority.push((g, maj, size));
+        }
+        majority.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+        let k_use = k.min(ids.len().max(1));
+        let mut fold_groups: Vec<Vec<i64>> = vec![Vec::new(); k_use];
+        let mut fold_load = vec![0usize; k_use];
+        let mut fold_class: Vec<Vec<(i64, usize)>> = vec![Vec::new(); k_use];
+        for &(g, maj, size) in &majority {
+            let mut best = 0usize;
+            let mut best_key = (usize::MAX, usize::MAX);
+            for f in 0..k_use {
+                let class_n = fold_class[f]
+                    .iter()
+                    .find(|(c, _)| *c == maj)
+                    .map(|s| s.1)
+                    .unwrap_or(0);
+                let key = (class_n, fold_load[f]);
+                if key < best_key {
+                    best_key = key;
+                    best = f;
+                }
+            }
+            fold_groups[best].push(g);
+            fold_load[best] += size;
+            if let Some(slot) = fold_class[best].iter_mut().find(|(c, _)| *c == maj) {
+                slot.1 += size;
+            } else {
+                fold_class[best].push((maj, size));
+            }
+        }
+        let mut folds = Vec::with_capacity(k_use);
+        for f in 0..k_use {
+            let mut test = Vec::new();
+            let mut train = Vec::new();
+            for i in 0..n {
+                let g = groups[i].round() as i64;
+                if fold_groups[f].contains(&g) {
+                    test.push(i);
+                } else {
+                    train.push(i);
+                }
+            }
+            folds.push(Split { train, test });
+        }
+        ctx.finish(folds)
+    }
+}
+
+/// Observed score, permutation scores, and a Monte Carlo *p* (sklearn
+/// `permutation_test_score`).
+#[derive(Clone, Debug)]
+pub struct PermutationTestScore {
+    /// Mean KFold Ridge \(R^2\) on the true labels.
+    pub score: f64,
+    /// The same score after each label permutation.
+    pub permutation_scores: Vector,
+    /// \((1 + \#\{s_\pi \ge s\}) / (n_{\mathrm{perm}}+1)\).
+    pub pvalue: f64,
+}
+
+/// Permutation test of a Ridge \(R^2\) against shuffled labels.
+///
+/// Inner residual / rank failures are not promoted. The Monte Carlo *p* is
+/// recorded as unreliable (it is not an exact permutation tail).
+pub fn permutation_test_score(
+    x: &Matrix,
+    y: &Vector,
+    n_permutations: usize,
+    n_splits: usize,
+    session: &Session,
+) -> Result<Qualified<PermutationTestScore>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let k = n_splits.max(2);
+    if n_splits < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message("permutation_test_score n_splits < 2; using 2")
+                .build(),
+        );
+    }
+    let nperm = n_permutations.max(1);
+    if n_permutations < 1 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message("permutation_test_score n_permutations < 1; using 1")
+                .build(),
+        );
+    }
+    let folds = match KFold::new(k).split(x.nrows(), &session.child("pts_k")) {
+        Ok(q) => q.value,
+        Err(e) => {
+            if !matches!(
+                e.primary.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+            ) {
+                ctx.push(e.primary);
+            }
+            return ctx.finish(PermutationTestScore {
+                score: f64::NAN,
+                permutation_scores: Vector::zeros(0),
+                pvalue: f64::NAN,
+            });
+        }
+    };
+    let score_of = |yy: &Vector, sess: &Session| -> f64 {
+        let mut acc = 0.0;
+        let mut used: f64 = 0.0;
+        for (fi, fold) in folds.iter().enumerate() {
+            let xt = take_rows(x, &fold.train);
+            let yt = take_vec(yy, &fold.train);
+            let xv = take_rows(x, &fold.test);
+            let yv = take_vec(yy, &fold.test);
+            let child = sess.child(format!("f{fi}"));
+            match Ridge::new(0.1).fit(&xt, &yt, &child) {
+                Ok(q) => {
+                    if let Ok(pred) = q.value.predict(&xv, &sess.child("p")) {
+                        if let Ok(s) = r2(&yv, &pred.value, &sess.child("r")) {
+                            if s.value.is_finite() {
+                                acc += s.value;
+                                used += 1.0;
+                            }
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        if used > 0.0 {
+            acc / used
+        } else {
+            f64::NAN
+        }
+    };
+    let observed = score_of(y, &session.child("obs"));
+    let mut rng = Rng::new(11);
+    let mut yb = y.as_slice().to_vec();
+    let mut perm = Vec::with_capacity(nperm);
+    for _ in 0..nperm {
+        rng.shuffle(&mut yb);
+        perm.push(score_of(&Vector::from_slice(&yb), &session.child("perm")));
+    }
+    let ge = perm
+        .iter()
+        .filter(|&&s| s.is_finite() && observed.is_finite() && s >= observed)
+        .count();
+    let pvalue = (1 + ge) as f64 / (nperm + 1) as f64;
+    ctx.push(
+        Issue::builder(IssueCode::PValueUnreliable)
+            .severity(Severity::Advisory)
+            .message("permutation_test_score p is a Monte Carlo tail, not an exact permutation p")
+            .compromise(NumericalCompromise::new(
+                "exact permutation tail",
+                format!("{nperm} label shuffles of a Ridge KFold R²"),
+                "the enumerator includes the observed score (plus-one smoothing)",
+                "read p as a Monte Carlo upper bound on the exchangeability test",
+            ))
+            .build(),
+    );
+    ctx.finish(PermutationTestScore {
+        score: observed,
+        permutation_scores: Vector::from_iter(perm),
+        pvalue,
+    })
+}
+
 /// Fit a column standardizer on **all** rows of `X` and transform them.
 ///
 /// This is the helper that documents the leakage anti-pattern. The scale is
@@ -3342,5 +3880,41 @@ mod tests {
         let pd = partial_dependence(&x, &y, 0, &grid, &Session::new("ms", "pd")).unwrap();
         assert_eq!(pd.value.average.len(), 3);
         assert!(pd.value.average.as_slice().iter().all(|v| v.is_finite()));
+        let lpo = LeavePOut::new(2)
+            .split(6, &Session::new("ms", "lpo"))
+            .unwrap()
+            .value;
+        assert_eq!(lpo.len(), 15);
+        assert!(lpo.iter().all(|s| s.test.len() == 2 && s.train.len() == 4));
+        let tf = Vector::from_slice(&[-1.0, 0.0, 0.0, 1.0, 1.0, -1.0]);
+        let pre = PredefinedSplit::new(tf)
+            .split(&Session::new("ms", "pre"))
+            .unwrap()
+            .value;
+        assert_eq!(pre.len(), 2);
+        let tt = TemporalTrainTestSplitter::new(0.25)
+            .split(20, &Session::new("ms", "ttt"))
+            .unwrap()
+            .value;
+        assert_eq!(tt.len(), 1);
+        assert_eq!(tt[0].test.len(), 5);
+        assert!(tt[0].train.iter().max().unwrap() < tt[0].test.iter().min().unwrap());
+        let g = Vector::from_slice(&[0.0, 0.0, 1.0, 1.0, 2.0, 2.0]);
+        let logo = LeaveOneGroupOut::new()
+            .split(&g, &Session::new("ms", "logo"))
+            .unwrap()
+            .value;
+        assert_eq!(logo.len(), 3);
+        let yg = Vector::from_iter((0..16).map(|i| if i % 4 < 2 { 0.0 } else { 1.0 }));
+        let gg = Vector::from_iter((0..16).map(|i| (i / 4) as f64));
+        let sgk = StratifiedGroupKFold::new(2)
+            .split(&yg, &gg, &Session::new("ms", "sgk"))
+            .unwrap()
+            .value;
+        assert_eq!(sgk.len(), 2);
+        let pts = permutation_test_score(&x, &y, 8, 3, &Session::new("ms", "pts")).unwrap();
+        assert!(pts.value.score.is_finite());
+        assert_eq!(pts.value.permutation_scores.len(), 8);
+        assert!(pts.value.pvalue <= 1.0);
     }
 }

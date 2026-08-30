@@ -4707,6 +4707,247 @@ pub fn anova_lm(
     })
 }
 
+/// Two-factor ANOVA (statsmodels `anova_lm` Type II on a two-way design).
+///
+/// Factor and cell counts are **not** identification `p`. Empty cells and a
+/// singular interaction block are recorded; they do not reuse cluster/`p`
+/// gates.
+#[derive(Clone, Debug)]
+pub struct AnovaTwoway {
+    /// Type-II *F* for factor A (after B).
+    pub f_a: f64,
+    /// Upper-tail *p* for A.
+    pub p_a: f64,
+    /// Type-II *F* for factor B (after A).
+    pub f_b: f64,
+    /// Upper-tail *p* for B.
+    pub p_b: f64,
+    /// Type-II *F* for the A×B interaction.
+    pub f_ab: f64,
+    /// Upper-tail *p* for A×B.
+    pub p_ab: f64,
+    /// Type-II extra sum of squares for A.
+    pub ss_a: f64,
+    /// Type-II extra sum of squares for B.
+    pub ss_b: f64,
+    /// Extra sum of squares for A×B.
+    pub ss_ab: f64,
+    /// Residual sum of squares of the saturated cell-means model.
+    pub ss_error: f64,
+    /// \(a-1\).
+    pub df_a: f64,
+    /// \(b-1\).
+    pub df_b: f64,
+    /// Interaction degrees of freedom.
+    pub df_ab: f64,
+    /// Residual degrees of freedom.
+    pub df_error: f64,
+}
+
+fn unique_int_labels(v: &Vector) -> Vec<i64> {
+    let mut ids = Vec::new();
+    for &x in v.as_slice() {
+        if !x.is_finite() {
+            continue;
+        }
+        let lab = x.round() as i64;
+        if !ids.contains(&lab) {
+            ids.push(lab);
+        }
+    }
+    ids.sort_unstable();
+    ids
+}
+
+fn dummy_vs_ref(labels: &Vector, ids: &[i64], k: usize) -> Vector {
+    let this = ids[k];
+    Vector::from_iter(labels.as_slice().iter().map(|&v| {
+        if v.is_finite() && v.round() as i64 == this {
+            1.0
+        } else {
+            0.0
+        }
+    }))
+}
+
+fn cols_to_matrix(cols: &[Vector], n: usize) -> Matrix {
+    if cols.is_empty() {
+        return Matrix::zeros(n, 0);
+    }
+    Matrix::from_fn(n, cols.len(), |i, j| cols[j][i])
+}
+
+fn twoway_f(extra: f64, df_num: f64, sse: f64, df_den: f64) -> (f64, f64) {
+    if df_num <= 0.0 || df_den <= 0.0 || sse <= 1e-18 || extra <= 0.0 {
+        return (f64::NAN, f64::NAN);
+    }
+    let f = (extra / df_num) / (sse / df_den);
+    if f.is_finite() && f > 0.0 {
+        (f, f_pvalue(f, df_num, df_den))
+    } else {
+        (f64::NAN, f64::NAN)
+    }
+}
+
+/// Two-way Type-II ANOVA of `y` on integer-coded factors `a` and `b`.
+///
+/// Dummy-column counts are identification `p` only when \(n \ge 5p\).
+pub fn anova_twoway(
+    y: &Vector,
+    a: &Vector,
+    b: &Vector,
+    session: &Session,
+) -> Result<Qualified<AnovaTwoway>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, y);
+    if a.len() != y.len() || b.len() != y.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("anova_twoway: factor length ≠ y length")
+                .build(),
+        );
+    }
+    let n = y.len().min(a.len()).min(b.len());
+    let a_ids = unique_int_labels(a);
+    let b_ids = unique_int_labels(b);
+    let na = a_ids.len();
+    let nb = b_ids.len();
+    if na < 2 || nb < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "anova_twoway needs ≥2 levels in each factor (A={na} B={nb})"
+                ))
+                .build(),
+        );
+        return ctx.finish(AnovaTwoway {
+            f_a: f64::NAN,
+            p_a: f64::NAN,
+            f_b: f64::NAN,
+            p_b: f64::NAN,
+            f_ab: f64::NAN,
+            p_ab: f64::NAN,
+            ss_a: 0.0,
+            ss_b: 0.0,
+            ss_ab: 0.0,
+            ss_error: 0.0,
+            df_a: (na as f64 - 1.0).max(0.0),
+            df_b: (nb as f64 - 1.0).max(0.0),
+            df_ab: 0.0,
+            df_error: 0.0,
+        });
+    }
+    let mut cell_n = vec![0usize; na * nb];
+    for i in 0..n {
+        if !a[i].is_finite() || !b[i].is_finite() {
+            continue;
+        }
+        let ia = a_ids.iter().position(|&v| v == a[i].round() as i64);
+        let ib = b_ids.iter().position(|&v| v == b[i].round() as i64);
+        if let (Some(ia), Some(ib)) = (ia, ib) {
+            cell_n[ia * nb + ib] += 1;
+        }
+    }
+    if cell_n.iter().any(|&c| c == 0) {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("anova_twoway has an empty cell; Type-II interaction df is reduced")
+                .build(),
+        );
+    }
+    let intercept = Vector::from_iter((0..n).map(|_| 1.0));
+    let mut a_dummies = Vec::new();
+    for k in 1..na {
+        a_dummies.push(dummy_vs_ref(a, &a_ids, k));
+    }
+    let mut b_dummies = Vec::new();
+    for k in 1..nb {
+        b_dummies.push(dummy_vs_ref(b, &b_ids, k));
+    }
+    let mut ab_dummies = Vec::new();
+    for ia in 0..a_dummies.len() {
+        for ib in 0..b_dummies.len() {
+            let col = Vector::from_iter((0..n).map(|i| a_dummies[ia][i] * b_dummies[ib][i]));
+            if col.as_slice().iter().any(|&v| v.abs() > 0.0) {
+                ab_dummies.push(col);
+            }
+        }
+    }
+    let only_int = vec![intercept.clone()];
+    let mut only_a = only_int.clone();
+    only_a.extend(a_dummies.iter().cloned());
+    let mut only_b = only_int.clone();
+    only_b.extend(b_dummies.iter().cloned());
+    let mut mains = only_a.clone();
+    mains.extend(b_dummies.iter().cloned());
+    let mut full = mains.clone();
+    full.extend(ab_dummies.iter().cloned());
+    let x_a = cols_to_matrix(&only_a, n);
+    let x_b = cols_to_matrix(&only_b, n);
+    let x_m = cols_to_matrix(&mains, n);
+    let x_f = cols_to_matrix(&full, n);
+    if n >= 5 * x_f.ncols().max(1) {
+        inspect_identification(&mut ctx.report, n, x_f.ncols(), &ctx.policy);
+    }
+    let (ss_a_only, _) = ols_sse(&x_a, y, &ctx.policy);
+    let (ss_b_only, _) = ols_sse(&x_b, y, &ctx.policy);
+    let (ss_m, _) = ols_sse(&x_m, y, &ctx.policy);
+    let (ss_f, p_f) = ols_sse(&x_f, y, &ctx.policy);
+    let ss_a = (ss_b_only - ss_m).max(0.0);
+    let ss_b = (ss_a_only - ss_m).max(0.0);
+    let ss_ab = (ss_m - ss_f).max(0.0);
+    let df_a = (na - 1) as f64;
+    let df_b = (nb - 1) as f64;
+    let df_ab = ab_dummies.len() as f64;
+    let df_error = n as f64 - p_f as f64;
+    if df_error <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::DegreesOfFreedomNonPositive)
+                .message("anova_twoway residual df ≤ 0")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "two-way ANOVA F",
+                    "the cell-means model has no residual degrees of freedom",
+                    "collect more rows per cell",
+                ))
+                .build(),
+        );
+    }
+    if ss_f <= 1e-18 && df_error > 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::R2IsOne)
+                .message("two-way ANOVA residual SS is ~0; F ratios are infinite or undefined")
+                .meaninglessness(Meaninglessness::new(
+                    "two-way ANOVA F",
+                    "within-cell residual is numerically zero",
+                    signlred::InterpretiveValue::Misleading,
+                    "do not treat infinite F as a precise p-value",
+                ))
+                .build(),
+        );
+    }
+    let (f_a, p_a) = twoway_f(ss_a, df_a, ss_f, df_error);
+    let (f_b, p_b) = twoway_f(ss_b, df_b, ss_f, df_error);
+    let (f_ab, p_ab) = twoway_f(ss_ab, df_ab, ss_f, df_error);
+    ctx.finish(AnovaTwoway {
+        f_a,
+        p_a,
+        f_b,
+        p_b,
+        f_ab,
+        p_ab,
+        ss_a,
+        ss_b,
+        ss_ab,
+        ss_error: ss_f,
+        df_a,
+        df_b,
+        df_ab,
+        df_error,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4895,5 +5136,16 @@ mod tests {
         let xf = Matrix::from_fn(24, 2, |i, j| if j == 0 { 1.0 } else { i as f64 });
         let alm = anova_lm(&yr, &xr, &xf, &Session::new("anlm", "t")).expect("anlm");
         assert!(alm.value.f_stat > 10.0, "F={}", alm.value.f_stat);
+        let y2w = Vector::from_iter((0..32).map(|i| {
+            let a = if i < 16 { 0.0 } else { 1.0 };
+            let b = if i % 2 == 0 { 0.0 } else { 1.0 };
+            0.4 * b + 3.0 * a + 0.05 * ((i % 5) as f64)
+        }));
+        let fa = Vector::from_iter((0..32).map(|i| if i < 16 { 0.0 } else { 1.0 }));
+        let fb = Vector::from_iter((0..32).map(|i| if i % 2 == 0 { 0.0 } else { 1.0 }));
+        let tw = anova_twoway(&y2w, &fa, &fb, &Session::new("a2", "t")).expect("a2");
+        assert!(tw.value.f_a > 10.0, "Fa={}", tw.value.f_a);
+        assert!(tw.value.p_a < 0.05);
+        assert!(tw.value.ss_error.is_finite());
     }
 }

@@ -19,7 +19,9 @@ use crate::special::norm_cdf;
 use crate::traits::{PartialFit, Predict, Transform};
 use faer::Mat;
 use ojizou_san::{IncrementalExplain, Session};
-use signlred::{IncrementalQuality, Issue, IssueCode, Qualified, Result, Severity};
+use signlred::{
+    IncrementalQuality, Issue, IssueCode, NumericalCompromise, Qualified, Result, Severity,
+};
 use std::collections::HashMap;
 
 pub use crate::linear_model::SgdRegressor;
@@ -7080,6 +7082,500 @@ impl Predict for OnlineGaussianNb {
     }
 }
 
+/// Incremental TF–IDF on a document–term count stream (river `feature_extraction.TFIDF`).
+///
+/// Document count is not identification `p`. IDF uses add-one smoothing and is
+/// recorded as a running approximation of the corpus IDF.
+#[derive(Clone, Debug)]
+pub struct OnlineTfidf {
+    df: Vector,
+    n_docs: u64,
+    n_features: usize,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineTfidf {
+    fn default() -> Self {
+        Self {
+            df: Vector::zeros(0),
+            n_docs: 0,
+            n_features: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineTfidf {
+    /// Empty streaming TF–IDF.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for OnlineTfidf {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_docs, "no features"),
+            );
+        }
+        if !self.initialized {
+            self.df = Vector::zeros(x.ncols());
+            self.n_features = x.ncols();
+            self.initialized = true;
+        } else if self.n_features != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_docs,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.df.clone();
+        for i in 0..x.nrows() {
+            let mut row_sum: f64 = 0.0;
+            for j in 0..x.ncols() {
+                let v = x.get(i, j);
+                if v.is_finite() && v > 0.0 {
+                    row_sum += v;
+                    self.df[j] += 1.0;
+                }
+            }
+            if row_sum <= 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NearZeroVariance)
+                        .message(format!(
+                            "OnlineTfidf document {i} has no positive term counts"
+                        ))
+                        .build(),
+                );
+            }
+            self.n_docs += 1;
+        }
+        self.updates += 1;
+        let delta = self.df.sub(&before);
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_docs);
+        q.effective_sample_size = self.n_docs as f64;
+        q.parameter_delta_norm = Some(delta.norm());
+        q.information_gain = Some(delta.norm().max(1.0 / self.n_docs.max(1) as f64));
+        q.still_identified = self.n_docs >= 1;
+        q.warmup = self.n_docs < 4;
+        q.explanation = format!("online TF-IDF df on {} documents", x.nrows());
+        flag_info(&mut ctx, &q);
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(Severity::Advisory)
+                .message(
+                    "OnlineTfidf IDF is a running add-one estimate, not the finished corpus IDF",
+                )
+                .compromise(NumericalCompromise::new(
+                    "batch TF-IDF on the complete collection",
+                    "smoothed IDF from documents seen so far",
+                    "early-stream IDF is biased toward the first documents",
+                    "do not treat early IDF weights as a static vocabulary ranking",
+                ))
+                .build(),
+        );
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "document frequencies",
+                "increment df for each positive term",
+                "previous df",
+                format!("n_docs={}", self.n_docs),
+            ),
+        )
+    }
+}
+
+impl Transform for OnlineTfidf {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(x.clone());
+        }
+        let p = x.ncols().min(self.df.len());
+        let n = self.n_docs.max(1) as f64;
+        let out = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            let tf = x.get(i, j).max(0.0);
+            if j >= p {
+                return tf;
+            }
+            let idf = ((n + 1.0) / (self.df[j] + 1.0)).ln() + 1.0;
+            tf * idf
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Running-mean imputer (river `imputation.StatImputer`).
+///
+/// Non-finite entries are skipped in the sufficient statistics. A column that
+/// has never been observed finite is filled with 0 and recorded; that is not
+/// a vacuous all-missing abort.
+#[derive(Clone, Debug)]
+pub struct StatImputer {
+    mean: Vector,
+    m2: Vector,
+    count: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for StatImputer {
+    fn default() -> Self {
+        Self {
+            mean: Vector::zeros(0),
+            m2: Vector::zeros(0),
+            count: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl StatImputer {
+    /// Empty streaming mean imputer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for StatImputer {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        if !self.initialized {
+            self.mean = Vector::zeros(x.ncols());
+            self.m2 = Vector::zeros(x.ncols());
+            self.count = Vector::zeros(x.ncols());
+            self.initialized = true;
+        } else if self.mean.len() != x.ncols() {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.mean.clone();
+        for j in 0..x.ncols() {
+            for i in 0..x.nrows() {
+                let v = x.get(i, j);
+                if !v.is_finite() {
+                    continue;
+                }
+                self.count[j] += 1.0;
+                let n = self.count[j];
+                let d = v - self.mean[j];
+                self.mean[j] += d / n;
+                let d2 = v - self.mean[j];
+                self.m2[j] += d * d2;
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let delta = self.mean.sub(&before);
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self
+            .count
+            .as_slice()
+            .iter()
+            .copied()
+            .fold(0.0, |a, b| a.max(b));
+        q.parameter_delta_norm = Some(delta.norm());
+        q.information_gain = Some(delta.norm().max(1.0 / self.n_seen.max(1) as f64));
+        q.still_identified = self.count.as_slice().iter().all(|&c| c >= 1.0);
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!("StatImputer Welford update on {} rows", x.nrows());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "column means",
+                "Welford on finite entries",
+                "previous means",
+                "updated means",
+            ),
+        )
+    }
+}
+
+impl Transform for StatImputer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(x.clone());
+        }
+        let p = x.ncols().min(self.mean.len());
+        let out = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            let v = x.get(i, j);
+            if v.is_finite() {
+                return v;
+            }
+            if j >= p || self.count[j] < 1.0 {
+                return 0.0;
+            }
+            self.mean[j]
+        });
+        for j in 0..p {
+            if self.count[j] < 1.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::ImputationUndefined)
+                        .severity(Severity::Warning)
+                        .message(format!(
+                            "StatImputer column {j} has no finite observations; missing values become 0"
+                        ))
+                        .build(),
+                );
+            }
+        }
+        ctx.finish(out)
+    }
+}
+
+/// Streaming univariate ANOVA *F* feature filter (river `feature_selection.SelectKBest`).
+///
+/// Class count is not identification `p`. Scores are class-conditional Welford
+/// moments; a thin class is recorded, not treated as a cluster/`p` gate.
+#[derive(Clone, Debug)]
+pub struct OnlineSelectKBest {
+    /// Number of columns to keep.
+    pub k: usize,
+    classes: Vec<i64>,
+    n_per: Vec<f64>,
+    mean: Matrix,
+    m2: Matrix,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineSelectKBest {
+    fn default() -> Self {
+        Self {
+            k: 1,
+            classes: Vec::new(),
+            n_per: Vec::new(),
+            mean: Matrix::zeros(0, 0),
+            m2: Matrix::zeros(0, 0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineSelectKBest {
+    /// Keep `k` columns with the largest running ANOVA *F*.
+    pub fn new(k: usize) -> Self {
+        Self {
+            k,
+            ..Self::default()
+        }
+    }
+
+    fn scores(&self) -> Vector {
+        let p = self.mean.ncols();
+        let k = self.classes.len();
+        if k < 2 || p == 0 {
+            return Vector::zeros(p);
+        }
+        Vector::from_iter((0..p).map(|j| {
+            let mut ntot = 0.0;
+            let mut grand = 0.0;
+            for c in 0..k {
+                ntot += self.n_per[c];
+                grand += self.n_per[c] * self.mean.get(c, j);
+            }
+            if ntot <= 0.0 {
+                return 0.0;
+            }
+            grand /= ntot;
+            let mut ssb = 0.0;
+            let mut ssw = 0.0;
+            for c in 0..k {
+                let d = self.mean.get(c, j) - grand;
+                ssb += self.n_per[c] * d * d;
+                ssw += self.m2.get(c, j);
+            }
+            let dfb = (k as f64 - 1.0).max(1.0);
+            let dfw = (ntot - k as f64).max(1.0);
+            if ssw <= 1e-18 {
+                return 0.0;
+            }
+            (ssb / dfb) / (ssw / dfw)
+        }))
+    }
+}
+
+impl PartialFit for OnlineSelectKBest {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        let p = x.ncols();
+        if self.k == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("OnlineSelectKBest.k=0; transform will keep no columns")
+                    .build(),
+            );
+        }
+        if self.initialized && self.mean.ncols() != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let lab = y[i].round() as i64;
+            let idx = if let Some(t) = self.classes.iter().position(|&c| c == lab) {
+                t
+            } else {
+                self.classes.push(lab);
+                self.n_per.push(0.0);
+                let kc = self.classes.len();
+                let mut nm = Matrix::zeros(kc, p);
+                let mut n2 = Matrix::zeros(kc, p);
+                for r in 0..self.mean.nrows() {
+                    for c in 0..p.min(self.mean.ncols()) {
+                        nm.set(r, c, self.mean.get(r, c));
+                        n2.set(r, c, self.m2.get(r, c));
+                    }
+                }
+                self.mean = nm;
+                self.m2 = n2;
+                self.initialized = true;
+                kc - 1
+            };
+            self.n_per[idx] += 1.0;
+            let n = self.n_per[idx];
+            for j in 0..p {
+                let v = x.get(i, j);
+                if !v.is_finite() {
+                    continue;
+                }
+                let d = v - self.mean.get(idx, j);
+                self.mean.set(idx, j, self.mean.get(idx, j) + d / n);
+                let d2 = v - self.mean.get(idx, j);
+                self.m2.set(idx, j, self.m2.get(idx, j) + d * d2);
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        if self.classes.len() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("OnlineSelectKBest has <2 classes; ANOVA F is unidentified")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some((self.n_seen - before_n) as f64);
+        q.still_identified = self.classes.len() >= 2 && self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!("online SelectKBest ANOVA on {} rows", x.nrows());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "class-conditional moments",
+                "Welford update then ANOVA F ranking",
+                format!("n={before_n}"),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Transform for OnlineSelectKBest {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), 0));
+        }
+        let scores = self.scores();
+        let p = scores.len().min(x.ncols());
+        let k = self.k.min(p);
+        let mut order: Vec<usize> = (0..p).collect();
+        order.sort_by(|a, b| {
+            scores[*b]
+                .partial_cmp(&scores[*a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.cmp(b))
+        });
+        order.truncate(k);
+        order.sort_unstable();
+        let out = Matrix::from_fn(x.nrows(), k, |i, j| x.get(i, order[j]));
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7278,6 +7774,15 @@ mod tests {
         OnlineOrdinalEncoder::new(8)
             .partial_fit(&x, None, &session)
             .expect("ord");
+        OnlineTfidf::new()
+            .partial_fit(&x, None, &session)
+            .expect("tfidf");
+        StatImputer::new()
+            .partial_fit(&x, None, &session)
+            .expect("statimp");
+        OnlineSelectKBest::new(1)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("osk");
 
         let n_expl = session
             .ledger()

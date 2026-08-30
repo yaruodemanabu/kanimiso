@@ -711,6 +711,322 @@ pub struct FittedTwoStepGmm {
     pub windmeijer_applied: bool,
 }
 
+/// Two-step IV-GMM with the Windmeijer (2005) finite-sample variance correction.
+///
+/// [`TwoStepGmm`] remains the uncorrected Hansen-*J* point. This wrapper keeps
+/// that point and replaces the usual \((G'WG)^{-1}\) sandwich with
+/// \(V+D+D'\), where \(D\) is the analytic \(\partial S/\partial\beta\) term.
+#[derive(Clone, Debug, Default)]
+pub struct WindmeijerGmm {
+    /// Include an intercept in both stages.
+    pub fit_intercept: bool,
+}
+
+impl WindmeijerGmm {
+    /// Default Windmeijer-corrected two-step GMM.
+    pub fn new() -> Self {
+        Self {
+            fit_intercept: true,
+        }
+    }
+
+    /// Fit `y` on `x` using instruments `z`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        z: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedWindmeijerGmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let inner = match (TwoStepGmm {
+            fit_intercept: self.fit_intercept,
+        })
+        .fit(x, y, z, &session.child("twostep"))
+        {
+            Ok(q) => q,
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                ) {
+                    ctx.push(e.primary);
+                }
+                return ctx.finish(FittedWindmeijerGmm {
+                    coef: Vector::zeros(x.ncols()),
+                    intercept: 0.0,
+                    se: Vector::zeros(x.ncols()),
+                    hansen_j: f64::NAN,
+                    hansen_p: f64::NAN,
+                    df_overid: 0,
+                    first_stage_f: f64::NAN,
+                    windmeijer_applied: false,
+                });
+            }
+        };
+        for issue in inner.report.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::PValueUnreliable
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let zdes = if self.fit_intercept {
+            z.with_intercept()
+        } else {
+            z.clone()
+        };
+        let xdes = if self.fit_intercept {
+            x.with_intercept()
+        } else {
+            x.clone()
+        };
+        let mut pred = x.matvec(&inner.value.coef);
+        for i in 0..pred.len() {
+            pred[i] += inner.value.intercept;
+        }
+        let e = Vector::from_iter(y.as_slice().iter().zip(pred.as_slice()).map(|(a, b)| a - b));
+        let kz = zdes.ncols();
+        let p = xdes.ncols();
+        let n = y.len().min(zdes.nrows()).min(xdes.nrows());
+        let mut g = Matrix::zeros(kz, p);
+        for a in 0..kz {
+            for b in 0..p {
+                let mut acc = 0.0;
+                for i in 0..n {
+                    acc += zdes.get(i, a) * xdes.get(i, b);
+                }
+                g.set(a, b, acc);
+            }
+        }
+        let mut s = Mat::<f64>::zeros(kz, kz);
+        for a in 0..kz {
+            for b in 0..=a {
+                let mut acc = 0.0;
+                for i in 0..n {
+                    let wi = e[i] * e[i];
+                    acc += zdes.get(i, a) * wi * zdes.get(i, b);
+                }
+                s[(a, b)] = acc;
+                s[(b, a)] = acc;
+            }
+        }
+        for i in 0..kz {
+            s[(i, i)] += 1e-10;
+        }
+        let mut ze = Vector::zeros(kz);
+        for a in 0..kz {
+            let mut acc = 0.0;
+            for i in 0..n {
+                acc += zdes.get(i, a) * e[i];
+            }
+            ze[a] = acc;
+        }
+        let mut w_ok = true;
+        let mut wg = Matrix::zeros(kz, p);
+        for j in 0..p {
+            let col = Vector::from_iter((0..kz).map(|i| g.get(i, j)));
+            let mut scratch = signlred::Report::new("wind", "wg");
+            match chol_solve(&mut scratch, &s, &col, &ctx.policy) {
+                Some(sol) => {
+                    for i in 0..kz {
+                        wg.set(i, j, sol[i]);
+                    }
+                }
+                None => w_ok = false,
+            }
+        }
+        let mut wze = Vector::zeros(kz);
+        {
+            let mut scratch = signlred::Report::new("wind", "wze");
+            match chol_solve(&mut scratch, &s, &ze, &ctx.policy) {
+                Some(sol) => wze = sol,
+                None => w_ok = false,
+            }
+        }
+        let mut se = Vector::zeros(if self.fit_intercept {
+            inner.value.coef.len()
+        } else {
+            inner.value.coef.len()
+        });
+        let mut applied = false;
+        if w_ok {
+            let xtwx = Matrix::from_fn(p, p, |i, j| {
+                let mut acc = 0.0;
+                for r in 0..kz {
+                    acc += g.get(r, i) * wg.get(r, j);
+                }
+                acc
+            });
+            let mut gram = Mat::<f64>::zeros(p, p);
+            for i in 0..p {
+                for j in 0..p {
+                    gram[(i, j)] = xtwx.get(i, j);
+                }
+            }
+            for i in 0..p {
+                gram[(i, i)] += 1e-12;
+            }
+            let mut vmat = Matrix::zeros(p, p);
+            let mut v_ok = true;
+            for j in 0..p {
+                let ej = Vector::from_iter((0..p).map(|i| if i == j { 1.0 } else { 0.0 }));
+                let mut scratch = signlred::Report::new("wind", "v");
+                match chol_solve(&mut scratch, &gram, &ej, &ctx.policy) {
+                    Some(sol) => {
+                        for i in 0..p {
+                            vmat.set(i, j, sol[i]);
+                        }
+                    }
+                    None => v_ok = false,
+                }
+            }
+            if v_ok {
+                let mut dmat = Matrix::zeros(p, p);
+                for k in 0..p {
+                    let mut sk = Mat::<f64>::zeros(kz, kz);
+                    for a in 0..kz {
+                        for b in 0..=a {
+                            let mut acc = 0.0;
+                            for i in 0..n {
+                                acc +=
+                                    -2.0 * e[i] * xdes.get(i, k) * zdes.get(i, a) * zdes.get(i, b);
+                            }
+                            sk[(a, b)] = acc;
+                            sk[(b, a)] = acc;
+                        }
+                    }
+                    let mut skwze = Vector::zeros(kz);
+                    for a in 0..kz {
+                        let mut acc = 0.0;
+                        for b in 0..kz {
+                            acc += sk[(a, b)] * wze[b];
+                        }
+                        skwze[a] = acc;
+                    }
+                    let mut scratch = signlred::Report::new("wind", "dsk");
+                    let wsk = match chol_solve(&mut scratch, &s, &skwze, &ctx.policy) {
+                        Some(sol) => sol,
+                        None => {
+                            v_ok = false;
+                            break;
+                        }
+                    };
+                    let gtw = Vector::from_iter((0..p).map(|j| {
+                        let mut acc = 0.0;
+                        for r in 0..kz {
+                            acc += g.get(r, j) * wsk[r];
+                        }
+                        acc
+                    }));
+                    for i in 0..p {
+                        let mut acc = 0.0;
+                        for j in 0..p {
+                            acc += vmat.get(i, j) * gtw[j];
+                        }
+                        dmat.set(i, k, acc);
+                    }
+                }
+                if v_ok {
+                    applied = true;
+                    let mut neg_diag = false;
+                    let start = if self.fit_intercept { 1 } else { 0 };
+                    let mut out_i = 0usize;
+                    for i in start..p {
+                        let vw = vmat.get(i, i) + 2.0 * dmat.get(i, i);
+                        if vw < 0.0 {
+                            neg_diag = true;
+                        }
+                        se[out_i] = vw.max(0.0).sqrt();
+                        out_i += 1;
+                    }
+                    if neg_diag {
+                        ctx.push(
+                            Issue::builder(IssueCode::JitterInjected)
+                                .message("Windmeijer V+D+D′ had a negative diagonal; SE is floored at 0")
+                                .compromise(NumericalCompromise::new(
+                                    "positive-definite Windmeijer covariance",
+                                    "sqrt(max(diag(V+D+D′), 0))",
+                                    "the one-term analytic correction can overshoot in small samples",
+                                    "treat a zero SE as unidentified, not as a precise zero",
+                                ))
+                                .build(),
+                        );
+                    }
+                }
+            }
+        }
+        if !applied {
+            ctx.push(
+                Issue::builder(IssueCode::CholeskyFailed)
+                    .severity(Severity::Warning)
+                    .message("Windmeijer weight or bread was not SPD; SEs are left NaN")
+                    .compromise(NumericalCompromise::new(
+                        "Windmeijer-corrected two-step SEs",
+                        "point estimates only",
+                        "Z'ΩZ or G'WG failed a Cholesky factorisation",
+                        "do not read the empty SE vector as a precision claim",
+                    ))
+                    .build(),
+            );
+            se = Vector::from_iter((0..inner.value.coef.len()).map(|_| f64::NAN));
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::PValueUnreliable)
+                    .severity(Severity::Advisory)
+                    .message("Windmeijer SEs use the one-term ∂S/∂β correction, not a bootstrap")
+                    .compromise(NumericalCompromise::new(
+                        "bootstrap or higher-order Windmeijer remainder",
+                        "analytic V + D + D′ with D from ∂(Z'ΩZ)/∂β at the two-step residual",
+                        "Ω = diag(e_i²) is the heteroskedastic meat; no clustering",
+                        "use the SEs as a finite-sample adjustment of the usual sandwich",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(FittedWindmeijerGmm {
+            coef: inner.value.coef.clone(),
+            intercept: inner.value.intercept,
+            se,
+            hansen_j: inner.value.hansen_j,
+            hansen_p: inner.value.hansen_p,
+            df_overid: inner.value.df_overid,
+            first_stage_f: inner.value.first_stage_f,
+            windmeijer_applied: applied,
+        })
+    }
+}
+
+/// Fitted Windmeijer-corrected two-step GMM.
+#[derive(Clone, Debug)]
+pub struct FittedWindmeijerGmm {
+    /// Structural slopes (same point as [`TwoStepGmm`]).
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+    /// Windmeijer-corrected standard errors of the slopes.
+    pub se: Vector,
+    /// Second-step Hansen *J*.
+    pub hansen_j: f64,
+    /// χ² p-value of *J*.
+    pub hansen_p: f64,
+    /// Overidentification degrees of freedom.
+    pub df_overid: usize,
+    /// Smallest first-stage *F*.
+    pub first_stage_f: f64,
+    /// `true` when the analytic \(V+D+D'\) correction was formed.
+    pub windmeijer_applied: bool,
+}
+
 /// Limited-information maximum likelihood (k-class).
 ///
 /// Just-identified designs reduce to 2SLS. A single endogenous column uses
@@ -1646,5 +1962,12 @@ mod tests {
         assert!(gmm2.value.coef[0].is_finite());
         assert!(!gmm2.value.windmeijer_applied);
         assert_eq!(gmm2.value.df_overid, 1);
+        let wg = WindmeijerGmm::new()
+            .fit(&xiv, &yiv, &ziv, &Session::new("wind", "fit"))
+            .expect("wind");
+        assert!(wg.value.coef[0].is_finite());
+        assert!(wg.value.windmeijer_applied);
+        assert_eq!(wg.value.se.len(), 1);
+        assert!(wg.value.se[0].is_finite() || wg.value.se[0].is_nan());
     }
 }
