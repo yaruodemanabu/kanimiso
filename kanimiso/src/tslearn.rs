@@ -8,7 +8,7 @@ use crate::data::{Matrix, Vector};
 use crate::linear_model::{FittedPenalized, Ridge};
 use crate::rng::Rng;
 use crate::special::norm_cdf;
-use crate::traits::{Fit, Predict};
+use crate::traits::{Fit, FitUnsupervised, Predict, Transform};
 use crate::validate::{inspect_classes, inspect_xy};
 use ojizou_san::Session;
 use signlred::{Issue, IssueCode, Qualified, Result};
@@ -112,8 +112,15 @@ pub fn softdtw(a: &Vector, b: &Vector, gamma: f64, session: &Session) -> Result<
         ctx.push(Issue::builder(IssueCode::EmptyMatrix).build());
         return ctx.finish(f64::NAN);
     }
+    ctx.finish(softdtw_raw(a.as_slice(), b.as_slice(), gamma))
+}
+
+fn softdtw_raw(a: &[f64], b: &[f64], gamma: f64) -> f64 {
     let n = a.len();
     let m = b.len();
+    if n == 0 || m == 0 {
+        return f64::NAN;
+    }
     let inf = 1e300;
     let mut r = vec![inf; (n + 2) * (m + 2)];
     let idx = |i: usize, j: usize| i * (m + 2) + j;
@@ -129,7 +136,30 @@ pub fn softdtw(a: &Vector, b: &Vector, gamma: f64, session: &Session) -> Result<
             r[idx(i, j)] = cost + v;
         }
     }
-    ctx.finish(r[idx(n, m)])
+    r[idx(n, m)]
+}
+
+/// Pairwise soft-DTW between rows of `a` and rows of `b`.
+pub fn cdist_softdtw(
+    a: &Matrix,
+    b: &Matrix,
+    gamma: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if !gamma.is_finite() || gamma <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .message(format!("cdist_softdtw gamma={gamma} is not positive"))
+                .build(),
+        );
+    }
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        softdtw_raw(a.row(i).as_slice(), b.row(j).as_slice(), gamma)
+    });
+    ctx.finish(out)
 }
 
 fn dtw_path(a: &[f64], b: &[f64]) -> Vec<(usize, usize)> {
@@ -1328,6 +1358,194 @@ impl Predict for FittedTimeSeriesForestReg {
     }
 }
 
+/// Kernel k-means with a soft-DTW RBF kernel on the rows.
+#[derive(Clone, Debug)]
+pub struct KernelKMeans {
+    /// Number of clusters.
+    pub n_clusters: usize,
+    /// Soft-DTW smoothness (also the kernel scale).
+    pub gamma: f64,
+    /// Assignment iterations.
+    pub max_iter: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for KernelKMeans {
+    fn default() -> Self {
+        Self {
+            n_clusters: 2,
+            gamma: 1.0,
+            max_iter: 20,
+            seed: 0,
+        }
+    }
+}
+
+impl KernelKMeans {
+    /// Soft-DTW kernel k-means with `k` clusters.
+    pub fn new(n_clusters: usize) -> Self {
+        Self {
+            n_clusters,
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted kernel k-means partition.
+#[derive(Clone, Debug)]
+pub struct FittedKernelKMeans {
+    /// Training assignments.
+    pub labels: Vector,
+    /// Soft-DTW RBF Gram used for assignment.
+    pub kernel: Matrix,
+}
+
+impl FitUnsupervised for KernelKMeans {
+    type Fitted = FittedKernelKMeans;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKernelKMeans>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let n = x.nrows();
+        let k = self.n_clusters.max(1).min(n.max(1));
+        if n == 0 {
+            return ctx.finish(FittedKernelKMeans {
+                labels: Vector::zeros(0),
+                kernel: Matrix::zeros(0, 0),
+            });
+        }
+        let g = self.gamma.max(1e-8);
+        let kernel = Matrix::from_fn(n, n, |i, j| {
+            if i == j {
+                1.0
+            } else {
+                let d = softdtw_raw(x.row(i).as_slice(), x.row(j).as_slice(), g);
+                (-d / g).exp()
+            }
+        });
+        let mut rng = Rng::new(self.seed);
+        let seeds = rng.sample_indices(n, k);
+        let mut labels = Vector::from_iter((0..n).map(|i| {
+            let mut best = 0usize;
+            let mut bd = f64::NEG_INFINITY;
+            for (c, &s) in seeds.iter().enumerate() {
+                let v = kernel.get(i, s);
+                if v > bd {
+                    bd = v;
+                    best = c;
+                }
+            }
+            best as f64
+        }));
+        for it in 0..self.max_iter.max(1) {
+            let mut members: Vec<Vec<usize>> = vec![Vec::new(); k];
+            for i in 0..n {
+                let c = labels[i].round().clamp(0.0, (k - 1) as f64) as usize;
+                members[c].push(i);
+            }
+            for c in 0..k {
+                if members[c].is_empty() {
+                    ctx.push(
+                        Issue::builder(IssueCode::EmptyCluster)
+                            .message(format!("kernel k-means cluster {c} emptied; re-seeded"))
+                            .build(),
+                    );
+                    members[c].push(rng.below(n));
+                }
+            }
+            let mut changed = 0usize;
+            for i in 0..n {
+                let mut best = 0usize;
+                let mut bd = f64::INFINITY;
+                for c in 0..k {
+                    let m = &members[c];
+                    let inv = 1.0 / m.len() as f64;
+                    let mut mean_k = 0.0;
+                    for &j in m {
+                        mean_k += kernel.get(i, j);
+                    }
+                    mean_k *= inv;
+                    let mut cc = 0.0;
+                    for &j in m {
+                        for &l in m {
+                            cc += kernel.get(j, l);
+                        }
+                    }
+                    cc *= inv * inv;
+                    let dist = kernel.get(i, i) - 2.0 * mean_k + cc;
+                    if dist < bd {
+                        bd = dist;
+                        best = c;
+                    }
+                }
+                if (labels[i] - best as f64).abs() > 0.5 {
+                    changed += 1;
+                }
+                labels[i] = best as f64;
+            }
+            ctx.session.step(it as u64, changed as f64, None);
+            if changed == 0 && it > 0 {
+                ctx.session.converged("kernel k-means", it as u64);
+                break;
+            }
+        }
+        ctx.finish(FittedKernelKMeans { labels, kernel })
+    }
+}
+
+/// Per-series mean/variance scaler (tslearn `TimeSeriesScalerMeanVariance`).
+///
+/// Each row is z-scored independently. A constant series becomes zeros and
+/// records a near-zero-variance warning.
+#[derive(Clone, Debug, Default)]
+pub struct TimeSeriesScalerMeanVariance;
+
+impl TimeSeriesScalerMeanVariance {
+    /// Default per-series z-score.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl FitUnsupervised for TimeSeriesScalerMeanVariance {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for TimeSeriesScalerMeanVariance {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let out = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            let row = x.row(i);
+            let sd = row.std();
+            if sd <= ctx.policy.near_zero_variance {
+                0.0
+            } else {
+                (x.get(i, j) - row.mean()) / sd
+            }
+        });
+        for i in 0..x.nrows() {
+            if x.row(i).std() <= ctx.policy.near_zero_variance {
+                ctx.push(
+                    Issue::builder(IssueCode::NearZeroVariance)
+                        .message(format!("series {i} has ~0 variance; it is mapped to 0"))
+                        .build(),
+                );
+            }
+        }
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1470,5 +1688,29 @@ mod tests {
             .unwrap()
             .value;
         assert!(pred.as_slice().iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn softdtw_cdist_kernel_kmeans_and_scaler() {
+        let x = Matrix::from_fn(6, 4, |i, j| {
+            if i < 3 {
+                (j as f64) + 0.1 * i as f64
+            } else {
+                3.0 - j as f64 + 0.1 * i as f64
+            }
+        });
+        let cd = cdist_softdtw(&x, &x, 0.5, &Session::new("ts", "csdtw"))
+            .unwrap()
+            .value;
+        assert_eq!(cd.shape(), (6, 6));
+        assert!(cd.get(0, 0).is_finite());
+        let km = KernelKMeans::new(2)
+            .fit_unsupervised(&x, &Session::new("ts", "kkm"))
+            .unwrap();
+        assert_eq!(km.value.labels.len(), 6);
+        let mut sc = TimeSeriesScalerMeanVariance::new();
+        sc.fit_unsupervised(&x, &Session::new("ts", "sc")).unwrap();
+        let z = sc.transform(&x, &Session::new("ts", "sct")).unwrap().value;
+        assert!((z.row(0).mean()).abs() < 1e-8);
     }
 }

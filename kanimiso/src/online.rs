@@ -3490,6 +3490,413 @@ impl PartialFit for Alma {
     }
 }
 
+/// Early drift detection (Baena-García; river `EDDM`) on a 0/1 error stream.
+#[derive(Clone, Debug)]
+pub struct Eddm {
+    n: u64,
+    last_error_at: Option<u64>,
+    mean_d: f64,
+    m2_d: f64,
+    n_err: u64,
+    max_mean2s: f64,
+    updates: u64,
+}
+
+impl Default for Eddm {
+    fn default() -> Self {
+        Self {
+            n: 0,
+            last_error_at: None,
+            mean_d: 0.0,
+            m2_d: 0.0,
+            n_err: 0,
+            max_mean2s: 0.0,
+            updates: 0,
+        }
+    }
+}
+
+impl Eddm {
+    /// Fresh EDDM detector.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Update with a 0/1 error indicator.
+    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+        let mut ctx = FitCtx::with_session(session.child("update"));
+        let e = if x > 0.5 { 1.0 } else { 0.0 };
+        self.n += 1;
+        if e > 0.5 {
+            if let Some(prev) = self.last_error_at {
+                let d = (self.n - prev) as f64;
+                self.n_err += 1;
+                let delta = d - self.mean_d;
+                self.mean_d += delta / self.n_err as f64;
+                self.m2_d += delta * (d - self.mean_d);
+            }
+            self.last_error_at = Some(self.n);
+        }
+        let sd = if self.n_err > 1 {
+            (self.m2_d / (self.n_err - 1) as f64).max(0.0).sqrt()
+        } else {
+            0.0
+        };
+        let stat = self.mean_d + 2.0 * sd;
+        if stat > self.max_mean2s {
+            self.max_mean2s = stat;
+        }
+        let decision = if self.n_err >= 30 && self.max_mean2s > 0.0 && stat < 0.90 * self.max_mean2s
+        {
+            ctx.push(
+                Issue::builder(IssueCode::ConceptDriftDetected)
+                    .message(format!("EDDM drift: mean+2s={stat:.4} < 0.9 max"))
+                    .metric("drift_statistic", stat)
+                    .build(),
+            );
+            self.n = 0;
+            self.last_error_at = None;
+            self.mean_d = 0.0;
+            self.m2_d = 0.0;
+            self.n_err = 0;
+            self.max_mean2s = 0.0;
+            DriftDecision::Drift { statistic: stat }
+        } else if self.n_err >= 30 && self.max_mean2s > 0.0 && stat < 0.95 * self.max_mean2s {
+            DriftDecision::Warning { statistic: stat }
+        } else {
+            DriftDecision::Stable
+        };
+        ctx.finish(decision)
+    }
+}
+
+impl PartialFit for Eddm {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let before = self.mean_d;
+        let mut fired = 0.0;
+        for i in 0..x.nrows() {
+            match self.update(x.get(i, 0), &session.child("eddm")) {
+                Ok(q) => {
+                    if matches!(q.value, DriftDecision::Drift { .. }) {
+                        fired += 1.0;
+                    }
+                }
+                Err(e) => {
+                    if e.primary().code == IssueCode::ConceptDriftDetected {
+                        fired += 1.0;
+                    }
+                }
+            }
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n);
+        q.effective_sample_size = self.n as f64;
+        q.information_gain = Some(fired);
+        q.drift_statistic = Some(self.mean_d);
+        q.still_identified = self.n_err >= 30;
+        q.warmup = self.n_err < 30;
+        q.explanation = format!(
+            "EDDM mean-distance {before:.4}→{:.4}, errors={}, drift_cuts={fired}",
+            self.mean_d, self.n_err
+        );
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "inter-error distance mean and std",
+                "EDDM comparison to the historical maximum of mean+2s",
+                format!("d̄={before:.4}"),
+                format!("d̄={:.4} n_err={}", self.mean_d, self.n_err),
+            ),
+        )
+    }
+}
+
+/// Hoeffding drift detection with an EWMA mean (river `HDDM_W`).
+#[derive(Clone, Debug)]
+pub struct HddmW {
+    /// Confidence \(\delta\).
+    pub delta: f64,
+    /// EWMA weight \(\lambda\).
+    pub lambda: f64,
+    n: u64,
+    mean: f64,
+    mean_min: f64,
+    n_min: u64,
+    updates: u64,
+}
+
+impl Default for HddmW {
+    fn default() -> Self {
+        Self {
+            delta: 0.002,
+            lambda: 0.05,
+            n: 0,
+            mean: 0.0,
+            mean_min: f64::INFINITY,
+            n_min: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl HddmW {
+    /// Fresh HDDM_W detector.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn bound(n: u64, lambda: f64, delta: f64) -> f64 {
+        if n == 0 {
+            return f64::INFINITY;
+        }
+        let decay = 1.0 - (1.0 - lambda).powi(n as i32);
+        let eff = (lambda / decay.max(1e-18)).min(1.0);
+        (0.5 * eff * (1.0 / delta.max(1e-16)).ln()).sqrt()
+    }
+
+    /// Update with a 0/1 error indicator.
+    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+        let mut ctx = FitCtx::with_session(session.child("update"));
+        let e = if x > 0.5 { 1.0 } else { 0.0 };
+        self.n += 1;
+        let l = self.lambda.clamp(1e-6, 1.0);
+        if self.n == 1 {
+            self.mean = e;
+        } else {
+            self.mean = l * e + (1.0 - l) * self.mean;
+        }
+        let eps = Self::bound(self.n, l, self.delta);
+        let eps_min = Self::bound(self.n_min.max(1), l, self.delta);
+        if self.mean + eps < self.mean_min + eps_min {
+            self.mean_min = self.mean;
+            self.n_min = self.n;
+        }
+        let stat = self.mean - self.mean_min;
+        let decision = if self.n >= 30 && self.mean - eps > self.mean_min + eps_min {
+            ctx.push(
+                Issue::builder(IssueCode::ConceptDriftDetected)
+                    .message(format!(
+                        "HDDM_W drift: μ-ε={:.4} > μ_min+ε_min",
+                        self.mean - eps
+                    ))
+                    .metric("drift_statistic", stat)
+                    .build(),
+            );
+            self.n = 0;
+            self.mean = 0.0;
+            self.n_min = 0;
+            self.mean_min = f64::INFINITY;
+            DriftDecision::Drift { statistic: stat }
+        } else if self.n >= 30 && self.mean - 0.5 * eps > self.mean_min + 0.5 * eps_min {
+            DriftDecision::Warning { statistic: stat }
+        } else {
+            DriftDecision::Stable
+        };
+        ctx.finish(decision)
+    }
+}
+
+impl PartialFit for HddmW {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let before = self.mean;
+        let mut fired = 0.0;
+        for i in 0..x.nrows() {
+            match self.update(x.get(i, 0), &session.child("hddmw")) {
+                Ok(q) => {
+                    if matches!(q.value, DriftDecision::Drift { .. }) {
+                        fired += 1.0;
+                    }
+                }
+                Err(e) => {
+                    if e.primary().code == IssueCode::ConceptDriftDetected {
+                        fired += 1.0;
+                    }
+                }
+            }
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n);
+        q.effective_sample_size = self.n as f64;
+        q.information_gain = Some(fired);
+        q.drift_statistic = Some(self.mean);
+        q.still_identified = self.n >= 30;
+        q.warmup = self.n < 30;
+        q.explanation = format!(
+            "HDDM_W μ {before:.4}→{:.4}, n={}, drift_cuts={fired}",
+            self.mean, self.n
+        );
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "EWMA error-rate and a weighted Hoeffding bound",
+                "HDDM_W comparison to the historical minimum",
+                format!("μ={before:.4}"),
+                format!("μ={:.4} n={}", self.mean, self.n),
+            ),
+        )
+    }
+}
+
+/// Leveraging bagging: Poisson(\(w\)) online bagging of Hoeffding trees.
+#[derive(Clone, Debug)]
+pub struct LeveragingBagging {
+    /// Number of trees.
+    pub n_estimators: usize,
+    /// Poisson mean of the leverage weights.
+    pub w: f64,
+    trees: Vec<HoeffdingTree>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+    rng: Rng,
+}
+
+impl Default for LeveragingBagging {
+    fn default() -> Self {
+        Self {
+            n_estimators: 3,
+            w: 6.0,
+            trees: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+            rng: Rng::new(11),
+        }
+    }
+}
+
+impl LeveragingBagging {
+    /// Forest with `n_estimators` trees.
+    pub fn new(n_estimators: usize) -> Self {
+        Self {
+            n_estimators: n_estimators.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn ensure(&mut self, p: usize) {
+        if self.initialized {
+            return;
+        }
+        self.trees = (0..self.n_estimators)
+            .map(|_| {
+                let mut t = HoeffdingTree::new();
+                t.min_samples = 15;
+                t.n_features = p;
+                t.root = HtNode::Leaf(HtLeaf::new(0, p));
+                t.initialized = true;
+                t
+            })
+            .collect();
+        self.initialized = true;
+    }
+}
+
+impl PartialFit for LeveragingBagging {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        if !self.initialized {
+            self.ensure(x.ncols());
+        }
+        let mut n_updates = 0u64;
+        for i in 0..x.nrows().min(y.len()) {
+            let xi = Matrix::from_fn(1, x.ncols(), |_, j| x.get(i, j));
+            let yi = Vector::from_slice(&[y[i]]);
+            for t in 0..self.trees.len() {
+                let k = self.rng.poisson(self.w.max(0.0));
+                n_updates += k;
+                for _ in 0..k {
+                    let _ = self.trees[t].partial_fit(&xi, Some(&yi), &session.child("tree"));
+                }
+            }
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates - 1, x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(n_updates as f64);
+        q.information_gain = Some(n_updates as f64);
+        q.still_identified = self.n_seen >= 15;
+        q.warmup = self.n_seen < 15;
+        q.explanation = format!(
+            "LeveragingBagging: {} trees, {n_updates} Poisson-weighted Hoeffding updates",
+            self.trees.len()
+        );
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("leveraging bagging still warming up")
+                    .build(),
+            );
+        }
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("{n_updates} Poisson(w={}) tree updates", self.w),
+                "each row is replayed k~Poisson(w) times into every Hoeffding tree",
+                "pre-batch forest",
+                "post-batch forest",
+            ),
+        )
+    }
+}
+
+impl Predict for LeveragingBagging {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut c0 = 0usize;
+            let mut c1 = 0usize;
+            for t in &self.trees {
+                if t.predict_one(x, i) >= 0.5 {
+                    c1 += 1;
+                } else {
+                    c0 += 1;
+                }
+            }
+            if c1 >= c0 {
+                1.0
+            } else {
+                0.0
+            }
+        }));
+        ctx.finish(out)
+    }
+}
+
 impl Predict for Alma {
     type Output = Vector;
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
@@ -3636,6 +4043,11 @@ mod tests {
             .partial_fit(&x, None, &session)
             .expect("kswin");
         Hddm::new().partial_fit(&x, None, &session).expect("hddm");
+        Eddm::new().partial_fit(&x, None, &session).expect("eddm");
+        HddmW::new().partial_fit(&x, None, &session).expect("hddmw");
+        LeveragingBagging::new(2)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("lb");
 
         let n_expl = session
             .ledger()
@@ -3644,7 +4056,7 @@ mod tests {
             .filter(|e| e.kind == EventKind::IncrementalExplanation)
             .count();
         assert!(
-            n_expl >= 20,
+            n_expl >= 23,
             "expected an IncrementalExplanation per partial_fit, got {n_expl}"
         );
     }

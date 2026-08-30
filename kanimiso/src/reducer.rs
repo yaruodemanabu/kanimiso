@@ -185,6 +185,184 @@ impl FitSeries for RecursiveReducer {
     }
 }
 
+/// Direct multi-horizon reduction: one lag-OLS per forecast step.
+#[derive(Clone, Debug)]
+pub struct DirectReducer {
+    /// Lag window.
+    pub window: usize,
+    /// Number of direct horizons to identify.
+    pub horizon: usize,
+}
+
+impl Default for DirectReducer {
+    fn default() -> Self {
+        Self {
+            window: 3,
+            horizon: 3,
+        }
+    }
+}
+
+impl DirectReducer {
+    /// Direct reducer with lag `window` and `horizon` models.
+    pub fn new(window: usize, horizon: usize) -> Self {
+        Self { window, horizon }
+    }
+}
+
+/// Fitted direct reducer.
+#[derive(Clone, Debug)]
+pub struct FittedDirectReducer {
+    /// `(coef, intercept)` per horizon (1-based order).
+    pub models: Vec<(Vector, f64)>,
+    last: Vector,
+    /// Lag order.
+    pub window: usize,
+}
+
+impl FittedDirectReducer {
+    /// Direct `h`-step forecast from the last training window (not recursive).
+    pub fn forecast(&self, horizon: usize, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        if horizon == 0 {
+            return ctx.finish(Vector::zeros(0));
+        }
+        if horizon > self.models.len() {
+            ctx.push(
+                Issue::builder(IssueCode::ForecastHorizonExceedsIdentifiability)
+                    .message(format!(
+                        "requested horizon {horizon} > identified {}",
+                        self.models.len()
+                    ))
+                    .meaninglessness(Meaninglessness::new(
+                        "direct multi-horizon path",
+                        "horizons past the fitted set have no model",
+                        signlred::InterpretiveValue::Misleading,
+                        "only the first fitted horizons are identified",
+                    ))
+                    .build(),
+            );
+        }
+        let mut out = Vector::zeros(horizon);
+        for h in 0..horizon {
+            if h >= self.models.len() {
+                out[h] = *self.last.as_slice().last().unwrap_or(&0.0);
+                continue;
+            }
+            let (coef, intercept) = &self.models[h];
+            let mut s = *intercept;
+            let start = self.last.len().saturating_sub(self.window);
+            for j in 0..coef.len().min(self.window) {
+                s += coef[j] * self.last[start + j];
+            }
+            out[h] = s;
+        }
+        ctx.finish(out)
+    }
+}
+
+impl FitSeries for DirectReducer {
+    type Fitted = FittedDirectReducer;
+    fn fit_series(
+        &mut self,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedDirectReducer>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let p = self.window.max(1);
+        let hmax = self.horizon.max(1);
+        if y.len() <= p + hmax {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!(
+                        "DirectReducer window {p} horizon {hmax} needs n>{} (n={})",
+                        p + hmax,
+                        y.len()
+                    ))
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "direct horizon regressions",
+                        "n ≤ p+H leaves a horizon without rows",
+                        "lengthen the series or shorten the window/horizon",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedDirectReducer {
+                models: vec![(Vector::zeros(p), y.mean()); hmax],
+                last: y.clone(),
+                window: p,
+            });
+        }
+        let mut models = Vec::with_capacity(hmax);
+        for h in 1..=hmax {
+            let n = y.len().saturating_sub(p + h - 1);
+            if n == 0 {
+                models.push((Vector::zeros(p), y.mean()));
+                continue;
+            }
+            let x = Matrix::from_fn(n, p, |i, j| y[i + j]);
+            let target = Vector::from_iter((0..n).map(|i| y[i + p + h - 1]));
+            let design = x.with_intercept();
+            let mut scratch = signlred::Report::new("direct", "ols");
+            let beta = least_squares(&mut scratch, &design, &target, &ctx.policy);
+            for issue in scratch.issues() {
+                if matches!(
+                    issue.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::PerfectCollinearity
+                        | IssueCode::NearSingular
+                        | IssueCode::SingularMatrix
+                ) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            if scratch.contains(IssueCode::PerfectCollinearity)
+                || scratch.contains(IssueCode::NearSingular)
+                || scratch.contains(IssueCode::SingularMatrix)
+            {
+                ctx.push(
+                    Issue::builder(IssueCode::HighMulticollinearity)
+                        .message(format!(
+                            "direct horizon {h}: lag columns of a trend are nearly collinear"
+                        ))
+                        .meaninglessness(Meaninglessness::new(
+                            "lag coefficients",
+                            "consecutive levels of a trend share one direction",
+                            signlred::InterpretiveValue::Misleading,
+                            "forecast the path; do not interpret individual lag coefficients",
+                        ))
+                        .build(),
+                );
+            }
+            match beta {
+                Some(b) => models.push((
+                    Vector::from_iter((1..b.len()).map(|j| b[j])),
+                    b.as_slice().first().copied().unwrap_or(0.0),
+                )),
+                None => models.push((Vector::zeros(p), target.mean())),
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::AutocorrelatedResiduals)
+                .severity(Severity::Advisory)
+                .message("direct reduction fits each horizon independently; residual ACF is not a joint specification test")
+                .compromise(NumericalCompromise::new(
+                    "joint multi-horizon likelihood",
+                    "separate OLS per horizon",
+                    "horizons do not share parameters",
+                    "the H models are not a single identified dynamic system",
+                ))
+                .build(),
+        );
+        let last = Vector::from_iter(y.as_slice()[y.len() - p..].iter().copied());
+        ctx.finish(FittedDirectReducer {
+            models,
+            last,
+            window: p,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +380,20 @@ mod tests {
             .value;
         assert_eq!(fc.len(), 3);
         assert!((fc[0] - 24.0).abs() < 1.0, "{:?}", fc.as_slice());
+    }
+
+    #[test]
+    fn direct_reducer_follows_a_ramp() {
+        let y = Vector::from_iter((0..24).map(|i| i as f64));
+        let q = DirectReducer::new(2, 3)
+            .fit_series(&y, &Session::new("dir", "fit"))
+            .expect("dir");
+        let fc = q
+            .value
+            .forecast(3, &Session::new("dir", "fc"))
+            .unwrap()
+            .value;
+        assert_eq!(fc.len(), 3);
+        assert!((fc[0] - 24.0).abs() < 1.5, "{:?}", fc.as_slice());
     }
 }

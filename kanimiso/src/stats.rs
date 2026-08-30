@@ -1449,6 +1449,151 @@ pub fn breusch_pagan(
     })
 }
 
+/// White's heteroscedasticity LM test (`het_white`).
+///
+/// Auxiliary regression of \(e^2\) on the original columns and their
+/// cross-products. A perfect auxiliary fit is Misleading, not vacuous, so
+/// a well-specified outer model is not aborted.
+pub fn het_white(
+    resid: &Vector,
+    design: &Matrix,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, design, Some(resid), &ctx.policy);
+    let e2 = Vector::from_iter(resid.as_slice().iter().map(|e| e * e));
+    if e2
+        .as_slice()
+        .iter()
+        .all(|v| *v <= ctx.policy.near_zero_variance)
+    {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("White LM: squared residuals are identically zero")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "White LM",
+                    "there is no heteroscedasticity contrast",
+                    "the residual is a perfect fit",
+                ))
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::NAN,
+            nobs: resid.len() as f64,
+        });
+    }
+    let p = design.ncols();
+    let n = resid.len();
+    let mut cols: Vec<Vec<f64>> = Vec::new();
+    cols.push(vec![1.0; n]);
+    for j in 0..p {
+        let mut looks_const = true;
+        let mut col = Vec::with_capacity(n);
+        for i in 0..n {
+            let v = if i < design.nrows() {
+                design.get(i, j)
+            } else {
+                0.0
+            };
+            if (v - 1.0).abs() > 1e-12 {
+                looks_const = false;
+            }
+            col.push(v);
+        }
+        if j == 0 && looks_const {
+            continue;
+        }
+        cols.push(col);
+    }
+    let base = cols.len();
+    for a in 1..base {
+        for b in a..base {
+            cols.push((0..n).map(|i| cols[a][i] * cols[b][i]).collect());
+        }
+    }
+    if cols.len() >= n {
+        ctx.push(
+            Issue::builder(IssueCode::Overparameterized)
+                .message(format!(
+                    "White auxiliary has {} columns ≥ n={n}; higher-order terms are truncated",
+                    cols.len()
+                ))
+                .meaninglessness(Meaninglessness::new(
+                    "White LM",
+                    "the auxiliary design is wider than the sample",
+                    signlred::InterpretiveValue::Misleading,
+                    "the LM uses the truncated column set",
+                ))
+                .build(),
+        );
+        cols.truncate(n.saturating_sub(1).max(1));
+    }
+    let aux = Matrix::from_fn(n, cols.len(), |i, j| cols[j][i]);
+    let mut scratch = Report::new("white", "aux");
+    let Some(beta) = crate::linalg::least_squares(&mut scratch, &aux, &e2, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::UnidentifiedModel)
+                .severity(signlred::Severity::Warning)
+                .message("White auxiliary regression failed to factor")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: (cols.len().saturating_sub(1)) as f64,
+            nobs: n as f64,
+        });
+    };
+    for issue in scratch.issues() {
+        if matches!(
+            issue.code,
+            IssueCode::ResidualTooLarge
+                | IssueCode::PerfectCollinearity
+                | IssueCode::NearSingular
+                | IssueCode::R2IsOne
+        ) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let fitted = aux.matvec(&beta);
+    let r = e2.sub(&fitted);
+    let sse = r.dot(&r);
+    let mean = e2.mean();
+    let sst: f64 = e2
+        .as_slice()
+        .iter()
+        .map(|v| {
+            let d = v - mean;
+            d * d
+        })
+        .sum();
+    let r2 = if sst > 0.0 { 1.0 - sse / sst } else { f64::NAN };
+    let df = (cols.len().saturating_sub(1)).max(1) as f64;
+    let stat = n as f64 * r2;
+    let pvalue = if stat.is_finite() {
+        chi2_pvalue(stat.max(0.0), df)
+    } else {
+        f64::NAN
+    };
+    if pvalue.is_finite() && pvalue < 0.05 {
+        ctx.push(
+            Issue::builder(IssueCode::Heteroscedasticity)
+                .message(format!("White p={pvalue:.4}"))
+                .metric("lm", stat)
+                .build(),
+        );
+    }
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df,
+        nobs: n as f64,
+    })
+}
+
 /// Ljung–Box `Q` test on the first `lags` autocorrelations of `x`.
 pub fn ljung_box(x: &Vector, lags: usize, session: &Session) -> Result<Qualified<LjungBoxResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
@@ -2860,5 +3005,14 @@ mod tests {
                 .map(|i| i.code)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn het_white_on_homoscedastic_residuals() {
+        let x = Matrix::from_fn(24, 2, |i, j| if j == 0 { 1.0 } else { i as f64 });
+        let e = Vector::from_iter((0..24).map(|i| ((i % 3) as f64 - 1.0) * 0.2));
+        let q = het_white(&e, &x, &Session::new("white", "test")).expect("white");
+        assert!(q.value.statistic.is_finite());
+        assert!(q.value.pvalue.is_finite());
     }
 }

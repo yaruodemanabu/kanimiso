@@ -6,15 +6,17 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linalg::least_squares;
+use crate::linalg::{chol_solve, least_squares};
 use crate::special::{ln_gamma, norm_cdf};
 use crate::traits::{Fit, PartialFit, Predict};
 use crate::validate::{inspect_classes, inspect_identification, inspect_xy};
+use faer::Mat;
 use ojizou_san::{IncrementalExplain, Session};
 use signlred::{
     IncrementalQuality, InterpretiveValue, Issue, IssueCode, Meaninglessness, NumericalCompromise,
     Qualified, Result, Severity,
 };
+use std::collections::BTreeMap;
 
 const INV_SQRT_2PI: f64 = 0.3989422804014327;
 
@@ -798,6 +800,489 @@ pub fn nb2_loglik(y: &Vector, mu: &Vector, alpha: f64) -> f64 {
     s
 }
 
+/// Ordered logit (cumulative / proportional-odds) via gradient ascent.
+///
+/// Classes must be ordered by their integer labels. A single class leaves
+/// \((\beta,\theta)\) unidentified.
+#[derive(Clone, Debug)]
+pub struct OrderedLogit {
+    /// Learning rate.
+    pub eta: f64,
+    /// Max gradient steps.
+    pub max_iter: usize,
+    /// ℓ₂ on the slopes.
+    pub ridge: f64,
+}
+
+impl Default for OrderedLogit {
+    fn default() -> Self {
+        Self {
+            eta: 0.05,
+            max_iter: 200,
+            ridge: 1e-3,
+        }
+    }
+}
+
+impl OrderedLogit {
+    /// Default ordered logit.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted ordered logit.
+#[derive(Clone, Debug)]
+pub struct FittedOrderedLogit {
+    /// Slopes.
+    pub coef: Vector,
+    /// Increasing cutpoints \(\theta_1 < \cdots < \theta_{K-1}\).
+    pub thresholds: Vector,
+    /// Sorted class labels.
+    pub classes: Vec<i64>,
+}
+
+impl FittedOrderedLogit {
+    /// Predicted class (argmax of category probabilities).
+    pub fn predict_label(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() != self.coef.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ordered logit column count ≠ coef")
+                    .build(),
+            );
+        }
+        let k = self.classes.len().max(1);
+        let mut out = Vector::zeros(x.nrows());
+        for i in 0..x.nrows() {
+            let mut xb = 0.0;
+            for j in 0..self.coef.len().min(x.ncols()) {
+                xb += self.coef[j] * x.get(i, j);
+            }
+            let mut best = 0usize;
+            let mut bp = f64::NEG_INFINITY;
+            for c in 0..k {
+                let lo = if c == 0 {
+                    0.0
+                } else {
+                    sigmoid(self.thresholds[c - 1] - xb)
+                };
+                let hi = if c + 1 == k {
+                    1.0
+                } else {
+                    sigmoid(self.thresholds[c] - xb)
+                };
+                let p = (hi - lo).max(0.0);
+                if p > bp {
+                    bp = p;
+                    best = c;
+                }
+            }
+            out[i] = self.classes.get(best).copied().unwrap_or(0) as f64;
+        }
+        ctx.finish(out)
+    }
+}
+
+impl Fit for OrderedLogit {
+    type Fitted = FittedOrderedLogit;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedOrderedLogit>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let classes: Vec<i64> = counts.iter().map(|(c, _)| *c).collect();
+        if classes.len() < 2 {
+            return ctx.finish(FittedOrderedLogit {
+                coef: Vector::zeros(x.ncols()),
+                thresholds: Vector::zeros(0),
+                classes,
+            });
+        }
+        let k = classes.len();
+        let mut yidx = vec![0usize; y.len()];
+        for i in 0..y.len() {
+            let lab = y[i].round() as i64;
+            yidx[i] = classes.iter().position(|&c| c == lab).unwrap_or(0);
+        }
+        let p = x.ncols();
+        let mut coef = Vector::zeros(p);
+        let mut thr = Vector::zeros(k - 1);
+        for t in 0..k - 1 {
+            let cum = counts.iter().take(t + 1).map(|(_, c)| *c).sum::<usize>() as f64
+                / y.len().max(1) as f64;
+            let q = cum.clamp(1e-3, 1.0 - 1e-3);
+            thr[t] = (q / (1.0 - q)).ln();
+            if t > 0 && thr[t] <= thr[t - 1] {
+                thr[t] = thr[t - 1] + 0.2;
+            }
+        }
+        let eta = self.eta.max(1e-6);
+        let ridge = self.ridge.max(0.0);
+        for it in 0..self.max_iter.max(1) {
+            let mut g_b = Vector::zeros(p);
+            let mut g_t = Vector::zeros(k - 1);
+            let mut ll = 0.0;
+            for i in 0..x.nrows().min(yidx.len()) {
+                let mut xb = 0.0;
+                for j in 0..p {
+                    xb += coef[j] * x.get(i, j);
+                }
+                let c = yidx[i];
+                let (p_c, d_beta, d_thr) = ordered_prob_grad(c, k, xb, &thr);
+                ll += (p_c.max(1e-15)).ln();
+                let inv = 1.0 / p_c.max(1e-15);
+                for j in 0..p {
+                    g_b[j] += inv * d_beta * x.get(i, j);
+                }
+                for t in 0..k - 1 {
+                    g_t[t] += inv * d_thr[t];
+                }
+            }
+            for j in 0..p {
+                g_b[j] -= ridge * coef[j];
+                coef[j] += eta * g_b[j] / x.nrows().max(1) as f64;
+            }
+            for t in 0..k - 1 {
+                thr[t] += eta * g_t[t] / x.nrows().max(1) as f64;
+            }
+            for t in 1..k - 1 {
+                if thr[t] <= thr[t - 1] + 1e-4 {
+                    thr[t] = thr[t - 1] + 1e-4;
+                }
+            }
+            ctx.session.step(it as u64, -ll, None);
+        }
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(Severity::Advisory)
+                .message(
+                    "ordered logit SEs are not reported; this is a gradient point, not IRLS MLE",
+                )
+                .compromise(NumericalCompromise::new(
+                    "IRLS / Newton ordered logit",
+                    "gradient ascent on the proportional-odds likelihood",
+                    "the information matrix is not inverted",
+                    "thresholds are ordered by projection, not by a constrained Hessian",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedOrderedLogit {
+            coef,
+            thresholds: thr,
+            classes,
+        })
+    }
+}
+
+fn ordered_prob_grad(c: usize, k: usize, xb: f64, thr: &Vector) -> (f64, f64, Vector) {
+    let mut d_thr = Vector::zeros(k.saturating_sub(1));
+    let sig = |z: f64| sigmoid(z);
+    let dsig = |z: f64| {
+        let s = sigmoid(z);
+        s * (1.0 - s)
+    };
+    if k < 2 {
+        return (1.0, 0.0, d_thr);
+    }
+    if c == 0 {
+        let z = thr[0] - xb;
+        let p = sig(z);
+        d_thr[0] = dsig(z);
+        return (p, -dsig(z), d_thr);
+    }
+    if c + 1 == k {
+        let z = thr[k - 2] - xb;
+        let p = 1.0 - sig(z);
+        d_thr[k - 2] = -dsig(z);
+        return (p, dsig(z), d_thr);
+    }
+    let zu = thr[c] - xb;
+    let zl = thr[c - 1] - xb;
+    let p = sig(zu) - sig(zl);
+    d_thr[c] = dsig(zu);
+    d_thr[c - 1] = -dsig(zl);
+    (p, -(dsig(zu) - dsig(zl)), d_thr)
+}
+
+/// Linear GEE with exchangeable working correlation (Liang–Zeger).
+#[derive(Clone, Debug)]
+pub struct Gee {
+    /// IRLS / GLS iterations.
+    pub max_iter: usize,
+    /// Include an intercept.
+    pub fit_intercept: bool,
+}
+
+impl Default for Gee {
+    fn default() -> Self {
+        Self {
+            max_iter: 25,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl Gee {
+    /// Default exchangeable linear GEE.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit `y | groups` under an exchangeable working `V`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedGee>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if groups.len() != y.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("GEE groups length ≠ n")
+                    .build(),
+            );
+            return ctx.finish(FittedGee {
+                coef: Vector::zeros(x.ncols()),
+                intercept: y.mean(),
+                sigma2: f64::NAN,
+                rho: f64::NAN,
+                n_groups: 0,
+            });
+        }
+        let mut members: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+        for (i, &g) in groups.as_slice().iter().enumerate() {
+            if !g.is_finite() {
+                ctx.push(
+                    Issue::builder(IssueCode::NonFiniteInput)
+                        .message("GEE group labels contain NaN/Inf")
+                        .build(),
+                );
+                break;
+            }
+            members.entry(g.round() as i64).or_default().push(i);
+        }
+        let n_groups = members.len();
+        if n_groups <= 1 {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("exchangeable GEE is unidentified with a single group")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "working correlation ρ",
+                        "one cluster cannot separate ρ from the residual scale",
+                        "collect more groups",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedGee {
+                coef: Vector::zeros(x.ncols()),
+                intercept: y.mean(),
+                sigma2: f64::NAN,
+                rho: f64::NAN,
+                n_groups,
+            });
+        }
+        let design = if self.fit_intercept {
+            x.with_intercept()
+        } else {
+            x.clone()
+        };
+        let p = design.ncols();
+        let mut scratch = signlred::Report::new("gee", "ols");
+        let mut beta = least_squares(&mut scratch, &design, y, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(p));
+        let mut sigma2 = 1.0;
+        let mut rho = 0.1;
+        for it in 0..self.max_iter.max(1) {
+            if let Some(b) = gee_gls(&design, y, &members, sigma2, rho, &ctx.policy) {
+                beta = b;
+            } else {
+                ctx.push(
+                    Issue::builder(IssueCode::CholeskyFailed)
+                        .severity(Severity::Warning)
+                        .message("GEE GLS Hessian refused Cholesky")
+                        .build(),
+                );
+                break;
+            }
+            let (s2, r) = gee_moments(&design, y, &beta, &members);
+            sigma2 = s2;
+            rho = r.clamp(-0.99, 0.99);
+            ctx.session.step(it as u64, s2, Some(r.abs()));
+        }
+        if rho.abs() >= 0.99 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateDistribution)
+                    .message("GEE ρ hit the ±0.99 bound; the working V is nearly singular")
+                    .metric("rho", rho)
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(Severity::Advisory)
+                .message("GEE reports a working-correlation point, not a robust sandwich")
+                .compromise(NumericalCompromise::new(
+                    "Liang–Zeger sandwich GEE",
+                    "iterated GLS with exchangeable V and moment ρ",
+                    "the bread/meat sandwich is not formed",
+                    "treat ρ as a working parameter, not as a causal intra-class correlation",
+                ))
+                .build(),
+        );
+        let intercept = if self.fit_intercept && !beta.is_empty() {
+            beta[0]
+        } else {
+            0.0
+        };
+        let coef = if self.fit_intercept {
+            Vector::from_iter((1..beta.len()).map(|j| beta[j]))
+        } else {
+            beta
+        };
+        ctx.finish(FittedGee {
+            coef,
+            intercept,
+            sigma2,
+            rho,
+            n_groups,
+        })
+    }
+}
+
+/// Fitted exchangeable linear GEE.
+#[derive(Clone, Debug)]
+pub struct FittedGee {
+    /// Fixed slopes.
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+    /// Residual scale.
+    pub sigma2: f64,
+    /// Working exchangeable correlation.
+    pub rho: f64,
+    /// Number of groups.
+    pub n_groups: usize,
+}
+
+impl Predict for FittedGee {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() != self.coef.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("GEE predict column count ≠ coef")
+                    .build(),
+            );
+        }
+        let mut y = x.matvec(&self.coef);
+        for i in 0..y.len() {
+            y[i] += self.intercept;
+        }
+        ctx.finish(y)
+    }
+}
+
+fn gee_gls(
+    design: &Matrix,
+    y: &Vector,
+    members: &BTreeMap<i64, Vec<usize>>,
+    sigma2: f64,
+    rho: f64,
+    policy: &signlred::Policy,
+) -> Option<Vector> {
+    let p = design.ncols();
+    let mut xtvx = vec![0.0; p * p];
+    let mut xtvy = Vector::zeros(p);
+    let s2 = sigma2.max(1e-12);
+    let r = rho.clamp(-0.99, 0.99);
+    let om = (1.0 - r).max(1e-8);
+    for idx in members.values() {
+        let ng = idx.len() as f64;
+        let a = 1.0 / (s2 * om);
+        let b = r / (s2 * om * (om + ng * r).max(1e-12));
+        let mut x1 = Vector::zeros(p);
+        let mut y1 = 0.0;
+        for &i in idx {
+            y1 += y[i];
+            for j in 0..p {
+                x1[j] += design.get(i, j);
+            }
+        }
+        for &i in idx {
+            for j in 0..p {
+                let xij = design.get(i, j);
+                xtvy[j] += a * xij * y[i];
+                for k in 0..p {
+                    xtvx[j * p + k] += a * xij * design.get(i, k);
+                }
+            }
+        }
+        for j in 0..p {
+            xtvy[j] -= b * x1[j] * y1;
+            for k in 0..p {
+                xtvx[j * p + k] -= b * x1[j] * x1[k];
+            }
+        }
+    }
+    let mut a = Mat::<f64>::zeros(p, p);
+    for j in 0..p {
+        for k in 0..p {
+            a[(j, k)] = xtvx[j * p + k];
+        }
+        a[(j, j)] += 1e-12;
+    }
+    let mut scratch = signlred::Report::new("gee", "gls");
+    chol_solve(&mut scratch, &a, &xtvy, policy)
+}
+
+fn gee_moments(
+    design: &Matrix,
+    y: &Vector,
+    beta: &Vector,
+    members: &BTreeMap<i64, Vec<usize>>,
+) -> (f64, f64) {
+    let mut sse = 0.0;
+    let mut n: f64 = 0.0;
+    let mut num = 0.0;
+    let mut pairs = 0.0;
+    for idx in members.values() {
+        let mut e = Vec::with_capacity(idx.len());
+        for &i in idx {
+            let mut xb = 0.0;
+            for j in 0..beta.len().min(design.ncols()) {
+                xb += design.get(i, j) * beta[j];
+            }
+            let ei = y[i] - xb;
+            e.push(ei);
+            sse += ei * ei;
+            n += 1.0;
+        }
+        for a in 0..e.len() {
+            for b in (a + 1)..e.len() {
+                num += e[a] * e[b];
+                pairs += 1.0;
+            }
+        }
+    }
+    let sigma2 = (sse / n.max(1.0)).max(1e-12);
+    let rho = if pairs > 0.0 {
+        num / (pairs * sigma2)
+    } else {
+        0.0
+    };
+    (sigma2, rho)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -857,5 +1342,51 @@ mod tests {
             .expect("pa");
         let hat = pa.predict(&x, &Session::new("pa", "p")).unwrap().value;
         assert!(hat.as_slice().iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn ordered_logit_ranks_a_line() {
+        let x = Matrix::from_fn(24, 1, |i, _| i as f64 + 0.3 * ((i % 3) as f64));
+        let y = Vector::from_iter((0..24).map(|i| {
+            if i < 8 {
+                0.0
+            } else if i < 16 {
+                1.0
+            } else {
+                2.0
+            }
+        }));
+        let q = OrderedLogit::new()
+            .fit(&x, &y, &Session::new("ol", "fit"))
+            .expect("ol");
+        let pred = q
+            .value
+            .predict_label(&x, &Session::new("ol", "p"))
+            .unwrap()
+            .value;
+        assert!((pred[0] - 0.0).abs() < 0.5 || (pred[1] - 0.0).abs() < 0.5);
+        assert!((pred[23] - 2.0).abs() < 0.5 || (pred[22] - 2.0).abs() < 0.5);
+        assert_eq!(q.value.thresholds.len(), 2);
+        assert!(q.value.thresholds[1] > q.value.thresholds[0]);
+    }
+
+    #[test]
+    fn gee_recovers_slope() {
+        let x = Matrix::from_fn(10, 1, |i, _| (i % 5) as f64);
+        let y = Vector::from_iter((0..10).map(|i| {
+            let u = if i < 5 { 5.0 } else { -5.0 };
+            2.0 * (i % 5) as f64 + u
+        }));
+        let g = Vector::from_iter((0..10).map(|i| if i < 5 { 0.0 } else { 1.0 }));
+        let q = Gee::new()
+            .fit(&x, &y, &g, &Session::new("gee", "fit"))
+            .expect("gee");
+        assert!(
+            (q.value.coef[0] - 2.0).abs() < 0.25,
+            "{:?}",
+            q.value.coef.as_slice()
+        );
+        assert!(q.value.rho.is_finite());
+        assert_eq!(q.value.n_groups, 2);
     }
 }

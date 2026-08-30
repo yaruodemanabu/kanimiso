@@ -7,7 +7,7 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linear_model::{FittedPenalized, LinearRegression, Ridge};
+use crate::linear_model::{FittedPenalized, Lasso, LinearRegression, Ridge};
 use crate::metrics::r2;
 use crate::rng::Rng;
 use crate::traits::{Fit, Predict};
@@ -500,6 +500,164 @@ impl Fit for GridSearchRidge {
     }
 }
 
+/// Ridge with a K-fold R² grid over `alpha` (sklearn `RidgeCV`).
+#[derive(Clone, Debug)]
+pub struct RidgeCV {
+    /// Candidate ℓ₂ penalties.
+    pub alphas: Vec<f64>,
+    /// CV splitter.
+    pub cv: KFold,
+}
+
+impl Default for RidgeCV {
+    fn default() -> Self {
+        Self {
+            alphas: vec![0.1, 1.0, 10.0],
+            cv: KFold::new(3),
+        }
+    }
+}
+
+impl RidgeCV {
+    /// Grid over the given `alpha` values.
+    pub fn new(alphas: Vec<f64>) -> Self {
+        Self {
+            alphas,
+            cv: KFold::new(3),
+        }
+    }
+}
+
+impl Fit for RidgeCV {
+    type Fitted = FittedGridSearchRidge;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedGridSearchRidge>> {
+        GridSearchRidge {
+            alphas: self.alphas.clone(),
+            cv: self.cv.clone(),
+        }
+        .fit(x, y, session)
+    }
+}
+
+/// Lasso with a K-fold R² grid over `alpha` (sklearn `LassoCV`).
+#[derive(Clone, Debug)]
+pub struct LassoCV {
+    /// Candidate ℓ₁ penalties.
+    pub alphas: Vec<f64>,
+    /// CV splitter.
+    pub cv: KFold,
+}
+
+impl Default for LassoCV {
+    fn default() -> Self {
+        Self {
+            alphas: vec![0.01, 0.1, 1.0],
+            cv: KFold::new(3),
+        }
+    }
+}
+
+impl LassoCV {
+    /// Grid over the given `alpha` values.
+    pub fn new(alphas: Vec<f64>) -> Self {
+        Self {
+            alphas,
+            cv: KFold::new(3),
+        }
+    }
+}
+
+/// Selected Lasso and the CV scores that justified it.
+#[derive(Clone, Debug)]
+pub struct FittedLassoCV {
+    /// Penalty with the highest mean fold R².
+    pub best_alpha: f64,
+    /// Mean CV R² of `best_alpha`.
+    pub best_score: f64,
+    /// `(alpha, mean_cv_r2)` for every grid point.
+    pub scores: Vec<(f64, f64)>,
+    /// Lasso refit on the full training design at `best_alpha`.
+    pub fitted: FittedPenalized,
+}
+
+impl Fit for LassoCV {
+    type Fitted = FittedLassoCV;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLassoCV>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let folds = match self.cv.split(x.nrows(), &session.child("cv")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                Vec::new()
+            }
+        };
+        let mut scores = Vec::new();
+        let mut best_alpha = self.alphas.first().copied().unwrap_or(1.0);
+        let mut best_score = f64::NEG_INFINITY;
+        for &alpha in &self.alphas {
+            let mut acc = 0.0;
+            let mut k = 0.0;
+            for (i, fold) in folds.iter().enumerate() {
+                let xt = take_rows(x, &fold.train);
+                let yt = take_vec(y, &fold.train);
+                let xv = take_rows(x, &fold.test);
+                let yv = take_vec(y, &fold.test);
+                let mut las = Lasso::new(alpha);
+                match las.fit(&xt, &yt, &session.child(format!("lasso_{alpha}_{i}"))) {
+                    Ok(q) => match q.value.predict(&xv, &session.child("predict")) {
+                        Ok(p) => {
+                            if let Ok(s) = r2(&yv, &p.value, &session.child("r2")) {
+                                if s.value.is_finite() {
+                                    acc += s.value;
+                                    k += 1.0;
+                                }
+                            }
+                        }
+                        Err(e) => ctx.push(e.primary),
+                    },
+                    Err(e) => ctx.push(e.primary),
+                }
+            }
+            let mean = if k > 0.0 { acc / k } else { f64::NAN };
+            scores.push((alpha, mean));
+            if mean.is_finite() && mean > best_score {
+                best_score = mean;
+                best_alpha = alpha;
+            }
+        }
+        let mut las = Lasso::new(best_alpha);
+        let fitted = match las.fit(x, y, &session.child("refit")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                FittedPenalized {
+                    coef: Vector::zeros(x.ncols()),
+                    intercept: y.mean(),
+                    alpha: best_alpha,
+                    l1_ratio: 1.0,
+                }
+            }
+        };
+        ctx.finish(FittedLassoCV {
+            best_alpha,
+            best_score,
+            scores,
+            fitted,
+        })
+    }
+}
+
 /// Leave-one-out: each row is a singleton test fold.
 #[derive(Clone, Debug, Default)]
 pub struct LeaveOneOut;
@@ -761,6 +919,14 @@ mod tests {
             .unwrap();
         assert!(q.value.best_alpha.is_finite());
         assert!(q.value.best_score.is_finite());
+        let r = RidgeCV::new(vec![0.1, 1.0])
+            .fit(&x, &y, &Session::new("ms", "ridgecv"))
+            .unwrap();
+        assert!(r.value.best_alpha.is_finite());
+        let l = LassoCV::new(vec![0.01, 0.1])
+            .fit(&x, &y, &Session::new("ms", "lassocv"))
+            .unwrap();
+        assert!(l.value.best_alpha.is_finite());
     }
 
     #[test]

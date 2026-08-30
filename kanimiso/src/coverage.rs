@@ -1193,6 +1193,119 @@ const INVENTORY: &[Algorithm] = &[
         "sktime.regression.interval_based.TimeSeriesForestRegressor",
         "timeseries",
     ),
+    a(
+        "bayes.ArdRegression",
+        "sklearn.linear_model.ARDRegression",
+        "estimator",
+    ),
+    a(
+        "classification.CalibratedClassifierCV",
+        "sklearn.calibration.CalibratedClassifierCV",
+        "estimator",
+    ),
+    a(
+        "semi.SelfTrainingClassifier",
+        "sklearn.semi_supervised.SelfTrainingClassifier",
+        "estimator",
+    ),
+    a(
+        "multioutput.MultiOutputRegressor",
+        "sklearn.multioutput.MultiOutputRegressor",
+        "estimator",
+    ),
+    a(
+        "multioutput.ClassifierChain",
+        "sklearn.multioutput.ClassifierChain",
+        "estimator",
+    ),
+    a(
+        "feature.f_classif",
+        "sklearn.feature_selection.f_classif",
+        "function",
+    ),
+    a(
+        "feature.f_regression",
+        "sklearn.feature_selection.f_regression",
+        "function",
+    ),
+    a("feature.chi2", "sklearn.feature_selection.chi2", "function"),
+    a(
+        "feature.FeatureAgglomeration",
+        "sklearn.cluster.FeatureAgglomeration",
+        "transformer",
+    ),
+    a(
+        "filters.cf_filter",
+        "statsmodels.tsa.filters.cf_filter.cffilter",
+        "forecast",
+    ),
+    a(
+        "reducer.DirectReducer",
+        "sktime.forecasting.compose.make_reduction",
+        "forecast",
+    ),
+    a(
+        "iv.hc0",
+        "statsmodels.stats.sandwich_covariance.cov_hc0",
+        "function",
+    ),
+    a(
+        "iv.hc3",
+        "statsmodels.stats.sandwich_covariance.cov_hc3",
+        "function",
+    ),
+    a(
+        "stats.het_white",
+        "statsmodels.stats.diagnostic.het_white",
+        "stats",
+    ),
+    a(
+        "glm.OrderedLogit",
+        "statsmodels.miscmodels.ordinal_model.OrderedModel",
+        "estimator",
+    ),
+    a(
+        "glm.Gee",
+        "statsmodels.genmod.generalized_estimating_equations.GEE",
+        "estimator",
+    ),
+    a(
+        "tsa.AutoArima",
+        "sktime.forecasting.arima.AutoARIMA",
+        "forecast",
+    ),
+    a(
+        "linear_model.RidgeCV",
+        "sklearn.linear_model.RidgeCV",
+        "estimator",
+    ),
+    a(
+        "linear_model.LassoCV",
+        "sklearn.linear_model.LassoCV",
+        "estimator",
+    ),
+    a(
+        "tslearn.cdist_softdtw",
+        "tslearn.metrics.cdist_soft_dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.KernelKMeans",
+        "tslearn.clustering.KernelKMeans",
+        "timeseries",
+    ),
+    a(
+        "tslearn.TimeSeriesScalerMeanVariance",
+        "tslearn.preprocessing.TimeSeriesScalerMeanVariance",
+        "timeseries",
+    ),
+    a("online.Eddm", "river.drift.binary.EDDM", "online"),
+    a("online.HddmW", "river.drift.HDDM_W", "online"),
+    a(
+        "online.LeveragingBagging",
+        "river.ensemble.LeveragingBaggingClassifier",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -1225,6 +1338,10 @@ mod tests {
             "classification.RidgeClassifier",
             "neural.MLPRegressor",
             "tslearn.dtw",
+            "bayes.ArdRegression",
+            "glm.OrderedLogit",
+            "tsa.AutoArima",
+            "online.LeveragingBagging",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

@@ -46,7 +46,7 @@ fn to_pm(y: f64, classes: &[i64]) -> f64 {
     }
 }
 
-fn from_score(s: f64, classes: &[i64]) -> f64 {
+pub(crate) fn from_score(s: f64, classes: &[i64]) -> f64 {
     let pos = *classes.last().unwrap_or(&1) as f64;
     let neg = *classes.first().unwrap_or(&0) as f64;
     if s >= 0.0 {
@@ -79,9 +79,21 @@ impl RidgeClassifier {
 /// Fitted ridge classifier.
 #[derive(Clone, Debug)]
 pub struct FittedRidgeClassifier {
-    inner: FittedPenalized,
+    pub(crate) inner: FittedPenalized,
     /// Training classes (sorted).
     pub classes: Vec<i64>,
+}
+
+impl FittedRidgeClassifier {
+    /// Build from an already-fitted ridge on `±1` labels.
+    pub(crate) fn from_penalized(inner: FittedPenalized, classes: Vec<i64>) -> Self {
+        Self { inner, classes }
+    }
+
+    /// Decision scores (ridge prediction on the `±1` scale).
+    pub fn decision_function(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
 }
 
 impl Predict for FittedRidgeClassifier {
@@ -426,6 +438,210 @@ pub struct FittedPlatt {
     pub classes: Vec<i64>,
 }
 
+/// Calibration map used by [`CalibratedClassifierCV`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalibrationMethod {
+    /// Platt logistic map on OOF scores.
+    Platt,
+    /// Isotonic regression on OOF scores.
+    Isotonic,
+}
+
+/// K-fold OOF calibration of a ridge classifier (sklearn `CalibratedClassifierCV`).
+#[derive(Clone, Debug)]
+pub struct CalibratedClassifierCV {
+    /// How to map scores to probabilities.
+    pub method: CalibrationMethod,
+    /// Number of stratified folds for OOF scores.
+    pub n_splits: usize,
+    /// Base ridge penalty.
+    pub alpha: f64,
+}
+
+impl Default for CalibratedClassifierCV {
+    fn default() -> Self {
+        Self {
+            method: CalibrationMethod::Platt,
+            n_splits: 3,
+            alpha: 1.0,
+        }
+    }
+}
+
+impl CalibratedClassifierCV {
+    /// Platt-calibrated ridge classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted calibrated classifier.
+#[derive(Clone, Debug)]
+pub struct FittedCalibrated {
+    /// Base classifier refit on the full sample.
+    pub base: FittedRidgeClassifier,
+    platt: Option<FittedPlatt>,
+    isotonic: Option<crate::linear_model::FittedIsotonic>,
+    /// Training classes.
+    pub classes: Vec<i64>,
+}
+
+impl FittedCalibrated {
+    /// Calibrated \(P(\text{last class})\).
+    pub fn predict_proba(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let scores = self.base.decision_function(x, &session.child("score"))?;
+        if let Some(p) = &self.platt {
+            return p.predict_proba(&scores.value, session);
+        }
+        if let Some(iso) = &self.isotonic {
+            let ctx = FitCtx::with_session(session.child("isotonic"));
+            let raw = iso.predict_1d(&scores.value);
+            let out = Vector::from_iter(raw.as_slice().iter().map(|&v| v.clamp(0.0, 1.0)));
+            return ctx.finish(out);
+        }
+        let ctx = FitCtx::with_session(session.child("fallback"));
+        ctx.finish(Vector::from_iter(
+            scores
+                .value
+                .as_slice()
+                .iter()
+                .map(|&s| 1.0 / (1.0 + (-s).exp())),
+        ))
+    }
+}
+
+impl Predict for FittedCalibrated {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let p = self.predict_proba(x, session)?;
+        Ok(p.map(|prob| {
+            Vector::from_iter(
+                prob.as_slice()
+                    .iter()
+                    .map(|&v| from_score(if v >= 0.5 { 1.0 } else { -1.0 }, &self.classes)),
+            )
+        }))
+    }
+}
+
+impl Fit for CalibratedClassifierCV {
+    type Fitted = FittedCalibrated;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCalibrated>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        if ctx.report.contains(IssueCode::SingleClass) || ctx.report.contains(IssueCode::EmptyClass)
+        {
+            return ctx.finish(FittedCalibrated {
+                base: FittedRidgeClassifier::from_penalized(
+                    FittedPenalized {
+                        coef: Vector::zeros(x.ncols()),
+                        intercept: 0.0,
+                        alpha: self.alpha,
+                        l1_ratio: 0.0,
+                    },
+                    counts.iter().map(|(c, _)| *c).collect(),
+                ),
+                platt: None,
+                isotonic: None,
+                classes: counts.iter().map(|(c, _)| *c).collect(),
+            });
+        }
+        let splitter = crate::model_selection::StratifiedKFold::new(self.n_splits.max(2));
+        let folds = match splitter.split(y, &session.child("cv")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                Vec::new()
+            }
+        };
+        let mut oof_s = Vec::new();
+        let mut oof_y = Vec::new();
+        for (i, fold) in folds.iter().enumerate() {
+            let xt = crate::model_selection::take_rows(x, &fold.train);
+            let yt = crate::model_selection::take_vec(y, &fold.train);
+            let xv = crate::model_selection::take_rows(x, &fold.test);
+            let yv = crate::model_selection::take_vec(y, &fold.test);
+            let mut base = RidgeClassifier::new(self.alpha);
+            match base.fit(&xt, &yt, &session.child(format!("fold_{i}"))) {
+                Ok(q) => match q.value.decision_function(&xv, &session.child("score")) {
+                    Ok(s) => {
+                        for t in 0..s.value.len().min(yv.len()) {
+                            oof_s.push(s.value[t]);
+                            oof_y.push(yv[t]);
+                        }
+                    }
+                    Err(e) => ctx.push(e.primary),
+                },
+                Err(e) => ctx.push(e.primary),
+            }
+        }
+        if oof_s.len() < 4 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(signlred::Severity::Warning)
+                    .message("too few OOF scores; calibration map is barely identified")
+                    .build(),
+            );
+        }
+        let scores = Vector::from_iter(oof_s);
+        let yo = Vector::from_iter(oof_y);
+        let mut platt = None;
+        let mut isotonic = None;
+        match self.method {
+            CalibrationMethod::Platt => {
+                match PlattCalibrator::new().fit(&scores, &yo, &session.child("platt")) {
+                    Ok(q) => platt = Some(q.value),
+                    Err(e) => ctx.push(e.primary),
+                }
+            }
+            CalibrationMethod::Isotonic => {
+                match crate::linear_model::IsotonicRegression::new().fit_1d(
+                    &scores,
+                    &yo,
+                    &session.child("iso"),
+                ) {
+                    Ok(q) => isotonic = Some(q.value),
+                    Err(e) => ctx.push(e.primary),
+                }
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::TargetLeakageSuspected)
+                .severity(signlred::Severity::Advisory)
+                .message("the calibrator is fit on OOF scores; the base is then refit on all rows")
+                .build(),
+        );
+        let base = match RidgeClassifier::new(self.alpha).fit(x, y, &session.child("refit")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                FittedRidgeClassifier::from_penalized(
+                    FittedPenalized {
+                        coef: Vector::zeros(x.ncols()),
+                        intercept: 0.0,
+                        alpha: self.alpha,
+                        l1_ratio: 0.0,
+                    },
+                    counts.iter().map(|(c, _)| *c).collect(),
+                )
+            }
+        };
+        let classes = base.classes.clone();
+        ctx.finish(FittedCalibrated {
+            base,
+            platt,
+            isotonic,
+            classes,
+        })
+    }
+}
+
 impl FittedPlatt {
     /// Calibrated \(P(\text{last class} \mid s)\).
     pub fn predict_proba(&self, scores: &Vector, session: &Session) -> Result<Qualified<Vector>> {
@@ -522,6 +738,39 @@ mod tests {
         let _ = GaussianNB::default();
         let _ = DecisionTreeClassifier::default();
         let _ = LinearSvc::default();
+    }
+
+    #[test]
+    fn calibrated_cv_platt_on_overlapping() {
+        let x = Matrix::from_fn(24, 1, |i, _| {
+            if i % 2 == 0 {
+                -0.6 + 0.12 * ((i / 2) % 6) as f64
+            } else {
+                0.6 + 0.12 * ((i / 2) % 6) as f64
+            }
+        });
+        let y = Vector::from_iter((0..24).map(|i| if i % 2 == 0 { 0.0 } else { 1.0 }));
+        let q = CalibratedClassifierCV::new()
+            .fit(&x, &y, &Session::new("cal", "fit"))
+            .expect("cal");
+        let p = q
+            .value
+            .predict_proba(&x, &Session::new("cal", "p"))
+            .unwrap()
+            .value;
+        assert!(p[1] > p[0], "p0={} p1={}", p[0], p[1]);
+        let pred = q
+            .value
+            .predict(&x, &Session::new("cal", "lab"))
+            .unwrap()
+            .value;
+        let mut ok = 0;
+        for i in 0..24 {
+            if (pred[i] - y[i]).abs() < 0.5 {
+                ok += 1;
+            }
+        }
+        assert!(ok >= 16, "ok={ok}");
     }
 
     #[test]

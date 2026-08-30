@@ -43,6 +43,7 @@ pub mod metrics;
 pub mod mixed;
 pub mod model_selection;
 pub mod multinomial;
+pub mod multioutput;
 pub mod naive_bayes;
 pub mod neighbors;
 pub mod neural;

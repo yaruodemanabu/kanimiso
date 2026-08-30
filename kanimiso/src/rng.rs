@@ -40,6 +40,27 @@ impl Rng {
         (-2.0 * u.ln()).sqrt() * (2.0 * std::f64::consts::PI * v).cos()
     }
 
+    /// Draw `Poisson(λ)` (Knuth for `λ≤20`, normal rounding otherwise).
+    pub fn poisson(&mut self, lambda: f64) -> u64 {
+        if !lambda.is_finite() || lambda <= 0.0 {
+            return 0;
+        }
+        if lambda > 20.0 {
+            let z = self.standard_normal();
+            return (lambda + lambda.sqrt() * z).round().max(0.0) as u64;
+        }
+        let l = (-lambda).exp();
+        let mut k = 0u64;
+        let mut p = 1.0;
+        loop {
+            k += 1;
+            p *= self.uniform();
+            if p <= l {
+                return k - 1;
+            }
+        }
+    }
+
     /// Integer in `0..n`.
     pub fn below(&mut self, n: usize) -> usize {
         if n == 0 {

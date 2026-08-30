@@ -14,7 +14,7 @@ use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linalg::chol_solve;
 
-pub use crate::filters::{bk_filter, FittedLocalLinearTrend, LocalLinearTrend};
+pub use crate::filters::{bk_filter, cf_filter, FittedLocalLinearTrend, LocalLinearTrend};
 use crate::traits::FitSeries;
 use crate::validate::{inspect_identification, inspect_xy};
 use ojizou_san::Session;
@@ -359,6 +359,136 @@ impl FitSeries for Arima {
     type Fitted = FittedArima;
     fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedArima>> {
         fit_arima(self, y, session)
+    }
+}
+
+/// Small \((p,d,q)\) AIC grid over Hannan–Rissanen [`Arima`].
+#[derive(Clone, Debug)]
+pub struct AutoArima {
+    /// Max AR order.
+    pub max_p: usize,
+    /// Max regular differences.
+    pub max_d: usize,
+    /// Max MA order.
+    pub max_q: usize,
+}
+
+impl Default for AutoArima {
+    fn default() -> Self {
+        Self {
+            max_p: 2,
+            max_d: 1,
+            max_q: 2,
+        }
+    }
+}
+
+impl AutoArima {
+    /// Default auto-ARIMA grid.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Selected ARIMA and the AIC grid that justified it.
+#[derive(Clone, Debug)]
+pub struct FittedAutoArima {
+    /// Winning specification.
+    pub spec: Arima,
+    /// AIC of the winner.
+    pub aic: f64,
+    /// `(p,d,q,aic)` for every successful grid point.
+    pub scores: Vec<(usize, usize, usize, f64)>,
+    /// Refit of the winner.
+    pub fitted: FittedArima,
+}
+
+impl FitSeries for AutoArima {
+    type Fitted = FittedAutoArima;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedAutoArima>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        let mut scores = Vec::new();
+        let mut best: Option<(f64, Arima, FittedArima)> = None;
+        for d in 0..=self.max_d {
+            for p in 0..=self.max_p {
+                for q in 0..=self.max_q {
+                    let mut spec = Arima { p, d, q };
+                    match spec.fit_series(y, &session.child(format!("arima_{p}{d}{q}"))) {
+                        Ok(fit) => {
+                            let n = fit.value.resid.len().max(1) as f64;
+                            let k = (1 + p + q) as f64;
+                            let s2 = fit.value.sigma2.max(1e-18);
+                            let aic = n * s2.ln() + 2.0 * k;
+                            scores.push((p, d, q, aic));
+                            match &best {
+                                Some((b, _, _)) if aic >= *b => {}
+                                _ => best = Some((aic, spec, fit.value)),
+                            }
+                        }
+                        Err(e) => {
+                            ctx.push(
+                                Issue::builder(IssueCode::DidNotConverge)
+                                    .severity(Severity::Advisory)
+                                    .message(format!(
+                                        "ARIMA({p},{d},{q}) rejected: {}",
+                                        e.primary().code
+                                    ))
+                                    .build(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::Overparameterized)
+                .severity(Severity::Advisory)
+                .message("auto-ARIMA AIC is computed on Hannan–Rissanen σ², not the exact Gaussian likelihood")
+                .compromise(NumericalCompromise::new(
+                    "exact-likelihood auto-ARIMA",
+                    "Hannan–Rissanen OLS grid + n ln σ² + 2k",
+                    "failed orders are skipped",
+                    "the selected (p,d,q) is a relative AIC winner on this grid only",
+                ))
+                .build(),
+        );
+        match best {
+            Some((aic, spec, fitted)) => ctx.finish(FittedAutoArima {
+                spec,
+                aic,
+                scores,
+                fitted,
+            }),
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::UnidentifiedModel)
+                        .message("every auto-ARIMA grid point failed")
+                        .meaninglessness(Meaninglessness::vacuous(
+                            "auto-ARIMA specification",
+                            "no (p,d,q) in the grid produced a fit",
+                            "lengthen the series or shrink the grid",
+                        ))
+                        .build(),
+                );
+                ctx.finish(FittedAutoArima {
+                    spec: Arima::default(),
+                    aic: f64::NAN,
+                    scores,
+                    fitted: FittedArima {
+                        spec: Arima::default(),
+                        ar: Vector::zeros(1),
+                        ma: Vector::zeros(0),
+                        intercept: y.mean(),
+                        sigma2: f64::NAN,
+                        resid: Vector::zeros(0),
+                        last_diff: Vector::zeros(0),
+                        last_resid: Vector::zeros(0),
+                        levels: Vec::new(),
+                    },
+                })
+            }
+        }
     }
 }
 
@@ -2107,5 +2237,24 @@ mod tests {
             q.value.ar[0],
             q.report.issues().iter().map(|i| i.code).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn auto_arima_selects_a_finite_aic() {
+        let mut rng = Rng::new(33);
+        let mut y = vec![0.0; 60];
+        for t in 1..60 {
+            y[t] = 0.6 * y[t - 1] + 0.3 * rng.standard_normal();
+        }
+        let q = AutoArima {
+            max_p: 1,
+            max_d: 0,
+            max_q: 1,
+        }
+        .fit_series(&Vector::from_slice(&y), &Session::new("aa", "fit"))
+        .expect("auto");
+        assert!(q.value.aic.is_finite());
+        assert!(!q.value.scores.is_empty());
+        assert!(q.value.fitted.sigma2.is_finite());
     }
 }

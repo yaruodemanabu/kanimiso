@@ -6,10 +6,11 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linalg::least_squares;
+use crate::linalg::{chol_solve, least_squares};
 use crate::stats::adfuller;
 use crate::traits::Predict;
 use crate::validate::{inspect_identification, inspect_xy};
+use faer::Mat;
 use ojizou_san::Session;
 use signlred::{Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result};
 
@@ -334,6 +335,136 @@ pub struct CointResult {
     pub adf_pvalue: f64,
 }
 
+/// Eicker–Huber–White sandwich kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SandwichKind {
+    /// HC0: \(\mathrm{meat} = \sum e_i^2 x_i x_i'\).
+    Hc0,
+    /// HC3: divide by \((1-h_{ii})^2\).
+    Hc3,
+}
+
+/// OLS sandwich covariance \((X'X)^{-1} \mathrm{meat} (X'X)^{-1}\).
+///
+/// `x` must already include an intercept column if one was used in the fit.
+pub fn sandwich_hc(
+    x: &Matrix,
+    resid: &Vector,
+    kind: SandwichKind,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(resid), &ctx.policy);
+    if resid.len() != x.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("sandwich residual length ≠ n")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(x.ncols(), x.ncols()));
+    }
+    let p = x.ncols();
+    let n = x.nrows();
+    if n == 0 || p == 0 {
+        return ctx.finish(Matrix::zeros(p, p));
+    }
+    let xtx = x.gram();
+    let mut inv = Mat::<f64>::zeros(p, p);
+    for j in 0..p {
+        let mut e = Vector::zeros(p);
+        e[j] = 1.0;
+        let mut scratch = signlred::Report::new("hc", "xtx");
+        match chol_solve(&mut scratch, &xtx, &e, &ctx.policy) {
+            Some(col) => {
+                for i in 0..p {
+                    inv[(i, j)] = col[i];
+                }
+            }
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::CholeskyFailed)
+                        .message("X'X refused Cholesky; sandwich is unidentified")
+                        .meaninglessness(Meaninglessness::vacuous(
+                            "sandwich covariance",
+                            "X'X is not SPD so (X'X)⁻¹ does not exist",
+                            "drop collinear columns",
+                        ))
+                        .build(),
+                );
+                return ctx.finish(Matrix::zeros(p, p));
+            }
+        }
+    }
+    let mut meat = Matrix::zeros(p, p);
+    for i in 0..n {
+        let mut h = 0.0;
+        for a in 0..p {
+            let mut s = 0.0;
+            for b in 0..p {
+                s += inv[(a, b)] * x.get(i, b);
+            }
+            h += x.get(i, a) * s;
+        }
+        let mut e2 = resid[i] * resid[i];
+        if kind == SandwichKind::Hc3 {
+            let den = (1.0 - h).max(1e-12);
+            if (1.0 - h).abs() < 1e-8 {
+                ctx.push(
+                    Issue::builder(IssueCode::LeveragePoint)
+                        .message(format!("row {i} has leverage h={h:.4}; HC3 is inflated"))
+                        .build(),
+                );
+            }
+            e2 /= den * den;
+        }
+        for a in 0..p {
+            for b in 0..p {
+                meat.set(a, b, meat.get(a, b) + e2 * x.get(i, a) * x.get(i, b));
+            }
+        }
+    }
+    let mut out = Matrix::zeros(p, p);
+    for a in 0..p {
+        for b in 0..p {
+            let mut s = 0.0;
+            for k in 0..p {
+                let mut t = 0.0;
+                for m in 0..p {
+                    t += meat.get(k, m) * inv[(m, b)];
+                }
+                s += inv[(a, k)] * t;
+            }
+            out.set(a, b, s);
+        }
+    }
+    ctx.push(
+        Issue::builder(IssueCode::Heteroscedasticity)
+            .severity(signlred::Severity::Advisory)
+            .message(match kind {
+                SandwichKind::Hc0 => "HC0 sandwich is not the OLS information covariance",
+                SandwichKind::Hc3 => "HC3 sandwich inflates levered rows; it is not HC0 or OLS",
+            })
+            .compromise(NumericalCompromise::new(
+                "model-based OLS covariance σ²(X'X)⁻¹",
+                format!("{kind:?} sandwich"),
+                "the meat uses squared residuals",
+                "do not interpret these as Gauss–Markov SEs",
+            ))
+            .build(),
+    );
+    ctx.finish(out)
+}
+
+/// HC0 sandwich.
+pub fn hc0(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+    sandwich_hc(x, resid, SandwichKind::Hc0, session)
+}
+
+/// HC3 sandwich.
+pub fn hc3(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+    sandwich_hc(x, resid, SandwichKind::Hc3, session)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,5 +486,17 @@ mod tests {
         let q = newey_west(&s, 2, &Session::new("hac", "fit")).expect("nw");
         assert_eq!(q.value.shape(), (2, 2));
         assert!(q.value.get(0, 0) >= 0.0);
+    }
+
+    #[test]
+    fn hc0_is_psd_on_a_line() {
+        let x = Matrix::from_fn(16, 2, |i, j| if j == 0 { 1.0 } else { i as f64 });
+        let y = Vector::from_iter((0..16).map(|i| 1.0 + 2.0 * i as f64));
+        let pred = Vector::from_iter((0..16).map(|i| 1.0 + 2.0 * i as f64));
+        let e = y.sub(&pred);
+        let q = hc0(&x, &e, &Session::new("hc", "0")).expect("hc0");
+        assert!(q.value.get(0, 0).is_finite());
+        let q3 = hc3(&x, &e, &Session::new("hc", "3")).expect("hc3");
+        assert_eq!(q3.value.shape(), (2, 2));
     }
 }

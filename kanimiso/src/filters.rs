@@ -104,6 +104,85 @@ pub fn bk_filter(
     ctx.finish(cycle)
 }
 
+/// Christiano–Fitzgerald asymmetric band-pass (statsmodels `cffilter`).
+///
+/// A linear drift is removed by OLS on \((1,t)\) before the filter. The
+/// remaining weights are shifted to sum to zero so a constant is annihilated.
+pub fn cf_filter(y: &Vector, low: f64, high: f64, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_univariate(&mut ctx, y);
+    if !(low.is_finite() && high.is_finite()) || low <= 2.0 || high <= low {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .message(format!(
+                    "CF periods must satisfy 2 < low < high (got {low}, {high})"
+                ))
+                .build(),
+        );
+    }
+    let n = y.len();
+    if n < 3 {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .message(format!("Christiano–Fitzgerald needs n≥3; series has {n}"))
+                .meaninglessness(Meaninglessness::vacuous(
+                    "asymmetric band-pass cycle",
+                    "a series shorter than 3 cannot identify a cycle after drift removal",
+                    "lengthen the series",
+                ))
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(n));
+    }
+    let design = Matrix::from_fn(n, 2, |i, j| if j == 0 { 1.0 } else { i as f64 });
+    let mut scratch = signlred::Report::new("cf", "drift");
+    let cycle_in =
+        if let Some(b) = crate::linalg::least_squares(&mut scratch, &design, y, &ctx.policy) {
+            ctx.push(
+                Issue::builder(IssueCode::SpectralLeakage)
+                    .severity(Severity::Advisory)
+                    .message("CF removes a linear drift by OLS before the band-pass")
+                    .compromise(NumericalCompromise::new(
+                        "CF filter on the raw series",
+                        "OLS detrend then full-sample asymmetric MA",
+                        "the drift is treated as identified",
+                        "do not read the cycle as including a stochastic trend",
+                    ))
+                    .build(),
+            );
+            y.sub(&design.matvec(&b))
+        } else {
+            y.clone()
+        };
+    let w1 = 2.0 * std::f64::consts::PI / high.max(low + 1e-9);
+    let w2 = 2.0 * std::f64::consts::PI / low.max(2.0 + 1e-9);
+    let bj = |j: i64| -> f64 {
+        if j == 0 {
+            (w2 - w1) / std::f64::consts::PI
+        } else {
+            let jf = j as f64;
+            ((jf * w2).sin() - (jf * w1).sin()) / (jf * std::f64::consts::PI)
+        }
+    };
+    let mut cycle = Vector::zeros(n);
+    for t in 0..n {
+        let mut w = vec![0.0; n];
+        let mut s = 0.0;
+        for u in 0..n {
+            let wt = bj(t as i64 - u as i64);
+            w[u] = wt;
+            s += wt;
+        }
+        let adj = s / n as f64;
+        let mut v = 0.0;
+        for u in 0..n {
+            v += (w[u] - adj) * cycle_in[u];
+        }
+        cycle[t] = v;
+    }
+    ctx.finish(cycle)
+}
+
 /// Local linear trend (unobserved-components level + slope).
 #[derive(Clone, Debug)]
 pub struct LocalLinearTrend {
@@ -274,6 +353,16 @@ mod tests {
             .value;
         let mid: f64 = (8..40).map(|i| c[i].abs()).sum::<f64>() / 32.0;
         assert!(mid < 0.5, "cycle mean abs={mid}");
+    }
+
+    #[test]
+    fn cf_annihilates_a_linear_trend() {
+        let y = Vector::from_iter((0..48).map(|i| i as f64));
+        let c = cf_filter(&y, 6.0, 32.0, &Session::new("cf", "fit"))
+            .expect("cf")
+            .value;
+        let mid: f64 = (8..40).map(|i| c[i].abs()).sum::<f64>() / 32.0;
+        assert!(mid < 0.75, "cf cycle mean abs={mid}");
     }
 
     #[test]

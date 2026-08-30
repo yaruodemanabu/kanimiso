@@ -4,12 +4,14 @@
 //! note) raise [`IssueCode::TargetLeakageSuspected`]. Constant columns are
 //! dropped by [`VarianceThreshold`] and ignored by [`SelectKBest`].
 
+use crate::cluster::Linkage;
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linalg::least_squares;
 use crate::rng::Rng;
+use crate::special::{chi2_pvalue, f_pvalue};
 use crate::traits::{Fit, FitUnsupervised, Transform};
-use crate::validate::inspect_xy;
+use crate::validate::{inspect_classes, inspect_xy};
 use faer::Mat;
 use ojizou_san::Session;
 use signlred::{
@@ -764,6 +766,368 @@ fn histogram_mi(x: &[f64], y: &[f64], n_bins: usize) -> f64 {
     }
 }
 
+/// Supervised feature scores plus p-values.
+#[derive(Clone, Debug)]
+pub struct FeatureScores {
+    /// Test statistic per column.
+    pub scores: Vector,
+    /// Upper-tail p-value per column.
+    pub pvalues: Vector,
+}
+
+/// One-way ANOVA F of each column against a class label (`f_classif`).
+pub fn f_classif(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FeatureScores>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+    ctx.push(
+        Issue::builder(IssueCode::TargetLeakageSuspected)
+            .severity(Severity::Advisory)
+            .message("f_classif scores every column against the full y")
+            .build(),
+    );
+    let k = counts.len();
+    let n = x.nrows();
+    let mut scores = Vector::zeros(x.ncols());
+    let mut pvalues = Vector::zeros(x.ncols());
+    if k < 2 {
+        return ctx.finish(FeatureScores { scores, pvalues });
+    }
+    let dfb = (k - 1) as f64;
+    let dfw = (n.saturating_sub(k)) as f64;
+    for j in 0..x.ncols() {
+        let mut ss_w = 0.0;
+        let mut ss_b = 0.0;
+        let grand = x.column(j).mean();
+        for (lab, cnt) in &counts {
+            let mut s = 0.0;
+            let mut q = 0.0;
+            let mut m = 0.0;
+            for i in 0..n {
+                if y[i].is_finite() && y[i].round() as i64 == *lab {
+                    let v = x.get(i, j);
+                    s += v;
+                    q += v * v;
+                    m += 1.0;
+                }
+            }
+            let mean = if m > 0.0 { s / m } else { 0.0 };
+            ss_w += q - mean * s;
+            let d = mean - grand;
+            ss_b += (*cnt as f64) * d * d;
+        }
+        let msb = ss_b / dfb.max(1.0);
+        let msw = ss_w / dfw.max(1.0);
+        if msw <= ctx.policy.near_zero_variance {
+            if msb <= ctx.policy.near_zero_variance {
+                scores[j] = 0.0;
+                pvalues[j] = 1.0;
+            } else {
+                ctx.push(
+                    Issue::builder(IssueCode::DegenerateDistribution)
+                        .message(format!("feature {j} has zero within-class variance"))
+                        .build(),
+                );
+                scores[j] = f64::INFINITY;
+                pvalues[j] = 0.0;
+            }
+        } else {
+            let f = msb / msw;
+            scores[j] = f;
+            pvalues[j] = f_pvalue(f.max(0.0), dfb, dfw.max(1.0));
+        }
+    }
+    ctx.finish(FeatureScores { scores, pvalues })
+}
+
+/// F-regression: \(F = r^2/(1-r^2)\,(n-2)\) of each column against `y`.
+pub fn f_regression(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FeatureScores>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    ctx.push(
+        Issue::builder(IssueCode::TargetLeakageSuspected)
+            .severity(Severity::Advisory)
+            .message("f_regression scores every column against the full y")
+            .build(),
+    );
+    let n = x.nrows() as f64;
+    let yst = slice_stats(y.as_slice());
+    let mut scores = Vector::zeros(x.ncols());
+    let mut pvalues = Vector::zeros(x.ncols());
+    for j in 0..x.ncols() {
+        let col: Vec<f64> = (0..x.nrows()).map(|i| x.get(i, j)).collect();
+        let xst = slice_stats(&col);
+        let r2 = pearson_sq(&col, xst, y.as_slice(), yst);
+        if r2 >= 1.0 - 1e-15 {
+            scores[j] = f64::INFINITY;
+            pvalues[j] = 0.0;
+        } else {
+            let f = (r2 / (1.0 - r2).max(1e-18)) * (n - 2.0).max(1.0);
+            scores[j] = f;
+            pvalues[j] = f_pvalue(f.max(0.0), 1.0, (n - 2.0).max(1.0));
+        }
+    }
+    ctx.finish(FeatureScores { scores, pvalues })
+}
+
+/// χ² scores of non-negative columns against a class label.
+pub fn chi2(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FeatureScores>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+    ctx.push(
+        Issue::builder(IssueCode::TargetLeakageSuspected)
+            .severity(Severity::Advisory)
+            .message("chi2 scores every column against the full y")
+            .build(),
+    );
+    let n = x.nrows() as f64;
+    let k = counts.len();
+    let mut scores = Vector::zeros(x.ncols());
+    let mut pvalues = Vector::zeros(x.ncols());
+    let mut any_neg = false;
+    for j in 0..x.ncols() {
+        for i in 0..x.nrows() {
+            if x.get(i, j) < 0.0 {
+                any_neg = true;
+                break;
+            }
+        }
+    }
+    if any_neg {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message("chi2 requires non-negative X; negative columns are scored as NaN")
+                .build(),
+        );
+    }
+    if k < 2 {
+        return ctx.finish(FeatureScores { scores, pvalues });
+    }
+    for j in 0..x.ncols() {
+        let mut neg = false;
+        let mut col_sum = 0.0;
+        for i in 0..x.nrows() {
+            let v = x.get(i, j);
+            if v < 0.0 {
+                neg = true;
+                break;
+            }
+            col_sum += v;
+        }
+        if neg || col_sum <= 0.0 {
+            scores[j] = f64::NAN;
+            pvalues[j] = f64::NAN;
+            continue;
+        }
+        let mut stat = 0.0;
+        for (lab, cnt) in &counts {
+            let mut obs = 0.0;
+            for i in 0..x.nrows() {
+                if y[i].is_finite() && y[i].round() as i64 == *lab {
+                    obs += x.get(i, j);
+                }
+            }
+            let exp = col_sum * (*cnt as f64 / n.max(1.0));
+            if exp > 1e-18 {
+                let d = obs - exp;
+                stat += d * d / exp;
+            }
+        }
+        scores[j] = stat;
+        pvalues[j] = chi2_pvalue(stat.max(0.0), (k.saturating_sub(1)) as f64);
+    }
+    ctx.finish(FeatureScores { scores, pvalues })
+}
+
+/// Agglomerative clustering on **columns**, then average members (sklearn
+/// `FeatureAgglomeration`).
+#[derive(Clone, Debug)]
+pub struct FeatureAgglomeration {
+    /// Number of output features (clusters of columns).
+    pub n_clusters: usize,
+    /// Linkage on column Euclidean distances.
+    pub linkage: Linkage,
+    labels: Vector,
+    fitted: bool,
+}
+
+impl Default for FeatureAgglomeration {
+    fn default() -> Self {
+        Self {
+            n_clusters: 2,
+            linkage: Linkage::Average,
+            labels: Vector::zeros(0),
+            fitted: false,
+        }
+    }
+}
+
+impl FeatureAgglomeration {
+    /// Keep `n_clusters` agglomerated features.
+    pub fn new(n_clusters: usize) -> Self {
+        Self {
+            n_clusters: n_clusters.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Cluster id per original column.
+    pub fn labels(&self) -> &Vector {
+        &self.labels
+    }
+}
+
+impl FitUnsupervised for FeatureAgglomeration {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let p = x.ncols();
+        let mut want = self.n_clusters.max(1);
+        if want > p && p > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::Overparameterized)
+                    .message(format!("n_clusters={want} > p={p}"))
+                    .build(),
+            );
+            want = p;
+        }
+        if p == 0 {
+            self.labels = Vector::zeros(0);
+            self.fitted = true;
+            return ctx.finish(self.clone());
+        }
+        let dist = Matrix::from_fn(p, p, |i, j| {
+            if i == j {
+                0.0
+            } else {
+                let mut s = 0.0;
+                for r in 0..x.nrows() {
+                    let d = x.get(r, i) - x.get(r, j);
+                    s += d * d;
+                }
+                s.sqrt()
+            }
+        });
+        let mut clusters: Vec<Vec<usize>> = (0..p).map(|i| vec![i]).collect();
+        while clusters.len() > want {
+            let mut bi = 0usize;
+            let mut bj = 1usize;
+            let mut best = f64::INFINITY;
+            for i in 0..clusters.len() {
+                for j in (i + 1)..clusters.len() {
+                    let d = feature_link(&clusters[i], &clusters[j], &dist, self.linkage);
+                    if d < best {
+                        best = d;
+                        bi = i;
+                        bj = j;
+                    }
+                }
+            }
+            let mut merged = clusters[bi].clone();
+            merged.extend_from_slice(&clusters[bj]);
+            if bi > bj {
+                clusters.remove(bi);
+                clusters.remove(bj);
+            } else {
+                clusters.remove(bj);
+                clusters.remove(bi);
+            }
+            clusters.push(merged);
+        }
+        let mut labels = Vector::zeros(p);
+        for (c, members) in clusters.iter().enumerate() {
+            for &j in members {
+                labels[j] = c as f64;
+            }
+        }
+        self.labels = labels;
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for FeatureAgglomeration {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(x.clone());
+        }
+        if x.ncols() != self.labels.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("FeatureAgglomeration transform column count ≠ fitted p")
+                    .build(),
+            );
+        }
+        let k = self.n_clusters.max(1);
+        let mut out = Matrix::zeros(x.nrows(), k);
+        let mut den = vec![0.0; k];
+        for j in 0..x.ncols().min(self.labels.len()) {
+            let c = self.labels[j].round().clamp(0.0, (k - 1) as f64) as usize;
+            den[c] += 1.0;
+            for i in 0..x.nrows() {
+                out.set(i, c, out.get(i, c) + x.get(i, j));
+            }
+        }
+        for c in 0..k {
+            if den[c] <= 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::EmptyCluster)
+                        .message(format!("feature cluster {c} is empty"))
+                        .build(),
+                );
+                continue;
+            }
+            for i in 0..x.nrows() {
+                out.set(i, c, out.get(i, c) / den[c]);
+            }
+        }
+        ctx.finish(out)
+    }
+}
+
+fn feature_link(a: &[usize], b: &[usize], dist: &Matrix, linkage: Linkage) -> f64 {
+    match linkage {
+        Linkage::Single => {
+            let mut m = f64::INFINITY;
+            for &i in a {
+                for &j in b {
+                    m = m.min(dist.get(i, j));
+                }
+            }
+            m
+        }
+        Linkage::Complete => {
+            let mut m = f64::NEG_INFINITY;
+            for &i in a {
+                for &j in b {
+                    m = m.max(dist.get(i, j));
+                }
+            }
+            m
+        }
+        Linkage::Average => {
+            let mut s = 0.0;
+            let mut c = 0.0;
+            for &i in a {
+                for &j in b {
+                    s += dist.get(i, j);
+                    c += 1.0;
+                }
+            }
+            if c == 0.0 {
+                f64::INFINITY
+            } else {
+                s / c
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -800,5 +1164,43 @@ mod tests {
         assert_eq!(z.ncols(), 1);
         assert!((z.get(5, 0) - 5.0).abs() < 1e-12);
         assert!(session.ledger().len() > 0);
+    }
+
+    #[test]
+    fn f_scores_and_agglomeration() {
+        let x = Matrix::from_fn(20, 3, |i, j| match j {
+            0 => i as f64,
+            1 => ((i * 17) % 5) as f64,
+            _ => {
+                if i < 10 {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
+        });
+        let y = Vector::from_iter((0..20).map(|i| if i < 10 { 0.0 } else { 1.0 }));
+        let fc = f_classif(&x, &y, &Session::new("f", "c")).unwrap();
+        assert!(fc.value.scores[2] > fc.value.scores[1]);
+        let fr = f_regression(&x, &y, &Session::new("f", "r")).unwrap();
+        assert!(fr.value.scores[0].is_finite() || fr.value.scores[2].is_finite());
+        let xnn = Matrix::from_fn(20, 2, |i, j| {
+            if j == 0 {
+                if i < 10 {
+                    3.0
+                } else {
+                    1.0
+                }
+            } else {
+                1.0
+            }
+        });
+        let ch = chi2(&xnn, &y, &Session::new("f", "chi")).unwrap();
+        assert!(ch.value.scores[0] > 0.0);
+        let mut fa = FeatureAgglomeration::new(2);
+        fa.fit_unsupervised(&x, &Session::new("fa", "fit")).unwrap();
+        let z = fa.transform(&x, &Session::new("fa", "t")).unwrap().value;
+        assert_eq!(z.ncols(), 2);
+        assert_eq!(z.nrows(), 20);
     }
 }
