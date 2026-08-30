@@ -692,6 +692,105 @@ pub fn manhattan_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<
     ctx.finish(out)
 }
 
+/// Pairwise Chebyshev (ℓ∞) distances (sklearn `pairwise_distances` metric=`chebyshev`).
+///
+/// Row counts are not identification `p`.
+pub fn chebyshev_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("chebyshev_distances column mismatch")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    ctx.finish(Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let mut acc_max: f64 = 0.0;
+        for k in 0..a.ncols() {
+            let d = (a.get(i, k) - b.get(j, k)).abs();
+            if d > acc_max {
+                acc_max = d;
+            }
+        }
+        acc_max
+    }))
+}
+
+/// Pairwise Minkowski distances (sklearn `pairwise_distances` metric=`minkowski`).
+///
+/// The order `p_norm` is not identification `p`.
+pub fn minkowski_distances(
+    a: &Matrix,
+    b: &Matrix,
+    p_norm: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let pord = if p_norm.is_finite() && p_norm > 0.0 {
+        p_norm
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("minkowski_distances p={p_norm}; using 2"))
+                .build(),
+        );
+        2.0
+    };
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("minkowski_distances column mismatch")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    ctx.finish(Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let mut s = 0.0;
+        for k in 0..a.ncols() {
+            s += (a.get(i, k) - b.get(j, k)).abs().powf(pord);
+        }
+        s.powf(1.0 / pord)
+    }))
+}
+
+/// Pairwise Canberra distances (sklearn `pairwise_distances` metric=`canberra`).
+///
+/// Row counts are not identification `p`.
+pub fn canberra_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("canberra_distances column mismatch")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
+    ctx.finish(Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let mut s = 0.0;
+        for k in 0..a.ncols() {
+            let u = a.get(i, k);
+            let v = b.get(j, k);
+            let den = u.abs() + v.abs();
+            if den > 1e-18 {
+                s += (u - v).abs() / den;
+            }
+        }
+        s
+    }))
+}
+
 /// Cosine similarity matrix (sklearn `cosine_similarity`).
 ///
 /// A zero-norm row is recorded as a numerical compromise and contributes 0.
@@ -1577,6 +1676,38 @@ pub fn pairwise_distances_argmin_min(
             best_d.sqrt()
         }
     }))
+}
+
+/// Alias of [`accuracy`] (sklearn `accuracy_score`).
+pub fn accuracy_score(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    accuracy(y_true, y_pred, session)
+}
+
+/// Alias of [`r2`] (sklearn `r2_score`).
+pub fn r2_score(y_true: &Vector, y_pred: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    r2(y_true, y_pred, session)
+}
+
+/// Alias of [`mse`] (sklearn `mean_squared_error`).
+pub fn mean_squared_error(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    mse(y_true, y_pred, session)
+}
+
+/// Alias of [`mae`] (sklearn `mean_absolute_error`).
+pub fn mean_absolute_error(
+    y_true: &Vector,
+    y_pred: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    mae(y_true, y_pred, session)
 }
 
 /// Maximum residual (sklearn `max_error`).
@@ -4415,5 +4546,37 @@ mod tests {
         assert_eq!(amm.shape(), (8, 2));
         assert!((amm.get(1, 0) - 1.0).abs() < 1e-12);
         assert!(amm.get(1, 1).abs() < 1e-12);
+        let accs = accuracy_score(
+            &y,
+            &Vector::from_slice(&[0.0, 1.0, 1.0, 0.0]),
+            &Session::new("m", "accs"),
+        )
+        .unwrap()
+        .value;
+        assert!((accs - 1.0).abs() < 1e-12);
+        let r2s = r2_score(&y2, &y2, &Session::new("m", "r2s"))
+            .unwrap()
+            .value;
+        assert!((r2s - 1.0).abs() < 1e-12);
+        let mse2 = mean_squared_error(&y2, &h2, &Session::new("m", "mse2"))
+            .unwrap()
+            .value;
+        assert!(mse2 > 0.0);
+        let mae2 = mean_absolute_error(&y2, &h2, &Session::new("m", "mae2"))
+            .unwrap()
+            .value;
+        assert!(mae2 > 0.0);
+        let chb = chebyshev_distances(&xb, &xb, &Session::new("m", "chb"))
+            .unwrap()
+            .value;
+        assert!(chb.get(1, 1).abs() < 1e-12);
+        let mk = minkowski_distances(&xb, &xb, 2.0, &Session::new("m", "mk"))
+            .unwrap()
+            .value;
+        assert!(mk.get(1, 1).abs() < 1e-12);
+        let can = canberra_distances(&xb, &xb, &Session::new("m", "can"))
+            .unwrap()
+            .value;
+        assert!(can.get(1, 1).abs() < 1e-12);
     }
 }

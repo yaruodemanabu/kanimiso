@@ -7013,6 +7013,260 @@ pub fn ftest_anova_power(
     ftest_power(effect_size, df_num, df_den, alpha, session)
 }
 
+/// One-sample *z*-test (statsmodels `ztest`).
+///
+/// Uses the sample standard error; `sigma` is not identification `p`.
+pub fn ztest(x: &Vector, value: f64, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_series_as_target(&mut ctx, x);
+    let st = slice_stats(x.as_slice());
+    let n = st.count;
+    if n < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("ztest needs at least two finite observations")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 0.0,
+            nobs: n as f64,
+        });
+    }
+    let se = st.std() / (n as f64).sqrt();
+    if se <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("ztest standard error vanished")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: f64::INFINITY,
+            nobs: n as f64,
+        });
+    }
+    let z = (st.mean - value) / se;
+    ctx.finish(HypothesisTest {
+        statistic: z,
+        pvalue: crate::special::norm_pvalue_two_sided(z),
+        df: f64::INFINITY,
+        nobs: n as f64,
+    })
+}
+
+/// Two-sample Hotelling *T*² (statsmodels `Hotelling`).
+///
+/// Feature count is not identification `p`.
+pub fn hotelling(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    if a.ncols() != b.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("hotelling column mismatch")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 0.0,
+            nobs: (a.nrows() + b.nrows()) as f64,
+        });
+    }
+    let p = a.ncols();
+    let n1 = a.nrows();
+    let n2 = b.nrows();
+    if n1 < 2 || n2 < 2 || p == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("hotelling needs two samples with n≥2")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: p as f64,
+            nobs: (n1 + n2) as f64,
+        });
+    }
+    let mut d = Vector::zeros(p);
+    for j in 0..p {
+        let mut s1 = 0.0;
+        let mut s2 = 0.0;
+        for i in 0..n1 {
+            s1 += a.get(i, j);
+        }
+        for i in 0..n2 {
+            s2 += b.get(i, j);
+        }
+        d[j] = s1 / n1 as f64 - s2 / n2 as f64;
+    }
+    let mut ss = 0.0;
+    for j in 0..p {
+        let m1 = {
+            let mut s = 0.0;
+            for i in 0..n1 {
+                s += a.get(i, j);
+            }
+            s / n1 as f64
+        };
+        let m2 = {
+            let mut s = 0.0;
+            for i in 0..n2 {
+                s += b.get(i, j);
+            }
+            s / n2 as f64
+        };
+        for i in 0..n1 {
+            let e = a.get(i, j) - m1;
+            ss += e * e;
+        }
+        for i in 0..n2 {
+            let e = b.get(i, j) - m2;
+            ss += e * e;
+        }
+    }
+    let df = (n1 + n2 - 2) as f64;
+    let var = if df > 0.0 { ss / (df * p.max(1) as f64) } else { 0.0 };
+    let se2 = var * (1.0 / n1 as f64 + 1.0 / n2 as f64);
+    let mut t2 = 0.0;
+    if se2 > 1e-18 {
+        for j in 0..p {
+            t2 += d[j] * d[j] / se2;
+        }
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("hotelling pooled covariance vanished")
+                .build(),
+        );
+        t2 = f64::NAN;
+    }
+    let df_den = (n1 + n2 - p.saturating_add(1)) as f64;
+    let f = if t2.is_finite() && df_den > 0.0 && p > 0 {
+        t2 * df_den / (p as f64 * ((n1 + n2 - 2) as f64).max(1.0))
+    } else {
+        f64::NAN
+    };
+    ctx.finish(HypothesisTest {
+        statistic: t2,
+        pvalue: if f.is_finite() {
+            f_pvalue(f.max(0.0), p as f64, df_den.max(1.0))
+        } else {
+            f64::NAN
+        },
+        df: p as f64,
+        nobs: (n1 + n2) as f64,
+    })
+}
+
+/// Cohen's *h* for two proportions (statsmodels `proportion_effectsize`).
+pub fn proportion_effectsize(
+    p1: f64,
+    p2: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if ![p1, p2].iter().all(|v| v.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .severity(Severity::Warning)
+                .message("proportion_effectsize received a non-finite rate")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let a = p1.clamp(0.0, 1.0);
+    let b = p2.clamp(0.0, 1.0);
+    if a != p1 || b != p2 {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message("proportion_effectsize clipped a rate onto [0, 1]")
+                .build(),
+        );
+    }
+    ctx.finish(2.0 * a.sqrt().asin() - 2.0 * b.sqrt().asin())
+}
+
+/// Two-sample two one-sided tests of equivalence (statsmodels `ttost_ind`).
+pub fn ttost(
+    x: &Vector,
+    y: &Vector,
+    low: f64,
+    high: f64,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_pair(&mut ctx, x, y);
+    if !(low.is_finite() && high.is_finite()) || low >= high {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("ttost bounds [{low}, {high}] are invalid"))
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 0.0,
+            nobs: 0.0,
+        });
+    }
+    let sx = slice_stats(x.as_slice());
+    let sy = slice_stats(y.as_slice());
+    let n1 = sx.count as f64;
+    let n2 = sy.count as f64;
+    if sx.count < 2 || sy.count < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("ttost needs ≥2 finite observations in each group")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df: 0.0,
+            nobs: n1 + n2,
+        });
+    }
+    let df = n1 + n2 - 2.0;
+    let sp = ((n1 - 1.0) * sx.variance + (n2 - 1.0) * sy.variance) / df.max(1.0);
+    let se = (sp * (1.0 / n1 + 1.0 / n2)).sqrt();
+    if se <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("ttost pooled standard error vanished")
+                .build(),
+        );
+        return ctx.finish(HypothesisTest {
+            statistic: f64::NAN,
+            pvalue: f64::NAN,
+            df,
+            nobs: n1 + n2,
+        });
+    }
+    let diff = sx.mean - sy.mean;
+    let t_lo = (diff - low) / se;
+    let t_hi = (high - diff) / se;
+    let p_lo = 1.0 - student_t_cdf(t_lo, df);
+    let p_hi = 1.0 - student_t_cdf(t_hi, df);
+    ctx.finish(HypothesisTest {
+        statistic: t_lo.min(t_hi),
+        pvalue: p_lo.max(p_hi).clamp(0.0, 1.0),
+        df,
+        nobs: n1 + n2,
+    })
+}
+
 /// Nested-model ANOVA (statsmodels `anova_lm`).
 #[derive(Clone, Debug)]
 pub struct AnovaLm {
@@ -8168,5 +8422,15 @@ mod tests {
         assert!(tost.value.pvalue.is_finite() || tost.value.statistic.is_nan());
         let ap = ftest_anova_power(0.5, 3.0, 12.0, 0.05, &Session::new("fap", "t")).expect("fap");
         assert!(ap.value.is_finite() && ap.value >= 0.0 && ap.value <= 1.0);
+        let zt = ztest(&y, 0.0, &Session::new("z", "t")).expect("z");
+        assert!(zt.value.statistic.is_finite() || zt.value.pvalue.is_nan());
+        let xa = Matrix::from_fn(12, 1, |i, _| a[i]);
+        let xb2 = Matrix::from_fn(12, 1, |i, _| b[i]);
+        let ht = hotelling(&xa, &xb2, &Session::new("hot", "t")).expect("hot");
+        assert!(ht.value.statistic.is_finite() || ht.value.pvalue.is_nan());
+        let eh = proportion_effectsize(0.2, 0.5, &Session::new("he", "t")).expect("he");
+        assert!(eh.value.is_finite());
+        let ts = ttost(&a, &b, -10.0, 10.0, &Session::new("ttost", "t")).expect("ttost");
+        assert!(ts.value.pvalue.is_finite() || ts.value.statistic.is_nan());
     }
 }

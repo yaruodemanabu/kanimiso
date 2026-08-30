@@ -12,7 +12,8 @@ use crate::rng::Rng;
 use crate::traits::PartialFit;
 use ojizou_san::{IncrementalExplain, Session};
 use signlred::{
-    IncrementalQuality, Issue, IssueCode, Meaninglessness, Qualified, Result, Severity,
+    IncrementalQuality, Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result,
+    Severity,
 };
 use std::collections::BTreeMap;
 
@@ -695,6 +696,225 @@ impl PartialFit for LinUcb {
     }
 }
 
+/// Contextual linear Thompson sampling (river `bandit.LinTS`).
+///
+/// Arm count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct LinTs {
+    n_arms: usize,
+    /// Posterior scale on \(A^{-1}\).
+    pub v: f64,
+    p: usize,
+    ainv: Vec<Vec<f64>>,
+    b: Vec<Vector>,
+    counts: Vec<u64>,
+    rng: Rng,
+    updates: u64,
+    n_seen: u64,
+}
+
+impl LinTs {
+    /// `k` arms, unit ridge.
+    pub fn new(n_arms: usize) -> Self {
+        let k = n_arms.max(1);
+        Self {
+            n_arms: k,
+            v: 1.0,
+            p: 0,
+            ainv: Vec::new(),
+            b: Vec::new(),
+            counts: vec![0; k],
+            rng: Rng::new(19),
+            updates: 0,
+            n_seen: 0,
+        }
+    }
+
+    fn ensure_dim(&mut self, p: usize) {
+        if self.p == p && !self.ainv.is_empty() {
+            return;
+        }
+        self.p = p.max(1);
+        let dim = self.p;
+        self.ainv = (0..self.n_arms)
+            .map(|_| {
+                let mut m = vec![0.0; dim * dim];
+                for i in 0..dim {
+                    m[i * dim + i] = 1.0;
+                }
+                m
+            })
+            .collect();
+        self.b = (0..self.n_arms).map(|_| Vector::zeros(dim)).collect();
+    }
+
+    fn sample_theta(&mut self, arm: usize, ctx: &mut FitCtx) -> Vector {
+        let p = self.p.max(1);
+        let mu = LinUcb::matvec(&self.ainv[arm], p, &self.b[arm]);
+        let scale = if self.v.is_finite() && self.v > 0.0 {
+            self.v.sqrt()
+        } else {
+            1.0
+        };
+        if p == 1 {
+            let sd = self.ainv[arm][0].max(0.0).sqrt() * scale;
+            return Vector::from_slice(&[mu[0] + sd * self.rng.standard_normal()]);
+        }
+        match cholesky_lower(&self.ainv[arm], p) {
+            Some(l) => {
+                let z = Vector::from_iter((0..p).map(|_| self.rng.standard_normal()));
+                let lz = LinUcb::matvec(&l, p, &z);
+                Vector::from_iter((0..p).map(|j| mu[j] + scale * lz[j]))
+            }
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::CholeskyFailed)
+                        .severity(Severity::Warning)
+                        .message(format!("LinTS arm {arm} A⁻¹ was not SPD; using a diagonal draw"))
+                        .compromise(NumericalCompromise::new(
+                            "θ ~ N(A⁻¹b, v A⁻¹)",
+                            "independent N(μ_j, v A⁻¹_jj) draws",
+                            "the posterior Gram lost definiteness",
+                            "arm scores are not a joint Gaussian draw",
+                        ))
+                        .build(),
+                );
+                Vector::from_iter((0..p).map(|j| {
+                    let sd = self.ainv[arm][j * p + j].max(0.0).sqrt() * scale;
+                    mu[j] + sd * self.rng.standard_normal()
+                }))
+            }
+        }
+    }
+
+    fn choose_arm(&mut self, z: &Vector, ctx: &mut FitCtx) -> usize {
+        if let Some(a) = self.counts.iter().position(|&c| c == 0) {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message(format!("LinTS has never pulled arm {a}"))
+                    .build(),
+            );
+            return a;
+        }
+        let mut best = 0usize;
+        let mut best_u = f64::NEG_INFINITY;
+        for a in 0..self.n_arms {
+            let theta = self.sample_theta(a, ctx);
+            let mut s = 0.0;
+            for j in 0..z.len().min(theta.len()) {
+                s += z[j] * theta[j];
+            }
+            if s > best_u {
+                best_u = s;
+                best = a;
+            }
+        }
+        best
+    }
+}
+
+fn cholesky_lower(a: &[f64], p: usize) -> Option<Vec<f64>> {
+    let mut l = vec![0.0; p * p];
+    for i in 0..p {
+        for j in 0..=i {
+            let mut s = a[i * p + j];
+            for k in 0..j {
+                s -= l[i * p + k] * l[j * p + k];
+            }
+            if i == j {
+                if s <= 1e-18 {
+                    return None;
+                }
+                l[i * p + i] = s.sqrt();
+            } else {
+                l[i * p + j] = s / l[j * p + j];
+            }
+        }
+    }
+    Some(l)
+}
+
+impl PartialFit for LinTs {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish(
+                &ctx,
+                reject(self.updates, 0, self.n_seen, "LinTS needs rewards"),
+            );
+        };
+        if x.ncols() == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .severity(Severity::Warning)
+                    .message("LinTS received a context with no columns")
+                    .build(),
+            );
+            return finish(
+                &ctx,
+                reject(self.updates, y.len(), self.n_seen, "empty context"),
+            );
+        }
+        if self.p != 0 && self.p != x.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message("LinTS context dim changed")
+                    .build(),
+            );
+            return finish(
+                &ctx,
+                reject(self.updates, y.len(), self.n_seen, "context dim changed"),
+            );
+        }
+        self.ensure_dim(x.ncols());
+        let before: Vec<f64> = self.b.iter().map(|v| v.norm()).collect();
+        let mut dsum = 0.0;
+        let mut last_arm = 0usize;
+        for i in 0..y.len().min(x.nrows()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = LinUcb::context(x, i, self.p);
+            let arm = self.choose_arm(&z, &mut ctx);
+            LinUcb::sherman_update(&mut self.ainv[arm], self.p.max(1), &z);
+            for j in 0..self.p.min(self.b[arm].len()).min(z.len()) {
+                self.b[arm][j] += y[i] * z[j];
+            }
+            self.counts[arm] += 1;
+            self.n_seen += 1;
+            self.updates += 1;
+            last_arm = arm;
+            dsum += 1.0;
+        }
+        let after: Vec<f64> = self.b.iter().map(|v| v.norm()).collect();
+        let identified = self.counts.iter().all(|&c| c > 0);
+        let why = format!(
+            "chose arm {last_arm} by a Gaussian draw of θ; arm count is not p"
+        );
+        let expl = pack_bandit(
+            &mut ctx,
+            self.updates,
+            y.len(),
+            self.n_seen,
+            dsum,
+            identified,
+            self.counts.iter().any(|&c| c == 0),
+            &before,
+            &after,
+            "LinTS posterior means",
+            why.as_str(),
+        );
+        finish(&ctx, expl)
+    }
+}
+
 fn sample_beta(rng: &mut Rng, alpha: f64, beta: f64) -> f64 {
     // Gamma(k,1) ≈ sum of k exponentials for integer shape; otherwise Jöhnk.
     let x = sample_gamma(rng, alpha.max(1e-6));
@@ -851,6 +1071,9 @@ mod tests {
         let _ = u.pull(&Session::new("ucb", "pull")).expect("ucb pull");
         let mut lin = LinUcb::new(2);
         let q = lin.partial_fit(&x, Some(&y), &session).expect("linucb");
+        assert!(!q.value.narrative.is_empty());
+        let mut lts = LinTs::new(2);
+        let q = lts.partial_fit(&x, Some(&y), &session).expect("lints");
         assert!(!q.value.narrative.is_empty());
     }
 }

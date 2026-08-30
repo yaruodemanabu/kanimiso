@@ -3501,6 +3501,52 @@ const INVENTORY: &[Algorithm] = &[
     a("online.OnlineQuantile", "river.stats.Quantile", "online"),
     a("online.SlimReco", "river.reco.SLIM", "online"),
     a("bandit.LinUcb", "river.bandit.LinUCB", "online"),
+    a("metrics.accuracy_score", "sklearn.metrics.accuracy_score", "metric"),
+    a("metrics.r2_score", "sklearn.metrics.r2_score", "metric"),
+    a(
+        "metrics.mean_squared_error",
+        "sklearn.metrics.mean_squared_error",
+        "metric",
+    ),
+    a(
+        "metrics.mean_absolute_error",
+        "sklearn.metrics.mean_absolute_error",
+        "metric",
+    ),
+    a(
+        "metrics.chebyshev_distances",
+        "sklearn.metrics.pairwise.pairwise_distances",
+        "metric",
+    ),
+    a(
+        "metrics.minkowski_distances",
+        "sklearn.metrics.pairwise.pairwise_distances",
+        "metric",
+    ),
+    a(
+        "metrics.canberra_distances",
+        "sklearn.metrics.pairwise.pairwise_distances",
+        "metric",
+    ),
+    a("stats.ztest", "statsmodels.stats.weightstats.ztest", "stats"),
+    a(
+        "stats.hotelling",
+        "statsmodels.stats.multivariate.Hotelling",
+        "stats",
+    ),
+    a(
+        "stats.proportion_effectsize",
+        "statsmodels.stats.proportion.proportion_effectsize",
+        "stats",
+    ),
+    a("stats.ttost", "statsmodels.stats.weightstats.ttost_ind", "stats"),
+    a(
+        "tslearn.EncoderClassifier",
+        "sktime.classification.deep_learning.encoder.EncoderClassifier",
+        "timeseries",
+    ),
+    a("online.AdaBoundRegressor", "river.optim.AdaBound", "online"),
+    a("bandit.LinTs", "river.bandit.LinTS", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -3660,6 +3706,11 @@ mod tests {
             "tslearn.FCNClassifier",
             "online.AdaMaxRegressor",
             "bandit.LinUcb",
+            "metrics.r2_score",
+            "stats.ztest",
+            "tslearn.EncoderClassifier",
+            "online.AdaBoundRegressor",
+            "bandit.LinTs",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

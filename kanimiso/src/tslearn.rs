@@ -8695,6 +8695,82 @@ impl Predict for FittedTapNetRegressor {
     }
 }
 
+/// Convolutional encoder + ridge classifier (sktime `EncoderClassifier` lite).
+///
+/// Encoder width is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct EncoderClassifier {
+    /// Bottleneck width.
+    pub latent: usize,
+    /// Ridge \(\alpha\).
+    pub alpha: f64,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for EncoderClassifier {
+    fn default() -> Self {
+        Self {
+            latent: 4,
+            alpha: 0.1,
+            seed: 47,
+        }
+    }
+}
+
+impl EncoderClassifier {
+    /// Default encoder-lite classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted encoder-lite ridge.
+#[derive(Clone, Debug)]
+pub struct FittedEncoderClassifier {
+    enc: Matrix,
+    inner: crate::classification::FittedRidgeClassifier,
+}
+
+fn encode_series(x: &Matrix, enc: &Matrix) -> Matrix {
+    Matrix::from_fn(x.nrows(), enc.ncols(), |i, j| {
+        let mut s = 0.0;
+        let t = x.ncols().min(enc.nrows());
+        for u in 0..t {
+            s += x.get(i, u) * enc.get(u, j);
+        }
+        (s / t.max(1) as f64).tanh()
+    })
+}
+
+impl Fit for EncoderClassifier {
+    type Fitted = FittedEncoderClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedEncoderClassifier>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_classes(&mut ctx.report, y, &ctx.policy);
+        let mut rng = Rng::new(self.seed);
+        let lat = self.latent.max(1);
+        let enc = Matrix::from_fn(x.ncols().max(1), lat, |_, _| rng.standard_normal());
+        let z = encode_series(x, &enc);
+        let inner = binary_ridge_from_features(&z, y, self.alpha, &ctx.policy, "encoder");
+        ctx.finish(FittedEncoderClassifier { enc, inner })
+    }
+}
+
+impl Predict for FittedEncoderClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let z = encode_series(x, &self.enc);
+        self.inner.predict(&z, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9483,5 +9559,14 @@ mod tests {
             .value;
         assert_eq!(taprp.len(), 6);
         assert!(taprp.as_slice().iter().all(|v| v.is_finite()));
+        let enc = EncoderClassifier::new()
+            .fit(&x, &yb, &Session::new("ts", "enc"))
+            .unwrap();
+        let encp = enc
+            .value
+            .predict(&x, &Session::new("ts", "encp"))
+            .unwrap()
+            .value;
+        assert_eq!(encp.len(), 6);
     }
 }
