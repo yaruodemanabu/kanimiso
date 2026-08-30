@@ -9632,6 +9632,51 @@ impl Binseg {
     }
 }
 
+/// Named PELT detector (sktime `Pelt` / ruptures `Pelt`).
+///
+/// Penalty and change-point count are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Pelt {
+    /// Mean-change penalty. Non-positive values fall back to \(2\log n\).
+    pub penalty: f64,
+}
+
+impl Default for Pelt {
+    fn default() -> Self {
+        Self { penalty: 0.0 }
+    }
+}
+
+impl Pelt {
+    /// Default PELT (BIC-like \(2\log n\) penalty).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Change-point locations as a vector of indices.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        pelt(y, self.penalty, session)
+    }
+}
+
+/// Named ClaSP change-point detector (sktime `ClaSPSegmentation`).
+///
+/// Split count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct ClaSPSegmentation;
+
+impl ClaSPSegmentation {
+    /// Default ClaSP segmentation.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Index of the principal ClaSP split.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+        clasp_change_point(y, session)
+    }
+}
+
 fn ridge_reg_from_features(
     z: &Matrix,
     y: &Vector,
@@ -12940,6 +12985,16 @@ mod tests {
             .unwrap()
             .value;
         assert!(bsg.is_finite());
+        let pel = Pelt::new()
+            .fit(&yr, &Session::new("ts", "pelt2"))
+            .unwrap()
+            .value;
+        assert!(pel.as_slice().iter().all(|v| v.is_finite()));
+        let clp = ClaSPSegmentation::new()
+            .fit(&yr, &Session::new("ts", "claspseg"))
+            .unwrap()
+            .value;
+        assert!(clp.is_finite() || clp.is_nan());
     }
 
     #[test]

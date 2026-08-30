@@ -19542,6 +19542,749 @@ impl PartialFit for RollingAccuracy {
     }
 }
 
+fn rolling_push_pair(pairs: &mut Vec<(f64, f64)>, pred: f64, truth: f64, cap: usize) {
+    if pred.is_finite() && truth.is_finite() {
+        pairs.push((pred, truth));
+        if pairs.len() > cap {
+            pairs.remove(0);
+        }
+    }
+}
+
+fn rolling_pair_metric<F>(
+    session: &Session,
+    name: &str,
+    x: &Matrix,
+    y: Option<&Vector>,
+    window: usize,
+    pairs: &mut Vec<(f64, f64)>,
+    n_seen: &mut u64,
+    updates: &mut u64,
+    score: F,
+    what: &str,
+    why: &str,
+) -> Result<Qualified<IncrementalExplain>>
+where
+    F: Fn(&[(f64, f64)]) -> f64,
+{
+    let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+    inspect_online_xy(&mut ctx, x, y);
+    let Some(y) = y else {
+        ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+        return finish_explain(
+            ctx,
+            reject_explain(*updates, x.nrows(), *n_seen, "missing target for rolling metric"),
+        );
+    };
+    let before = score(pairs);
+    let cap = window.max(1);
+    for i in 0..x.nrows().min(y.len()) {
+        rolling_push_pair(pairs, x.get(i, 0), y[i], cap);
+        if x.get(i, 0).is_finite() && y[i].is_finite() {
+            *n_seen += 1;
+        }
+    }
+    *updates += 1;
+    let after = score(pairs);
+    let mut q = IncrementalQuality::new(updates.saturating_sub(1), x.nrows(), *n_seen);
+    q.effective_sample_size = pairs.len() as f64;
+    q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+        (after - before).abs()
+    } else {
+        0.0
+    });
+    q.information_gain = Some(x.nrows() as f64);
+    q.still_identified = !pairs.is_empty() && after.is_finite();
+    q.warmup = pairs.is_empty();
+    q.explanation = format!("{name}={after:.6e}");
+    flag_info(&mut ctx, &q);
+    finish_explain(
+        ctx,
+        IncrementalExplain::from_quality(
+            q,
+            what,
+            why,
+            format!("{name}={before:.6e}"),
+            format!("{name}={after:.6e}"),
+        ),
+    )
+}
+
+fn window_hard_counts(pairs: &[(f64, f64)]) -> (f64, f64, f64, f64) {
+    let mut tp = 0.0_f64;
+    let mut fp = 0.0_f64;
+    let mut tn = 0.0_f64;
+    let mut fn_ = 0.0_f64;
+    for &(pred, truth) in pairs {
+        let p = pred > 0.5;
+        let t = truth > 0.5;
+        match (p, t) {
+            (true, true) => tp += 1.0,
+            (true, false) => fp += 1.0,
+            (false, false) => tn += 1.0,
+            (false, true) => fn_ += 1.0,
+        }
+    }
+    (tp, fp, tn, fn_)
+}
+
+fn window_f1(pairs: &[(f64, f64)]) -> f64 {
+    let (tp, fp, _, fn_) = window_hard_counts(pairs);
+    let den = 2.0 * tp + fp + fn_;
+    if den <= 0.0 {
+        f64::NAN
+    } else {
+        2.0 * tp / den
+    }
+}
+
+fn window_precision(pairs: &[(f64, f64)]) -> f64 {
+    let (tp, fp, _, _) = window_hard_counts(pairs);
+    let den = tp + fp;
+    if den <= 0.0 {
+        f64::NAN
+    } else {
+        tp / den
+    }
+}
+
+fn window_recall(pairs: &[(f64, f64)]) -> f64 {
+    let (tp, _, _, fn_) = window_hard_counts(pairs);
+    let den = tp + fn_;
+    if den <= 0.0 {
+        f64::NAN
+    } else {
+        tp / den
+    }
+}
+
+fn window_r2(pairs: &[(f64, f64)]) -> f64 {
+    if pairs.len() < 2 {
+        return f64::NAN;
+    }
+    let n = pairs.len() as f64;
+    let mut sse = 0.0_f64;
+    let mut sy = 0.0_f64;
+    let mut sy2 = 0.0_f64;
+    for &(pred, truth) in pairs {
+        let e = pred - truth;
+        sse += e * e;
+        sy += truth;
+        sy2 += truth * truth;
+    }
+    let mean = sy / n;
+    let sst = sy2 - n * mean * mean;
+    if sst.abs() <= 1e-15 {
+        f64::NAN
+    } else {
+        1.0 - sse / sst
+    }
+}
+
+fn window_cohen(pairs: &[(f64, f64)]) -> f64 {
+    let (tp, fp, tn, fn_) = window_hard_counts(pairs);
+    let n = tp + fp + tn + fn_;
+    if n <= 0.0 {
+        return f64::NAN;
+    }
+    let po = (tp + tn) / n;
+    let pe = ((tn + fp) * (tn + fn_) + (fn_ + tp) * (fp + tp)) / (n * n);
+    if (1.0 - pe).abs() <= 1e-18 {
+        f64::NAN
+    } else {
+        (po - pe) / (1.0 - pe)
+    }
+}
+
+fn window_balanced(pairs: &[(f64, f64)]) -> f64 {
+    let (tp, fp, tn, fn_) = window_hard_counts(pairs);
+    let pos = tp + fn_;
+    let neg = tn + fp;
+    if pos <= 0.0 || neg <= 0.0 {
+        f64::NAN
+    } else {
+        0.5 * (tp / pos + tn / neg)
+    }
+}
+
+/// Rolling F1 (river `metrics.Rolling` + `F1`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingF1 {
+    /// Window capacity.
+    pub window: usize,
+    pairs: Vec<(f64, f64)>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingF1 {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            pairs: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingF1 {
+    /// Rolling F1 with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window F1, or NaN when unidentified.
+    pub fn score(&self) -> f64 {
+        window_f1(&self.pairs)
+    }
+}
+
+impl PartialFit for RollingF1 {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        rolling_pair_metric(
+            session,
+            "RollingF1",
+            x,
+            y,
+            self.window,
+            &mut self.pairs,
+            &mut self.n_seen,
+            &mut self.updates,
+            window_f1,
+            "windowed F1",
+            "sliding hard-0.5 F1 of column 0 vs y; window is not identification p",
+        )
+    }
+}
+
+/// Rolling precision (river `metrics.Rolling` + `Precision`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingPrecision {
+    /// Window capacity.
+    pub window: usize,
+    pairs: Vec<(f64, f64)>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingPrecision {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            pairs: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingPrecision {
+    /// Rolling precision with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window precision, or NaN when no positive predictions.
+    pub fn score(&self) -> f64 {
+        window_precision(&self.pairs)
+    }
+}
+
+impl PartialFit for RollingPrecision {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        rolling_pair_metric(
+            session,
+            "RollingPrecision",
+            x,
+            y,
+            self.window,
+            &mut self.pairs,
+            &mut self.n_seen,
+            &mut self.updates,
+            window_precision,
+            "windowed precision",
+            "sliding hard-0.5 precision of column 0 vs y; window is not identification p",
+        )
+    }
+}
+
+/// Rolling recall (river `metrics.Rolling` + `Recall`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingRecall {
+    /// Window capacity.
+    pub window: usize,
+    pairs: Vec<(f64, f64)>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingRecall {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            pairs: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingRecall {
+    /// Rolling recall with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window recall, or NaN when no positive labels.
+    pub fn score(&self) -> f64 {
+        window_recall(&self.pairs)
+    }
+}
+
+impl PartialFit for RollingRecall {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        rolling_pair_metric(
+            session,
+            "RollingRecall",
+            x,
+            y,
+            self.window,
+            &mut self.pairs,
+            &mut self.n_seen,
+            &mut self.updates,
+            window_recall,
+            "windowed recall",
+            "sliding hard-0.5 recall of column 0 vs y; window is not identification p",
+        )
+    }
+}
+
+/// Rolling coefficient of determination (river `metrics.Rolling` + `R2`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingR2 {
+    /// Window capacity.
+    pub window: usize,
+    pairs: Vec<(f64, f64)>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingR2 {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            pairs: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingR2 {
+    /// Rolling R² with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window R², or NaN when unidentified.
+    pub fn score(&self) -> f64 {
+        window_r2(&self.pairs)
+    }
+}
+
+impl PartialFit for RollingR2 {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        rolling_pair_metric(
+            session,
+            "RollingR2",
+            x,
+            y,
+            self.window,
+            &mut self.pairs,
+            &mut self.n_seen,
+            &mut self.updates,
+            window_r2,
+            "windowed R2",
+            "sliding 1-SSE/SST of column 0 vs y; window is not identification p",
+        )
+    }
+}
+
+/// Rolling Cohen's κ (river `metrics.Rolling` + `CohenKappa`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingCohenKappa {
+    /// Window capacity.
+    pub window: usize,
+    pairs: Vec<(f64, f64)>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingCohenKappa {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            pairs: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingCohenKappa {
+    /// Rolling κ with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window κ, or NaN when empty or chance agreement is 1.
+    pub fn score(&self) -> f64 {
+        window_cohen(&self.pairs)
+    }
+}
+
+impl PartialFit for RollingCohenKappa {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        rolling_pair_metric(
+            session,
+            "RollingCohenKappa",
+            x,
+            y,
+            self.window,
+            &mut self.pairs,
+            &mut self.n_seen,
+            &mut self.updates,
+            window_cohen,
+            "windowed Cohen kappa",
+            "sliding hard-0.5 kappa of column 0 vs y; window is not identification p",
+        )
+    }
+}
+
+/// Rolling balanced accuracy (river `metrics.Rolling` + `BalancedAccuracy`).
+///
+/// Window length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RollingBalancedAccuracy {
+    /// Window capacity.
+    pub window: usize,
+    pairs: Vec<(f64, f64)>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RollingBalancedAccuracy {
+    fn default() -> Self {
+        Self {
+            window: 8,
+            pairs: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RollingBalancedAccuracy {
+    /// Rolling balanced accuracy with capacity `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Current window \((\mathrm{TPR}+\mathrm{TNR})/2\), or NaN before both classes appear.
+    pub fn score(&self) -> f64 {
+        window_balanced(&self.pairs)
+    }
+}
+
+impl PartialFit for RollingBalancedAccuracy {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        rolling_pair_metric(
+            session,
+            "RollingBalancedAccuracy",
+            x,
+            y,
+            self.window,
+            &mut self.pairs,
+            &mut self.n_seen,
+            &mut self.updates,
+            window_balanced,
+            "windowed balanced accuracy",
+            "sliding hard-0.5 balanced accuracy of column 0 vs y; window is not identification p",
+        )
+    }
+}
+
+/// Constant score threshold (river `anomaly.ConstantThresholder`).
+///
+/// Scores at or above `threshold` are classified as anomalous (`1`). The cutoff
+/// is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ConstantThresholder {
+    /// Anomaly cutoff.
+    pub threshold: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for ConstantThresholder {
+    fn default() -> Self {
+        Self {
+            threshold: 0.5,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl ConstantThresholder {
+    /// Thresholder at `threshold`.
+    pub fn new(threshold: f64) -> Self {
+        Self {
+            threshold,
+            ..Self::default()
+        }
+    }
+
+    fn cutoff(&self) -> f64 {
+        if self.threshold.is_finite() {
+            self.threshold
+        } else {
+            0.5
+        }
+    }
+}
+
+impl PartialFit for ConstantThresholder {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        if !self.threshold.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "ConstantThresholder.threshold={} is non-finite; using 0.5",
+                        self.threshold
+                    ))
+                    .build(),
+            );
+            self.threshold = 0.5;
+        }
+        let thr = self.cutoff();
+        let mut flagged = 0.0_f64;
+        for i in 0..x.nrows() {
+            if x.get(i, 0) >= thr {
+                flagged += 1.0;
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = x.nrows() as f64;
+        q.parameter_delta_norm = Some(0.0);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = true;
+        q.warmup = false;
+        q.explanation = format!("ConstantThresholder flagged={flagged:.6e} thr={thr:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "constant anomaly threshold",
+                "hard cutoff on column 0; threshold is not identification p",
+                format!("thr={thr:.6e}"),
+                format!("flagged={flagged:.6e}"),
+            ),
+        )
+    }
+}
+
+impl Transform for ConstantThresholder {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        let thr = self.cutoff();
+        let out = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            if x.get(i, j) >= thr {
+                1.0
+            } else {
+                0.0
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Keep scores at or above a cutoff (river `anomaly.ThresholdFilter`).
+///
+/// Values below `threshold` become 0. The cutoff is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ThresholdFilter {
+    /// Minimum kept score.
+    pub threshold: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for ThresholdFilter {
+    fn default() -> Self {
+        Self {
+            threshold: 0.5,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl ThresholdFilter {
+    /// Filter at `threshold`.
+    pub fn new(threshold: f64) -> Self {
+        Self {
+            threshold,
+            ..Self::default()
+        }
+    }
+
+    fn cutoff(&self) -> f64 {
+        if self.threshold.is_finite() {
+            self.threshold
+        } else {
+            0.5
+        }
+    }
+}
+
+impl PartialFit for ThresholdFilter {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        if !self.threshold.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "ThresholdFilter.threshold={} is non-finite; using 0.5",
+                        self.threshold
+                    ))
+                    .build(),
+            );
+            self.threshold = 0.5;
+        }
+        let thr = self.cutoff();
+        let mut kept = 0.0_f64;
+        for i in 0..x.nrows() {
+            if x.get(i, 0) >= thr {
+                kept += 1.0;
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = x.nrows() as f64;
+        q.parameter_delta_norm = Some(0.0);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = true;
+        q.warmup = false;
+        q.explanation = format!("ThresholdFilter kept={kept:.6e} thr={thr:.6e}");
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "score threshold filter",
+                "zeros column-0 scores below the cutoff; threshold is not identification p",
+                format!("thr={thr:.6e}"),
+                format!("kept={kept:.6e}"),
+            ),
+        )
+    }
+}
+
+impl Transform for ThresholdFilter {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        let thr = self.cutoff();
+        let out = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            let v = x.get(i, j);
+            if v.is_finite() && v >= thr {
+                v
+            } else {
+                0.0
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
 /// ADWIN-resetting bag of perceptrons (river `ensemble.ADWINBaggingClassifier`).
 #[derive(Clone, Debug)]
 pub struct AdwinBagging {
@@ -28284,6 +29027,30 @@ mod tests {
         RollingAccuracy::new(4)
             .partial_fit(&x, Some(&yb), &session)
             .expect("racc");
+        RollingF1::new(4)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("rf1");
+        RollingPrecision::new(4)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("rprec");
+        RollingRecall::new(4)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("rrec");
+        RollingR2::new(4)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("rr2");
+        RollingCohenKappa::new(4)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("rkappa");
+        RollingBalancedAccuracy::new(4)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("rbal");
+        ConstantThresholder::new(3.0)
+            .partial_fit(&x, None, &session)
+            .expect("cth");
+        ThresholdFilter::new(0.5)
+            .partial_fit(&x, None, &session)
+            .expect("tfilt");
 
         let n_expl = session
             .ledger()

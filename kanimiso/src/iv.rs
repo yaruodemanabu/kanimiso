@@ -7,7 +7,7 @@
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linalg::{chol_solve, least_squares};
-use crate::special::chi2_pvalue;
+use crate::special::{chi2_pvalue, student_t_pvalue};
 use crate::stats::{adfuller, phillips_perron};
 use crate::traits::Predict;
 use crate::validate::{inspect_identification, inspect_xy};
@@ -2176,6 +2176,163 @@ pub fn cov_hac(
     ctx.finish(out)
 }
 
+/// OLS parameters with HC0 sandwich SEs (statsmodels `OLSResults.get_robustcov_results`).
+///
+/// Coefficient count is the design width including the intercept. Failed bread
+/// Cholesky is a warning, not a fatal abort.
+#[derive(Clone, Debug)]
+pub struct RobustCovResults {
+    /// Intercept then slopes.
+    pub params: Vector,
+    /// HC0 standard errors.
+    pub se: Vector,
+    /// \(t = \hat\beta / \mathrm{se}\).
+    pub tvalues: Vector,
+    /// Two-sided Student-t p-values.
+    pub pvalues: Vector,
+    /// HC0 covariance.
+    pub cov: Matrix,
+    /// Residual degrees of freedom.
+    pub df: f64,
+}
+
+/// Fit OLS and report HC0 sandwich inference.
+pub fn get_robustcov_results(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<RobustCovResults>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let design = x.with_intercept();
+    let n = design.nrows().min(y.len());
+    let p = design.ncols();
+    let empty = || RobustCovResults {
+        params: Vector::zeros(p),
+        se: Vector::zeros(p),
+        tvalues: Vector::zeros(p),
+        pvalues: Vector::from_iter((0..p).map(|_| f64::NAN)),
+        cov: Matrix::zeros(p, p),
+        df: (n as f64 - p as f64).max(1.0),
+    };
+    let mut scratch = signlred::Report::new("robustcov", "ols");
+    let Some(beta) = least_squares(&mut scratch, &design, y, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::UnidentifiedModel)
+                .message("get_robustcov_results: OLS failed")
+                .build(),
+        );
+        return ctx.finish(empty());
+    };
+    for issue in scratch.issues() {
+        if matches!(
+            issue.code,
+            IssueCode::ResidualTooLarge
+                | IssueCode::NearSingular
+                | IssueCode::R2IsOne
+                | IssueCode::RankZero
+                | IssueCode::CholeskyFailed
+                | IssueCode::PerfectCollinearity
+        ) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    if beta.len() != p {
+        return ctx.finish(empty());
+    }
+    let fit = design.matvec(&beta);
+    let resid = Vector::from_iter((0..n).map(|i| y[i] - if i < fit.len() { fit[i] } else { 0.0 }));
+    let xtx = design.gram();
+    let mut inv = Mat::<f64>::zeros(p, p);
+    let mut bread_ok = true;
+    for j in 0..p {
+        let mut e = Vector::zeros(p);
+        e[j] = 1.0;
+        let mut sc = signlred::Report::new("robustcov", "xtx");
+        match chol_solve(&mut sc, &xtx, &e, &ctx.policy) {
+            Some(col) => {
+                for i in 0..p {
+                    inv[(i, j)] = col[i];
+                }
+            }
+            None => {
+                bread_ok = false;
+                break;
+            }
+        }
+    }
+    if !bread_ok {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("get_robustcov_results: X'X is not SPD; sandwich is unidentified")
+                .build(),
+        );
+        return ctx.finish(RobustCovResults {
+            params: beta,
+            se: Vector::from_iter((0..p).map(|_| f64::NAN)),
+            tvalues: Vector::from_iter((0..p).map(|_| f64::NAN)),
+            pvalues: Vector::from_iter((0..p).map(|_| f64::NAN)),
+            cov: Matrix::zeros(p, p),
+            df: (n as f64 - p as f64).max(1.0),
+        });
+    }
+    let mut meat = Matrix::zeros(p, p);
+    for i in 0..n {
+        let e2 = resid[i] * resid[i];
+        for a in 0..p {
+            for b in 0..p {
+                meat.set(a, b, meat.get(a, b) + e2 * design.get(i, a) * design.get(i, b));
+            }
+        }
+    }
+    let mut cov = Matrix::zeros(p, p);
+    for a in 0..p {
+        for b in 0..p {
+            let mut s = 0.0_f64;
+            for k in 0..p {
+                let mut t = 0.0_f64;
+                for m in 0..p {
+                    t += meat.get(k, m) * inv[(m, b)];
+                }
+                s += inv[(a, k)] * t;
+            }
+            cov.set(a, b, s);
+        }
+    }
+    let df = (n as f64 - p as f64).max(1.0);
+    let se = Vector::from_iter((0..p).map(|j| cov.get(j, j).max(0.0).sqrt()));
+    let tvalues = Vector::from_iter((0..p).map(|j| {
+        if se[j].is_finite() && se[j] > 1e-18 {
+            beta[j] / se[j]
+        } else {
+            f64::NAN
+        }
+    }));
+    let pvalues = Vector::from_iter((0..p).map(|j| student_t_pvalue(tvalues[j], df)));
+    ctx.push(
+        Issue::builder(IssueCode::Heteroscedasticity)
+            .severity(Severity::Advisory)
+            .message("get_robustcov_results uses HC0, not the OLS information covariance")
+            .compromise(NumericalCompromise::new(
+                "model-based OLS covariance σ²(X'X)⁻¹",
+                "White HC0 sandwich of X_i e_i",
+                "heteroscedasticity is allowed; serial correlation is not",
+                "do not read these as Gauss–Markov SEs",
+            ))
+            .build(),
+    );
+    ctx.finish(RobustCovResults {
+        params: beta,
+        se,
+        tvalues,
+        pvalues,
+        cov,
+        df,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2229,6 +2386,12 @@ mod tests {
         assert_eq!(hac.value.shape(), (2, 2));
         assert!(hac.value.get(0, 0).is_finite());
         assert!(hac.value.get(0, 0) >= 0.0);
+        let xf = Matrix::from_fn(16, 1, |i, _| i as f64);
+        let yline = Vector::from_iter((0..16).map(|i| 1.0 + 2.0 * i as f64 + e[i]));
+        let rc = get_robustcov_results(&xf, &yline, &Session::new("hc", "rc")).expect("rc");
+        assert_eq!(rc.value.params.len(), 2);
+        assert!(rc.value.se[1].is_finite());
+        assert!(rc.value.cov.get(1, 1) >= 0.0 || rc.value.cov.get(1, 1).is_nan());
     }
 
     #[test]

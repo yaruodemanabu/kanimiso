@@ -5092,6 +5092,55 @@ const INVENTORY: &[Algorithm] = &[
         "river.metrics.Accuracy",
         "online",
     ),
+    a("online.RollingF1", "river.metrics.F1", "online"),
+    a(
+        "online.RollingPrecision",
+        "river.metrics.Precision",
+        "online",
+    ),
+    a("online.RollingRecall", "river.metrics.Recall", "online"),
+    a("online.RollingR2", "river.metrics.R2", "online"),
+    a(
+        "online.RollingCohenKappa",
+        "river.metrics.CohenKappa",
+        "online",
+    ),
+    a(
+        "online.RollingBalancedAccuracy",
+        "river.metrics.BalancedAccuracy",
+        "online",
+    ),
+    a(
+        "online.ConstantThresholder",
+        "river.anomaly.ConstantThresholder",
+        "anomaly",
+    ),
+    a(
+        "online.ThresholdFilter",
+        "river.anomaly.ThresholdFilter",
+        "anomaly",
+    ),
+    a("tslearn.Pelt", "sktime.annotation.Pelt", "timeseries"),
+    a(
+        "tslearn.ClaSPSegmentation",
+        "sktime.annotation.ClaSPSegmentation",
+        "timeseries",
+    ),
+    a(
+        "stats.compare_lm",
+        "statsmodels.regression.linear_model.RegressionResults.compare_lm_test",
+        "stats",
+    ),
+    a(
+        "stats.linear_reset",
+        "statsmodels.stats.diagnostic.linear_reset",
+        "stats",
+    ),
+    a(
+        "iv.get_robustcov_results",
+        "statsmodels.regression.linear_model.OLSResults.get_robustcov_results",
+        "function",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5444,6 +5493,12 @@ mod tests {
             "tslearn.Binseg",
             "tslearn.cdist_ddtw",
             "online.RollingLogCosh",
+            "online.RollingF1",
+            "online.RollingR2",
+            "online.ConstantThresholder",
+            "tslearn.Pelt",
+            "stats.compare_lm",
+            "iv.get_robustcov_results",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

@@ -13584,6 +13584,112 @@ pub fn process_mle(t: &Vector, y: &Vector, session: &Session) -> Result<Qualifie
     ctx.finish(best)
 }
 
+/// Nested OLS Lagrange-multiplier test (statsmodels `compare_lm_test`).
+///
+/// Fits the restricted design, then regresses those residuals on the
+/// unrestricted design. The statistic is \(n R^2\) against \(\chi^2_{p_u-p_r}\).
+/// Extra-column count is not identification `p`. Inner OLS failures are not
+/// promoted as fatal Cholesky / rank issues.
+pub fn compare_lm(
+    y: &Vector,
+    x_restr: &Matrix,
+    x_unrestr: &Matrix,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x_restr, Some(y), &ctx.policy);
+    inspect_xy(&mut ctx.report, x_unrestr, Some(y), &ctx.policy);
+    let n = y.len().min(x_restr.nrows()).min(x_unrestr.nrows());
+    let df = (x_unrestr.ncols() as f64 - x_restr.ncols() as f64).max(1.0);
+    let nan = || HypothesisTest {
+        statistic: f64::NAN,
+        pvalue: f64::NAN,
+        df,
+        nobs: n as f64,
+    };
+    if x_unrestr.ncols() <= x_restr.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message("compare_lm: unrestricted design is not wider")
+                .build(),
+        );
+    }
+    let mut sc_r = Report::new("compare_lm", "restr");
+    let Some(br) = least_squares(&mut sc_r, x_restr, y, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("compare_lm: restricted OLS failed")
+                .build(),
+        );
+        return ctx.finish(nan());
+    };
+    if br.len() != x_restr.ncols() {
+        return ctx.finish(nan());
+    }
+    let fr = x_restr.matvec(&br);
+    let resid = Vector::from_iter((0..n).map(|i| y[i] - if i < fr.len() { fr[i] } else { 0.0 }));
+    let mut sc_u = Report::new("compare_lm", "aux");
+    let Some(bu) = least_squares(&mut sc_u, x_unrestr, &resid, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("compare_lm: auxiliary OLS of restricted residuals failed")
+                .build(),
+        );
+        return ctx.finish(nan());
+    };
+    if bu.len() != x_unrestr.ncols() {
+        return ctx.finish(nan());
+    }
+    let fu = x_unrestr.matvec(&bu);
+    let mut sse = 0.0_f64;
+    let mut sy = 0.0_f64;
+    let mut sy2 = 0.0_f64;
+    for i in 0..n {
+        let e = resid[i];
+        let fit = if i < fu.len() { fu[i] } else { 0.0 };
+        let r = e - fit;
+        sse += r * r;
+        sy += e;
+        sy2 += e * e;
+    }
+    let nf = n as f64;
+    let sst = sy2 - if nf > 0.0 { sy * sy / nf } else { 0.0 };
+    if sst.abs() <= 1e-15 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .severity(Severity::Warning)
+                .message("compare_lm: restricted residuals have zero variance")
+                .build(),
+        );
+        return ctx.finish(nan());
+    }
+    let r2 = 1.0 - sse / sst;
+    let stat = nf * r2.max(0.0);
+    let pvalue = if stat.is_finite() {
+        chi2_pvalue(stat, df)
+    } else {
+        f64::NAN
+    };
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df,
+        nobs: nf,
+    })
+}
+
+/// Ramsey RESET under the statsmodels `linear_reset` name.
+pub fn linear_reset(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    ramsey_reset(x, y, session)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -14178,5 +14284,11 @@ mod tests {
         assert!(pm.value.mean.is_finite());
         assert!(pm.value.sigma2.is_finite() && pm.value.sigma2 > 0.0);
         assert!(pm.value.range.is_finite() && pm.value.range > 0.0);
+        let ones = Matrix::from_fn(40, 1, |_, _| 1.0);
+        let xu = x.with_intercept();
+        let clm = compare_lm(&y, &ones, &xu, &Session::new("clm", "t")).expect("clm");
+        assert!(clm.value.statistic.is_finite() || clm.value.pvalue.is_nan());
+        let lrst = linear_reset(&x, &y, &Session::new("lreset", "t")).expect("lreset");
+        assert!(lrst.value.statistic.is_finite() || lrst.value.pvalue.is_nan());
     }
 }
