@@ -1881,6 +1881,96 @@ pub enum DriftDecision {
     },
 }
 
+/// Dummy drift detector (river `drift.DummyDrift`).
+///
+/// Fires every `every` observations (`0` never fires). The period is not
+/// identification `p`.
+#[derive(Clone, Debug)]
+pub struct DummyDrift {
+    /// Drift period. `0` means never.
+    pub every: u64,
+    n_seen: u64,
+    updates: u64,
+    last: DriftDecision,
+}
+
+impl Default for DummyDrift {
+    fn default() -> Self {
+        Self {
+            every: 0,
+            n_seen: 0,
+            updates: 0,
+            last: DriftDecision::Stable,
+        }
+    }
+}
+
+impl DummyDrift {
+    /// Fire every `every` rows (`0` = never).
+    pub fn new(every: u64) -> Self {
+        Self {
+            every,
+            ..Self::default()
+        }
+    }
+
+    /// Last decision.
+    pub fn decision(&self) -> DriftDecision {
+        self.last
+    }
+}
+
+impl PartialFit for DummyDrift {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.n_seen;
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        self.last = if self.every > 0 && self.n_seen / self.every > before / self.every {
+            DriftDecision::Drift {
+                statistic: self.n_seen as f64,
+            }
+        } else {
+            DriftDecision::Stable
+        };
+        if matches!(self.last, DriftDecision::Drift { .. }) {
+            ctx.push(
+                Issue::builder(IssueCode::ConceptDriftDetected)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "DummyDrift fired on a calendar period every={}",
+                        self.every
+                    ))
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(0.0);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = true;
+        q.warmup = false;
+        q.explanation = format!("DummyDrift n={} last={:?}", self.n_seen, self.last);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "calendar drift trigger",
+                "DummyDrift fires on a fixed observation period, not a data-dependent test",
+                format!("n={before}"),
+                format!("n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
 /// ADWIN (Bifet & Gavaldà): adaptive windowing on a scalar stream.
 #[derive(Clone, Debug)]
 pub struct Adwin {
@@ -8061,6 +8151,71 @@ impl Predict for OnlineMultinomialNb {
                 }
             }
             self.classes[best] as f64
+        }));
+        ctx.finish(y)
+    }
+}
+
+/// Complement naive Bayes (river `naive_bayes.ComplementNB`).
+///
+/// Class count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct OnlineComplementNb {
+    inner: OnlineMultinomialNb,
+}
+
+impl OnlineComplementNb {
+    /// Empty complement NB.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for OnlineComplementNb {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for OnlineComplementNb {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.inner.initialized || self.inner.classes.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let k = self.inner.classes.len();
+        let p = self.inner.counts.ncols();
+        let alpha = self.inner.alpha.max(0.0);
+        let tot_feat: Vec<f64> = (0..p)
+            .map(|j| (0..k).map(|c| self.inner.counts.get(c, j)).sum::<f64>())
+            .collect();
+        let tot_all: f64 = tot_feat.iter().sum();
+        let y = Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut best = 0usize;
+            let mut bv = f64::NEG_INFINITY;
+            for c in 0..k {
+                let mut s = 0.0;
+                let comp_tot = (tot_all
+                    - (0..p).map(|j| self.inner.counts.get(c, j)).sum::<f64>())
+                    + alpha * p as f64;
+                for j in 0..x.ncols().min(p) {
+                    let v = x.get(i, j).max(0.0);
+                    let comp = (tot_feat[j] - self.inner.counts.get(c, j) + alpha).max(1e-12);
+                    s -= v * (comp.ln() - comp_tot.max(1e-12).ln());
+                }
+                if s > bv {
+                    bv = s;
+                    best = c;
+                }
+            }
+            self.inner.classes[best] as f64
         }));
         ctx.finish(y)
     }
@@ -19346,6 +19501,12 @@ mod tests {
         PoissonInclusion::new(2.0)
             .partial_fit(&x, None, &session)
             .expect("poisinc");
+        DummyDrift::new(0)
+            .partial_fit(&x, None, &session)
+            .expect("dummy");
+        OnlineComplementNb::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("cnb");
 
         let n_expl = session
             .ledger()

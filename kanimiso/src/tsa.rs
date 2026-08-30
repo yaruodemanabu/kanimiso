@@ -5239,6 +5239,155 @@ impl FitSeries for Figarch {
     }
 }
 
+/// APARCH(1,1) (Ding–Granger–Engle / arch `APARCH`).
+///
+/// \(\sigma_t^\delta=\omega+\alpha(|\varepsilon_{t-1}|-\gamma\varepsilon_{t-1})^\delta+\beta\sigma_{t-1}^\delta\).
+#[derive(Clone, Debug)]
+pub struct Aparch {
+    /// Coordinate-search iterations.
+    pub max_iter: usize,
+}
+
+impl Default for Aparch {
+    fn default() -> Self {
+        Self { max_iter: 24 }
+    }
+}
+
+impl Aparch {
+    /// Default APARCH settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted APARCH(1,1) power-volatility state.
+#[derive(Clone, Debug)]
+pub struct FittedAparch {
+    /// ω.
+    pub omega: f64,
+    /// ARCH coefficient.
+    pub alpha: f64,
+    /// Leverage \(\gamma\).
+    pub gamma: f64,
+    /// GARCH coefficient.
+    pub beta: f64,
+    /// Power \(\delta\).
+    pub delta: f64,
+    /// In-sample conditional variances \(\sigma_t^2\).
+    pub sigma2: Vector,
+    /// Demeaned residuals.
+    pub resid: Vector,
+}
+
+fn aparch_sigma2(
+    e: &[f64],
+    omega: f64,
+    alpha: f64,
+    gamma: f64,
+    beta: f64,
+    delta: f64,
+) -> Vec<f64> {
+    let d = delta.clamp(0.25, 4.0);
+    let var0 = e.iter().map(|v| v * v).sum::<f64>() / e.len().max(1) as f64;
+    let mut s2 = vec![var0.max(omega).max(1e-12); e.len()];
+    let mut sp = s2[0].powf(d / 2.0);
+    for t in 1..e.len() {
+        let shock = (e[t - 1].abs() - gamma * e[t - 1]).max(0.0);
+        sp = omega + alpha * shock.powf(d) + beta * sp;
+        if !sp.is_finite() || sp <= 0.0 {
+            sp = omega.max(1e-12);
+        }
+        s2[t] = sp.powf(2.0 / d).max(1e-12);
+    }
+    s2
+}
+
+fn aparch_nll(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64, delta: f64) -> f64 {
+    if omega <= 0.0 || alpha < 0.0 || beta < 0.0 || !(0.2..=4.0).contains(&delta) || gamma.abs() >= 1.0
+    {
+        return f64::INFINITY;
+    }
+    let s2 = aparch_sigma2(e, omega, alpha, gamma, beta, delta);
+    let mut nll = 0.0;
+    for t in 0..e.len() {
+        let v = s2[t].max(1e-12);
+        nll += 0.5 * (v.ln() + e[t] * e[t] / v);
+    }
+    nll
+}
+
+impl FitSeries for Aparch {
+    type Fitted = FittedAparch;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedAparch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("APARCH QMLE needs a longer series")
+                    .metric("n", y.len() as f64)
+                    .build(),
+            );
+        }
+        let mean = y.mean();
+        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
+        let var = e.as_slice().iter().map(|v| v * v).sum::<f64>() / y.len().max(1) as f64;
+        let mut omega = 0.05 * var.max(1e-8);
+        let mut alpha = 0.05;
+        let mut gamma = 0.1;
+        let mut beta = 0.80;
+        let mut delta = 1.5;
+        let mut best = aparch_nll(e.as_slice(), omega, alpha, gamma, beta, delta);
+        let mut step = 0.05;
+        for it in 0..self.max_iter {
+            let mut improved = false;
+            for (i, cur) in [omega, alpha, gamma, beta, delta].into_iter().enumerate() {
+                for dir in [-step, step] {
+                    let mut cand = [omega, alpha, gamma, beta, delta];
+                    cand[i] = match i {
+                        2 => (cur + dir).clamp(-0.99, 0.99),
+                        4 => (cur + dir).clamp(0.25, 4.0),
+                        _ => (cur + dir).max(1e-8),
+                    };
+                    if cand[1] + cand[3] >= 0.999 {
+                        continue;
+                    }
+                    let nll = aparch_nll(e.as_slice(), cand[0], cand[1], cand[2], cand[3], cand[4]);
+                    if nll < best {
+                        best = nll;
+                        omega = cand[0];
+                        alpha = cand[1];
+                        gamma = cand[2];
+                        beta = cand[3];
+                        delta = cand[4];
+                        improved = true;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, best, None);
+            if !improved {
+                step *= 0.5;
+                if step < 1e-5 {
+                    ctx.session.converged("APARCH coordinate search", it as u64);
+                    break;
+                }
+            }
+        }
+        let sigma2 = aparch_sigma2(e.as_slice(), omega, alpha, gamma, beta, delta);
+        ctx.finish(FittedAparch {
+            omega,
+            alpha,
+            gamma,
+            beta,
+            delta,
+            sigma2: Vector::from_iter(sigma2),
+            resid: e,
+        })
+    }
+}
+
 /// Croston intermittent-demand smoother.
 #[derive(Clone, Debug)]
 pub struct Croston {
@@ -7103,6 +7252,76 @@ impl HolidayFeatures {
                 0.0
             }
         }))
+    }
+}
+
+/// Deterministic trend / seasonal design (statsmodels `DeterministicProcess`).
+///
+/// Seasonal dummy count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct DeterministicProcess {
+    /// Include a constant column.
+    pub constant: bool,
+    /// Include a linear trend.
+    pub trend: bool,
+    /// Seasonal period (`0` or `1` skips dummies).
+    pub period: usize,
+}
+
+impl Default for DeterministicProcess {
+    fn default() -> Self {
+        Self {
+            constant: true,
+            trend: true,
+            period: 0,
+        }
+    }
+}
+
+impl DeterministicProcess {
+    /// Constant + trend, no seasonal dummies.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Constant + trend + `period` seasonal dummies (drop-last).
+    pub fn seasonal(period: usize) -> Self {
+        Self {
+            constant: true,
+            trend: true,
+            period,
+        }
+    }
+
+    /// Design matrix for `t = 0..n-1`.
+    pub fn transform(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
+        let ctx = FitCtx::with_session(session.child("transform"));
+        let seas = self.period.max(0).saturating_sub(1);
+        let p = usize::from(self.constant) + usize::from(self.trend) + seas;
+        if p == 0 {
+            return ctx.finish(Matrix::zeros(n, 0));
+        }
+        let out = Matrix::from_fn(n, p, |t, j| {
+            let mut col = 0usize;
+            if self.constant {
+                if j == col {
+                    return 1.0;
+                }
+                col += 1;
+            }
+            if self.trend {
+                if j == col {
+                    return t as f64;
+                }
+                col += 1;
+            }
+            if seas > 0 {
+                let s = j - col;
+                return if (t % self.period.max(1)) == s { 1.0 } else { 0.0 };
+            }
+            0.0
+        });
+        ctx.finish(out)
     }
 }
 
@@ -9803,6 +10022,12 @@ mod tests {
         assert_eq!(hol.shape(), (20, 1));
         assert!((hol.get(0, 0) - 1.0).abs() < 1e-12);
         assert!(hol.get(1, 0).abs() < 1e-12);
+        let det = DeterministicProcess::seasonal(4)
+            .transform(12, &Session::new("det", "t"))
+            .expect("det")
+            .value;
+        assert_eq!(det.shape(), (12, 5));
+        assert!((det.get(0, 0) - 1.0).abs() < 1e-12);
         let lg = LogTransformer::new()
             .transform(&ypos, &Session::new("logt", "t"))
             .expect("logt")
@@ -9899,6 +10124,16 @@ mod tests {
             .iter()
             .all(|v| v.is_finite() && *v > 0.0));
         assert!(fig.value.d > 0.0 && fig.value.d < 1.0);
+        let ap = Aparch::new()
+            .fit_series(&y, &Session::new("ap", "fit"))
+            .expect("aparch");
+        assert!(ap
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        assert!(ap.value.delta > 0.0);
         let uc = UnobservedComponents::with_seasonal(4)
             .fit_series(&y, &Session::new("uc", "fit"))
             .expect("uc");

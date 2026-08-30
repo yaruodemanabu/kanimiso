@@ -3917,6 +3917,18 @@ const INVENTORY: &[Algorithm] = &[
         "river.feature_selection.PoissonInclusion",
         "online",
     ),
+    a("tsa.Aparch", "arch.univariate.APARCH", "forecast"),
+    a(
+        "tsa.DeterministicProcess",
+        "statsmodels.tsa.deterministic.DeterministicProcess",
+        "forecast",
+    ),
+    a("online.DummyDrift", "river.drift.DummyDrift", "online"),
+    a(
+        "online.OnlineComplementNb",
+        "river.naive_bayes.ComplementNB",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -4150,6 +4162,10 @@ mod tests {
             "online.PopularReco",
             "online.OnlineSmape",
             "online.PoissonInclusion",
+            "tsa.Aparch",
+            "tsa.DeterministicProcess",
+            "online.DummyDrift",
+            "online.OnlineComplementNb",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
