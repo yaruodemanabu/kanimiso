@@ -16946,6 +16946,796 @@ pub fn martingale_resid(
     ctx.finish(out)
 }
 
+/// Harrell concordance (lifelines `concordance_index` / sksurv).
+#[derive(Clone, Debug)]
+pub struct ConcordanceResult {
+    /// \(C = (n_{\mathrm{conc}}+0.5\,n_{\mathrm{tie}})/n_{\mathrm{pair}}\).
+    pub c_index: f64,
+    /// Comparable pairs (earlier time is an event).
+    pub n_pairs: f64,
+    /// Pairs with higher risk on the earlier event.
+    pub n_concordant: f64,
+    /// Pairs with equal risk scores.
+    pub n_tied: f64,
+}
+
+/// Harrell's \(C\) from durations, events, and risk scores (higher = higher hazard).
+///
+/// Pair count is not identification `p`. Inspect times with `y=None`.
+pub fn concordance_index(
+    durations: &Vector,
+    events: &Vector,
+    scores: &Vector,
+    session: &Session,
+) -> Result<Qualified<ConcordanceResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    if let Some(issue) = scan_finite(events.as_slice()).to_issue("events") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = scan_finite(scores.as_slice()).to_issue("scores") {
+        ctx.push(issue);
+    }
+    let n = durations.len().min(events.len()).min(scores.len());
+    if events.len() != durations.len() || scores.len() != durations.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("concordance_index lengths do not match")
+                .build(),
+        );
+    }
+    let mut n_pairs = 0.0_f64;
+    let mut n_conc = 0.0_f64;
+    let mut n_tie = 0.0_f64;
+    for i in 0..n {
+        if !durations[i].is_finite() || events[i] < 0.5 || !scores[i].is_finite() {
+            continue;
+        }
+        for j in 0..n {
+            if i == j || !durations[j].is_finite() || !scores[j].is_finite() {
+                continue;
+            }
+            if durations[i] + 1e-15 >= durations[j] {
+                continue;
+            }
+            n_pairs += 1.0;
+            let d = scores[i] - scores[j];
+            if d.abs() <= 1e-15 {
+                n_tie += 1.0;
+            } else if d > 0.0 {
+                n_conc += 1.0;
+            }
+        }
+    }
+    if n_pairs <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("concordance_index has no comparable pairs")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "Harrell C-index",
+                    "need an event that precedes another finite time",
+                    "collect events with distinct times",
+                ))
+                .build(),
+        );
+        return ctx.finish(ConcordanceResult {
+            c_index: f64::NAN,
+            n_pairs: 0.0,
+            n_concordant: 0.0,
+            n_tied: 0.0,
+        });
+    }
+    ctx.finish(ConcordanceResult {
+        c_index: (n_conc + 0.5 * n_tie) / n_pairs,
+        n_pairs,
+        n_concordant: n_conc,
+        n_tied: n_tie,
+    })
+}
+
+/// Named alias of [`concordance_index`].
+pub fn c_index(
+    durations: &Vector,
+    events: &Vector,
+    scores: &Vector,
+    session: &Session,
+) -> Result<Qualified<ConcordanceResult>> {
+    concordance_index(durations, events, scores, session)
+}
+
+/// Breslow baseline hazard / survival from a Cox fit.
+#[derive(Clone, Debug)]
+pub struct BaselineHazard {
+    /// Event times.
+    pub times: Vector,
+    /// Increments \(d\hat H_0(t)\).
+    pub hazard: Vector,
+    /// Cumulative \(\hat H_0(t)\).
+    pub cumulative: Vector,
+    /// \(\hat S_0(t)=\exp(-\hat H_0(t))\).
+    pub survival: Vector,
+}
+
+/// Breslow baseline hazard (statsmodels `PHRegResults.baseline_cumulative_hazard`).
+///
+/// Do not call [`nelson_aalen`] / [`kaplan_meier_fit`]. Covariate count is
+/// identification `p`. Inspect times with `y=None`.
+pub fn baseline_hazard(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<BaselineHazard>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+    let n = x.nrows().min(durations.len()).min(events.len());
+    let n_events = (0..n).filter(|&i| events[i] > 0.5).count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("baseline_hazard has no events")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "Breslow baseline hazard",
+                    "without events H0 never leaves 0",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(BaselineHazard {
+            times: Vector::zeros(0),
+            hazard: Vector::zeros(0),
+            cumulative: Vector::zeros(0),
+            survival: Vector::zeros(0),
+        });
+    }
+    let beta = cox_beta_or_zero(durations, events, x, session, &mut ctx);
+    let p = x.ncols().min(beta.len());
+    let mut ev_times: Vec<f64> = (0..n)
+        .filter(|&i| events[i] > 0.5 && durations[i].is_finite())
+        .map(|i| durations[i])
+        .collect();
+    ev_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ev_times.dedup_by(|a, b| (*a - *b).abs() <= 0.0);
+    let mut times = Vec::new();
+    let mut haz = Vec::new();
+    let mut cum = Vec::new();
+    let mut surv = Vec::new();
+    let mut acc = 0.0_f64;
+    for &t in &ev_times {
+        let mut s0 = 0.0_f64;
+        let mut d = 0.0_f64;
+        for i in 0..n {
+            if !durations[i].is_finite() || durations[i] + 1e-15 < t {
+                continue;
+            }
+            let mut xb = 0.0_f64;
+            for j in 0..p {
+                xb += x.get(i, j) * beta[j];
+            }
+            s0 += xb.clamp(-20.0, 20.0).exp();
+            if events[i] > 0.5 && (durations[i] - t).abs() <= 0.0 {
+                d += 1.0;
+            }
+        }
+        let dh = if s0 > 1e-15 { d / s0 } else { 0.0 };
+        acc += dh;
+        times.push(t);
+        haz.push(dh);
+        cum.push(acc);
+        surv.push((-acc).exp());
+    }
+    ctx.finish(BaselineHazard {
+        times: Vector::from_iter(times),
+        hazard: Vector::from_iter(haz),
+        cumulative: Vector::from_iter(cum),
+        survival: Vector::from_iter(surv),
+    })
+}
+
+/// Baseline survival \(S_0(t)=\exp(-H_0(t))\) from [`baseline_hazard`].
+pub fn baseline_survival(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let q = baseline_hazard(durations, events, x, session)?;
+    Ok(q.map(|b| b.survival))
+}
+
+/// Cox deviance residuals from martingale residuals.
+///
+/// \(d_i=\mathrm{sign}(M_i)\sqrt{-2[M_i+\delta_i\log(\delta_i-M_i)]}\).
+pub fn deviance_resid(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let q = martingale_resid(durations, events, x, &session.child("mres"))?;
+    let mut ctx = FitCtx::with_session(session.clone());
+    for issue in q.report.issues() {
+        if skip_aborting_inner(issue) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    let out = Vector::from_iter((0..q.value.len()).map(|i| {
+        let m = q.value[i];
+        let delta = if i < events.len() && events[i] > 0.5 {
+            1.0
+        } else {
+            0.0
+        };
+        let inside = if delta > 0.5 {
+            m + (delta - m).max(1e-12).ln()
+        } else {
+            m
+        };
+        let v = (-2.0 * inside).max(0.0).sqrt();
+        if m < 0.0 {
+            -v
+        } else {
+            v
+        }
+    }));
+    ctx.finish(out)
+}
+
+/// Fitted gamma shared-frailty Cox.
+#[derive(Clone, Debug)]
+pub struct FittedSharedFrailty {
+    /// Partial-likelihood slopes.
+    pub coef: Vector,
+    /// Posterior mean frailty \(Z_g\) for each row's group.
+    pub frailty: Vector,
+    /// Gamma variance \(\theta\).
+    pub theta: f64,
+    /// Last Breslow partial log-likelihood (shared β, current Z).
+    pub loglik: f64,
+    /// Uncensored events.
+    pub n_events: usize,
+    /// Distinct groups.
+    pub n_groups: usize,
+    /// Whether the last Newton reported convergence.
+    pub converged: bool,
+}
+
+/// Shared gamma frailty Cox (R `coxph` / `frailty`, statsmodels-adjacent).
+///
+/// Group count is not identification `p`. EM: posterior
+/// \(Z_g=(D_g+1/\theta)/(\Lambda_g+1/\theta)\) then Breslow Newton with
+/// frailty-weighted risk sets. Scratch Cholesky.
+pub fn shared_frailty(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    groups: &Vector,
+    theta: f64,
+    session: &Session,
+) -> Result<Qualified<FittedSharedFrailty>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+    let n = x.nrows();
+    let p = x.ncols();
+    inspect_identification(&mut ctx.report, n, p, &ctx.policy);
+    if groups.len() != n || events.len() != n || durations.len() != n {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("shared_frailty lengths ≠ X rows")
+                .build(),
+        );
+    }
+    let n_events = (0..n)
+        .filter(|&i| i < events.len() && events[i] > 0.5)
+        .count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("shared frailty Cox has no events")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "frailty Cox coefficients",
+                    "zero events ⇒ empty partial likelihood",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedSharedFrailty {
+            coef: Vector::zeros(p),
+            frailty: Vector::filled(n, 1.0),
+            theta: theta.max(1e-6),
+            loglik: 0.0,
+            n_events: 0,
+            n_groups: 0,
+            converged: false,
+        });
+    }
+    let th = if theta.is_finite() && theta > 0.0 {
+        theta
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("shared_frailty θ={theta} is not a finite >0; using 0.5"))
+                .build(),
+        );
+        0.5
+    };
+    let mut by_g: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+    for i in 0..n.min(groups.len()) {
+        if groups[i].is_finite() {
+            by_g.entry(groups[i].round() as i64).or_default().push(i);
+        }
+    }
+    if by_g.len() <= 1 {
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("shared frailty has one group; Z is identically 1")
+                .compromise(NumericalCompromise::new(
+                    "gamma frailty with several clusters",
+                    "a single cluster mean-one frailty",
+                    "there is no between-group mixing to identify θ",
+                    "read as ordinary Cox, not a frailty model",
+                ))
+                .build(),
+        );
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("shared_frailty is EM with fixed θ, not a profiled-θ PPL")
+            .compromise(NumericalCompromise::new(
+                "penalized partial likelihood with estimated θ",
+                "fixed-θ gamma posterior means and weighted Breslow",
+                "θ is not updated from the marginal likelihood",
+                "read Z as an empirical Bayes shrink, not the unique PPL MLE",
+            ))
+            .build(),
+    );
+    let mut z_g: BTreeMap<i64, f64> = by_g.keys().map(|k| (*k, 1.0_f64)).collect();
+    let mut beta = Vector::zeros(p);
+    let mut loglik = f64::NEG_INFINITY;
+    let mut converged = false;
+    let mut idx: Vec<usize> = (0..n).collect();
+    idx.sort_by(|&a, &b| {
+        durations[a]
+            .partial_cmp(&durations[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for _em in 0..6 {
+        let frailty = Vector::from_iter((0..n).map(|i| {
+            if i < groups.len() && groups[i].is_finite() {
+                *z_g.get(&(groups[i].round() as i64)).unwrap_or(&1.0)
+            } else {
+                1.0
+            }
+        }));
+        for it in 0..20 {
+            let (ll, grad, hess) =
+                cox_grad_hess_frailty(&idx, durations, events, x, &beta, frailty.as_slice());
+            loglik = ll;
+            if !grad.as_slice().iter().all(|v| v.is_finite()) {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("shared frailty gradient became non-finite")
+                        .build(),
+                );
+                break;
+            }
+            let gnorm = grad.norm();
+            if gnorm < 1e-7 {
+                converged = true;
+                break;
+            }
+            let mut hneg = Matrix::zeros(p, p);
+            for a in 0..p {
+                for b in 0..p {
+                    hneg.set(a, b, -hess.get(a, b));
+                }
+            }
+            let mut scratch = Report::new("frailty", "newton");
+            match chol_solve(&mut scratch, hneg.inner(), &grad, &ctx.policy) {
+                Some(delta) => {
+                    for j in 0..p {
+                        beta[j] -= delta[j];
+                    }
+                }
+                None => {
+                    ctx.push(
+                        Issue::builder(IssueCode::DidNotConverge)
+                            .message("shared frailty information is not SPD")
+                            .build(),
+                    );
+                    break;
+                }
+            }
+            let _ = it;
+        }
+        let lam = breslow_cumhaz_frailty(durations, events, x, &beta, frailty.as_slice());
+        for (g, rows) in &by_g {
+            let mut d = 0.0_f64;
+            let mut lg = 0.0_f64;
+            for &i in rows {
+                if i < events.len() && events[i] > 0.5 {
+                    d += 1.0;
+                }
+                if i < lam.len() {
+                    lg += lam[i];
+                }
+            }
+            let z = (d + 1.0 / th) / (lg + 1.0 / th).max(1e-12);
+            z_g.insert(*g, z.clamp(1e-6, 1e6));
+        }
+    }
+    if !beta.as_slice().iter().all(|v| v.is_finite()) {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .message("shared frailty coefficients are non-finite")
+                .build(),
+        );
+        beta = Vector::zeros(p);
+    }
+    let frailty = Vector::from_iter((0..n).map(|i| {
+        if i < groups.len() && groups[i].is_finite() {
+            *z_g.get(&(groups[i].round() as i64)).unwrap_or(&1.0)
+        } else {
+            1.0
+        }
+    }));
+    ctx.finish(FittedSharedFrailty {
+        coef: beta,
+        frailty,
+        theta: th,
+        loglik,
+        n_events,
+        n_groups: by_g.len(),
+        converged,
+    })
+}
+
+fn cox_grad_hess_frailty(
+    idx: &[usize],
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    beta: &Vector,
+    frailty: &[f64],
+) -> (f64, Vector, Matrix) {
+    let n = idx.len();
+    let p = x.ncols();
+    let mut ll = 0.0_f64;
+    let mut grad = Vector::zeros(p);
+    let mut hess = Matrix::zeros(p, p);
+    let mut s0 = 0.0_f64;
+    let mut s1 = vec![0.0_f64; p];
+    let mut s2 = vec![0.0_f64; p * p];
+    let mut k = n;
+    while k > 0 {
+        let t = durations[idx[k - 1]];
+        let start = k;
+        while k > 0 && (durations[idx[k - 1]] - t).abs() <= 0.0 {
+            k -= 1;
+            let i = idx[k];
+            let mut xb = 0.0_f64;
+            for j in 0..p {
+                xb += x.get(i, j) * beta[j];
+            }
+            let z = if i < frailty.len() && frailty[i].is_finite() && frailty[i] > 0.0 {
+                frailty[i]
+            } else {
+                1.0
+            };
+            let w = (z * xb.clamp(-20.0, 20.0).exp()).max(1e-300);
+            s0 += w;
+            for j in 0..p {
+                s1[j] += w * x.get(i, j);
+            }
+            for a in 0..p {
+                for b in 0..p {
+                    s2[a * p + b] += w * x.get(i, a) * x.get(i, b);
+                }
+            }
+        }
+        for r in k..start {
+            let i = idx[r];
+            if i >= events.len() || events[i] <= 0.5 {
+                continue;
+            }
+            if s0 <= 0.0 {
+                continue;
+            }
+            let mut xb = 0.0_f64;
+            for j in 0..p {
+                xb += x.get(i, j) * beta[j];
+            }
+            let z = if i < frailty.len() && frailty[i].is_finite() && frailty[i] > 0.0 {
+                frailty[i]
+            } else {
+                1.0
+            };
+            ll += xb + z.max(1e-300).ln() - s0.ln();
+            for j in 0..p {
+                grad[j] += x.get(i, j) - s1[j] / s0;
+            }
+            for a in 0..p {
+                for b in 0..p {
+                    let v = s2[a * p + b] / s0 - (s1[a] / s0) * (s1[b] / s0);
+                    hess.set(a, b, hess.get(a, b) - v);
+                }
+            }
+        }
+    }
+    (ll, grad, hess)
+}
+
+fn breslow_cumhaz_frailty(
+    durations: &Vector,
+    events: &Vector,
+    x: &Matrix,
+    beta: &Vector,
+    frailty: &[f64],
+) -> Vector {
+    let n = x.nrows().min(durations.len()).min(events.len());
+    let p = x.ncols().min(beta.len());
+    let mut ev_times: Vec<f64> = (0..n)
+        .filter(|&i| events[i] > 0.5 && durations[i].is_finite())
+        .map(|i| durations[i])
+        .collect();
+    ev_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ev_times.dedup_by(|a, b| (*a - *b).abs() <= 0.0);
+    let mut h0_at: Vec<(f64, f64)> = Vec::new();
+    let mut acc = 0.0_f64;
+    for &t in &ev_times {
+        let mut s0 = 0.0_f64;
+        let mut d = 0.0_f64;
+        for i in 0..n {
+            if !durations[i].is_finite() || durations[i] + 1e-15 < t {
+                continue;
+            }
+            let mut xb = 0.0_f64;
+            for j in 0..p {
+                xb += x.get(i, j) * beta[j];
+            }
+            let z = if i < frailty.len() && frailty[i].is_finite() && frailty[i] > 0.0 {
+                frailty[i]
+            } else {
+                1.0
+            };
+            s0 += z * xb.clamp(-20.0, 20.0).exp();
+            if events[i] > 0.5 && (durations[i] - t).abs() <= 0.0 {
+                d += 1.0;
+            }
+        }
+        if s0 > 1e-15 {
+            acc += d / s0;
+        }
+        h0_at.push((t, acc));
+    }
+    Vector::from_iter((0..x.nrows()).map(|i| {
+        if i >= durations.len() || !durations[i].is_finite() {
+            return 0.0;
+        }
+        let t = durations[i];
+        let mut h0 = 0.0_f64;
+        for &(tj, hj) in &h0_at {
+            if tj <= t + 1e-15 {
+                h0 = hj;
+            }
+        }
+        let mut xb = 0.0_f64;
+        for j in 0..p {
+            xb += x.get(i, j) * beta[j];
+        }
+        let z = if i < frailty.len() && frailty[i].is_finite() && frailty[i] > 0.0 {
+            frailty[i]
+        } else {
+            1.0
+        };
+        z * h0 * xb.clamp(-20.0, 20.0).exp()
+    }))
+}
+
+/// Named shared-frailty Cox.
+#[derive(Clone, Debug)]
+pub struct SharedFrailty {
+    /// Gamma variance \(\theta>0\). Not identification `p`.
+    pub theta: f64,
+}
+
+impl Default for SharedFrailty {
+    fn default() -> Self {
+        Self { theta: 0.5 }
+    }
+}
+
+impl SharedFrailty {
+    /// Default \(\theta=0.5\) shared frailty.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit \(h_i(t)=Z_{g(i)}h_0(t)\exp(x\beta)\).
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSharedFrailty>> {
+        shared_frailty(durations, events, x, groups, self.theta, session)
+    }
+}
+
+/// Interval-censored Cox via midpoint imputation (statsmodels-adjacent).
+///
+/// A finite right endpoint is treated as an event at \((L+R)/2\); \(+\infty\)
+/// is right-censoring at \(L\). Interval count is not identification `p`.
+/// Do not `scan_finite` the right endpoints (\(+\infty\) is allowed).
+pub fn interval_censored_ph(
+    left: &Vector,
+    right: &Vector,
+    x: &Matrix,
+    session: &Session,
+) -> Result<Qualified<FittedCoxPH>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(left),
+        None,
+        &ctx.policy,
+    );
+    let n = left.len().min(x.nrows());
+    if right.len() != left.len() || x.nrows() != left.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("interval_censored_ph lengths do not match")
+                .build(),
+        );
+    }
+    inspect_identification(&mut ctx.report, n, x.ncols(), &ctx.policy);
+    let mut n_inf = 0usize;
+    let mut n_nan = 0usize;
+    let mut times = Vec::with_capacity(n);
+    let mut evs = Vec::with_capacity(n);
+    for i in 0..n {
+        let lo = if i < left.len() { left[i] } else { f64::NAN };
+        let hi = if i < right.len() { right[i] } else { f64::NAN };
+        if hi.is_nan() {
+            n_nan += 1;
+        }
+        if hi.is_infinite() && hi > 0.0 {
+            n_inf += 1;
+        }
+        if !lo.is_finite() || lo <= 0.0 {
+            times.push(1e-12);
+            evs.push(0.0);
+            continue;
+        }
+        if hi.is_finite() && hi >= lo {
+            times.push((0.5 * (lo + hi)).max(1e-12));
+            evs.push(1.0);
+        } else {
+            times.push(lo);
+            evs.push(0.0);
+        }
+    }
+    if n_nan > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .severity(Severity::Warning)
+                .message(format!("{n_nan} interval right endpoints are NaN; treated as censored"))
+                .build(),
+        );
+    }
+    if n_inf > 0 {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteInput)
+                .severity(Severity::Advisory)
+                .message(format!(
+                    "{n_inf} right endpoints are +∞ and are treated as right-censoring"
+                ))
+                .build(),
+        );
+    }
+    let n_events = evs.iter().filter(|e| **e > 0.5).count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("interval-censored PH has no finite right endpoints")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "interval-censored Cox coefficients",
+                    "every interval is right-censored so the midpoint PL is empty",
+                    "collect finite event intervals",
+                ))
+                .build(),
+        );
+        return ctx.finish(FittedCoxPH {
+            coef: Vector::zeros(x.ncols()),
+            loglik: 0.0,
+            n_events: 0,
+            n,
+            converged: false,
+        });
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("interval_censored_ph is midpoint Cox, not a Turnbull/ICM PH")
+            .compromise(NumericalCompromise::new(
+                "interval-censored partial likelihood",
+                "event at (L+R)/2, censoring at L when R=+∞",
+                "the midpoint is not the NPMLE support",
+                "read β as a midpoint approximation, not Finkelstein's IC PH",
+            ))
+            .build(),
+    );
+    let t = Vector::from_iter(times);
+    let e = Vector::from_iter(evs);
+    match CoxPH::new().fit(&t, &e, x, &session.child("icph-cox")) {
+        Ok(q) => {
+            for issue in q.report.issues() {
+                if skip_aborting_inner(issue) {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            ctx.finish(q.value)
+        }
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("interval-censored midpoint Cox Newton failed")
+                    .build(),
+            );
+            ctx.finish(FittedCoxPH {
+                coef: Vector::zeros(x.ncols()),
+                loglik: f64::NAN,
+                n_events,
+                n,
+                converged: false,
+            })
+        }
+    }
+}
+
+/// Named interval-censored midpoint Cox.
+#[derive(Clone, Debug, Default)]
+pub struct IntervalCensoredPH;
+
+impl IntervalCensoredPH {
+    /// Default midpoint IC PH.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on left/right endpoints and covariates.
+    pub fn fit(
+        &self,
+        left: &Vector,
+        right: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCoxPH>> {
+        interval_censored_ph(left, right, x, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -17664,5 +18454,36 @@ mod tests {
         let mres = martingale_resid(&dur, &ev, &xcox, &Session::new("mres", "t")).expect("mres");
         assert_eq!(mres.value.len(), 20);
         assert!(mres.value.as_slice().iter().all(|v| v.is_finite()));
+        let scores = Vector::from_iter((0..20).map(|i| xcox.get(i, 0)));
+        let cix = concordance_index(&dur, &ev, &scores, &Session::new("cidx", "t")).expect("cidx");
+        assert!(cix.value.n_pairs > 0.0);
+        assert!(cix.value.c_index.is_finite() || cix.value.c_index.is_nan());
+        let bh = baseline_hazard(&dur, &ev, &xcox, &Session::new("bh0", "t")).expect("bh0");
+        assert!(!bh.value.times.is_empty());
+        assert!(bh
+            .value
+            .survival
+            .as_slice()
+            .iter()
+            .all(|s| *s >= 0.0 && *s <= 1.0));
+        let dvr = deviance_resid(&dur, &ev, &xcox, &Session::new("dvr", "t")).expect("dvr");
+        assert_eq!(dvr.value.len(), 20);
+        assert!(dvr.value.as_slice().iter().all(|v| v.is_finite()));
+        let fgrp = Vector::from_iter((0..20).map(|i| (i % 4) as f64));
+        let sfr = shared_frailty(&dur, &ev, &xcox, &fgrp, 0.5, &Session::new("sfrl", "t"))
+            .expect("sfrl");
+        assert_eq!(sfr.value.coef.len(), 1);
+        assert!(sfr.value.coef[0].is_finite() || !sfr.value.converged);
+        assert_eq!(sfr.value.frailty.len(), 20);
+        let icr = Vector::from_iter((0..20).map(|i| {
+            if ev[i] > 0.5 {
+                dur[i]
+            } else {
+                f64::INFINITY
+            }
+        }));
+        let icph = interval_censored_ph(&dur, &icr, &xcox, &Session::new("icph", "t")).expect("icph");
+        assert_eq!(icph.value.coef.len(), 1);
+        assert!(icph.value.coef[0].is_finite() || !icph.value.converged);
     }
 }

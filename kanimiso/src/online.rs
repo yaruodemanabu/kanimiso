@@ -26450,6 +26450,185 @@ impl Predict for FtrlRegressor {
     }
 }
 
+/// FTRL-Proximal logistic classifier (river `optim.FTRL` / Follow-the-Regularized-Leader).
+///
+/// Gradient is \((\sigma(w^\top x)-y)x\). Feature count is identification
+/// width, not a substitute `p` from class count.
+#[derive(Clone, Debug)]
+pub struct FtrlClassifier {
+    /// Learning-rate scale \(\alpha > 0\).
+    pub alpha: f64,
+    /// Learning-rate offset \(\beta > 0\).
+    pub beta: f64,
+    /// ℓ1.
+    pub l1: f64,
+    /// ℓ2.
+    pub l2: f64,
+    /// Prepend an intercept column.
+    pub fit_intercept: bool,
+    z: Vector,
+    n: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for FtrlClassifier {
+    fn default() -> Self {
+        Self {
+            alpha: 0.5,
+            beta: 1.0,
+            l1: 0.0,
+            l2: 0.0,
+            fit_intercept: true,
+            z: Vector::zeros(0),
+            n: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl FtrlClassifier {
+    /// Default FTRL classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn weights(&self) -> Vector {
+        let dim = self.z.len();
+        let mut w = Vector::zeros(dim);
+        let alpha = if self.alpha.is_finite() && self.alpha > 0.0 {
+            self.alpha
+        } else {
+            0.5
+        };
+        let beta = if self.beta.is_finite() && self.beta > 0.0 {
+            self.beta
+        } else {
+            1.0
+        };
+        for j in 0..dim {
+            if self.z[j].abs() <= self.l1 {
+                w[j] = 0.0;
+            } else {
+                let sign = if self.z[j] < 0.0 { -1.0 } else { 1.0 };
+                w[j] =
+                    -(self.z[j] - sign * self.l1) / ((beta + self.n[j].sqrt()) / alpha + self.l2);
+            }
+        }
+        w
+    }
+
+    fn predict_row(&self, x: &Matrix, i: usize) -> f64 {
+        let z = row_aug(x, i, self.fit_intercept);
+        let w = self.weights();
+        let n = z.len().min(w.len());
+        let mut s = 0.0_f64;
+        for j in 0..n {
+            s += w[j] * z[j];
+        }
+        sigmoid(s)
+    }
+}
+
+impl PartialFit for FtrlClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no target"),
+            );
+        };
+        let dim = online_linear_dim(self.fit_intercept, x.ncols());
+        if !self.initialized {
+            self.z = Vector::zeros(dim);
+            self.n = Vector::zeros(dim);
+            self.initialized = true;
+        } else if self.z.len() != dim {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "feature space changed",
+                ),
+            );
+        }
+        let before = self.weights();
+        let alpha = if self.alpha.is_finite() && self.alpha > 0.0 {
+            self.alpha
+        } else {
+            0.5
+        };
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let yi = if y[i] > 0.5 { 1.0 } else { 0.0 };
+            let xa = row_aug(x, i, self.fit_intercept);
+            let pred = self.predict_row(x, i).clamp(1e-12, 1.0 - 1e-12);
+            loss_before += -(yi * pred.ln() + (1.0 - yi) * (1.0 - pred).ln());
+            let w = self.weights();
+            let gbase = pred - yi;
+            for j in 0..dim {
+                let g = gbase * xa[j];
+                let sigma = (self.n[j] + g * g).sqrt() / alpha - self.n[j].sqrt() / alpha;
+                self.z[j] += g - sigma * w[j];
+                self.n[j] += g * g;
+            }
+            let after = self.predict_row(x, i).clamp(1e-12, 1.0 - 1e-12);
+            loss_after += -(yi * after.ln() + (1.0 - yi) * (1.0 - after).ln());
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after_w = self.weights();
+        let delta = after_w.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            x.nrows(),
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen >= dim as u64,
+            self.n_seen < 4,
+            "FTRL-Proximal logistic weights",
+            "log-loss gradient; class count is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for FtrlClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::filled(x.nrows(), 0.5));
+        }
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.predict_row(x, i)),
+        ))
+    }
+}
+
 /// AdaDelta linear regressor (river `optim.AdaDelta`).
 #[derive(Clone, Debug)]
 pub struct AdaDeltaRegressor {
@@ -28883,6 +29062,110 @@ impl PartialFit for OnlineLogNormal {
                 "positive column-0 values only",
                 format!("mu={before:.6e}"),
                 format!("mu={after:.6e}"),
+            ),
+        )
+    }
+}
+
+/// Streaming Pareto Hill estimator on positive column 0 (river-style `proba`).
+///
+/// \(\hat\alpha = n / \sum\log(x_i/\hat x_{\min})\). Shape is not identification
+/// `p`.
+#[derive(Clone, Debug, Default)]
+pub struct OnlinePareto {
+    n: f64,
+    sum_log: f64,
+    xmin: f64,
+    updates: u64,
+}
+
+impl OnlinePareto {
+    /// Empty Pareto accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Hill shape, or NaN during warmup.
+    pub fn alpha(&self) -> f64 {
+        if self.n < 1.0 || !self.xmin.is_finite() || self.xmin <= 0.0 {
+            return f64::NAN;
+        }
+        let den = self.sum_log - self.n * self.xmin.ln();
+        if den <= 1e-18 {
+            f64::NAN
+        } else {
+            self.n / den
+        }
+    }
+}
+
+impl PartialFit for OnlinePareto {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let before = self.alpha();
+        let mut nonpos = 0u64;
+        for i in 0..x.nrows() {
+            let v = x.get(i, 0);
+            if !v.is_finite() {
+                continue;
+            }
+            if v <= 0.0 {
+                nonpos += 1;
+                continue;
+            }
+            if self.n <= 0.0 || v < self.xmin {
+                self.xmin = v;
+            }
+            self.n += 1.0;
+            self.sum_log += v.ln();
+        }
+        if nonpos > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "OnlinePareto skipped {nonpos} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        self.updates += 1;
+        let after = self.alpha();
+        let mut q =
+            IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n as u64);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(if before.is_finite() && after.is_finite() {
+            (after - before).abs()
+        } else {
+            0.0
+        });
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n >= 2.0 && after.is_finite();
+        q.warmup = self.n < 2.0;
+        q.explanation = format!("OnlinePareto α={after:.6e}");
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("OnlinePareto needs two positive observations")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Pareto Hill shape",
+                "running xmin and sum of log positives; shape is not p",
+                format!("alpha={before:.6e}"),
+                format!("alpha={after:.6e}"),
             ),
         )
     }
@@ -31340,6 +31623,12 @@ mod tests {
         OnlineLogNormal::new()
             .partial_fit(&x, None, &session)
             .expect("oln");
+        OnlinePareto::new()
+            .partial_fit(&x, None, &session)
+            .expect("opar");
+        FtrlClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("ftrlc");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

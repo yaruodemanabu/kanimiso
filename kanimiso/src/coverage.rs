@@ -5445,6 +5445,56 @@ const INVENTORY: &[Algorithm] = &[
         "sktime.regression.distance_based.ProximityForest",
         "estimator",
     ),
+    a(
+        "stats.concordance_index",
+        "lifelines.utils.concordance_index",
+        "function",
+    ),
+    a("stats.c_index", "sksurv.metrics.concordance_index_censored", "function"),
+    a(
+        "stats.baseline_hazard",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "function",
+    ),
+    a(
+        "stats.baseline_survival",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "function",
+    ),
+    a("stats.deviance_resid", "lifelines.CoxPHFitter", "function"),
+    a(
+        "stats.shared_frailty",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "stats",
+    ),
+    a(
+        "stats.SharedFrailty",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "estimator",
+    ),
+    a(
+        "stats.interval_censored_ph",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "stats",
+    ),
+    a(
+        "stats.IntervalCensoredPH",
+        "statsmodels.duration.hazard_regression.PHReg",
+        "estimator",
+    ),
+    a(
+        "panel.DifferenceGmm",
+        "linearmodels.panel.model.DifferenceGMM",
+        "estimator",
+    ),
+    a("panel.SystemGmm", "linearmodels.panel.model.SystemGMM", "estimator"),
+    a("online.FtrlClassifier", "river.optim.FTRL", "online"),
+    a("online.OnlinePareto", "scipy.stats.pareto", "online"),
+    a(
+        "tslearn.CanonicalIntervalForestRegressor",
+        "sktime.regression.interval_based.CanonicalIntervalForest",
+        "estimator",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -5843,6 +5893,12 @@ mod tests {
             "stats.cox_snell",
             "online.OnlineExponential",
             "tslearn.ProximityForestRegressor",
+            "stats.concordance_index",
+            "stats.baseline_hazard",
+            "stats.SharedFrailty",
+            "panel.SystemGmm",
+            "online.FtrlClassifier",
+            "tslearn.CanonicalIntervalForestRegressor",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

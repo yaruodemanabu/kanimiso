@@ -2158,6 +2158,156 @@ impl Predict for FittedCanonicalIntervalForest {
     }
 }
 
+/// Canonical interval forest regressor (sktime `CanonicalIntervalForest` regression).
+///
+/// Interval / tree counts are not identification `p`. Uses the same five
+/// summaries per interval as [`CanonicalIntervalForest`].
+#[derive(Clone, Debug)]
+pub struct CanonicalIntervalForestRegressor {
+    /// Trees.
+    pub n_estimators: usize,
+    /// Random intervals per tree.
+    pub n_intervals: usize,
+    /// Tree depth.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for CanonicalIntervalForestRegressor {
+    fn default() -> Self {
+        Self {
+            n_estimators: 6,
+            n_intervals: 3,
+            max_depth: 4,
+            seed: 11,
+        }
+    }
+}
+
+impl CanonicalIntervalForestRegressor {
+    /// Default CIF regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted CIF regressor.
+#[derive(Clone, Debug)]
+pub struct FittedCanonicalIntervalForestReg {
+    trees: Vec<crate::tree::FittedTreeRegressor>,
+    intervals: Vec<Vec<Interval>>,
+}
+
+impl Fit for CanonicalIntervalForestRegressor {
+    type Fitted = FittedCanonicalIntervalForestReg;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCanonicalIntervalForestReg>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if x.ncols() < 3 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .message(format!(
+                        "CanonicalIntervalForestRegressor series length {} < 3",
+                        x.ncols()
+                    ))
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("CIF regressor uses mean/std/slope/median/IQR, not full catch22")
+                .compromise(NumericalCompromise::new(
+                    "sktime CanonicalIntervalForest regression",
+                    "five summaries per random interval then CART",
+                    "the published CIF feature set is larger",
+                    "do not read as a published CIF-R accuracy",
+                ))
+                .build(),
+        );
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        let mut intervals = Vec::new();
+        let tlen = x.ncols().max(1);
+        for e in 0..self.n_estimators.max(1) {
+            let mut iv = Vec::new();
+            for _ in 0..self.n_intervals.max(1) {
+                let a = rng.below(tlen);
+                let span = 1 + rng.below(tlen);
+                let b = (a + span).min(tlen);
+                iv.push(Interval {
+                    start: a,
+                    end: b.max(a + 1),
+                });
+            }
+            let feat = interval_feats_cif(x, &iv);
+            let mut tree = crate::tree::DecisionTreeRegressor {
+                max_depth: self.max_depth,
+                seed: rng.next_u64(),
+                ..crate::tree::DecisionTreeRegressor::default()
+            };
+            match tree.fit(&feat, y, &session.child("cifr_tree")) {
+                Ok(q) => {
+                    trees.push(q.value);
+                    intervals.push(iv);
+                }
+                Err(err) => {
+                    for issue in err.report.issues() {
+                        if matches!(
+                            issue.code,
+                            IssueCode::ResidualTooLarge
+                                | IssueCode::NearSingular
+                                | IssueCode::R2IsOne
+                                | IssueCode::RankZero
+                                | IssueCode::MeaninglessFit
+                        ) {
+                            continue;
+                        }
+                        ctx.push(issue.clone());
+                    }
+                }
+            }
+            ctx.session.step(e as u64, 0.0, None);
+        }
+        if trees.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .message("every CanonicalIntervalForestRegressor tree failed")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedCanonicalIntervalForestReg { trees, intervals })
+    }
+}
+
+impl Predict for FittedCanonicalIntervalForestReg {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let mut acc = Vector::zeros(x.nrows());
+        let mut k = 0.0_f64;
+        for (tree, iv) in self.trees.iter().zip(&self.intervals) {
+            let feat = interval_feats_cif(x, iv);
+            if let Ok(q) = tree.predict(&feat, &session.child("cifr_pred")) {
+                for i in 0..x.nrows() {
+                    acc[i] += q.value[i];
+                }
+                k += 1.0;
+            }
+        }
+        if k > 0.0 {
+            acc = acc.scale(1.0 / k);
+        }
+        ctx.finish(acc)
+    }
+}
+
 /// ROCKET features + ridge classifier (sktime `RocketClassifier`).
 #[derive(Clone, Debug)]
 pub struct RocketClassifier {
@@ -13326,6 +13476,16 @@ mod tests {
             .value;
         assert_eq!(ppfr.len(), 8);
         assert!(ppfr.as_slice().iter().all(|v| v.is_finite()));
+        let cifr = CanonicalIntervalForestRegressor::new()
+            .fit(&x, &yr, &Session::new("ts", "cifr"))
+            .unwrap();
+        let pcifr = cifr
+            .value
+            .predict(&x, &Session::new("ts", "cifrp"))
+            .unwrap()
+            .value;
+        assert_eq!(pcifr.len(), 8);
+        assert!(pcifr.as_slice().iter().all(|v| v.is_finite()));
         let rst = Rstsf::new()
             .fit(&x, &y, &Session::new("ts", "rstsf"))
             .unwrap();

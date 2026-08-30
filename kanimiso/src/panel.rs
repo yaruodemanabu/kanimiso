@@ -990,6 +990,130 @@ pub struct FittedBlundellBond {
     pub n_groups: usize,
 }
 
+/// Difference GMM (linearmodels `DifferenceGMM` / Arellano–Bond).
+///
+/// Group count is not identification `p`. Delegates to [`ArellanoBondGmm`].
+#[derive(Clone, Debug, Default)]
+pub struct DifferenceGmm;
+
+impl DifferenceGmm {
+    /// Default collapsed first-difference GMM.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on rows sorted by group then time.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedArellanoBond>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("DifferenceGmm is collapsed Arellano–Bond, not two-step Windmeijer")
+                .build(),
+        );
+        match ArellanoBondGmm::new().fit(x, y, groups, &session.child("dgmm-ab")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::R2IsOne
+                            | IssueCode::RankZero
+                            | IssueCode::CholeskyFailed
+                            | IssueCode::MeaninglessFit
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                ctx.finish(q.value)
+            }
+            Err(_) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("DifferenceGmm inner Arellano–Bond failed")
+                        .build(),
+                );
+                ctx.finish(FittedArellanoBond {
+                    rho: 0.0,
+                    coef: Vector::zeros(x.ncols()),
+                    n_eff: 0,
+                    n_groups: 0,
+                })
+            }
+        }
+    }
+}
+
+/// System GMM (linearmodels `SystemGMM` / Blundell–Bond).
+///
+/// Group count is not identification `p`. Delegates to [`BlundellBond`].
+#[derive(Clone, Debug, Default)]
+pub struct SystemGmm;
+
+impl SystemGmm {
+    /// Default collapsed system GMM.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit on rows sorted by group then time.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedBlundellBond>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SystemGmm is collapsed Blundell–Bond, not two-step Windmeijer")
+                .build(),
+        );
+        match BlundellBond::new().fit(x, y, groups, &session.child("sgmm-bb")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::R2IsOne
+                            | IssueCode::RankZero
+                            | IssueCode::CholeskyFailed
+                            | IssueCode::MeaninglessFit
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                ctx.finish(q.value)
+            }
+            Err(_) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("SystemGmm inner Blundell–Bond failed")
+                        .build(),
+                );
+                ctx.finish(FittedBlundellBond {
+                    rho: 0.0,
+                    coef: Vector::zeros(x.ncols()),
+                    n_eff: 0,
+                    n_groups: 0,
+                })
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1060,5 +1184,15 @@ mod tests {
             .expect("bb");
         assert!(bb.value.n_eff > 0);
         assert!(bb.value.rho.is_finite());
+        let dg = DifferenceGmm::new()
+            .fit(&x, &ydyn, &g, &Session::new("dgmm", "fit"))
+            .expect("dgmm");
+        assert!(dg.value.n_eff > 0);
+        assert!(dg.value.rho.is_finite());
+        let sg = SystemGmm::new()
+            .fit(&x, &ydyn, &g, &Session::new("sgmm", "fit"))
+            .expect("sgmm");
+        assert!(sg.value.n_eff > 0);
+        assert!(sg.value.rho.is_finite());
     }
 }
