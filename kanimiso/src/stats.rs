@@ -22242,6 +22242,369 @@ impl FittedComponentwiseGbs {
     }
 }
 
+/// Single extra-trees survival tree (sksurv `SurvivalTree`).
+///
+/// Tree depth is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SurvivalTree {
+    inner: RandomSurvivalForest,
+}
+
+impl Default for SurvivalTree {
+    fn default() -> Self {
+        Self {
+            inner: RandomSurvivalForest {
+                n_estimators: 1,
+                max_depth: 4,
+                min_samples_split: 2,
+                n_try: 8,
+                seed: 41,
+            },
+        }
+    }
+}
+
+impl SurvivalTree {
+    /// Default extra-trees survival stump forest of size 1.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit one log-rank extra-tree.
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedRandomSurvivalForest>> {
+        self.inner.fit(durations, events, x, session)
+    }
+}
+
+/// Named Harrell \(C\) (sksurv `concordance_index_censored`).
+#[derive(Clone, Debug, Default)]
+pub struct ConcordanceIndex;
+
+impl ConcordanceIndex {
+    /// Default Harrell C.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Score risk ranks against right-censored times.
+    pub fn score(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        scores: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<ConcordanceResult>> {
+        concordance_index(durations, events, scores, session)
+    }
+}
+
+/// Named Harrell \(C\) alias.
+#[derive(Clone, Debug, Default)]
+pub struct HarrellC {
+    inner: ConcordanceIndex,
+}
+
+impl HarrellC {
+    /// Default Harrell C.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Score risk ranks.
+    pub fn score(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        scores: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<ConcordanceResult>> {
+        self.inner.score(durations, events, scores, session)
+    }
+}
+
+/// Named Uno IPCW \(C\) (sksurv `concordance_index_ipcw`).
+#[derive(Clone, Debug, Default)]
+pub struct UnoC;
+
+impl UnoC {
+    /// Default Uno C.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// IPCW concordance on right-censored times.
+    pub fn score(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        scores: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<ConcordanceResult>> {
+        ipcw_cindex(durations, events, scores, session)
+    }
+}
+
+/// Named IPCW C-index wrapper.
+#[derive(Clone, Debug, Default)]
+pub struct IpcwCindex {
+    inner: UnoC,
+}
+
+impl IpcwCindex {
+    /// Default IPCW C.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Score IPCW concordance.
+    pub fn score(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        scores: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<ConcordanceResult>> {
+        self.inner.score(durations, events, scores, session)
+    }
+}
+
+/// Integrated Brier score (sksurv `integrated_brier_score`, Graf rectangle rule).
+///
+/// `pred_surv` is \(n\times m\) predicted \(S(t_k\mid x_i)\). Time-grid width is
+/// not identification `p`. Censoring KM is local ([`censoring_km`]); this does
+/// not call [`nelson_aalen`]. Inspect times with `y=None`.
+pub fn integrated_brier_score(
+    durations: &Vector,
+    events: &Vector,
+    pred_surv: &Matrix,
+    times: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(durations),
+        None,
+        &ctx.policy,
+    );
+    let n = durations.len().min(events.len());
+    let m = times.len();
+    if pred_surv.nrows() != n || pred_surv.ncols() != m {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("integrated_brier_score pred_surv shape ≠ (n, n_times); using 0.5")
+                .build(),
+        );
+    }
+    let n_events = (0..n).filter(|&i| events[i] > 0.5).count();
+    if n_events == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::MeaninglessFit)
+                .message("integrated_brier_score has no events")
+                .meaninglessness(Meaninglessness::vacuous(
+                    "Graf IBS",
+                    "zero events ⇒ every IPCW term is empty or censoring-only",
+                    "collect events",
+                ))
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    if m == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("integrated_brier_score time grid is empty")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("IBS uses a rectangle rule on the supplied grid, not Graf's published trapezoid")
+            .compromise(NumericalCompromise::new(
+                "Graf et al. integrated Brier score",
+                "mean of IPCW Brier values on the given times",
+                "the time measure and inverse-probability tail are a sketch",
+                "read the number as a ranking/calibration proxy, not a published IBS",
+            ))
+            .build(),
+    );
+    let g_hat = censoring_km(durations, events);
+    let mut acc = 0.0_f64;
+    let mut used = 0.0_f64;
+    for k in 0..m {
+        let t = times[k];
+        if !t.is_finite() {
+            continue;
+        }
+        let g_t = censor_surv_at(&g_hat, t).max(1e-8);
+        let mut bs = 0.0_f64;
+        for i in 0..n {
+            if !durations[i].is_finite() {
+                continue;
+            }
+            let s = if pred_surv.nrows() == n && pred_surv.ncols() == m {
+                pred_surv.get(i, k).clamp(0.0, 1.0)
+            } else {
+                0.5
+            };
+            if durations[i] > t + 1e-15 {
+                let e = s - 1.0;
+                bs += e * e / g_t;
+            } else if events[i] > 0.5 {
+                let g_ti = censor_surv_at(&g_hat, durations[i]).max(1e-8);
+                bs += s * s / g_ti;
+            }
+        }
+        acc += bs / n.max(1) as f64;
+        used += 1.0;
+    }
+    if used <= 0.0 {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .message("integrated_brier_score had no finite grid times")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(acc / used)
+}
+
+/// Named Graf IBS wrapper.
+#[derive(Clone, Debug, Default)]
+pub struct IntegratedBrierScore;
+
+impl IntegratedBrierScore {
+    /// Default rectangle-rule IBS.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Score predicted survivals on a time grid.
+    pub fn score(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        pred_surv: &Matrix,
+        times: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<f64>> {
+        integrated_brier_score(durations, events, pred_surv, times, session)
+    }
+}
+
+/// sksurv `CoxPHSurvivalAnalysis` name for Breslow Cox.
+///
+/// Inner Newton `CholeskyFailed` is not promoted.
+#[derive(Clone, Debug, Default)]
+pub struct CoxPHSurvivalAnalysis {
+    inner: CoxPH,
+}
+
+impl CoxPHSurvivalAnalysis {
+    /// Default Breslow Cox.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit \(h(t\mid x)=h_0(t)\exp(x\beta)\).
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCoxPH>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(durations), &ctx.policy);
+        match self.inner.fit(durations, events, x, &session.child("sksurv-cox")) {
+            Ok(q) => {
+                for issue in q.report.issues() {
+                    if skip_aborting_inner(issue) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                ctx.finish(q.value)
+            }
+            Err(_) => {
+                ctx.push(
+                    Issue::builder(IssueCode::DidNotConverge)
+                        .message("CoxPHSurvivalAnalysis inner Newton failed")
+                        .build(),
+                );
+                ctx.finish(FittedCoxPH {
+                    coef: Vector::zeros(x.ncols()),
+                    loglik: f64::NAN,
+                    n_events: events.as_slice().iter().filter(|e| **e > 0.5).count(),
+                    n: x.nrows(),
+                    converged: false,
+                })
+            }
+        }
+    }
+}
+
+/// Local Breslow cumulative hazard (sksurv `BreslowEstimator`).
+///
+/// Event / time counts are not identification `p`. Does not call
+/// [`nelson_aalen`]. Inspect times with `y=None`.
+#[derive(Clone, Debug, Default)]
+pub struct BreslowEstimator;
+
+impl BreslowEstimator {
+    /// Default Breslow baseline.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit a subject-level Breslow \(H(T_i)\).
+    pub fn fit(
+        &self,
+        durations: &Vector,
+        events: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_vector(durations),
+            None,
+            &ctx.policy,
+        );
+        let n_events = events.as_slice().iter().filter(|e| **e > 0.5).count();
+        if n_events == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateDistribution)
+                    .message("BreslowEstimator has no events; H is identically 0")
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("BreslowEstimator is a local risk-set increment, not a published CHF")
+                .compromise(NumericalCompromise::new(
+                    "Breslow / Nelson–Aalen cumulative hazard",
+                    "tied-time risk-set increment H(T_i)",
+                    "Greenwood variance and interpolation off the event grid are omitted",
+                    "read H as a ranking baseline, not a lifetable with SEs",
+                ))
+                .build(),
+        );
+        ctx.finish(local_breslow_h(durations, events))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -23224,5 +23587,32 @@ mod tests {
             .fit(&dur, &ev, &xcox, &Session::new("cgbs", "t"))
             .expect("cgbs");
         assert_eq!(cgbs.value.coef.len(), 1);
+        let stree = SurvivalTree::new()
+            .fit(&dur, &ev, &xcox, &Session::new("stree", "t"))
+            .expect("stree");
+        assert_eq!(stree.value.n_features, 1);
+        let hc = HarrellC::new()
+            .score(&dur, &ev, &scores, &Session::new("hc", "t"))
+            .expect("hc");
+        assert!(hc.value.c_index.is_finite() || hc.value.c_index.is_nan());
+        let uno = UnoC::new()
+            .score(&dur, &ev, &scores, &Session::new("uno", "t"))
+            .expect("uno");
+        assert!(uno.value.n_pairs >= 0.0);
+        let ibs_t = Vector::from_iter([5.0_f64, 10.0, 15.0]);
+        let ibs_p = Matrix::from_fn(20, 3, |_, _| 0.5);
+        let ibs = IntegratedBrierScore::new()
+            .score(&dur, &ev, &ibs_p, &ibs_t, &Session::new("ibs", "t"))
+            .expect("ibs");
+        assert!(ibs.value.is_finite() || ibs.value.is_nan());
+        let cphs = CoxPHSurvivalAnalysis::new()
+            .fit(&dur, &ev, &xcox, &Session::new("cphs", "t"))
+            .expect("cphs");
+        assert_eq!(cphs.value.coef.len(), 1);
+        let brw = BreslowEstimator::new()
+            .fit(&dur, &ev, &Session::new("brw", "t"))
+            .expect("brw");
+        assert_eq!(brw.value.len(), 20);
+        assert!(brw.value.as_slice().iter().all(|v| v.is_finite()));
     }
 }

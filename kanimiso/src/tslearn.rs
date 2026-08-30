@@ -14997,6 +14997,100 @@ impl Predict for FittedRotationForestRegressor {
     }
 }
 
+/// Named FreshPRINCE classifier (sktime `FreshPRINCEClassifier`).
+#[derive(Clone, Debug)]
+pub struct FreshPrinceClassifier {
+    inner: FreshPrince,
+}
+
+impl Default for FreshPrinceClassifier {
+    fn default() -> Self {
+        Self {
+            inner: FreshPrince::default(),
+        }
+    }
+}
+
+impl FreshPrinceClassifier {
+    /// Default FreshPRINCE classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for FreshPrinceClassifier {
+    type Fitted = FittedFreshPrince;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedFreshPrince>> {
+        self.inner.fit(x, y, session)
+    }
+}
+
+/// Named DrCIF classifier (sktime `DrCIF`).
+#[derive(Clone, Debug)]
+pub struct DrCifClassifier {
+    inner: DrCif,
+}
+
+impl Default for DrCifClassifier {
+    fn default() -> Self {
+        Self {
+            inner: DrCif::default(),
+        }
+    }
+}
+
+impl DrCifClassifier {
+    /// Default DrCIF classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for DrCifClassifier {
+    type Fitted = FittedDrCif;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedDrCif>> {
+        self.inner.fit(x, y, session)
+    }
+}
+
+/// Named CIF classifier (sktime `CanonicalIntervalForest`).
+#[derive(Clone, Debug)]
+pub struct CanonicalIntervalForestClassifier {
+    inner: CanonicalIntervalForest,
+}
+
+impl Default for CanonicalIntervalForestClassifier {
+    fn default() -> Self {
+        Self {
+            inner: CanonicalIntervalForest::default(),
+        }
+    }
+}
+
+impl CanonicalIntervalForestClassifier {
+    /// Default CIF classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for CanonicalIntervalForestClassifier {
+    type Fitted = FittedCanonicalIntervalForest;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedCanonicalIntervalForest>> {
+        self.inner.fit(x, y, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -15471,6 +15565,39 @@ mod tests {
             .value;
         assert_eq!(protfr.len(), 8);
         assert!(protfr.as_slice().iter().all(|v| v.is_finite()));
+        let fpc = FreshPrinceClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "fpc"))
+            .unwrap();
+        assert_eq!(
+            fpc.value
+                .predict(&x, &Session::new("ts", "fpcp"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let dcc = DrCifClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "dcc"))
+            .unwrap();
+        assert_eq!(
+            dcc.value
+                .predict(&x, &Session::new("ts", "dccp"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
+        let cifc = CanonicalIntervalForestClassifier::new()
+            .fit(&x, &y, &Session::new("ts", "cifc"))
+            .unwrap();
+        assert_eq!(
+            cifc.value
+                .predict(&x, &Session::new("ts", "cifcp"))
+                .unwrap()
+                .value
+                .len(),
+            8
+        );
         let rst = Rstsf::new()
             .fit(&x, &y, &Session::new("ts", "rstsf"))
             .unwrap();

@@ -4747,6 +4747,48 @@ impl FitUnsupervised for MultinomialHmmLeftRight {
     }
 }
 
+/// Left-right GMM-HMM (hmmlearn `GMMHMM` with `left_right`).
+///
+/// State / mixture counts are not extra identification `p` beyond the inner
+/// [`GmmHmm`] fit.
+#[derive(Clone, Debug)]
+pub struct GmmHmmLeftRight {
+    inner: GmmHmm,
+}
+
+impl Default for GmmHmmLeftRight {
+    fn default() -> Self {
+        Self {
+            inner: GmmHmm::left_right(2, 1),
+        }
+    }
+}
+
+impl GmmHmmLeftRight {
+    /// Left-right GMM-HMM with `n_states` states and `n_mix` mixtures.
+    pub fn new(n_states: usize, n_mix: usize) -> Self {
+        Self {
+            inner: GmmHmm::left_right(n_states, n_mix),
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmmHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+impl FitUnsupervised for GmmHmmLeftRight {
+    type Fitted = FittedGmmHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedGmmHmm>> {
+        self.inner.fit_unsupervised(x, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4820,6 +4862,10 @@ mod tests {
             .fit(&x, &Session::new("glr_hmm", "fit"))
             .expect("glr");
         assert!(glr.value.trans.get(1, 0) <= 1e-8);
+        let gmmlr = GmmHmmLeftRight::new(2, 1)
+            .fit(&x, &Session::new("gmmlr_hmm", "fit"))
+            .expect("gmmlr");
+        assert!(gmmlr.value.trans.get(1, 0) <= 1e-8);
         let gsph = GmmHmm::spherical(2, 1)
             .fit(&x, &Session::new("gsph_hmm", "fit"))
             .expect("gsph");

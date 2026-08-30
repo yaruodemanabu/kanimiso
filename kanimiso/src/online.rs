@@ -35706,6 +35706,37 @@ impl Predict for AdwinBaggingClassifier {
     }
 }
 
+/// Named softmax classifier (river `linear_model.SoftmaxRegression`).
+#[derive(Clone, Debug, Default)]
+pub struct SoftmaxClassifier {
+    inner: SoftmaxRegression,
+}
+
+impl SoftmaxClassifier {
+    /// Empty softmax classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for SoftmaxClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        self.inner.partial_fit(x, y, session)
+    }
+}
+
+impl Predict for SoftmaxClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -36294,6 +36325,9 @@ mod tests {
         AdwinBaggingClassifier::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("adwinc");
+        SoftmaxClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("smc");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

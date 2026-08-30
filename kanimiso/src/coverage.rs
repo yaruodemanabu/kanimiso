@@ -5885,6 +5885,54 @@ const INVENTORY: &[Algorithm] = &[
         "sklearn.linear_model.PassiveAggressiveClassifier",
         "estimator",
     ),
+    a("stats.SurvivalTree", "sksurv.tree.SurvivalTree", "estimator"),
+    a(
+        "stats.ConcordanceIndex",
+        "sksurv.metrics.concordance_index_censored",
+        "estimator",
+    ),
+    a("stats.HarrellC", "sksurv.metrics.concordance_index_censored", "estimator"),
+    a("stats.UnoC", "sksurv.metrics.concordance_index_ipcw", "estimator"),
+    a(
+        "stats.integrated_brier_score",
+        "sksurv.metrics.integrated_brier_score",
+        "function",
+    ),
+    a(
+        "stats.IntegratedBrierScore",
+        "sksurv.metrics.integrated_brier_score",
+        "estimator",
+    ),
+    a(
+        "stats.CoxPHSurvivalAnalysis",
+        "sksurv.linear_model.CoxPHSurvivalAnalysis",
+        "estimator",
+    ),
+    a(
+        "stats.BreslowEstimator",
+        "sksurv.nonparametric.SurvivalFunctionEstimator",
+        "estimator",
+    ),
+    a(
+        "tslearn.FreshPrinceClassifier",
+        "sktime.classification.feature_based.FreshPRINCEClassifier",
+        "estimator",
+    ),
+    a(
+        "tslearn.DrCifClassifier",
+        "sktime.classification.interval_based.DrCIF",
+        "estimator",
+    ),
+    a(
+        "tslearn.CanonicalIntervalForestClassifier",
+        "sktime.classification.interval_based.CanonicalIntervalForest",
+        "estimator",
+    ),
+    a(
+        "online.SoftmaxClassifier",
+        "river.linear_model.SoftmaxRegression",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6352,6 +6400,12 @@ mod tests {
             "ensemble.RotationForestRegressor",
             "tslearn.RotationForestRegressor",
             "classification.PassiveAggressiveClassifier",
+            "stats.SurvivalTree",
+            "stats.integrated_brier_score",
+            "stats.CoxPHSurvivalAnalysis",
+            "tslearn.FreshPrinceClassifier",
+            "tslearn.CanonicalIntervalForestClassifier",
+            "online.SoftmaxClassifier",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
