@@ -9,6 +9,7 @@ use crate::data::{Matrix, Vector};
 use crate::linalg::symmetric_eigen;
 use crate::traits::{FitUnsupervised, Transform};
 use crate::validate::inspect_xy;
+use faer::linalg::solvers::Solve;
 use faer::{Mat, Side};
 use ojizou_san::Session;
 use signlred::{Issue, IssueCode, NumericalCompromise, Qualified, Result};
@@ -501,9 +502,18 @@ impl FitUnsupervised for LocallyLinearEmbedding {
             }
             let z = Matrix::from_fn(k, p, |a, c| x.get(nbrs[a], c) - x.get(i, c));
             let ones = Vector::filled(k, 1.0);
-            let mut gram = z.gram();
-            for t in 0..k {
-                gram[(t, t)] += 1e-3;
+            // Local Gram is k×k (neighbors), not p×p.
+            let mut gram = faer::Mat::<f64>::zeros(k, k);
+            for a in 0..k {
+                for b in 0..=a {
+                    let mut s = 0.0;
+                    for c in 0..p {
+                        s += z.get(a, c) * z.get(b, c);
+                    }
+                    gram[(a, b)] = s;
+                    gram[(b, a)] = s;
+                }
+                gram[(a, a)] += 1e-3;
             }
             let wt = match gram.llt(Side::Lower) {
                 Ok(chol) => {
@@ -843,7 +853,7 @@ mod tests {
 
     #[test]
     fn lle_and_tsne_run() {
-        let x = Matrix::from_fn(10, 2, |i, j| (i as f64) * 0.3 + j as f64);
+        let x = Matrix::from_fn(10, 2, |i, j| (i as f64) * 0.3 + (j as f64) * 0.7 + 0.05 * (i * j) as f64);
         let lle = LocallyLinearEmbedding::new(3, 2)
             .fit_unsupervised(&x, &Session::new("man", "lle"))
             .unwrap();

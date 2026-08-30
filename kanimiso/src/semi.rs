@@ -272,7 +272,7 @@ fn fit_graph(
             clamp_labeled(&mut nxt, &y0, &labeled);
         }
         normalize_rows(&mut nxt);
-        let mut delta = 0.0;
+        let mut delta: f64 = 0.0;
         for i in 0..f.nrows() {
             for k in 0..f.ncols() {
                 delta = delta.max((nxt.get(i, k) - f.get(i, k)).abs());

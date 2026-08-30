@@ -52,14 +52,14 @@ pub fn dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> 
 fn dtw_raw(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len();
     let m = b.len();
-    let inf = 1e300;
+    let inf: f64 = 1e300;
     let mut prev = vec![inf; m + 1];
     let mut cur = vec![inf; m + 1];
     prev[0] = 0.0;
     for i in 1..=n {
         cur[0] = inf;
         for j in 1..=m {
-            let cost = (a[i - 1] - b[j - 1]).abs();
+            let cost: f64 = (a[i - 1] - b[j - 1]).abs();
             cur[j] = cost + prev[j].min(cur[j - 1]).min(prev[j - 1]);
         }
         std::mem::swap(&mut prev, &mut cur);
@@ -132,7 +132,7 @@ pub fn softdtw(a: &Vector, b: &Vector, gamma: f64, session: &Session) -> Result<
 fn dtw_path(a: &[f64], b: &[f64]) -> Vec<(usize, usize)> {
     let n = a.len();
     let m = b.len();
-    let inf = 1e300;
+    let inf: f64 = 1e300;
     let mut dp = vec![inf; (n + 1) * (m + 1)];
     let at = |i: usize, j: usize| i * (m + 1) + j;
     dp[at(0, 0)] = 0.0;

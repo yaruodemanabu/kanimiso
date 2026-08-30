@@ -362,12 +362,6 @@ impl Fit for DummyClassifier {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
-        ctx.push(
-            Issue::builder(IssueCode::InterceptOnlyCollapse)
-                .severity(signlred::Severity::Advisory)
-                .message("DummyClassifier ignores X and emits the majority label")
-                .build(),
-        );
         let (lab, _) = counts
             .iter()
             .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))

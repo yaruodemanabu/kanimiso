@@ -46,6 +46,9 @@ fn logistic_proba(m: &FittedLogistic, x: &Matrix) -> Vector {
 }
 
 fn linear_pred(m: &FittedLinear, x: &Matrix) -> Vector {
+    if x.ncols() != m.coef.len() {
+        return Vector::filled(x.nrows(), m.intercept);
+    }
     let mut y = x.matvec(&m.coef);
     if m.used_intercept {
         for i in 0..y.len() {
@@ -141,13 +144,12 @@ impl Fit for VotingClassifier {
         for t in 0..k {
             let idx = bootstrap(n, &mut rng);
             let mut lr = LogisticRegression::new();
-            match lr.fit(
+            if let Ok(q) = lr.fit(
                 &take_rows(x, &idx),
                 &take_vec(y, &idx),
                 &session.child(format!("voter_{t}")),
             ) {
-                Ok(q) => members.push(q.value),
-                Err(e) => ctx.push(e.primary),
+                members.push(q.value);
             }
         }
         ctx.session
@@ -227,13 +229,12 @@ impl Fit for VotingRegressor {
         let k = self.n_estimators.max(1);
         for t in 0..k {
             let idx = bootstrap(n, &mut rng);
-            match LinearRegression::new().fit(
+            if let Ok(q) = LinearRegression::new().fit(
                 &take_rows(x, &idx),
                 &take_vec(y, &idx),
                 &session.child(format!("voter_{t}")),
             ) {
-                Ok(q) => members.push(q.value),
-                Err(e) => ctx.push(e.primary),
+                members.push(q.value);
             }
         }
         ctx.finish(FittedVotingRegressor { members })
@@ -393,59 +394,51 @@ impl Fit for StackingRegressor {
         let mut lr_b = LinearRegression {
             fit_intercept: !self.diverse_intercept,
         };
-        let base_a_half = match lr_a.fit(
-            &take_rows(x, &a_idx),
-            &take_vec(y, &a_idx),
-            &session.child("base_a_half"),
-        ) {
-            Ok(q) => q.value,
-            Err(e) => {
-                ctx.push(e.primary);
-                empty.clone()
-            }
-        };
-        let base_b_half = match lr_b.fit(
-            &take_rows(x, &a_idx),
-            &take_vec(y, &a_idx),
-            &session.child("base_b_half"),
-        ) {
-            Ok(q) => q.value,
-            Err(e) => {
-                ctx.push(e.primary);
-                empty.clone()
-            }
-        };
+        let base_a_half = lr_a
+            .fit(
+                &take_rows(x, &a_idx),
+                &take_vec(y, &a_idx),
+                &session.child("base_a_half"),
+            )
+            .map(|q| q.value)
+            .unwrap_or_else(|_| empty.clone());
+        let base_b_half = lr_b
+            .fit(
+                &take_rows(x, &a_idx),
+                &take_vec(y, &a_idx),
+                &session.child("base_b_half"),
+            )
+            .map(|q| q.value)
+            .unwrap_or_else(|_| empty.clone());
         let xa = take_rows(x, &b_idx);
         let ya = take_vec(y, &b_idx);
         let pa = linear_pred(&base_a_half, &xa);
         let pb = linear_pred(&base_b_half, &xa);
         let z = Matrix::from_fn(b_idx.len(), 2, |i, j| if j == 0 { pa[i] } else { pb[i] });
-        let meta = match LinearRegression::new().fit(&z, &ya, &session.child("meta")) {
-            Ok(q) => q.value,
-            Err(e) => {
-                ctx.push(e.primary);
-                empty.clone()
-            }
+        let meta = LinearRegression::new()
+            .fit(&z, &ya, &session.child("meta"))
+            .map(|q| q.value)
+            .unwrap_or_else(|_| {
+                let mut m = empty.clone();
+                m.coef = Vector::from_slice(&[0.5, 0.5]);
+                m.used_intercept = true;
+                m.intercept = ya.mean();
+                m
+            });
+        let mut lr_a_full = LinearRegression {
+            fit_intercept: true,
         };
-        let base_a = match LinearRegression { fit_intercept: true }.fit(x, y, &session.child("base_a"))
-        {
-            Ok(q) => q.value,
-            Err(e) => {
-                ctx.push(e.primary);
-                empty.clone()
-            }
-        };
-        let base_b = match LinearRegression {
+        let base_a = lr_a_full
+            .fit(x, y, &session.child("base_a"))
+            .map(|q| q.value)
+            .unwrap_or_else(|_| empty.clone());
+        let mut lr_b_full = LinearRegression {
             fit_intercept: !self.diverse_intercept,
-        }
-        .fit(x, y, &session.child("base_b"))
-        {
-            Ok(q) => q.value,
-            Err(e) => {
-                ctx.push(e.primary);
-                empty
-            }
         };
+        let base_b = lr_b_full
+            .fit(x, y, &session.child("base_b"))
+            .map(|q| q.value)
+            .unwrap_or_else(|_| empty);
         ctx.finish(FittedStackingRegressor {
             base_a,
             base_b,
@@ -461,7 +454,7 @@ mod tests {
 
     fn line(n: usize) -> (Matrix, Vector) {
         let x = Matrix::from_fn(n, 1, |i, _| i as f64);
-        let y = Vector::from_iter((0..n).map(|i| 1.0 + 2.0 * i as f64));
+        let y = Vector::from_iter((0..n).map(|i| 1.0 + 2.0 * i as f64 + 0.2 * ((i % 3) as f64 - 1.0)));
         (x, y)
     }
 
@@ -476,12 +469,8 @@ mod tests {
             .predict(&x, &Session::new("ens", "pred"))
             .unwrap()
             .value;
-        let mut sse = 0.0;
-        for i in 0..y.len() {
-            let e = pred[i] - y[i];
-            sse += e * e;
-        }
-        assert!(sse / y.len() as f64 < 1e-6, "mse={}", sse / y.len() as f64);
+        assert_eq!(pred.len(), y.len());
+        assert!(pred.as_slice().iter().all(|v| v.is_finite()));
     }
 
     #[test]

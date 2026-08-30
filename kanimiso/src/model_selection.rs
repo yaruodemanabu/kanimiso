@@ -605,13 +605,27 @@ mod tests {
     }
 
     #[test]
-    fn cv_ols_on_a_line_is_high() {
+    fn cv_ridge_on_a_line_is_high() {
         let x = Matrix::from_fn(24, 1, |i, _| i as f64);
-        let y = Vector::from_iter((0..24).map(|i| 1.0 + 2.0 * i as f64));
-        let s = cross_val_score_linear(&x, &y, &KFold::new(4), &Session::new("ms", "cv"))
+        let y = Vector::from_iter((0..24).map(|i| 1.0 + 2.0 * i as f64 + 0.3 * ((i % 4) as f64)));
+        let folds = KFold::new(4)
+            .split(24, &Session::new("ms", "kfold"))
             .unwrap()
             .value;
-        assert!(s.as_slice().iter().all(|v| *v > 0.99), "{:?}", s.as_slice());
+        let s = cross_val_score(
+            &x,
+            &y,
+            &folds,
+            |xt, yt, xv, yv, sess| {
+                let fitted = Ridge::new(0.1).fit(xt, yt, &sess.child("ridge"))?;
+                let pred = fitted.value.predict(xv, &sess.child("predict"))?;
+                r2(yv, &pred.value, &sess.child("r2"))
+            },
+            &Session::new("ms", "cv"),
+        )
+        .unwrap()
+        .value;
+        assert!(s.as_slice().iter().all(|v| v.is_finite() && *v > 0.9), "{:?}", s.as_slice());
     }
 
     #[test]

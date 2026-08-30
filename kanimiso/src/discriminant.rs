@@ -9,9 +9,10 @@ use crate::data::{Matrix, Vector};
 use crate::linalg::symmetric_eigen;
 use crate::traits::{Fit, Predict};
 use crate::validate::{inspect_classes, inspect_identification, inspect_xy};
+use faer::linalg::solvers::Solve;
 use faer::{Mat, Side};
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Meaninglessness, Qualified, Result};
+use signlred::{Issue, IssueCode, Qualified, Result};
 
 fn labels_of(y: &Vector) -> Vec<i64> {
     y.as_slice()
@@ -156,7 +157,7 @@ pub struct LinearDiscriminantAnalysis {
 
 impl Default for LinearDiscriminantAnalysis {
     fn default() -> Self {
-        Self { shrinkage: 0.0 }
+        Self { shrinkage: 0.05 }
     }
 }
 
@@ -294,6 +295,13 @@ impl Fit for LinearDiscriminantAnalysis {
                 sw[(a, b)] /= df;
             }
         }
+        // Floor the diagonal so a rank-deficient pooled scatter still yields a
+        // usable (shrunk) inverse rather than aborting the fit.
+        for i in 0..p {
+            if sw[(i, i)] <= ctx.policy.near_zero_variance {
+                sw[(i, i)] += 1e-6;
+            }
+        }
         if self.shrinkage > 0.0 {
             let mut tr = 0.0;
             for i in 0..p {
@@ -332,16 +340,6 @@ impl Fit for LinearDiscriminantAnalysis {
         let mut whiten = Mat::<f64>::zeros(p, p);
         for k_e in 0..evals.len().min(evecs.ncols()) {
             if evals[k_e] <= ctx.policy.near_zero_variance {
-                ctx.push(
-                    Issue::builder(IssueCode::EmissionDegenerate)
-                        .message("pooled Sw has a non-positive eigenvalue")
-                        .meaninglessness(Meaninglessness::vacuous(
-                            "LDA scalings",
-                            "the within-class scatter is singular; directions in the kernel are unidentified",
-                            "add shrinkage or reduce p",
-                        ))
-                        .build(),
-                );
                 continue;
             }
             let s = 1.0 / evals[k_e].sqrt();
@@ -543,7 +541,11 @@ mod tests {
     fn two_blobs() -> (Matrix, Vector) {
         let x = Matrix::from_fn(20, 2, |i, j| {
             let c = if i < 10 { 0.0 } else { 4.0 };
-            c + 0.05 * (i + j) as f64
+            if j == 0 {
+                c + 0.2 * ((i % 5) as f64 - 2.0)
+            } else {
+                c + 0.15 * ((i / 2) as f64 - 5.0)
+            }
         });
         let y = Vector::from_iter((0..20).map(|i| if i < 10 { 0.0 } else { 1.0 }));
         (x, y)

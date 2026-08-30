@@ -651,6 +651,7 @@ impl FittedRbm {
         h
     }
 
+    #[allow(dead_code)]
     fn p_v(&self, h: &Vector) -> Vector {
         let mut v = Vector::zeros(self.vis_bias.len());
         for j in 0..v.len() {
@@ -824,7 +825,7 @@ mod tests {
             let e = pred[i] - y[i];
             sse += e * e;
         }
-        assert!(sse / y.len() as f64 < 0.05, "mse={}", sse / y.len() as f64);
+        assert!(sse / (y.len() as f64) < 0.05, "mse={}", sse / (y.len() as f64));
     }
 
     #[test]

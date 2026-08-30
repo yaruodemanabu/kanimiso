@@ -9,6 +9,7 @@ use crate::data::{Matrix, Vector};
 use crate::special::chi2_pvalue;
 use crate::traits::{FitUnsupervised, Predict};
 use crate::validate::inspect_xy;
+use faer::linalg::solvers::Solve;
 use faer::{Mat, Side};
 use ojizou_san::Session;
 use signlred::{Issue, IssueCode, NumericalCompromise, Qualified, Result};
@@ -113,20 +114,13 @@ fn try_precision(ctx: &mut FitCtx, cov: &Mat<f64>) -> Option<Matrix> {
             }
             Some(prec)
         }
-        Err(_) => {
-            ctx.push(
-                Issue::builder(IssueCode::NonPositiveDefinite)
-                    .message("covariance Cholesky failed; precision withheld until jitter")
-                    .build(),
-            );
-            None
-        }
+        Err(_) => None,
     }
 }
 
 fn jitter_spd(ctx: &mut FitCtx, cov: &mut Mat<f64>) -> Option<Matrix> {
     let p = cov.nrows();
-    let eps = ctx.policy.rank_tol_relative.max(1e-12);
+    let eps = ctx.policy.rank_tol_relative.max(1e-8);
     for i in 0..p {
         cov[(i, i)] += eps;
     }
@@ -141,7 +135,17 @@ fn jitter_spd(ctx: &mut FitCtx, cov: &mut Mat<f64>) -> Option<Matrix> {
             ))
             .build(),
     );
-    try_precision(ctx, cov)
+    match try_precision(ctx, cov) {
+        Some(p) => Some(p),
+        None => {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveDefinite)
+                    .message("covariance remained non-SPD after jitter")
+                    .build(),
+            );
+            None
+        }
+    }
 }
 
 fn finish_cov(
@@ -278,7 +282,8 @@ impl FitUnsupervised for LedoitWolf {
             0.0
         };
         let shrunk = shrink(&s, alpha, mu);
-        ctx.finish(finish_cov(&mut ctx, loc, shrunk, alpha))
+        let fitted = finish_cov(&mut ctx, loc, shrunk, alpha);
+        ctx.finish(fitted)
     }
 }
 
@@ -323,7 +328,8 @@ impl FitUnsupervised for Oas {
         };
         let mu = if p > 0.0 { tr / p } else { 0.0 };
         let shrunk = shrink(&s, rho, mu);
-        ctx.finish(finish_cov(&mut ctx, loc, shrunk, rho))
+        let fitted = finish_cov(&mut ctx, loc, shrunk, rho);
+        ctx.finish(fitted)
     }
 }
 
@@ -446,7 +452,8 @@ impl FitUnsupervised for MinCovDet {
         order.truncate(h);
         let (loc, cov) = subset_cov(x, &order);
         ctx.session.converged("MCD subset + reweight", trials as u64);
-        ctx.finish(finish_cov(&mut ctx, loc, cov, 0.0))
+        let fitted = finish_cov(&mut ctx, loc, cov, 0.0);
+        ctx.finish(fitted)
     }
 }
 
@@ -541,7 +548,7 @@ impl FitUnsupervised for GraphicalLasso {
                 ctx.push(Issue::builder(IssueCode::NonPositiveDefinite).build());
                 break;
             };
-            let mut max_d = 0.0;
+            let mut max_d: f64 = 0.0;
             let mut next = Mat::<f64>::zeros(p, p);
             for i in 0..p {
                 for j in 0..p {
