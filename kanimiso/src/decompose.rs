@@ -1982,10 +1982,9 @@ fn ista_codes(x: &Matrix, dict: &Matrix, alpha: f64, iters: usize) -> Matrix {
     }
     let eta = 1.0 / lip.max(1.0);
     for _ in 0..iters {
-        let recon = matmul_nt(&codes, dict); // n × p
-                                             // grad = (recon − X) Dᵀ   → n × k
+        let recon = matmul(&codes, dict); // n × k · k × p → n × p
         let resid = Matrix::from_fn(n, p, |i, j| recon.get(i, j) - x.get(i, j));
-        let grad = matmul_nt(&resid, dict);
+        let grad = matmul_nt(&resid, dict); // (recon − X) Dᵀ → n × k
         codes = Matrix::from_fn(n, k, |i, c| {
             soft_threshold(codes.get(i, c) - eta * grad.get(i, c), alpha)
         });

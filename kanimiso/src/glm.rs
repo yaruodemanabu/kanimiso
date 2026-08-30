@@ -2035,7 +2035,15 @@ impl Fit for Hurdle {
             match lr.fit(x, &z, &session.child("hurdle-logit")) {
                 Ok(q) => (q.value.intercept, q.value.coef),
                 Err(e) => {
-                    ctx.push(e.primary);
+                    if !matches!(
+                        e.primary.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::RankZero
+                            | IssueCode::R2IsOne
+                    ) {
+                        ctx.push(e.primary);
+                    }
                     (0.0, Vector::zeros(x.ncols()))
                 }
             }
