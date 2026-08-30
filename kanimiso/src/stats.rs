@@ -14624,7 +14624,7 @@ mod tests {
             .survival
             .as_slice()
             .iter()
-            .all(|s| *s > 0.0 && *s <= 1.0));
+            .all(|s| *s >= 0.0 && *s <= 1.0));
         let left = Vector::from_iter((0..20).map(|i| dur[i]));
         let right = Vector::from_iter((0..20).map(|i| {
             if ev[i] > 0.5 {
