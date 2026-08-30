@@ -603,8 +603,14 @@ impl Fit for SequentialFeatureSelector {
                 let mut cols = chosen.clone();
                 cols.push(j);
                 let sub = take_columns(x, &cols);
-                let mse = ols_mse(&sub, y, &ctx.policy);
-                if mse < best_mse {
+                let mse = ols_mse(&sub.with_intercept(), y, &ctx.policy);
+                if !mse.is_finite() {
+                    continue;
+                }
+                // Collinear copies of the same signal (x and 0.01 x) share MSE;
+                // keep the earlier column rather than letting 1e-16 noise flip the pick.
+                let tol = 1e-12 * (1.0 + best_mse.abs());
+                if mse + tol < best_mse {
                     best_mse = mse;
                     best_j = t;
                 }

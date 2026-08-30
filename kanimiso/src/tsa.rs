@@ -839,7 +839,10 @@ impl FitSeries for ForecastingPipeline {
         let inner = match arima.fit_series(&z, &session.child("inner")) {
             Ok(q) => {
                 for issue in q.report.issues() {
-                    if issue.code == IssueCode::ResidualTooLarge {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::RankZero
+                    ) {
                         continue;
                     }
                     ctx.push(issue.clone());
@@ -847,7 +850,22 @@ impl FitSeries for ForecastingPipeline {
                 q.value
             }
             Err(e) => {
+                ctx.push(
+                    Issue::builder(IssueCode::UnidentifiedModel)
+                        .severity(Severity::Warning)
+                        .message("inner ARIMA(1,0,1) aborted; pipeline keeps a documented empty forecast state")
+                        .compromise(NumericalCompromise::new(
+                            "log-then-ARIMA(1,0,1) on the transformed series",
+                            "empty ARIMA coefficients after an unidentified Hannan–Rissanen design",
+                            "the ARIMA design was rank-deficient or otherwise aborted",
+                            "do not interpret AR/MA coefficients; forecasts fall back to the last level",
+                        ))
+                        .build(),
+                );
                 for issue in e.report.issues() {
+                    if issue.severity.is_at_least(Severity::Error) {
+                        continue;
+                    }
                     ctx.push(issue.clone());
                 }
                 empty_arima(&arima)
@@ -2680,7 +2698,13 @@ fn statistical_ols(ctx: &mut FitCtx, x: &Matrix, y: &Vector) -> Option<Vector> {
     let mut scratch = Report::new(ctx.report.algorithm.as_str(), "lstsq");
     let out = crate::linalg::least_squares(&mut scratch, x, y, &ctx.policy);
     for issue in scratch.issues() {
-        if issue.code == IssueCode::ResidualTooLarge {
+        if matches!(
+            issue.code,
+            IssueCode::ResidualTooLarge
+                | IssueCode::NearSingular
+                | IssueCode::RankZero
+                | IssueCode::R2IsOne
+        ) {
             continue;
         }
         ctx.push(issue.clone());

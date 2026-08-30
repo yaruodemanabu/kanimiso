@@ -387,18 +387,34 @@ impl FirstDifferenceOls {
         let p = x.ncols();
         let xmat = Matrix::from_fn(m, p, |i, j| xd[i][j]);
         let yvec = Vector::from_iter(yd);
-        if yvec.std() <= ctx.policy.near_zero_variance {
+        let mut x_energy: f64 = 0.0;
+        for j in 0..p {
+            for i in 0..m {
+                x_energy = x_energy.max(xmat.get(i, j).abs());
+            }
+        }
+        // Constant nonzero ΔX (a linear time trend) still identifies β = Δy/ΔX.
+        // The empty estimand is the zero map: X is time-invariant, so ΔX ≡ 0.
+        if x_energy <= ctx.policy.near_zero_variance {
             ctx.push(
                 Issue::builder(IssueCode::MeaninglessFit)
-                    .message("Δy is constant; first-difference OLS is empty")
+                    .message("ΔX is the zero map; first-difference slopes are unidentified")
                     .meaninglessness(Meaninglessness::vacuous(
                         "first-difference slopes",
-                        "every within-group change in y is the same (or zero)",
-                        "the outcome does not move inside groups",
+                        "every within-group change in X is ~0 (time-invariant regressors)",
+                        "need time-varying regressors, or a longer panel",
                     ))
                     .build(),
             );
             return ctx.finish(empty_panel(p));
+        }
+        if yvec.std() <= ctx.policy.near_zero_variance {
+            ctx.push(
+                Issue::builder(IssueCode::NearZeroVariance)
+                    .severity(Severity::Warning)
+                    .message("Δy is constant; first-difference OLS is a ratio of constants")
+                    .build(),
+            );
         }
         let mut scratch = signlred::Report::new("fdols", "ols");
         let Some(coef) = least_squares(&mut scratch, &xmat, &yvec, &ctx.policy) else {
