@@ -2433,7 +2433,8 @@ mod tests {
             .value;
         assert!(rmse.is_finite() && rmse >= 0.0);
         let sc2 = Matrix::from_fn(4, 2, |i, j| {
-            if (i < 2 && j == 0) || (i >= 2 && j == 1) {
+            let want = if y[i] > 0.5 { 1 } else { 0 };
+            if j == want {
                 0.9
             } else {
                 0.1
