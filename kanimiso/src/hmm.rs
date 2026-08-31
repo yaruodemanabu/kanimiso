@@ -10464,7 +10464,7 @@ impl FitUnsupervised for HypergeometricHmm {
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let t_len = x.nrows();
         let k = self.n_states.max(1);
-        let np = if self.n_pop.is_finite() && self.n_pop >= 2.0 {
+        let mut np = if self.n_pop.is_finite() && self.n_pop >= 2.0 {
             self.n_pop
         } else {
             20.0
@@ -10474,6 +10474,25 @@ impl FitUnsupervised for HypergeometricHmm {
         } else {
             np.min(10.0)
         };
+        let mut ymin = f64::INFINITY;
+        let mut ymax = 0.0_f64;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && y >= 0.0 {
+                ymin = ymin.min(y);
+                ymax = ymax.max(y);
+            }
+        }
+        if !ymin.is_finite() {
+            ymin = 0.0;
+        }
+        // Every observed y must be feasible under every K: ymax ≤ K ≤ N − n + ymin.
+        let need = ymax - ymin + nd;
+        if np < need {
+            np = need;
+        }
+        let k_lo = ymax.clamp(0.0, np);
+        let k_hi = (np - nd + ymin).clamp(k_lo, np);
         if t_len == 0 {
             return ctx.finish(FittedHypergeometricHmm {
                 labels: empty_labels(0),
@@ -10486,7 +10505,7 @@ impl FitUnsupervised for HypergeometricHmm {
             });
         }
         let mut k_succ = Vector::from_iter((0..k).map(|j| {
-            (nd * (0.25 + 0.5 * j as f64 / k.max(1) as f64)).clamp(1.0, np - 1.0)
+            (nd * (0.25 + 0.5 * j as f64 / k.max(1) as f64)).clamp(k_lo, k_hi)
         }));
         let mut start = init_start(k);
         let mut trans = init_trans(k);
@@ -10522,7 +10541,7 @@ impl FitUnsupervised for HypergeometricHmm {
                 }
                 if wsum > 1e-12 {
                     let mu = wy / wsum;
-                    k_succ[j] = (mu * np / nd.max(1e-8)).clamp(1.0, np - 1.0);
+                    k_succ[j] = (mu * np / nd.max(1e-8)).clamp(k_lo, k_hi);
                 }
             }
             let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
