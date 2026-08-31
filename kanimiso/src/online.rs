@@ -54539,6 +54539,405 @@ impl Predict for Ldf {
     }
 }
 
+/// Neighbourhood outlier factor on the natural-neighbour graph.
+///
+/// \(k\) is the smallest integer such that every reservoir point has
+/// in-degree \(\ge 1\). Score is \((k-\mathrm{in\text{-}degree})/k\).
+/// Distinct from [`Odin`] (fixed \(k=5\)).
+#[derive(Clone, Debug)]
+pub struct Nof {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for Nof {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl Nof {
+    /// Empty NOF detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn dist_row(&self, x: &Matrix, i: usize, row: &[f64]) -> f64 {
+        let p = self.ncols.min(x.ncols()).min(row.len());
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return f64::INFINITY;
+            }
+            let d = z - row[j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn dist_stored(&self, a: usize, b: usize) -> f64 {
+        if a >= self.rows.len() || b >= self.rows.len() {
+            return f64::INFINITY;
+        }
+        let p = self.ncols;
+        if self.rows[a].len() < p || self.rows[b].len() < p {
+            return f64::INFINITY;
+        }
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let d = self.rows[a][j] - self.rows[b][j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn knn_stored(&self, idx: usize, k: usize) -> Vec<usize> {
+        let mut ds: Vec<(f64, usize)> = (0..self.rows.len())
+            .filter(|&t| t != idx)
+            .map(|t| (self.dist_stored(idx, t), t))
+            .filter(|(d, _)| d.is_finite())
+            .collect();
+        ds.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        ds.into_iter().take(k).map(|(_, t)| t).collect()
+    }
+
+    fn natural_k(&self) -> usize {
+        let n = self.rows.len();
+        if n < 2 {
+            return 1;
+        }
+        for k in 1..n {
+            let mut indeg = vec![0usize; n];
+            for i in 0..n {
+                for t in self.knn_stored(i, k) {
+                    if t < n {
+                        indeg[t] += 1;
+                    }
+                }
+            }
+            if indeg.iter().all(|&d| d >= 1) {
+                return k;
+            }
+        }
+        n - 1
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 3 || self.ncols == 0 {
+            return 0.0;
+        }
+        let k = self.natural_k().max(1);
+        let mut indeg = 0.0_f64;
+        for t in 0..self.rows.len() {
+            let neigh = self.knn_stored(t, k);
+            let d = self.dist_row(x, i, &self.rows[t]);
+            if !d.is_finite() {
+                continue;
+            }
+            let farthest = neigh
+                .iter()
+                .map(|&u| self.dist_stored(t, u))
+                .fold(0.0_f64, f64::max);
+            if d <= farthest {
+                indeg += 1.0;
+            }
+        }
+        (k as f64 - indeg.min(k as f64)).max(0.0) / k as f64
+    }
+}
+
+impl PartialFit for Nof {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 3;
+        q.warmup = self.rows.len() < 3;
+        q.explanation = format!("NOF reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "natural-neighbour in-degree scores",
+                "NOF uses adaptive natural k; not ODIN fixed-k",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for Nof {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
+/// Fast angle-based outlier detection (kNN-restricted ABOD).
+///
+/// Variance of pairwise cosines is computed only among the query's \(k\)
+/// nearest reservoir points. Distinct from [`Abod`] (all pairs).
+#[derive(Clone, Debug)]
+pub struct FastAbod {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for FastAbod {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl FastAbod {
+    /// Empty FastABOD detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn dist_row(&self, x: &Matrix, i: usize, row: &[f64]) -> f64 {
+        let p = self.ncols.min(x.ncols()).min(row.len());
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return f64::INFINITY;
+            }
+            let d = z - row[j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        let p = self.ncols.min(x.ncols());
+        if p == 0 || self.rows.len() < 3 {
+            return 0.0;
+        }
+        let k = 5.min(self.rows.len().saturating_sub(1)).max(2);
+        let mut ds: Vec<(f64, usize)> = self
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(t, row)| (self.dist_row(x, i, row), t))
+            .filter(|(d, _)| d.is_finite() && *d > 1e-15)
+            .collect();
+        if ds.len() < 2 {
+            return 0.0;
+        }
+        ds.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let neigh: Vec<usize> = ds.into_iter().take(k).map(|(_, t)| t).collect();
+        let mut cosines: Vec<f64> = Vec::new();
+        for (ia, &a) in neigh.iter().enumerate() {
+            if a >= self.rows.len() || self.rows[a].len() < p {
+                continue;
+            }
+            for &b in neigh.iter().skip(ia + 1) {
+                if b >= self.rows.len() || self.rows[b].len() < p {
+                    continue;
+                }
+                let mut dot = 0.0_f64;
+                let mut na = 0.0_f64;
+                let mut nb = 0.0_f64;
+                let mut ok = true;
+                for j in 0..p {
+                    let z = x.get(i, j);
+                    if !z.is_finite() {
+                        ok = false;
+                        break;
+                    }
+                    let ua = self.rows[a][j] - z;
+                    let ub = self.rows[b][j] - z;
+                    dot += ua * ub;
+                    na += ua * ua;
+                    nb += ub * ub;
+                }
+                if !ok {
+                    continue;
+                }
+                let den = na.sqrt() * nb.sqrt();
+                if den < 1e-18 {
+                    continue;
+                }
+                cosines.push((dot / den).clamp(-1.0, 1.0));
+            }
+        }
+        if cosines.len() < 2 {
+            return 0.0;
+        }
+        let nf = cosines.len() as f64;
+        let mut mean = 0.0_f64;
+        for &c in &cosines {
+            mean += c;
+        }
+        mean /= nf;
+        let mut var = 0.0_f64;
+        for &c in &cosines {
+            let d = c - mean;
+            var += d * d;
+        }
+        var / nf
+    }
+}
+
+impl PartialFit for FastAbod {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 3;
+        q.warmup = self.rows.len() < 3;
+        q.explanation = format!("FastABOD reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "kNN-restricted angle variance scores",
+                "FastABOD is ABOD on kNN pairs; not all-pairs Abod",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for FastAbod {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55505,6 +55904,12 @@ mod tests {
         Ldf::new()
             .partial_fit(&x, None, &session)
             .expect("ldf");
+        Nof::new()
+            .partial_fit(&x, None, &session)
+            .expect("nof");
+        FastAbod::new()
+            .partial_fit(&x, None, &session)
+            .expect("fab");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

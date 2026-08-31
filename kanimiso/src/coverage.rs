@@ -7639,6 +7639,41 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.UnitNakagamiHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaNakagamiHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.ExponentiatedNakagamiHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.UnitRiceHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.DiscreteNakagamiHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("online.Nof", "river.anomaly.HalfSpaceTrees", "online"),
+    a("online.FastAbod", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.inner_product_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_inner_product",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.intersection_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_intersection",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8582,6 +8617,17 @@ mod tests {
             "tslearn.cdist_kumar_johnson",
             "tslearn.harmonic_mean_distance",
             "tslearn.cdist_harmonic_mean",
+            "hmm.UnitNakagamiHmm",
+            "hmm.BetaNakagamiHmm",
+            "hmm.ExponentiatedNakagamiHmm",
+            "hmm.UnitRiceHmm",
+            "hmm.DiscreteNakagamiHmm",
+            "online.Nof",
+            "online.FastAbod",
+            "tslearn.inner_product_distance",
+            "tslearn.cdist_inner_product",
+            "tslearn.intersection_distance",
+            "tslearn.cdist_intersection",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
