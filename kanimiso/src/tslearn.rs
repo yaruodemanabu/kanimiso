@@ -3804,6 +3804,155 @@ pub fn cdist_intersection(a: &Matrix, b: &Matrix, session: &Session) -> Result<Q
     ctx.finish(out)
 }
 
+fn min_symmetric_chi_squared_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let p = (a[i].abs() / sa).max(1e-18);
+        let q = (b[i].abs() / sb).max(1e-18);
+        let d = p - q;
+        s += d * d / p.min(q);
+    }
+    s.max(0.0)
+}
+
+fn l1_squared_euclidean_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let p = a[i].abs() / sa;
+        let q = b[i].abs() / sb;
+        let d = p - q;
+        s += d * d;
+    }
+    s.max(0.0)
+}
+
+/// Min-symmetric χ² \(\sum(p-q)^2/\min(p,q)\) after \(\ell_1\).
+///
+/// Distinct from [`max_symmetric_chi_squared_distance`] (divide by \(\max\))
+/// and [`additive_symmetric_distance`] (divide by \(p+q\)). Identical series
+/// score 0.
+pub fn min_symmetric_chi_squared_distance(
+    a: &Vector,
+    b: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) =
+        signlred::scan_finite(a.as_slice()).to_issue("min_symmetric_chi_squared_distance.a")
+    {
+        ctx.push(issue);
+    }
+    if let Some(issue) =
+        signlred::scan_finite(b.as_slice()).to_issue("min_symmetric_chi_squared_distance.b")
+    {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("min_symmetric_chi_squared_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(min_symmetric_chi_squared_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise min-symmetric χ² distance.
+pub fn cdist_min_symmetric_chi_squared(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        min_symmetric_chi_squared_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+/// Squared Euclidean distance after \(\ell_1\) normalisation.
+///
+/// Distinct from [`squared_euclidean_distance`] (raw coordinates).
+/// Identical series score 0.
+pub fn l1_squared_euclidean_distance(
+    a: &Vector,
+    b: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) =
+        signlred::scan_finite(a.as_slice()).to_issue("l1_squared_euclidean_distance.a")
+    {
+        ctx.push(issue);
+    }
+    if let Some(issue) =
+        signlred::scan_finite(b.as_slice()).to_issue("l1_squared_euclidean_distance.b")
+    {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("l1_squared_euclidean_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(l1_squared_euclidean_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise \(\ell_1\)-normalised squared Euclidean distance.
+pub fn cdist_l1_squared_euclidean(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        l1_squared_euclidean_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -22486,6 +22635,10 @@ mod tests {
         assert!(msc.abs() < 1e-12, "max_symmetric_chi_squared_distance={msc}");
         let isc = intersection_distance(&a, &a, &Session::new("ts", "isc")).unwrap().value;
         assert!(isc.abs() < 1e-12, "intersection_distance={isc}");
+        let mns = min_symmetric_chi_squared_distance(&a, &a, &Session::new("ts", "mns")).unwrap().value;
+        assert!(mns.abs() < 1e-12, "min_symmetric_chi_squared_distance={mns}");
+        let pse = l1_squared_euclidean_distance(&a, &a, &Session::new("ts", "pse")).unwrap().value;
+        assert!(pse.abs() < 1e-12, "l1_squared_euclidean_distance={pse}");
     }
 
     #[test]
@@ -23708,6 +23861,16 @@ mod tests {
             .value;
         assert_eq!(cis.shape(), (8, 8));
         assert!(cis.get(0, 0).abs() < 1e-12);
+        let cnm = cdist_min_symmetric_chi_squared(&x, &x, &Session::new("ts", "cnm"))
+            .unwrap()
+            .value;
+        assert_eq!(cnm.shape(), (8, 8));
+        assert!(cnm.get(0, 0).abs() < 1e-12);
+        let cpe = cdist_l1_squared_euclidean(&x, &x, &Session::new("ts", "cpe"))
+            .unwrap()
+            .value;
+        assert_eq!(cpe.shape(), (8, 8));
+        assert!(cpe.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

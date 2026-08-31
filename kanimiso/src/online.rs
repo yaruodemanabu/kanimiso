@@ -54938,6 +54938,369 @@ impl Predict for FastAbod {
     }
 }
 
+/// Rank-1 PCA reconstruction anomaly on a reservoir.
+///
+/// When width \(\ge 2\), the score is \(\|(I-vv^\top)(x-\mu)\|^2\) after a
+/// power-method first axis. In one dimension it is \((x-\mu)^2\). Distinct
+/// from [`OnlinePca`] (Oja transform) and [`OnlineMahalanobis`].
+#[derive(Clone, Debug)]
+pub struct PcaAnomaly {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for PcaAnomaly {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl PcaAnomaly {
+    /// Empty PCA anomaly detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn mean(&self) -> Vec<f64> {
+        let p = self.ncols;
+        let mut m = vec![0.0_f64; p];
+        let mut n = 0.0_f64;
+        for row in &self.rows {
+            if row.len() < p {
+                continue;
+            }
+            n += 1.0;
+            for j in 0..p {
+                m[j] += row[j];
+            }
+        }
+        if n > 0.0 {
+            for mj in &mut m {
+                *mj /= n;
+            }
+        }
+        m
+    }
+
+    fn first_axis(&self, mean: &[f64]) -> Vec<f64> {
+        let p = self.ncols;
+        let mut v = vec![0.0_f64; p];
+        if p == 0 {
+            return v;
+        }
+        v[0] = 1.0;
+        for _ in 0..12 {
+            let mut w = vec![0.0_f64; p];
+            for row in &self.rows {
+                if row.len() < p {
+                    continue;
+                }
+                let mut proj = 0.0_f64;
+                for j in 0..p {
+                    proj += (row[j] - mean[j]) * v[j];
+                }
+                for j in 0..p {
+                    w[j] += proj * (row[j] - mean[j]);
+                }
+            }
+            let mut nrm = 0.0_f64;
+            for wj in &w {
+                nrm += wj * wj;
+            }
+            nrm = nrm.sqrt();
+            if nrm < 1e-18 {
+                break;
+            }
+            for j in 0..p {
+                v[j] = w[j] / nrm;
+            }
+        }
+        v
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 2 || self.ncols == 0 {
+            return 0.0;
+        }
+        let p = self.ncols.min(x.ncols());
+        let mean = self.mean();
+        if p == 1 {
+            let z = x.get(i, 0);
+            if !z.is_finite() {
+                return 0.0;
+            }
+            let d = z - mean[0];
+            return d * d;
+        }
+        let v = self.first_axis(&mean);
+        let mut centered = vec![0.0_f64; p];
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return 0.0;
+            }
+            centered[j] = z - mean[j];
+        }
+        let mut proj = 0.0_f64;
+        for j in 0..p {
+            proj += centered[j] * v[j];
+        }
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let r = centered[j] - proj * v[j];
+            s += r * r;
+        }
+        s
+    }
+}
+
+impl PartialFit for PcaAnomaly {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 2;
+        q.warmup = self.rows.len() < 2;
+        q.explanation = format!("PCA anomaly reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "rank-1 PCA residual scores",
+                "PcaAnomaly is reconstruction error; not OnlinePca/Mahalanobis",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for PcaAnomaly {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
+/// Inverse-distance weighted \(k\)-NN anomaly (harmonic mean of \(k\)-distances).
+///
+/// Distinct from [`KnnAnomaly`] (arithmetic mean) and [`Ldof`] (pairwise
+/// neighbour scale).
+#[derive(Clone, Debug)]
+pub struct Knnw {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for Knnw {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl Knnw {
+    /// Empty weighted \(k\)-NN detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn dist_row(&self, x: &Matrix, i: usize, row: &[f64]) -> f64 {
+        let p = self.ncols.min(x.ncols()).min(row.len());
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return f64::INFINITY;
+            }
+            let d = z - row[j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 3 || self.ncols == 0 {
+            return 0.0;
+        }
+        let k = 5.min(self.rows.len().saturating_sub(1)).max(1);
+        let mut ds: Vec<f64> = self
+            .rows
+            .iter()
+            .map(|row| self.dist_row(x, i, row))
+            .filter(|d| d.is_finite() && *d > 1e-15)
+            .collect();
+        if ds.len() < k {
+            return 0.0;
+        }
+        ds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mut inv = 0.0_f64;
+        for d in ds.iter().take(k) {
+            inv += 1.0 / d;
+        }
+        if inv < 1e-18 {
+            0.0
+        } else {
+            k as f64 / inv
+        }
+    }
+}
+
+impl PartialFit for Knnw {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 3;
+        q.warmup = self.rows.len() < 3;
+        q.explanation = format!("KNNW reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "harmonic-mean k-NN distances",
+                "KNNW is the harmonic mean of k distances; not KnnAnomaly/LDOF",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for Knnw {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55910,6 +56273,12 @@ mod tests {
         FastAbod::new()
             .partial_fit(&x, None, &session)
             .expect("fab");
+        PcaAnomaly::new()
+            .partial_fit(&x, None, &session)
+            .expect("pcn");
+        Knnw::new()
+            .partial_fit(&x, None, &session)
+            .expect("knw");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

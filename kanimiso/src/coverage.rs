@@ -7674,6 +7674,45 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.UnitMaxwellHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaMaxwellHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.ExponentiatedMaxwellHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.KumaraswamyMaxwellHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.DiscreteMaxwellHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "online.PcaAnomaly",
+        "river.anomaly.GaussianScorer",
+        "online",
+    ),
+    a("online.Knnw", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.min_symmetric_chi_squared_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_min_symmetric_chi_squared",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.l1_squared_euclidean_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_l1_squared_euclidean",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8628,6 +8667,17 @@ mod tests {
             "tslearn.cdist_max_symmetric_chi_squared",
             "tslearn.intersection_distance",
             "tslearn.cdist_intersection",
+            "hmm.UnitMaxwellHmm",
+            "hmm.BetaMaxwellHmm",
+            "hmm.ExponentiatedMaxwellHmm",
+            "hmm.KumaraswamyMaxwellHmm",
+            "hmm.DiscreteMaxwellHmm",
+            "online.PcaAnomaly",
+            "online.Knnw",
+            "tslearn.min_symmetric_chi_squared_distance",
+            "tslearn.cdist_min_symmetric_chi_squared",
+            "tslearn.l1_squared_euclidean_distance",
+            "tslearn.cdist_l1_squared_euclidean",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
