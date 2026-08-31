@@ -841,6 +841,78 @@ pub fn cdist_lb_kim(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualifi
     ctx.finish(out)
 }
 
+fn mpdist_raw(a: &[f64], b: &[f64], window: usize) -> f64 {
+    let m = window;
+    if m < 2 || m > a.len() || m > b.len() {
+        return 0.0;
+    }
+    let na = a.len() + 1 - m;
+    let nb = b.len() + 1 - m;
+    let mut acc = 0.0_f64;
+    let mut n = 0usize;
+    for i in 0..na {
+        let mut best = f64::INFINITY;
+        for j in 0..nb {
+            let mut s = 0.0_f64;
+            for t in 0..m {
+                let e = a[i + t] - b[j + t];
+                s += e * e;
+            }
+            let d = s.max(0.0).sqrt();
+            if d < best {
+                best = d;
+            }
+        }
+        if best.is_finite() {
+            acc += best;
+            n += 1;
+        }
+    }
+    for j in 0..nb {
+        let mut best = f64::INFINITY;
+        for i in 0..na {
+            let mut s = 0.0_f64;
+            for t in 0..m {
+                let e = b[j + t] - a[i + t];
+                s += e * e;
+            }
+            let d = s.max(0.0).sqrt();
+            if d < best {
+                best = d;
+            }
+        }
+        if best.is_finite() {
+            acc += best;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        0.0
+    } else {
+        acc / n as f64
+    }
+}
+
+/// Pairwise matrix-profile distance (tslearn-style `cdist` with [`mpdist`]).
+///
+/// Window length is not identification `p`. Distinct from [`cdist_dtw`].
+pub fn cdist_mpdist(
+    a: &Matrix,
+    b: &Matrix,
+    window: usize,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        mpdist_raw(ai.as_slice(), bj.as_slice(), window)
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -20425,6 +20497,11 @@ mod tests {
             .value;
         assert_eq!(ckm.shape(), (8, 8));
         assert!(ckm.get(0, 0).abs() < 1e-12);
+        let cmd = cdist_mpdist(&x, &x, 3, &Session::new("ts", "cmd"))
+            .unwrap()
+            .value;
+        assert_eq!(cmd.shape(), (8, 8));
+        assert!(cmd.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

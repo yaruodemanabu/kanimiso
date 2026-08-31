@@ -46594,6 +46594,197 @@ impl Predict for SoftImpute {
     }
 }
 
+/// Weighted regularized MF (Hu–Koren–Volinsky implicit ALS).
+///
+/// Confidence \(c=1+\alpha r\) multiplies a binary preference. Distinct from
+/// [`AlsReco`] (explicit ridge on the raw rating). Rank is not identification
+/// `p`.
+#[derive(Clone, Debug)]
+pub struct Wrmf {
+    /// Latent rank.
+    pub n_factors: usize,
+    /// Confidence slope.
+    pub alpha: f64,
+    /// Ridge on the rank-1 Gram.
+    pub l2: f64,
+    pu: Vec<Vec<f64>>,
+    qi: Vec<Vec<f64>>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for Wrmf {
+    fn default() -> Self {
+        Self {
+            n_factors: 4,
+            alpha: 20.0,
+            l2: 0.1,
+            pu: Vec::new(),
+            qi: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl Wrmf {
+    /// WRMF with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn grow(&mut self, u: usize, i: usize) {
+        let k = self.n_factors.max(1);
+        while self.pu.len() <= u {
+            self.pu.push(vec![0.01; k]);
+        }
+        while self.qi.len() <= i {
+            self.qi.push(vec![0.01; k]);
+        }
+    }
+
+    fn pred(&self, u: usize, i: usize) -> f64 {
+        let mut s = 0.0_f64;
+        if u < self.pu.len() && i < self.qi.len() {
+            for f in 0..self.n_factors.min(self.pu[u].len()).min(self.qi[i].len()) {
+                s += self.pu[u][f] * self.qi[i][f];
+            }
+        }
+        s
+    }
+}
+
+impl PartialFit for Wrmf {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("Wrmf needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let l2 = if self.l2.is_finite() && self.l2 >= 0.0 {
+            self.l2
+        } else {
+            0.1
+        };
+        let alpha = if self.alpha.is_finite() && self.alpha >= 0.0 {
+            self.alpha
+        } else {
+            20.0
+        };
+        let mut sse = 0.0_f64;
+        let mut dsum = 0.0_f64;
+        for r in 0..x.nrows().min(y.len()) {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.grow(u, i);
+            let rating = if y[r].is_finite() { y[r].max(0.0) } else { 0.0 };
+            let pref = if rating > 0.0 { 1.0 } else { 0.0 };
+            let conf = 1.0 + alpha * rating;
+            let pred = self.pred(u, i);
+            let e = pref - pred;
+            sse += conf * e * e;
+            let mut qn = 0.0_f64;
+            for f in 0..self.n_factors {
+                qn += self.qi[i][f] * self.qi[i][f];
+            }
+            let den_u = (conf * qn + l2).max(1e-8);
+            for f in 0..self.n_factors {
+                let old = self.pu[u][f];
+                self.pu[u][f] = conf * pref * self.qi[i][f] / den_u;
+                dsum += (self.pu[u][f] - old).abs();
+            }
+            let mut pn = 0.0_f64;
+            for f in 0..self.n_factors {
+                pn += self.pu[u][f] * self.pu[u][f];
+            }
+            let den_i = (conf * pn + l2).max(1e-8);
+            for f in 0..self.n_factors {
+                let old = self.qi[i][f];
+                self.qi[i][f] = conf * pref * self.pu[u][f] / den_i;
+                dsum += (self.qi[i][f] - old).abs();
+            }
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        let warmup = self.n_seen < 8;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.loss_before = Some(sse);
+        q.loss_after = Some(sse);
+        q.information_gain = Some(dsum.max(x.nrows() as f64));
+        q.still_identified = !warmup;
+        q.warmup = warmup;
+        q.explanation = format!(
+            "Wrmf implicit ALS on {} ratings; ||ΔP,Q||₁={:.6e}",
+            x.nrows(),
+            dsum
+        );
+        if warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("Wrmf is still warming up")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("WRMF on {} ratings", x.nrows()),
+                "confidence-weighted implicit ALS; distinct from explicit AlsReco",
+                "previous factors",
+                "updated factors",
+            ),
+        )
+    }
+}
+
+impl Predict for Wrmf {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("Wrmf predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.pred(u, i)
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47431,6 +47622,9 @@ mod tests {
         SoftImpute::new()
             .partial_fit(&xui, Some(&y), &session)
             .expect("simp");
+        Wrmf::new(2)
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("wrm");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
