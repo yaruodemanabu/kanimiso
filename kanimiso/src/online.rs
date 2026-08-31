@@ -48331,6 +48331,423 @@ impl Predict for Climf {
     }
 }
 
+/// Online sequential extreme learning machine (Liang et al. OS-ELM).
+///
+/// Random hidden layer, recursive least squares on the output. Hidden width
+/// is not identification `p`. Distinct from [`MiniBatchMlp`] (SGD) and
+/// [`LinearRegression`] (no hidden map).
+#[derive(Clone, Debug)]
+pub struct OsElm {
+    /// Hidden units. Not identification `p`.
+    pub n_hidden: usize,
+    /// Initial inverse-Gram scale.
+    pub p0: f64,
+    w: Vec<Vec<f64>>,
+    bias: Vec<f64>,
+    beta: Vector,
+    p_mat: Option<Mat<f64>>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OsElm {
+    fn default() -> Self {
+        Self {
+            n_hidden: 4,
+            p0: 100.0,
+            w: Vec::new(),
+            bias: Vec::new(),
+            beta: Vector::zeros(0),
+            p_mat: None,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OsElm {
+    /// OS-ELM with `n_hidden` tanh units.
+    pub fn new(n_hidden: usize) -> Self {
+        Self {
+            n_hidden: n_hidden.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn hidden(&self, x: &Matrix, i: usize) -> Vector {
+        Vector::from_iter((0..self.n_hidden.max(1)).map(|h| {
+            let mut s = self.bias.get(h).copied().unwrap_or(0.0);
+            if h < self.w.len() {
+                for j in 0..x.ncols().min(self.w[h].len()) {
+                    s += self.w[h][j] * x.get(i, j);
+                }
+            }
+            s.tanh()
+        }))
+    }
+
+    fn init(&mut self, p: usize) {
+        let h = self.n_hidden.max(1);
+        let mut rng = Rng::new(0x0e17);
+        self.w = (0..h)
+            .map(|_| (0..p).map(|_| 0.5 * rng.standard_normal()).collect())
+            .collect();
+        self.bias = (0..h).map(|_| 0.25 * rng.standard_normal()).collect();
+        self.beta = Vector::zeros(h);
+        let p0 = if self.p0.is_finite() && self.p0 > 0.0 {
+            self.p0
+        } else {
+            100.0
+        };
+        self.p_mat = Some(Mat::<f64>::from_fn(h, h, |r, c| {
+            if r == c {
+                p0
+            } else {
+                0.0
+            }
+        }));
+        self.initialized = true;
+    }
+}
+
+impl PartialFit for OsElm {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() == 0 || x.nrows() == 0 {
+            if !self.initialized {
+                ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            }
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "empty"),
+            );
+        }
+        if !self.initialized {
+            self.init(x.ncols());
+        } else if self.w.as_slice().first().map(|r| r.len()) != Some(x.ncols()) {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let mut dsum = 0.0_f64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let z = self.hidden(x, i);
+            let p = match self.p_mat.as_mut() {
+                Some(p) => p,
+                None => break,
+            };
+            let mut pz = Vector::zeros(z.len());
+            for r in 0..z.len() {
+                let mut s = 0.0;
+                for c in 0..z.len() {
+                    s += p[(r, c)] * z[c];
+                }
+                pz[r] = s;
+            }
+            let denom = 1.0 + z.dot(&pz);
+            if !denom.is_finite() || denom.abs() < 1e-18 {
+                ctx.push(
+                    Issue::builder(IssueCode::NearSingular)
+                        .severity(Severity::Warning)
+                        .message("OsElm gain denominator vanished")
+                        .build(),
+                );
+                continue;
+            }
+            let pred = z.dot(&self.beta);
+            let err = y[i] - pred;
+            for r in 0..z.len() {
+                let g = pz[r] / denom;
+                let before = self.beta[r];
+                self.beta[r] += g * err;
+                dsum += (self.beta[r] - before).abs();
+                for c in 0..z.len() {
+                    p[(r, c)] -= g * pz[c];
+                }
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(dsum);
+        q.still_identified = self.n_seen >= self.n_hidden.max(1) as u64;
+        q.warmup = self.n_seen < self.n_hidden.max(1) as u64;
+        q.explanation = format!(
+            "OsElm hidden={} ||Δβ||₁={dsum:.4e}",
+            self.n_hidden
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "OS-ELM recursive output step",
+                "fixed random tanh hidden layer; RLS on β, not backprop",
+                "pre-batch β",
+                format!("dsum={dsum:.4e} n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+impl Predict for OsElm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let z = self.hidden(x, i);
+            z.dot(&self.beta)
+        })))
+    }
+}
+
+/// Streaming peaks-over-threshold anomaly detector (Siffer et al. SPOT).
+///
+/// GPD tail on excesses above an init quantile. Distinct from
+/// [`QuantileFilter`] (order statistic only) and [`Loda`] (projections).
+/// Init length is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SpotAnomaly {
+    /// Tail probability \(q\in(0,1)\).
+    pub q: f64,
+    /// Warm-up length. Not identification `p`.
+    pub n_init: usize,
+    init_buf: Vec<f64>,
+    t0: f64,
+    excesses: Vec<f64>,
+    n_seen: u64,
+    n_alarms: u64,
+    updates: u64,
+    warmed: bool,
+}
+
+impl Default for SpotAnomaly {
+    fn default() -> Self {
+        Self {
+            q: 1e-3,
+            n_init: 8,
+            init_buf: Vec::new(),
+            t0: f64::NAN,
+            excesses: Vec::new(),
+            n_seen: 0,
+            n_alarms: 0,
+            updates: 0,
+            warmed: false,
+        }
+    }
+}
+
+impl SpotAnomaly {
+    /// SPOT with tail level `q`.
+    pub fn new(q: f64) -> Self {
+        Self {
+            q,
+            ..Self::default()
+        }
+    }
+
+    fn row_score(x: &Matrix, i: usize) -> f64 {
+        if x.ncols() == 1 {
+            x.get(i, 0)
+        } else {
+            let mut s = 0.0_f64;
+            for j in 0..x.ncols() {
+                let v = x.get(i, j);
+                if v.is_finite() {
+                    s += v * v;
+                }
+            }
+            s.sqrt()
+        }
+    }
+
+    fn finish_init(&mut self) {
+        if self.init_buf.is_empty() {
+            return;
+        }
+        let mut xs = self.init_buf.clone();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = ((xs.len() - 1) as f64 * 0.9).round() as usize;
+        self.t0 = xs[idx.min(xs.len() - 1)];
+        self.excesses = self
+            .init_buf
+            .iter()
+            .filter_map(|v| {
+                if *v > self.t0 {
+                    Some(*v - self.t0)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.warmed = true;
+    }
+
+    fn gpd_threshold(&self) -> f64 {
+        if !self.t0.is_finite() {
+            return f64::NAN;
+        }
+        if self.excesses.len() < 2 {
+            return self.t0;
+        }
+        let n = self.excesses.len() as f64;
+        let mean = self.excesses.iter().sum::<f64>() / n;
+        let var = self
+            .excesses
+            .iter()
+            .map(|e| {
+                let d = *e - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / n;
+        if !mean.is_finite() || mean <= 0.0 {
+            return self.t0;
+        }
+        let mut xi = 0.5 * (1.0 - mean * mean / var.max(1e-12));
+        xi = xi.clamp(-0.4, 0.4);
+        let sig = (mean * (1.0 - xi)).max(1e-6);
+        let ntot = self.n_seen.max(1) as f64;
+        let npeak = self.excesses.len().max(1) as f64;
+        let qv = if self.q.is_finite() && self.q > 0.0 && self.q < 1.0 {
+            self.q
+        } else {
+            1e-3
+        };
+        let r = (qv * ntot / npeak).clamp(1e-9, 1.0);
+        if xi.abs() < 1e-6 {
+            self.t0 - sig * r.ln()
+        } else {
+            self.t0 + sig / xi * (r.powf(-xi) - 1.0)
+        }
+    }
+}
+
+impl PartialFit for SpotAnomaly {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 || x.nrows() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "empty"),
+            );
+        }
+        let need = self.n_init.max(4);
+        let mut alarms = 0u64;
+        for i in 0..x.nrows() {
+            let v = Self::row_score(x, i);
+            if !v.is_finite() {
+                continue;
+            }
+            self.n_seen += 1;
+            if !self.warmed {
+                self.init_buf.push(v);
+                if self.init_buf.len() >= need {
+                    self.finish_init();
+                }
+                continue;
+            }
+            let zq = self.gpd_threshold();
+            if v > zq {
+                alarms += 1;
+                self.n_alarms += 1;
+            } else if v > self.t0 {
+                self.excesses.push(v - self.t0);
+                if self.excesses.len() > 256 {
+                    self.excesses.remove(0);
+                }
+            }
+        }
+        self.updates += 1;
+        if !self.warmed {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message(format!(
+                        "SpotAnomaly warming {} / {need}",
+                        self.init_buf.len()
+                    ))
+                    .build(),
+            );
+        }
+        let zq = self.gpd_threshold();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(alarms as f64);
+        q.information_gain = Some(self.excesses.len() as f64);
+        q.still_identified = self.warmed && self.excesses.len() >= 2;
+        q.warmup = !self.warmed;
+        q.explanation = format!(
+            "SPOT alarms={alarms} z_q={:.4e} peaks={}",
+            if zq.is_finite() { zq } else { 0.0 },
+            self.excesses.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "SPOT GPD tail step",
+                "peaks over init quantile; distinct from QuantileFilter",
+                "pre-batch excesses",
+                format!("alarms={alarms} zq={zq:.4e}"),
+            ),
+        )
+    }
+}
+
+impl Predict for SpotAnomaly {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.warmed {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let zq = self.gpd_threshold();
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let v = Self::row_score(x, i);
+            if v.is_finite() && zq.is_finite() && v > zq {
+                1.0
+            } else {
+                0.0
+            }
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49195,6 +49612,12 @@ mod tests {
         Climf::new(2)
             .partial_fit(&xui, Some(&y), &session)
             .expect("clf");
+        OsElm::new(4)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("ose");
+        SpotAnomaly::new(1e-3)
+            .partial_fit(&x, None, &session)
+            .expect("spo");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

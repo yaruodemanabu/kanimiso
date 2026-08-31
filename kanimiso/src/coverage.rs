@@ -7046,6 +7046,21 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.InverseGompertzHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.InverseNakagamiHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.ZeroInflatedLogarithmicHmm",
+        "hmmlearn.hmm.PoissonHMM",
+        "hmm",
+    ),
+    a("hmm.PowerLindleyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.DiscreteLindleyHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a("online.OsElm", "river.linear_model.LinearRegression", "online"),
+    a("online.SpotAnomaly", "river.anomaly.QuantileFilter", "online"),
+    a("tslearn.cyclic_dtw", "tslearn.metrics.dtw", "timeseries"),
+    a("tslearn.cdist_cyclic_dtw", "tslearn.metrics.cdist", "timeseries"),
+    a("tslearn.obe_dtw", "tslearn.metrics.dtw", "timeseries"),
+    a("tslearn.cdist_obe_dtw", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7792,6 +7807,17 @@ mod tests {
             "online.Climf",
             "tslearn.sakoe_chiba_dtw",
             "tslearn.cdist_sakoe_chiba_dtw",
+            "hmm.InverseGompertzHmm",
+            "hmm.InverseNakagamiHmm",
+            "hmm.ZeroInflatedLogarithmicHmm",
+            "hmm.PowerLindleyHmm",
+            "hmm.DiscreteLindleyHmm",
+            "online.OsElm",
+            "online.SpotAnomaly",
+            "tslearn.cyclic_dtw",
+            "tslearn.cdist_cyclic_dtw",
+            "tslearn.obe_dtw",
+            "tslearn.cdist_obe_dtw",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

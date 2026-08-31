@@ -1470,6 +1470,125 @@ pub fn cdist_sakoe_chiba_dtw(
     ctx.finish(out)
 }
 
+fn cyclic_dtw_raw(a: &[f64], b: &[f64]) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return f64::NAN;
+    }
+    let mut best = dtw_raw(a, b);
+    let mut rot = b.to_vec();
+    for _ in 1..b.len() {
+        rot.rotate_left(1);
+        let d = dtw_raw(a, &rot);
+        if d < best {
+            best = d;
+        }
+    }
+    best
+}
+
+/// Cyclic DTW: minimum unconstrained DTW over circular shifts of `b`.
+///
+/// Distinct from [`dtw`] (no rotation) and [`dtw_subsequence`] (open ends,
+/// no wrap). Shift search is not identification `p`.
+pub fn cyclic_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("cyclic_dtw.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("cyclic_dtw.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("cyclic_dtw on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(cyclic_dtw_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise cyclic DTW.
+///
+/// Distinct from [`cdist_dtw`] and [`cdist_dtw_subsequence`].
+pub fn cdist_cyclic_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        cyclic_dtw_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+fn obe_dtw_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len();
+    let m = b.len();
+    if n == 0 || m == 0 {
+        return f64::NAN;
+    }
+    let mut prev = vec![0.0_f64; m];
+    for j in 0..m {
+        prev[j] = (a[0] - b[j]).abs();
+    }
+    let mut best = prev[m - 1];
+    let mut cur = vec![0.0_f64; m];
+    for i in 1..n {
+        cur[0] = (a[i] - b[0]).abs();
+        for j in 1..m {
+            let cost = (a[i] - b[j]).abs();
+            cur[j] = cost + prev[j].min(cur[j - 1]).min(prev[j - 1]);
+        }
+        best = best.min(cur[m - 1]);
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    for j in 0..m {
+        best = best.min(prev[j]);
+    }
+    best
+}
+
+/// Open-begin-end DTW (free prefix and suffix on both series).
+///
+/// Distinct from [`dtw`] (closed ends) and [`dtw_subsequence`] (open on one
+/// series only).
+pub fn obe_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("obe_dtw.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("obe_dtw.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("obe_dtw on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(obe_dtw_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise open-begin-end DTW.
+///
+/// Distinct from [`cdist_dtw`] and [`cdist_dtw_subsequence`].
+pub fn cdist_obe_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        obe_dtw_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -20074,6 +20193,10 @@ mod tests {
         assert!(itk.abs() < 1e-12, "itakura_dtw={itk}");
         let scb = sakoe_chiba_dtw(&a, &a, 1, &Session::new("ts", "scb")).unwrap().value;
         assert!(scb.abs() < 1e-12, "sakoe_chiba_dtw={scb}");
+        let cyc = cyclic_dtw(&a, &a, &Session::new("ts", "cyc")).unwrap().value;
+        assert!(cyc.abs() < 1e-12, "cyclic_dtw={cyc}");
+        let obe = obe_dtw(&a, &a, &Session::new("ts", "obe")).unwrap().value;
+        assert!(obe.abs() < 1e-12, "obe_dtw={obe}");
     }
 
     #[test]
@@ -21101,6 +21224,16 @@ mod tests {
             .value;
         assert_eq!(csc.shape(), (8, 8));
         assert!(csc.get(0, 0).abs() < 1e-12);
+        let ccy = cdist_cyclic_dtw(&x, &x, &Session::new("ts", "ccy"))
+            .unwrap()
+            .value;
+        assert_eq!(ccy.shape(), (8, 8));
+        assert!(ccy.get(0, 0).abs() < 1e-12);
+        let cob = cdist_obe_dtw(&x, &x, &Session::new("ts", "cob"))
+            .unwrap()
+            .value;
+        assert_eq!(cob.shape(), (8, 8));
+        assert!(cob.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;
