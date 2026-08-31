@@ -6811,6 +6811,15 @@ const INVENTORY: &[Algorithm] = &[
         "river.linear_model.PAClassifier",
         "online",
     ),
+    a("hmm.WrappedExponentialHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ChiHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.DelaporteHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a("hmm.NeymanTypeAHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a(
+        "online.OnlineScwClassifier",
+        "river.linear_model.PAClassifier",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7416,6 +7425,9 @@ mod tests {
             "hmm.HyperbolicSecantHmm",
             "hmm.HermiteHmm",
             "online.OnlineArowClassifier",
+            "hmm.DelaporteHmm",
+            "hmm.NeymanTypeAHmm",
+            "online.OnlineScwClassifier",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
