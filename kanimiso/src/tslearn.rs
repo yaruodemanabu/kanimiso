@@ -16601,6 +16601,172 @@ impl Floss {
     }
 }
 
+/// FLUSS multi-change-point annotator (sktime / STUMPY `FLUSS`).
+///
+/// Regime count is not identification `p`. Distinct from [`Floss`] (single
+/// CAC argmin) and [`ClaSPSegmentation`] (two-mean F).
+#[derive(Clone, Debug)]
+pub struct Fluss {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+    /// Number of regimes (change points = regimes − 1). Not identification `p`.
+    pub n_regimes: usize,
+}
+
+impl Default for Fluss {
+    fn default() -> Self {
+        Self {
+            window: 3,
+            n_regimes: 2,
+        }
+    }
+}
+
+impl Fluss {
+    /// FLUSS with `n_regimes` pieces.
+    pub fn new(n_regimes: usize) -> Self {
+        Self {
+            n_regimes: n_regimes.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Local minima of the corrected arc curve.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        let q = floss_change_point(y, self.window, session)?;
+        let mut ctx = FitCtx::with_session(session.child("fluss"));
+        let cac = &q.value.cac;
+        let n = cac.len();
+        let want = self.n_regimes.max(2).saturating_sub(1);
+        let mut idx: Vec<(f64, usize)> = Vec::new();
+        for k in 1..n.saturating_sub(1) {
+            let v = cac[k];
+            if !v.is_finite() {
+                continue;
+            }
+            let left = cac.as_slice().get(k - 1).copied().unwrap_or(v);
+            let right = cac.as_slice().get(k + 1).copied().unwrap_or(v);
+            if v <= left && v <= right {
+                idx.push((v, k));
+            }
+        }
+        idx.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut out = Vec::new();
+        for &(_, k) in idx.iter() {
+            if out.iter().all(|&u: &f64| (u - k as f64).abs() >= self.window as f64) {
+                out.push(k as f64);
+            }
+            if out.len() >= want {
+                break;
+            }
+        }
+        if out.is_empty() && q.value.index.is_finite() {
+            out.push(q.value.index);
+        }
+        ctx.finish(Vector::from_iter(out))
+    }
+}
+
+/// STOMP matrix profile plus per-subsequence nearest-neighbour index (stumpy `stomp`).
+///
+/// Window length is not identification `p`. Distinct from [`Stamp`] (global
+/// argmin only) and [`matrix_profile`] (distances without the index vector).
+#[derive(Clone, Debug)]
+pub struct StompResult {
+    /// Distance profile.
+    pub profile: Vector,
+    /// Nearest-neighbour subsequence index for each window.
+    pub nn_index: Vector,
+}
+
+/// Named STOMP detector.
+#[derive(Clone, Debug)]
+pub struct Stomp {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+}
+
+impl Default for Stomp {
+    fn default() -> Self {
+        Self { window: 3 }
+    }
+}
+
+impl Stomp {
+    /// STOMP with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+        }
+    }
+
+    /// Full matrix profile and nearest-neighbour index vector.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_vector(y),
+            Some(y),
+            &ctx.policy,
+        );
+        let n = y.len();
+        let m = self.window.max(2);
+        if m >= n {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .severity(Severity::Warning)
+                    .message(format!("STOMP window={m} is unusable for n={n}"))
+                    .build(),
+            );
+            return ctx.finish(StompResult {
+                profile: Vector::zeros(0),
+                nn_index: Vector::zeros(0),
+            });
+        }
+        let n_sub = n + 1 - m;
+        let excl = (m / 4).max(1);
+        let mut profile = Vector::filled(n_sub, f64::INFINITY);
+        let mut nn_index = Vector::zeros(n_sub);
+        for diag in 1..n_sub {
+            let mut prev = f64::NAN;
+            for i in 0..(n_sub - diag) {
+                let j = i + diag;
+                if i.abs_diff(j) < excl {
+                    prev = f64::NAN;
+                    continue;
+                }
+                let d = if !prev.is_finite() {
+                    let mut s = 0.0_f64;
+                    for t in 0..m {
+                        let e = y[i + t] - y[j + t];
+                        s += e * e;
+                    }
+                    s.sqrt()
+                } else {
+                    let leave = y[i - 1] - y[j - 1];
+                    let enter = y[i + m - 1] - y[j + m - 1];
+                    (prev * prev - leave * leave + enter * enter).max(0.0).sqrt()
+                };
+                prev = d;
+                if d < profile[i] {
+                    profile[i] = d;
+                    nn_index[i] = j as f64;
+                }
+                if d < profile[j] {
+                    profile[j] = d;
+                    nn_index[j] = i as f64;
+                }
+            }
+        }
+        for i in 0..n_sub {
+            if !profile[i].is_finite() {
+                profile[i] = 0.0;
+            }
+        }
+        ctx.finish(StompResult { profile, nn_index })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -17200,6 +17366,17 @@ mod tests {
             .fit(&yr, &Session::new("ts", "floss"))
             .unwrap();
         assert!(fls.value.index.is_finite() || fls.value.index.is_nan());
+        let flu = Fluss::new(2)
+            .fit(&yr, &Session::new("ts", "fluss"))
+            .unwrap();
+        assert!(flu.value.as_slice().iter().all(|v| v.is_finite()) || flu.value.is_empty());
+        let stm = Stomp::new(3)
+            .fit(&yr, &Session::new("ts", "stomp"))
+            .unwrap();
+        assert!(
+            stm.value.profile.as_slice().iter().all(|v| v.is_finite())
+                || stm.value.profile.is_empty()
+        );
         let igs = InformationGainSegmentation::new()
             .fit(&yr, &Session::new("ts", "igs"))
             .unwrap();

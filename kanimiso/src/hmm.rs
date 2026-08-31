@@ -6735,6 +6735,689 @@ impl FitUnsupervised for Hsmm {
     }
 }
 
+fn log_negbin(y: f64, r: f64, p: f64) -> f64 {
+    if !y.is_finite() || y < 0.0 || r <= 0.0 || p <= 0.0 || p >= 1.0 {
+        return f64::NEG_INFINITY;
+    }
+    crate::special::ln_gamma(y + r) - crate::special::ln_gamma(r) - crate::special::ln_gamma(y + 1.0)
+        + r * p.ln()
+        + y * (1.0 - p).ln()
+}
+
+fn log_zip(y: f64, pi: f64, lam: f64) -> f64 {
+    if !y.is_finite() || y < 0.0 || lam <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let pi = pi.clamp(1e-6, 1.0 - 1e-6);
+    if y.abs() < 1e-12 {
+        let a = pi.ln();
+        let b = (1.0 - pi).ln() - lam;
+        logsumexp(&[a, b])
+    } else {
+        (1.0 - pi).ln() + y * lam.ln() - lam - crate::special::ln_gamma(y + 1.0)
+    }
+}
+
+fn log_dirichlet_row(x: &Matrix, t: usize, alpha: &Vector) -> f64 {
+    let d = x.ncols().min(alpha.len());
+    let mut asum = 0.0_f64;
+    let mut s = 0.0_f64;
+    for j in 0..d {
+        let a = alpha[j];
+        let y = x.get(t, j);
+        if !y.is_finite() || y <= 0.0 || a <= 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        asum += a;
+        s += (a - 1.0) * y.ln() - crate::special::ln_gamma(a);
+    }
+    crate::special::ln_gamma(asum) + s
+}
+
+/// Negative-binomial emission HMM (overdispersed counts).
+///
+/// State count is not identification `p`. Distinct from [`PoissonHmm`]
+/// (equidispersed) and [`GammaHmm`] (continuous).
+#[derive(Clone, Debug)]
+pub struct NegativeBinomialHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for NegativeBinomialHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl NegativeBinomialHmm {
+    /// `k`-state NB HMM.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedNegativeBinomialHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted negative-binomial HMM.
+#[derive(Clone, Debug)]
+pub struct FittedNegativeBinomialHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Success counts \(r_j\).
+    pub r: Vector,
+    /// Success probability \(p_j\).
+    pub p: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedNegativeBinomialHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let s = self.r.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; s]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..s {
+                out[ti][j] = log_negbin(y, self.r[j], self.p[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedNegativeBinomialHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for NegativeBinomialHmm {
+    type Fitted = FittedNegativeBinomialHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedNegativeBinomialHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        if t_len == 0 {
+            return ctx.finish(FittedNegativeBinomialHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                r: Vector::filled(k, 1.0),
+                p: Vector::filled(k, 0.5),
+                loglik: f64::NAN,
+            });
+        }
+        let mean = x.column(0).as_slice().iter().filter(|v| **v >= 0.0).sum::<f64>()
+            / t_len.max(1) as f64;
+        let mut r = Vector::from_iter((0..k).map(|j| (1.0 + j as f64).max(0.5)));
+        let mut p = Vector::from_iter((0..k).map(|j| {
+            let rj = r[j];
+            (rj / (rj + mean.max(0.1) * (0.6 + 0.4 * j as f64))).clamp(0.05, 0.95)
+        }));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let log_emit: Vec<Vec<f64>> = (0..t_len)
+                .map(|t| {
+                    let y = x.get(t, 0);
+                    (0..k).map(|j| log_negbin(y, r[j], p[j])).collect()
+                })
+                .collect();
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &log_emit) else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            let mut ns = Vector::zeros(k);
+            let mut nt = Matrix::zeros(k, k);
+            for j in 0..k {
+                ns[j] = fb.gamma[0][j];
+            }
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wy = 0.0_f64;
+                let mut wy2 = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if y < 0.0 || !y.is_finite() {
+                        continue;
+                    }
+                    let w = fb.gamma[t][j];
+                    wsum += w;
+                    wy += w * y;
+                    wy2 += w * y * y;
+                }
+                if wsum > 1e-12 {
+                    let mu = wy / wsum;
+                    let var = (wy2 / wsum - mu * mu).max(mu + 1e-4);
+                    r[j] = (mu * mu / (var - mu).max(1e-4)).clamp(0.05, 80.0);
+                    p[j] = (r[j] / (r[j] + mu.max(1e-6))).clamp(0.02, 0.98);
+                }
+            }
+            for t in 0..t_len.saturating_sub(1) {
+                for i in 0..k {
+                    for j in 0..k {
+                        nt.set(i, j, nt.get(i, j) + fb.xi[t][i][j]);
+                    }
+                }
+            }
+            start = ns;
+            trans = nt;
+            renormalize_vec(&mut start, TRANS_FLOOR);
+            renormalize_rows(&mut trans, TRANS_FLOOR);
+        }
+        let occup: Vec<f64> = (0..k)
+            .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+            .collect();
+        if !last_gamma.is_empty() {
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedNegativeBinomialHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            r: r.clone(),
+            p: p.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedNegativeBinomialHmm {
+            labels,
+            start,
+            trans,
+            r,
+            p,
+            loglik,
+        })
+    }
+}
+
+/// Zero-inflated Poisson HMM.
+///
+/// Zero-mass \(\pi_j\) is not identification `p`. Distinct from [`PoissonHmm`]
+/// (no extra zeros) and [`NegativeBinomialHmm`] (overdispersion without a point mass).
+#[derive(Clone, Debug)]
+pub struct ZeroInflatedPoissonHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for ZeroInflatedPoissonHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl ZeroInflatedPoissonHmm {
+    /// `k`-state ZIP HMM.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedZeroInflatedPoissonHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted ZIP HMM.
+#[derive(Clone, Debug)]
+pub struct FittedZeroInflatedPoissonHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Extra-zero mass.
+    pub pi: Vector,
+    /// Poisson rate on the non-zero component.
+    pub lam: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedZeroInflatedPoissonHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let s = self.lam.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; s]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..s {
+                out[ti][j] = log_zip(y, self.pi[j], self.lam[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedZeroInflatedPoissonHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for ZeroInflatedPoissonHmm {
+    type Fitted = FittedZeroInflatedPoissonHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedZeroInflatedPoissonHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        if t_len == 0 {
+            return ctx.finish(FittedZeroInflatedPoissonHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                pi: Vector::filled(k, 0.1),
+                lam: Vector::filled(k, 1.0),
+                loglik: f64::NAN,
+            });
+        }
+        let mean = x.column(0).as_slice().iter().filter(|v| **v >= 0.0).sum::<f64>()
+            / t_len.max(1) as f64;
+        let mut pi = Vector::filled(k, 0.15);
+        let mut lam = Vector::from_iter((0..k).map(|j| (mean * (0.5 + j as f64)).max(0.2)));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let log_emit: Vec<Vec<f64>> = (0..t_len)
+                .map(|t| {
+                    let y = x.get(t, 0);
+                    (0..k).map(|j| log_zip(y, pi[j], lam[j])).collect()
+                })
+                .collect();
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &log_emit) else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            let mut ns = Vector::zeros(k);
+            let mut nt = Matrix::zeros(k, k);
+            for j in 0..k {
+                ns[j] = fb.gamma[0][j];
+            }
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wzero = 0.0_f64;
+                let mut wy = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if y < 0.0 || !y.is_finite() {
+                        continue;
+                    }
+                    let w = fb.gamma[t][j];
+                    wsum += w;
+                    wy += w * y;
+                    if y.abs() < 1e-12 {
+                        wzero += w;
+                    }
+                }
+                if wsum > 1e-12 {
+                    let mu = wy / wsum;
+                    let zf = (wzero / wsum).clamp(0.0, 0.95);
+                    let pois0 = (-lam[j]).exp();
+                    pi[j] = ((zf - pois0) / (1.0 - pois0).max(1e-6)).clamp(1e-4, 0.9);
+                    lam[j] = (mu / (1.0 - pi[j]).max(1e-3)).max(0.05);
+                }
+            }
+            for t in 0..t_len.saturating_sub(1) {
+                for i in 0..k {
+                    for j in 0..k {
+                        nt.set(i, j, nt.get(i, j) + fb.xi[t][i][j]);
+                    }
+                }
+            }
+            start = ns;
+            trans = nt;
+            renormalize_vec(&mut start, TRANS_FLOOR);
+            renormalize_rows(&mut trans, TRANS_FLOOR);
+        }
+        let occup: Vec<f64> = (0..k)
+            .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+            .collect();
+        if !last_gamma.is_empty() {
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedZeroInflatedPoissonHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            pi: pi.clone(),
+            lam: lam.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedZeroInflatedPoissonHmm {
+            labels,
+            start,
+            trans,
+            pi,
+            lam,
+            loglik,
+        })
+    }
+}
+
+/// Dirichlet-emission HMM (simplex / compositional rows).
+///
+/// Concentration width is not identification `p`. Distinct from
+/// [`MultinomialHmm`] (integer codes) and [`CircularHmm`] (von Mises).
+#[derive(Clone, Debug)]
+pub struct DirichletHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for DirichletHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl DirichletHmm {
+    /// `k`-state Dirichlet HMM.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedDirichletHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted Dirichlet HMM.
+#[derive(Clone, Debug)]
+pub struct FittedDirichletHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Concentrations \(\alpha_{j\cdot}\).
+    pub alpha: Matrix,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedDirichletHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let s = self.alpha.nrows();
+        let mut out = vec![vec![f64::NEG_INFINITY; s]; t];
+        for ti in 0..t {
+            for j in 0..s {
+                let aj = Vector::from_iter((0..self.alpha.ncols()).map(|c| self.alpha.get(j, c)));
+                out[ti][j] = log_dirichlet_row(x, ti, &aj);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedDirichletHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for DirichletHmm {
+    type Fitted = FittedDirichletHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDirichletHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let d = x.ncols().max(1);
+        let k = self.n_states.max(1);
+        if t_len == 0 {
+            return ctx.finish(FittedDirichletHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                alpha: Matrix::from_fn(k, d, |_, _| 1.0),
+                loglik: f64::NAN,
+            });
+        }
+        let mut n_ok = 0usize;
+        for i in 0..t_len {
+            let mut s = 0.0_f64;
+            let mut pos = true;
+            for j in 0..d {
+                let v = x.get(i, j);
+                if !v.is_finite() || v <= 0.0 {
+                    pos = false;
+                }
+                s += v;
+            }
+            if pos && s > 1e-12 {
+                n_ok += 1;
+            }
+        }
+        if n_ok < t_len {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message("DirichletHmm skipped non-simplex rows")
+                    .build(),
+            );
+        }
+        if n_ok < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("DirichletHmm needs at least two positive simplex rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "Dirichlet HMM",
+                        "concentrations are unidentified without positive compositions",
+                        "collect simplex-valued rows",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedDirichletHmm {
+                labels: empty_labels(t_len),
+                start: init_start(k),
+                trans: init_trans(k),
+                alpha: Matrix::from_fn(k, d, |_, _| 1.0),
+                loglik: f64::NAN,
+            });
+        }
+        let mut alpha = Matrix::from_fn(k, d, |j, c| 0.8 + 0.4 * j as f64 + 0.2 * c as f64);
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedDirichletHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                alpha: alpha.clone(),
+                loglik,
+            };
+            let log_emit = dummy.log_emit_seq(x);
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &log_emit) else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            let mut ns = Vector::zeros(k);
+            let mut nt = Matrix::zeros(k, k);
+            for j in 0..k {
+                ns[j] = fb.gamma[0][j];
+            }
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut mean = vec![0.0_f64; d];
+                let mut var = vec![0.0_f64; d];
+                for t in 0..t_len {
+                    let mut ok = true;
+                    let mut row = vec![0.0_f64; d];
+                    let mut rs = 0.0_f64;
+                    for c in 0..d {
+                        let v = x.get(t, c);
+                        if !v.is_finite() || v <= 0.0 {
+                            ok = false;
+                        }
+                        row[c] = v;
+                        rs += v;
+                    }
+                    if !ok || rs <= 1e-12 {
+                        continue;
+                    }
+                    let w = fb.gamma[t][j];
+                    wsum += w;
+                    for c in 0..d {
+                        let z = row[c] / rs;
+                        mean[c] += w * z;
+                        var[c] += w * z * z;
+                    }
+                }
+                if wsum > 1e-12 {
+                    for c in 0..d {
+                        mean[c] /= wsum;
+                        var[c] = (var[c] / wsum - mean[c] * mean[c]).max(1e-8);
+                    }
+                    let mut prec = 0.0_f64;
+                    let mut pc = 0.0_f64;
+                    for c in 0..d {
+                        if mean[c] > 1e-8 && mean[c] < 1.0 - 1e-8 {
+                            prec += mean[c] * (1.0 - mean[c]) / var[c] - 1.0;
+                            pc += 1.0;
+                        }
+                    }
+                    let prec = if pc > 0.0 {
+                        (prec / pc).clamp(0.5, 80.0)
+                    } else {
+                        2.0
+                    };
+                    for c in 0..d {
+                        alpha.set(j, c, (mean[c] * prec).max(0.05));
+                    }
+                }
+            }
+            for t in 0..t_len.saturating_sub(1) {
+                for i in 0..k {
+                    for j in 0..k {
+                        nt.set(i, j, nt.get(i, j) + fb.xi[t][i][j]);
+                    }
+                }
+            }
+            start = ns;
+            trans = nt;
+            renormalize_vec(&mut start, TRANS_FLOOR);
+            renormalize_rows(&mut trans, TRANS_FLOOR);
+        }
+        let occup: Vec<f64> = (0..k)
+            .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+            .collect();
+        if !last_gamma.is_empty() {
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedDirichletHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            alpha: alpha.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedDirichletHmm {
+            labels,
+            start,
+            trans,
+            alpha,
+            loglik,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6835,6 +7518,21 @@ mod tests {
             .expect("hsm");
         assert_eq!(hsm.value.labels.len(), 80);
         assert!(hsm.value.rho.as_slice().iter().all(|v| v.is_finite()));
+        let dirx = Matrix::from_fn(80, 2, |i, j| {
+            let a = (x.get(i, 0) + 6.0).max(0.2);
+            let b = (6.0 - x.get(i, 0)).max(0.2);
+            let t = a + b;
+            if j == 0 {
+                a / t
+            } else {
+                b / t
+            }
+        });
+        let dh = DirichletHmm::new(2)
+            .fit(&dirx, &Session::new("dirhmm", "fit"))
+            .expect("dirhmm");
+        assert_eq!(dh.value.labels.len(), 80);
+        assert_eq!(dh.value.alpha.shape(), (2, 2));
         let cat = Matrix::from_fn(40, 1, |i, _| if i < 20 { 0.0 } else { 1.0 });
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
@@ -6997,6 +7695,16 @@ mod tests {
         vr.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert!(vr[0] < 3.0 && vr[1] > 5.0, "{vr:?}");
         assert_eq!(vb.value.labels.len(), 40);
+        let nbh = NegativeBinomialHmm::new(2)
+            .fit(&x, &Session::new("nbhmm", "fit"))
+            .expect("nbhmm");
+        assert_eq!(nbh.value.labels.len(), 40);
+        assert!(nbh.value.r.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let zip = ZeroInflatedPoissonHmm::new(2)
+            .fit(&x, &Session::new("ziphmm", "fit"))
+            .expect("ziphmm");
+        assert_eq!(zip.value.labels.len(), 40);
+        assert!(zip.value.lam.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
     }
 
     #[test]

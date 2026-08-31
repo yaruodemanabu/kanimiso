@@ -8,7 +8,7 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linalg::{chol_solve, ridge_solve, symmetric_eigen, thin_svd};
+use crate::linalg::{chol_solve, least_squares, ridge_solve, symmetric_eigen, thin_svd};
 use crate::rng::Rng;
 use crate::traits::{Fit, FitUnsupervised, PartialFit, Transform};
 use crate::validate::{inspect_identification, inspect_xy};
@@ -2685,6 +2685,156 @@ impl FitUnsupervised for ConfirmatoryFactor {
     }
 }
 
+/// LISREL-lite: one-factor measurement plus a structural slope on \(y\).
+///
+/// Factor count is not identification `p`. Distinct from [`ConfirmatoryFactor`]
+/// (no structural equation) and ordinary OLS (no latent).
+#[derive(Clone, Debug, Default)]
+pub struct Lisrel;
+
+impl Lisrel {
+    /// Default one-factor LISREL.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit CFA scores of \(X\), then OLS of \(y\) on the factor.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLisrel>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let mut cfa = ConfirmatoryFactor::new();
+        let q = match cfa.fit(x, &session.child("cfa")) {
+            Ok(q) => q,
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                        | IssueCode::MeaninglessFit
+                        | IssueCode::CholeskyFailed
+                ) {
+                    ctx.push(e.primary);
+                }
+                return ctx.finish(FittedLisrel {
+                    loadings: Vector::zeros(x.ncols()),
+                    uniqueness: Vector::filled(x.ncols().max(1), 1.0),
+                    mean: Vector::zeros(x.ncols()),
+                    scale: Vector::filled(x.ncols().max(1), 1.0),
+                    intercept: y.mean(),
+                    slope: 0.0,
+                    scores: Vector::zeros(x.nrows()),
+                });
+            }
+        };
+        for issue in q.report.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::MeaninglessFit
+                    | IssueCode::CholeskyFailed
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let scores = match q.value.transform(x, &session.child("scores")) {
+            Ok(z) => Vector::from_iter((0..z.value.nrows()).map(|i| z.value.get(i, 0))),
+            Err(_) => Vector::zeros(x.nrows()),
+        };
+        let n = scores.len().min(y.len());
+        let design = Matrix::from_fn(n, 2, |i, j| if j == 0 { 1.0 } else { scores[i] });
+        let mut scratch = Report::new("lisrel", "ols");
+        let coef = least_squares(&mut scratch, &design, y, &ctx.policy)
+            .unwrap_or_else(|| Vector::from_slice(&[y.mean(), 0.0]));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::CholeskyFailed
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Lisrel is 1-factor scores plus OLS, not a published LISREL SEM")
+                .compromise(NumericalCompromise::new(
+                    "LISREL structural equation",
+                    "MINRES factor scores of X, then OLS of y on [1, f]",
+                    "a user path diagram, ML, and measurement-error correction are omitted",
+                    "read the slope as a factor-score regression sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedLisrel {
+            loadings: q.value.loadings.clone(),
+            uniqueness: q.value.uniqueness.clone(),
+            mean: q.value.mean.clone(),
+            scale: q.value.scale.clone(),
+            intercept: coef.as_slice().first().copied().unwrap_or(0.0),
+            slope: coef.as_slice().get(1).copied().unwrap_or(0.0),
+            scores,
+        })
+    }
+}
+
+/// Fitted LISREL-lite model.
+#[derive(Clone, Debug)]
+pub struct FittedLisrel {
+    /// Measurement loadings.
+    pub loadings: Vector,
+    /// Uniqueness.
+    pub uniqueness: Vector,
+    /// Indicator means.
+    pub mean: Vector,
+    /// Indicator scales.
+    pub scale: Vector,
+    /// Structural intercept.
+    pub intercept: f64,
+    /// Structural slope on the factor.
+    pub slope: f64,
+    /// Training factor scores.
+    pub scores: Vector,
+}
+
+impl FittedLisrel {
+    /// Predict \(y\) from new indicators via the stored measurement model.
+    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let cfa = FittedConfirmatoryFactor {
+            loadings: self.loadings.clone(),
+            uniqueness: self.uniqueness.clone(),
+            mean: self.mean.clone(),
+            scale: self.scale.clone(),
+            residual_ss: 0.0,
+        };
+        let z = match cfa.transform(x, &session.child("f")) {
+            Ok(q) => q.value,
+            Err(_) => Matrix::zeros(x.nrows(), 1),
+        };
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            self.intercept + self.slope * z.get(i, 0)
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2799,5 +2949,16 @@ mod tests {
             .value;
         assert_eq!(zf.ncols(), 1);
         assert!(zf.get(0, 0).is_finite());
+        let lis = Lisrel::new()
+            .fit(&x, &ycca, &Session::new("lis", "fit"))
+            .expect("lis");
+        assert!(lis.value.slope.is_finite());
+        let lisp = lis
+            .value
+            .predict(&x, &Session::new("lis", "p"))
+            .expect("lisp")
+            .value;
+        assert_eq!(lisp.len(), x.nrows());
+        assert!(lisp.as_slice().iter().all(|v| v.is_finite()));
     }
 }

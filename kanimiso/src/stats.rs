@@ -29764,6 +29764,521 @@ impl FittedOrthoForest {
     }
 }
 
+fn residual_wald(yres: &Vector, dres: &Vector, zres: &Vector, idx: &[usize]) -> f64 {
+    let mut num = 0.0_f64;
+    let mut den = 0.0_f64;
+    for &i in idx {
+        if i < yres.len() && i < dres.len() && i < zres.len() {
+            num += zres[i] * yres[i];
+            den += zres[i] * dres[i];
+        }
+    }
+    if den.abs() > 1e-12 {
+        num / den
+    } else {
+        0.0
+    }
+}
+
+fn grow_ortho_iv_tree(
+    x: &Matrix,
+    yres: &Vector,
+    dres: &Vector,
+    zres: &Vector,
+    idx: &[usize],
+    depth: usize,
+    max_depth: usize,
+    min_leaf: usize,
+    rng: &mut Rng,
+) -> CateNode {
+    let tau = residual_wald(yres, dres, zres, idx);
+    if depth >= max_depth
+        || idx.len() < min_leaf.saturating_mul(2)
+        || !residual_varies(dres, idx)
+        || !residual_varies(zres, idx)
+    {
+        return CateNode::Leaf { cate: tau };
+    }
+    let p = x.ncols();
+    if p == 0 || idx.is_empty() {
+        return CateNode::Leaf { cate: tau };
+    }
+    let mut best_gain = 0.0_f64;
+    let mut best: Option<(usize, f64, Vec<usize>, Vec<usize>)> = None;
+    for _ in 0..8 {
+        let feat = rng.below(p);
+        let a = idx[rng.below(idx.len())];
+        let b = idx[rng.below(idx.len())];
+        let thresh = 0.5 * (x.get(a, feat) + x.get(b, feat));
+        if !thresh.is_finite() {
+            continue;
+        }
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for &i in idx {
+            if x.get(i, feat) <= thresh {
+                left.push(i);
+            } else {
+                right.push(i);
+            }
+        }
+        if left.len() < min_leaf || right.len() < min_leaf {
+            continue;
+        }
+        if !residual_varies(dres, &left)
+            || !residual_varies(dres, &right)
+            || !residual_varies(zres, &left)
+            || !residual_varies(zres, &right)
+        {
+            continue;
+        }
+        let tl = residual_wald(yres, dres, zres, &left);
+        let tr = residual_wald(yres, dres, zres, &right);
+        let gain = (tl - tr).abs() * ((left.len() * right.len()) as f64).sqrt();
+        if gain > best_gain {
+            best_gain = gain;
+            best = Some((feat, thresh, left, right));
+        }
+    }
+    match best {
+        Some((feat, thresh, left, right)) => CateNode::Split {
+            feat,
+            thresh,
+            left: Box::new(grow_ortho_iv_tree(
+                x, yres, dres, zres, &left, depth + 1, max_depth, min_leaf, rng,
+            )),
+            right: Box::new(grow_ortho_iv_tree(
+                x, yres, dres, zres, &right, depth + 1, max_depth, min_leaf, rng,
+            )),
+        },
+        None => CateNode::Leaf { cate: tau },
+    }
+}
+
+/// Orthogonal IV forest (econml `OrthoIV` / DML-IV forest).
+///
+/// Residualize \(Y,D,Z\) on \(X\), then extra-trees with leaf
+/// \(\sum\tilde Z\tilde Y/\sum\tilde Z\tilde D\). Distinct from
+/// [`InstrumentalForest`] (raw Wald) and [`DmlIv`] (scalar residual Wald).
+#[derive(Clone, Debug)]
+pub struct OrthoIv {
+    /// Trees. Not identification `p`.
+    pub n_estimators: usize,
+    /// Depth cap.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for OrthoIv {
+    fn default() -> Self {
+        Self {
+            n_estimators: 8,
+            max_depth: 3,
+            seed: 73,
+        }
+    }
+}
+
+impl OrthoIv {
+    /// Default orthogonal IV forest.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Residualize then grow residual-Wald trees.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        instrument: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedOrthoIv>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x
+            .nrows()
+            .min(y.len())
+            .min(treat.len())
+            .min(instrument.len());
+        let idx: Vec<usize> = (0..n).collect();
+        if !instrument_varies(instrument, &idx) || !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("OrthoIv needs treatment and instrument variation")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "orthogonal IV forest",
+                        "residual Wald needs Z and D contrast",
+                        "collect a non-degenerate instrument and both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedOrthoIv { trees: Vec::new() });
+        }
+        let (by, ay) = ols_arm(x, y, &idx, &ctx.policy);
+        let (bd, ad) = ols_arm(x, treat, &idx, &ctx.policy);
+        let (bz, az) = ols_arm(x, instrument, &idx, &ctx.policy);
+        let yres = Vector::from_iter((0..n).map(|i| y[i] - mu_lin(x, i, ay, &by)));
+        let dres = Vector::from_iter((0..n).map(|i| treat[i] - mu_lin(x, i, ad, &bd)));
+        let zres = Vector::from_iter((0..n).map(|i| instrument[i] - mu_lin(x, i, az, &bz)));
+        if !residual_varies(&dres, &idx) || !residual_varies(&zres, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("OrthoIv residual D or Z has no variance")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "orthogonal IV forest",
+                        "D̃ or Z̃ ≈ 0 leaves leaf LATE unidentified",
+                        "need overlap after residualizing X",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedOrthoIv { trees: Vec::new() });
+        }
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        for _ in 0..self.n_estimators.max(1) {
+            trees.push(grow_ortho_iv_tree(
+                x,
+                &yres,
+                &dres,
+                &zres,
+                &idx,
+                0,
+                self.max_depth.max(1),
+                2,
+                &mut rng,
+            ));
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("OrthoIv is residual-Wald extra-trees, not a published OrthoIV")
+                .compromise(NumericalCompromise::new(
+                    "econml OrthoIV",
+                    "OLS residualize Y, D, Z then extra-trees on Σ Z̃Ỹ / Σ Z̃D̃",
+                    "honesty, cross-fitting, and the published forest weights are omitted",
+                    "read CATE as an ensemble residual-Wald leaf",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedOrthoIv { trees })
+    }
+}
+
+/// Fitted orthogonal IV forest.
+#[derive(Clone, Debug)]
+pub struct FittedOrthoIv {
+    trees: Vec<CateNode>,
+}
+
+impl FittedOrthoIv {
+    /// Ensemble-mean residual-Wald leaf.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let m = self.trees.len().max(1) as f64;
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            if self.trees.is_empty() {
+                0.0
+            } else {
+                self.trees.iter().map(|t| walk_cate(t, x, i)).sum::<f64>() / m
+            }
+        })))
+    }
+}
+
+/// Deep CATE (econml `DeepCATE` / residual MLP Robinson).
+///
+/// Residualize \(Y,D\) on \(X\), map \(X\) through one tanh hidden unit, then
+/// OLS of \(\tilde Y\) on \(\tilde D[1,h]\). Hidden width is not identification
+/// `p`. Distinct from [`DeepIv`] (instrumented first stage) and [`RLearner`]
+/// (linear \(\varphi\)).
+#[derive(Clone, Debug)]
+pub struct DeepCate {
+    /// SGD steps for the hidden map. Not identification `p`.
+    pub max_iter: usize,
+}
+
+impl Default for DeepCate {
+    fn default() -> Self {
+        Self { max_iter: 40 }
+    }
+}
+
+impl DeepCate {
+    /// Default deep CATE.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Residualize, train a tanh sketch of \(X\), then Robinson OLS.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedDeepCate>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let idx: Vec<usize> = (0..n).collect();
+        if !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("DeepCate needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "deep CATE",
+                        "D̃ is unidentified with a single arm",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedDeepCate {
+                intercept: 0.0,
+                ate_h0: 0.0,
+                ate_h1: 0.0,
+                w: Vector::zeros(x.ncols()),
+                b: 0.0,
+            });
+        }
+        let (by, ay) = ols_arm(x, y, &idx, &ctx.policy);
+        let (bd, ad) = ols_arm(x, treat, &idx, &ctx.policy);
+        let yres = Vector::from_iter((0..n).map(|i| y[i] - mu_lin(x, i, ay, &by)));
+        let dres = Vector::from_iter((0..n).map(|i| treat[i] - mu_lin(x, i, ad, &bd)));
+        let mut w = Vector::from_iter((0..x.ncols()).map(|j| 0.1 * (j as f64 + 1.0)));
+        let mut bh = 0.0_f64;
+        let lr = 0.05_f64;
+        for _ in 0..self.max_iter.max(1) {
+            for i in 0..n {
+                let mut xb = bh;
+                for j in 0..x.ncols() {
+                    xb += w[j] * x.get(i, j);
+                }
+                let h = xb.clamp(-20.0, 20.0).tanh();
+                let pred = dres[i] * h;
+                let g = pred - yres[i];
+                let dh = (1.0 - h * h) * dres[i];
+                bh -= lr * g * dh;
+                for j in 0..x.ncols() {
+                    w[j] -= lr * g * dh * x.get(i, j);
+                }
+            }
+        }
+        let design = Matrix::from_fn(n, 2, |i, j| {
+            let mut xb = bh;
+            for c in 0..x.ncols() {
+                xb += w[c] * x.get(i, c);
+            }
+            let h = xb.clamp(-20.0, 20.0).tanh();
+            if j == 0 {
+                dres[i]
+            } else {
+                dres[i] * h
+            }
+        });
+        let mut scratch = Report::new("deep-cate", "ols");
+        let coef = least_squares(&mut scratch, &design, &yres, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(2));
+        for issue in scratch.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("DeepCate is a one-hidden tanh Robinson sketch, not a published DeepCATE")
+                .compromise(NumericalCompromise::new(
+                    "econml DeepCATE",
+                    "OLS residualize Y and D, tanh(X), Robinson OLS on D̃[1,h]",
+                    "cross-fitting, a deeper net, and a proper CATE loss are omitted",
+                    "read CATE as a one-hidden residual-ratio sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedDeepCate {
+            intercept: coef.as_slice().first().copied().unwrap_or(0.0),
+            ate_h0: coef.as_slice().first().copied().unwrap_or(0.0),
+            ate_h1: coef.as_slice().get(1).copied().unwrap_or(0.0),
+            w,
+            b: bh,
+        })
+    }
+}
+
+/// Fitted deep CATE.
+#[derive(Clone, Debug)]
+pub struct FittedDeepCate {
+    /// Unused intercept placeholder kept for API symmetry.
+    pub intercept: f64,
+    /// Slope on \(\tilde D\).
+    pub ate_h0: f64,
+    /// Slope on \(\tilde D\,h(X)\).
+    pub ate_h1: f64,
+    w: Vector,
+    b: f64,
+}
+
+impl FittedDeepCate {
+    /// Hidden-feature CATE.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut xb = self.b;
+            for j in 0..x.ncols().min(self.w.len()) {
+                xb += self.w[j] * x.get(i, j);
+            }
+            let h = xb.clamp(-20.0, 20.0).tanh();
+            self.ate_h0 + self.ate_h1 * h + 0.0 * self.intercept
+        })))
+    }
+}
+
+fn ista_l1(x: &Matrix, y: &Vector, alpha: f64, max_iter: usize) -> Vector {
+    let p = x.ncols();
+    let mut b = Vector::zeros(p);
+    if p == 0 || x.nrows() == 0 {
+        return b;
+    }
+    let mut lip = 0.0_f64;
+    for j in 0..p {
+        let mut s = 0.0_f64;
+        for i in 0..x.nrows() {
+            let v = x.get(i, j);
+            s += v * v;
+        }
+        lip = lip.max(s);
+    }
+    let step = 1.0 / lip.max(1e-6);
+    let a = if alpha.is_finite() && alpha >= 0.0 {
+        alpha
+    } else {
+        0.0
+    };
+    for _ in 0..max_iter.max(1) {
+        let pred = x.matvec(&b);
+        let r = pred.sub(y);
+        let g = x.matvec_t(&r);
+        for j in 0..p {
+            b[j] = soft_threshold(b[j] - step * g[j], step * a);
+        }
+    }
+    b
+}
+
+/// Sparse linear DRIV (econml `SparseLinearDRIV`).
+///
+/// AIPW \(\psi_Y,\psi_D\), then ISTA-\(L_1\) of \(\psi_Y\) on \(\psi_D[1,X]\).
+/// \(\alpha\) is not identification `p`. Distinct from [`Driv`] (scalar ratio)
+/// and [`SparseLinearDml`] (no instrument).
+#[derive(Clone, Debug)]
+pub struct SparseLinearDriv {
+    /// L1 level. Not identification `p`.
+    pub alpha: f64,
+}
+
+impl Default for SparseLinearDriv {
+    fn default() -> Self {
+        Self { alpha: 0.01 }
+    }
+}
+
+impl SparseLinearDriv {
+    /// Sparse DRIV with L1 `alpha`.
+    pub fn new(alpha: f64) -> Self {
+        Self { alpha }
+    }
+
+    /// Fit ISTA Robinson on AIPW scores.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        instrument: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSparseLinearDriv>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x
+            .nrows()
+            .min(y.len())
+            .min(treat.len())
+            .min(instrument.len());
+        let q = 1 + x.ncols();
+        let idx: Vec<usize> = (0..n).collect();
+        if !instrument_varies(instrument, &idx) || !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("SparseLinearDriv needs treatment and instrument variation")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "sparse linear DRIV",
+                        "AIPW ITT and the first stage need Z and D contrast",
+                        "collect a non-degenerate instrument and both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedSparseLinearDriv {
+                coef: Vector::zeros(q),
+            });
+        }
+        let (psi_y, _, _, _, _, _, _) = dr_pseudo_outcome(x, y, instrument, n, &ctx.policy);
+        let (psi_d, _, _, _, _, _, _) = dr_pseudo_outcome(x, treat, instrument, n, &ctx.policy);
+        let design = Matrix::from_fn(n, q, |i, j| {
+            if j == 0 {
+                psi_d[i]
+            } else {
+                psi_d[i] * x.get(i, j - 1)
+            }
+        });
+        let coef = ista_l1(&design, &psi_y, self.alpha, 40);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SparseLinearDriv is ISTA on AIPW scores, not Syrgkanis DRIV")
+                .compromise(NumericalCompromise::new(
+                    "econml SparseLinearDRIV",
+                    "AIPW(Z→Y) and AIPW(Z→D), then ISTA-L1 of ψY on ψD[1,X]",
+                    "cross-fitting, a CATE head, and the published penalty path are omitted",
+                    "read CATE as a sparse DR residual-ratio sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedSparseLinearDriv { coef })
+    }
+}
+
+/// Fitted sparse linear DRIV.
+#[derive(Clone, Debug)]
+pub struct FittedSparseLinearDriv {
+    /// Slopes on \([1,X]\).
+    pub coef: Vector,
+}
+
+impl FittedSparseLinearDriv {
+    /// Linear CATE.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.coef.as_slice().first().copied().unwrap_or(0.0);
+            for j in 0..x.ncols() {
+                if 1 + j < self.coef.len() {
+                    s += x.get(i, j) * self.coef[1 + j];
+                }
+            }
+            s
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -31156,6 +31671,39 @@ mod tests {
             orf.value
                 .predict_cate(&xate, &Session::new("orfp", "t"))
                 .expect("orfp")
+                .value
+                .len(),
+            20
+        );
+        let oiv = OrthoIv::new()
+            .fit(&xate, &dur, &grp, &ivz, &Session::new("oiv", "t"))
+            .expect("oiv");
+        assert_eq!(
+            oiv.value
+                .predict_cate(&xate, &Session::new("oivp", "t"))
+                .expect("oivp")
+                .value
+                .len(),
+            20
+        );
+        let dca = DeepCate::new()
+            .fit(&xate, &dur, &grp, &Session::new("dca", "t"))
+            .expect("dca");
+        assert_eq!(
+            dca.value
+                .predict_cate(&xate, &Session::new("dcap", "t"))
+                .expect("dcap")
+                .value
+                .len(),
+            20
+        );
+        let sldv = SparseLinearDriv::new(0.01)
+            .fit(&xate, &dur, &grp, &ivz, &Session::new("sldv", "t"))
+            .expect("sldv");
+        assert_eq!(
+            sldv.value
+                .predict_cate(&xate, &Session::new("sldvp", "t"))
+                .expect("sldvp")
                 .value
                 .len(),
             20

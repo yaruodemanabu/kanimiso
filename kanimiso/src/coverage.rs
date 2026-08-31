@@ -6508,6 +6508,31 @@ const INVENTORY: &[Algorithm] = &[
         "sklearn.cross_decomposition.PLSRegression",
         "estimator",
     ),
+    a(
+        "hmm.NegativeBinomialHmm",
+        "hmmlearn.hmm.PoissonHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.ZeroInflatedPoissonHmm",
+        "hmmlearn.hmm.PoissonHMM",
+        "hmm",
+    ),
+    a("hmm.DirichletHmm", "hmmlearn.hmm.MultinomialHMM", "hmm"),
+    a("stats.OrthoIv", "econml.iv.dml.OrthoIV", "estimator"),
+    a("stats.DeepCate", "econml.dml.DeepCATE", "estimator"),
+    a(
+        "stats.SparseLinearDriv",
+        "econml.iv.dr.SparseLinearDRIV",
+        "estimator",
+    ),
+    a(
+        "decompose.Lisrel",
+        "statsmodels.multivariate.factor.Factor",
+        "estimator",
+    ),
+    a("tslearn.Fluss", "sktime.annotation.clasp.FLUSS", "timeseries"),
+    a("tslearn.Stomp", "stumpy.stomp", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7053,6 +7078,10 @@ mod tests {
             "tslearn.Floss",
             "decompose.KernelCca",
             "linear_model.SparsePls",
+            "hmm.NegativeBinomialHmm",
+            "stats.OrthoIv",
+            "tslearn.Fluss",
+            "decompose.Lisrel",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
