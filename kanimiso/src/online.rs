@@ -54070,6 +54070,475 @@ impl Predict for KdeAnomaly {
     }
 }
 
+/// Relative density-based outlier score (Tang–He RDOS).
+///
+/// Score is mean Gaussian-KDE density on \(k\mathrm{NN}\cup RN_k\) over own
+/// KDE. Distinct from [`Inflo`] (\(1/k\)-distance density) and
+/// [`KdeAnomaly`] (\(-\log\) global KDE).
+#[derive(Clone, Debug)]
+pub struct Rdos {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for Rdos {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl Rdos {
+    /// Empty RDOS detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn dist_row(&self, x: &Matrix, i: usize, row: &[f64]) -> f64 {
+        let p = self.ncols.min(x.ncols()).min(row.len());
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return f64::INFINITY;
+            }
+            let d = z - row[j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn dist_stored(&self, a: usize, b: usize) -> f64 {
+        if a >= self.rows.len() || b >= self.rows.len() {
+            return f64::INFINITY;
+        }
+        let p = self.ncols;
+        if self.rows[a].len() < p || self.rows[b].len() < p {
+            return f64::INFINITY;
+        }
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let d = self.rows[a][j] - self.rows[b][j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn k_distance_stored(&self, idx: usize, k: usize) -> f64 {
+        let mut ds: Vec<f64> = (0..self.rows.len())
+            .filter(|&t| t != idx)
+            .map(|t| self.dist_stored(idx, t))
+            .filter(|d| d.is_finite())
+            .collect();
+        if ds.is_empty() {
+            return f64::INFINITY;
+        }
+        ds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        ds[(k.min(ds.len()) - 1).min(ds.len() - 1)]
+    }
+
+    fn bandwidth(&self, k: usize) -> f64 {
+        let mut s = 0.0_f64;
+        let mut n = 0.0_f64;
+        for t in 0..self.rows.len() {
+            let d = self.k_distance_stored(t, k);
+            if d.is_finite() && d > 1e-15 {
+                s += d;
+                n += 1.0;
+            }
+        }
+        if n < 1.0 {
+            1.0
+        } else {
+            (s / n).clamp(1e-3, 20.0)
+        }
+    }
+
+    fn kde_query(&self, x: &Matrix, i: usize, h2: f64) -> f64 {
+        let mut s = 0.0_f64;
+        let mut n = 0.0_f64;
+        for row in &self.rows {
+            let d = self.dist_row(x, i, row);
+            if d.is_finite() {
+                s += (-d * d / h2).exp();
+                n += 1.0;
+            }
+        }
+        if n < 1.0 {
+            0.0
+        } else {
+            s / n
+        }
+    }
+
+    fn kde_stored(&self, idx: usize, h2: f64) -> f64 {
+        let mut s = 0.0_f64;
+        let mut n = 0.0_f64;
+        for t in 0..self.rows.len() {
+            if t == idx {
+                continue;
+            }
+            let d = self.dist_stored(idx, t);
+            if d.is_finite() {
+                s += (-d * d / h2).exp();
+                n += 1.0;
+            }
+        }
+        if n < 1.0 {
+            0.0
+        } else {
+            s / n
+        }
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 3 || self.ncols == 0 {
+            return 0.0;
+        }
+        let k = 5.min(self.rows.len().saturating_sub(1)).max(1);
+        let mut qds: Vec<(f64, usize)> = self
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(t, row)| (self.dist_row(x, i, row), t))
+            .filter(|(d, _)| d.is_finite() && *d > 1e-15)
+            .collect();
+        if qds.len() < k {
+            return 0.0;
+        }
+        qds.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut infl: Vec<usize> = qds.iter().take(k).map(|(_, t)| *t).collect();
+        for t in 0..self.rows.len() {
+            let d = self.dist_row(x, i, &self.rows[t]);
+            if d.is_finite() && d <= self.k_distance_stored(t, k) && !infl.contains(&t) {
+                infl.push(t);
+            }
+        }
+        if infl.is_empty() {
+            return 0.0;
+        }
+        let h = self.bandwidth(k);
+        let h2 = (2.0 * h * h).max(1e-12);
+        let own = self.kde_query(x, i, h2).max(1e-18);
+        let mut mean = 0.0_f64;
+        for &t in &infl {
+            mean += self.kde_stored(t, h2);
+        }
+        mean / (infl.len() as f64 * own)
+    }
+}
+
+impl PartialFit for Rdos {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 3;
+        q.warmup = self.rows.len() < 3;
+        q.explanation = format!("RDOS reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "relative KDE scores on kNN∪RN",
+                "RDOS is mean KDE of influence space over own KDE; not INFLO/KdeAnomaly",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for Rdos {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
+/// Local density factor (Latecki–Lazarevic–Pokrajac LDF).
+///
+/// Score is mean variable-bandwidth KDE of the \(k\)-NN over own KDE, with
+/// \(h(y)=k\)-distance of \(y\). Distinct from [`KdeAnomaly`] (global
+/// Silverman \(h\)) and [`Rdos`] (fixed \(h\), reverse neighbours).
+#[derive(Clone, Debug)]
+pub struct Ldf {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for Ldf {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl Ldf {
+    /// Empty LDF detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn dist_row(&self, x: &Matrix, i: usize, row: &[f64]) -> f64 {
+        let p = self.ncols.min(x.ncols()).min(row.len());
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return f64::INFINITY;
+            }
+            let d = z - row[j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn dist_stored(&self, a: usize, b: usize) -> f64 {
+        if a >= self.rows.len() || b >= self.rows.len() {
+            return f64::INFINITY;
+        }
+        let p = self.ncols;
+        if self.rows[a].len() < p || self.rows[b].len() < p {
+            return f64::INFINITY;
+        }
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let d = self.rows[a][j] - self.rows[b][j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn k_distance_stored(&self, idx: usize, k: usize) -> f64 {
+        let mut ds: Vec<f64> = (0..self.rows.len())
+            .filter(|&t| t != idx)
+            .map(|t| self.dist_stored(idx, t))
+            .filter(|d| d.is_finite())
+            .collect();
+        if ds.is_empty() {
+            return f64::INFINITY;
+        }
+        ds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        ds[(k.min(ds.len()) - 1).min(ds.len() - 1)]
+    }
+
+    fn knn_stored(&self, idx: usize, k: usize) -> Vec<usize> {
+        let mut ds: Vec<(f64, usize)> = (0..self.rows.len())
+            .filter(|&t| t != idx)
+            .map(|t| (self.dist_stored(idx, t), t))
+            .filter(|(d, _)| d.is_finite())
+            .collect();
+        ds.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        ds.into_iter().take(k).map(|(_, t)| t).collect()
+    }
+
+    fn rho_from(&self, ds: &[(f64, usize)], k: usize) -> f64 {
+        if ds.is_empty() {
+            return 0.0;
+        }
+        let mut s = 0.0_f64;
+        let mut n = 0.0_f64;
+        for &(d, t) in ds {
+            let h = self.k_distance_stored(t, k).max(1e-12);
+            s += (-d * d / (2.0 * h * h)).exp() / h;
+            n += 1.0;
+        }
+        if n < 1.0 {
+            0.0
+        } else {
+            s / n
+        }
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 3 || self.ncols == 0 {
+            return 0.0;
+        }
+        let k = 5.min(self.rows.len().saturating_sub(1)).max(1);
+        let mut qds: Vec<(f64, usize)> = self
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(t, row)| (self.dist_row(x, i, row), t))
+            .filter(|(d, _)| d.is_finite() && *d > 1e-15)
+            .collect();
+        if qds.len() < k {
+            return 0.0;
+        }
+        qds.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let neigh: Vec<(f64, usize)> = qds.into_iter().take(k).collect();
+        let own = self.rho_from(&neigh, k).max(1e-18);
+        let mut mean = 0.0_f64;
+        let mut n = 0.0_f64;
+        for &(_, t) in &neigh {
+            let tn = self.knn_stored(t, k);
+            let tds: Vec<(f64, usize)> = tn.iter().map(|&u| (self.dist_stored(t, u), u)).collect();
+            mean += self.rho_from(&tds, k);
+            n += 1.0;
+        }
+        if n < 1.0 {
+            0.0
+        } else {
+            mean / (n * own)
+        }
+    }
+}
+
+impl PartialFit for Ldf {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 3;
+        q.warmup = self.rows.len() < 3;
+        q.explanation = format!("LDF reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "variable-bandwidth local density ratios",
+                "LDF uses k-distance kernels on kNN; not RDOS/KdeAnomaly",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for Ldf {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55030,6 +55499,12 @@ mod tests {
         KdeAnomaly::new()
             .partial_fit(&x, None, &session)
             .expect("kda");
+        Rdos::new()
+            .partial_fit(&x, None, &session)
+            .expect("rdo");
+        Ldf::new()
+            .partial_fit(&x, None, &session)
+            .expect("ldf");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

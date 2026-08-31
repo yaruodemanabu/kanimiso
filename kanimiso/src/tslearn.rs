@@ -3545,6 +3545,129 @@ pub fn cdist_taneja(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualifi
     ctx.finish(out)
 }
 
+fn kumar_johnson_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let p = (a[i].abs() / sa).max(1e-18);
+        let q = (b[i].abs() / sb).max(1e-18);
+        let d2 = p * p - q * q;
+        s += d2 * d2 / (2.0 * (p * q).powf(1.5));
+    }
+    s.max(0.0)
+}
+
+fn harmonic_mean_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let p = (a[i].abs() / sa).max(1e-18);
+        let q = (b[i].abs() / sb).max(1e-18);
+        s += 2.0 * p * q / (p + q);
+    }
+    (1.0 - s).max(0.0)
+}
+
+/// Kumar–Johnson distance \(\sum(p^2-q^2)^2/(2(pq)^{3/2})\) after \(\ell_1\).
+///
+/// Distinct from [`pearson_chi_squared_distance`] and [`taneja_distance`].
+/// Identical series score 0.
+pub fn kumar_johnson_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("kumar_johnson_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("kumar_johnson_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("kumar_johnson_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(kumar_johnson_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Kumar–Johnson distance.
+pub fn cdist_kumar_johnson(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        kumar_johnson_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+/// Harmonic-mean distance \(1-2\sum pq/(p+q)\) after \(\ell_1\).
+///
+/// Distinct from [`dice_distance`] (\(2\sum\min\)) and [`tanimoto_distance`].
+/// Identical series score 0.
+pub fn harmonic_mean_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("harmonic_mean_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("harmonic_mean_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("harmonic_mean_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(harmonic_mean_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise harmonic-mean distance.
+pub fn cdist_harmonic_mean(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        harmonic_mean_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -22219,6 +22342,10 @@ mod tests {
         assert!(top.abs() < 1e-12, "topsoe_distance={top}");
         let tne = taneja_distance(&a, &a, &Session::new("ts", "tne")).unwrap().value;
         assert!(tne.abs() < 1e-12, "taneja_distance={tne}");
+        let kjn = kumar_johnson_distance(&a, &a, &Session::new("ts", "kjn")).unwrap().value;
+        assert!(kjn.abs() < 1e-12, "kumar_johnson_distance={kjn}");
+        let hmn = harmonic_mean_distance(&a, &a, &Session::new("ts", "hmn")).unwrap().value;
+        assert!(hmn.abs() < 1e-12, "harmonic_mean_distance={hmn}");
     }
 
     #[test]
@@ -23421,6 +23548,16 @@ mod tests {
             .value;
         assert_eq!(ctj.shape(), (8, 8));
         assert!(ctj.get(0, 0).abs() < 1e-12);
+        let ckj = cdist_kumar_johnson(&x, &x, &Session::new("ts", "ckj"))
+            .unwrap()
+            .value;
+        assert_eq!(ckj.shape(), (8, 8));
+        assert!(ckj.get(0, 0).abs() < 1e-12);
+        let chm = cdist_harmonic_mean(&x, &x, &Session::new("ts", "chm"))
+            .unwrap()
+            .value;
+        assert_eq!(chm.shape(), (8, 8));
+        assert!(chm.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

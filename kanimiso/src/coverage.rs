@@ -7600,6 +7600,45 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.UnitRayleighHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaRayleighHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.ExponentiatedRayleighHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.KumaraswamyNakagamiHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.DiscreteInverseNakagamiHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("online.Rdos", "river.anomaly.HalfSpaceTrees", "online"),
+    a("online.Ldf", "river.anomaly.GaussianScorer", "online"),
+    a(
+        "tslearn.kumar_johnson_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_kumar_johnson",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.harmonic_mean_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_harmonic_mean",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8532,6 +8571,17 @@ mod tests {
             "tslearn.cdist_topsoe",
             "tslearn.taneja_distance",
             "tslearn.cdist_taneja",
+            "hmm.UnitRayleighHmm",
+            "hmm.BetaRayleighHmm",
+            "hmm.ExponentiatedRayleighHmm",
+            "hmm.KumaraswamyNakagamiHmm",
+            "hmm.DiscreteInverseNakagamiHmm",
+            "online.Rdos",
+            "online.Ldf",
+            "tslearn.kumar_johnson_distance",
+            "tslearn.cdist_kumar_johnson",
+            "tslearn.harmonic_mean_distance",
+            "tslearn.cdist_harmonic_mean",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
