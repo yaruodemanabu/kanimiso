@@ -7339,6 +7339,41 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.DiscreteGompertzHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaWeibullHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.MarshallOlkinChenHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.BetaGompertzHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.DiscreteInverseGammaHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("online.AdaRank", "river.reco.FM", "online"),
+    a("online.Inne", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.kulczynski_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_kulczynski",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.ruzicka_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_ruzicka",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8194,6 +8229,17 @@ mod tests {
             "tslearn.cdist_tanimoto",
             "tslearn.wave_hedges_distance",
             "tslearn.cdist_wave_hedges",
+            "hmm.DiscreteGompertzHmm",
+            "hmm.BetaWeibullHmm",
+            "hmm.MarshallOlkinChenHmm",
+            "hmm.BetaGompertzHmm",
+            "hmm.DiscreteInverseGammaHmm",
+            "online.AdaRank",
+            "online.Inne",
+            "tslearn.kulczynski_distance",
+            "tslearn.cdist_kulczynski",
+            "tslearn.ruzicka_distance",
+            "tslearn.cdist_ruzicka",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

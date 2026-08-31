@@ -2681,6 +2681,112 @@ pub fn cdist_wave_hedges(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qu
     ctx.finish(out)
 }
 
+fn kulczynski_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut num = 0.0_f64;
+    let mut den = 0.0_f64;
+    for i in 0..n {
+        num += (a[i] - b[i]).abs();
+        den += a[i].abs().min(b[i].abs());
+    }
+    if den < 1e-18 {
+        return 0.0;
+    }
+    num / den
+}
+
+fn ruzicka_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut nmin = 0.0_f64;
+    let mut nmax = 0.0_f64;
+    for i in 0..n {
+        nmin += a[i].abs().min(b[i].abs());
+        nmax += a[i].abs().max(b[i].abs());
+    }
+    if nmax < 1e-18 {
+        return 0.0;
+    }
+    1.0 - nmin / nmax
+}
+
+/// Kulczynski distance \(\sum|a_i-b_i|/\sum\min(|a_i|,|b_i|)\).
+///
+/// Distinct from [`wave_hedges_distance`] (per-coordinate max) and
+/// [`canberra_distance`]. Identical series score 0.
+pub fn kulczynski_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("kulczynski_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("kulczynski_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("kulczynski_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(kulczynski_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Kulczynski distance.
+pub fn cdist_kulczynski(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        kulczynski_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+/// Ruzicka distance \(1-\sum\min(|a_i|,|b_i|)/\sum\max(|a_i|,|b_i|)\).
+///
+/// Distinct from [`tanimoto_distance`] (inner-product form) and
+/// [`dice_distance`]. Identical series score 0.
+pub fn ruzicka_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("ruzicka_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("ruzicka_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("ruzicka_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(ruzicka_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Ruzicka distance.
+pub fn cdist_ruzicka(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        ruzicka_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -21327,6 +21433,10 @@ mod tests {
         assert!(tan.abs() < 1e-12, "tanimoto_distance={tan}");
         let wav = wave_hedges_distance(&a, &a, &Session::new("ts", "wav")).unwrap().value;
         assert!(wav.abs() < 1e-12, "wave_hedges_distance={wav}");
+        let kul = kulczynski_distance(&a, &a, &Session::new("ts", "kul")).unwrap().value;
+        assert!(kul.abs() < 1e-12, "kulczynski_distance={kul}");
+        let ruz = ruzicka_distance(&a, &a, &Session::new("ts", "ruz")).unwrap().value;
+        assert!(ruz.abs() < 1e-12, "ruzicka_distance={ruz}");
     }
 
     #[test]
@@ -22459,6 +22569,16 @@ mod tests {
             .value;
         assert_eq!(cwa.shape(), (8, 8));
         assert!(cwa.get(0, 0).abs() < 1e-12);
+        let cku = cdist_kulczynski(&x, &x, &Session::new("ts", "cku"))
+            .unwrap()
+            .value;
+        assert_eq!(cku.shape(), (8, 8));
+        assert!(cku.get(0, 0).abs() < 1e-12);
+        let cru = cdist_ruzicka(&x, &x, &Session::new("ts", "cru"))
+            .unwrap()
+            .value;
+        assert_eq!(cru.shape(), (8, 8));
+        assert!(cru.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;
