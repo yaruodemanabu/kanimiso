@@ -8475,6 +8475,19 @@ const INVENTORY: &[Algorithm] = &[
         "timeseries",
     ),
     a("tslearn.cdist_minkowski27_l1", "tslearn.metrics.cdist", "timeseries"),
+    a("hmm.UnitAdditiveWeibullHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaAdditiveWeibullHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ExponentiatedAdditiveWeibullHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.KumaraswamyAdditiveWeibullHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.DiscreteAdditiveWeibullHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.WindowLag17", "river.anomaly.GaussianScorer", "online"),
+    a("online.LogEuclideanAnomaly", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.minkowski29_l1_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a("tslearn.cdist_minkowski29_l1", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -9802,6 +9815,15 @@ mod tests {
             "online.IDivergenceAnomaly",
             "tslearn.minkowski27_l1_distance",
             "tslearn.cdist_minkowski27_l1",
+            "hmm.UnitAdditiveWeibullHmm",
+            "hmm.BetaAdditiveWeibullHmm",
+            "hmm.ExponentiatedAdditiveWeibullHmm",
+            "hmm.KumaraswamyAdditiveWeibullHmm",
+            "hmm.DiscreteAdditiveWeibullHmm",
+            "online.WindowLag17",
+            "online.LogEuclideanAnomaly",
+            "tslearn.minkowski29_l1_distance",
+            "tslearn.cdist_minkowski29_l1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

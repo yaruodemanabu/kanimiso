@@ -100758,6 +100758,1206 @@ let mut n_skip = 0usize;
     }
 }
 
+
+fn aw_cdf(y: f64, a: f64, b: f64, c: f64, d: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || a <= 0.0 || b <= 0.0 || c <= 0.0 || d <= 0.0 {
+        return 0.0;
+    }
+    let yb = y.powf(b);
+    let yd = y.powf(d);
+    if !yb.is_finite() || !yd.is_finite() {
+        return 1.0 - 1e-15;
+    }
+    let h = a * yb + c * yd;
+    if !h.is_finite() {
+        return 1.0 - 1e-15;
+    }
+    let s = (-h).exp();
+    if !s.is_finite() {
+        return 1.0 - 1e-15;
+    }
+    (1.0 - s).clamp(0.0, 1.0 - 1e-15)
+}
+
+fn log_unit_aw(y: f64, a: f64, b: f64, c: f64, d: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || y >= 1.0 || a <= 0.0 || b <= 0.0 || c <= 0.0 || d <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    log_additive_weibull(y / (1.0 - y), a, b, c, d) - 2.0 * (1.0 - y).ln()
+}
+
+fn log_beta_aw(y: f64, a: f64, b: f64, c: f64, d: f64, alpha: f64, beta: f64) -> f64 {
+    if !y.is_finite()
+        || y <= 0.0
+        || a <= 0.0
+        || b <= 0.0
+        || c <= 0.0
+        || d <= 0.0
+        || alpha <= 0.0
+        || beta <= 0.0
+    {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = aw_cdf(y, a, b, c, d);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let surv = (1.0 - cdf).max(1e-15);
+    log_additive_weibull(y, a, b, c, d) + (alpha - 1.0) * cdf.ln() + (beta - 1.0) * surv.ln()
+        - ln_beta(alpha, beta)
+}
+
+fn log_exp_aw(y: f64, a: f64, b: f64, c: f64, d: f64, power: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || a <= 0.0 || b <= 0.0 || c <= 0.0 || d <= 0.0 || power <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = aw_cdf(y, a, b, c, d);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    power.ln() + log_additive_weibull(y, a, b, c, d) + (power - 1.0) * cdf.ln()
+}
+
+fn log_kuma_aw(y: f64, a: f64, b: f64, c: f64, d: f64, alpha: f64, beta: f64) -> f64 {
+    if !y.is_finite()
+        || y <= 0.0
+        || a <= 0.0
+        || b <= 0.0
+        || c <= 0.0
+        || d <= 0.0
+        || alpha <= 0.0
+        || beta <= 0.0
+    {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = aw_cdf(y, a, b, c, d);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let fa = cdf.powf(alpha);
+    let one_m = 1.0 - fa;
+    if one_m <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    alpha.ln()
+        + beta.ln()
+        + log_additive_weibull(y, a, b, c, d)
+        + (alpha - 1.0) * cdf.ln()
+        + (beta - 1.0) * one_m.ln()
+}
+
+fn log_disc_aw(y: f64, a: f64, b: f64, c: f64, d: f64) -> f64 {
+    if !y.is_finite() || y < 1.0 || a <= 0.0 || b <= 0.0 || c <= 0.0 || d <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let k = y.round().max(1.0);
+    let p = (aw_cdf(k + 1.0, a, b, c, d) - aw_cdf(k, a, b, c, d)).max(0.0);
+    if p <= 1e-300 {
+        return f64::NEG_INFINITY;
+    }
+    p.ln()
+}
+
+/// Unit additive-Weibull HMM on $(0,1)$ (AW on $u=x/(1-x)$).
+///
+/// First weight $a$ is free from $\mathbb{E}[U^b]$; powers $b\neq 1$, $d\neq b$ and second weight $c$ are pinned, not identification `p`. Distinct from [`AdditiveWeibullHmm`] (half-line) and [`UnitHjorthHmm`].
+#[derive(Clone, Debug)]
+pub struct UnitAdditiveWeibullHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for UnitAdditiveWeibullHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl UnitAdditiveWeibullHmm {
+    /// `k`-state UnitAdditiveWeibullHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitAdditiveWeibullHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted UnitAdditiveWeibullHmm.
+#[derive(Clone, Debug)]
+pub struct FittedUnitAdditiveWeibullHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// First hazard weights \(a_j\).
+    pub scale: Vector,
+    /// Pinned first powers \(b_j\neq 1\).
+    pub shape: Vector,
+    /// Pinned second hazard weights \(c_j\).
+    pub rate2: Vector,
+    /// Pinned second powers \(d_j\neq b_j\).
+    pub power2: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedUnitAdditiveWeibullHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_unit_aw(y, self.scale[j], self.shape[j], self.rate2[j], self.power2[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedUnitAdditiveWeibullHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for UnitAdditiveWeibullHmm {
+    type Fitted = FittedUnitAdditiveWeibullHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitAdditiveWeibullHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.75 + 0.15 * j as f64));
+        let rate2 = Vector::from_iter((0..k).map(|j| 0.10 + 0.06 * j as f64));
+        let power2 = Vector::from_iter((0..k).map(|j| 1.45 + 0.20 * j as f64));
+let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0 || y >= 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "UnitAdditiveWeibullHmm skipped {n_skip} observations outside (0,1)"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedUnitAdditiveWeibullHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.55),
+                shape,
+                rate2,
+                power2,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.55 + 0.12 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedUnitAdditiveWeibullHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                rate2: rate2.clone(),
+                power2: power2.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wb = 0.0_f64;
+                let bj: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 || y >= 1.0 {
+                        continue;
+                    }
+                    let z = y / (1.0 - y);
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    let zb = z.powf(bj);
+                    if !zb.is_finite() || zb > 1.0e6 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wb += fb.gamma[t][j] * zb;
+                }
+                if wsum > 1e-12 && wb > 1e-18 {
+                    scale[j] = (0.5 * wsum / wb).clamp(0.40, 0.75);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedUnitAdditiveWeibullHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            rate2: rate2.clone(),
+            power2: power2.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedUnitAdditiveWeibullHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            rate2,
+            power2,
+            loglik,
+        })
+    }
+}
+
+/// Beta–additive-Weibull HMM ($f F^{a-1}(1-F)^{b-1}/B(a,b)$, $a,b\neq 1$).
+///
+/// Extra shapes and $b\neq 1$, $d\neq b$, $c$ are hyperparameters, not identification `p`. Distinct from [`KumaraswamyAdditiveWeibullHmm`] and [`BetaWeibullHmm`].
+#[derive(Clone, Debug)]
+pub struct BetaAdditiveWeibullHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for BetaAdditiveWeibullHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl BetaAdditiveWeibullHmm {
+    /// `k`-state BetaAdditiveWeibullHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaAdditiveWeibullHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted BetaAdditiveWeibullHmm.
+#[derive(Clone, Debug)]
+pub struct FittedBetaAdditiveWeibullHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// First hazard weights \(a_j\).
+    pub scale: Vector,
+    /// Pinned first powers \(b_j\neq 1\).
+    pub shape: Vector,
+    /// Pinned second hazard weights \(c_j\).
+    pub rate2: Vector,
+    /// Pinned second powers \(d_j\neq b_j\).
+    pub power2: Vector,
+    /// First extra shapes \(a_j\neq 1\).
+    pub a: Vector,
+    /// Second extra shapes \(b_j\neq 1\).
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedBetaAdditiveWeibullHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_beta_aw(y, self.scale[j], self.shape[j], self.rate2[j], self.power2[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedBetaAdditiveWeibullHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for BetaAdditiveWeibullHmm {
+    type Fitted = FittedBetaAdditiveWeibullHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaAdditiveWeibullHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.70 + 0.15 * j as f64));
+        let rate2 = Vector::from_iter((0..k).map(|j| 0.015 + 0.010 * j as f64));
+        let power2 = Vector::from_iter((0..k).map(|j| 1.70 + 0.20 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.5 + 0.3 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 2.2 + 0.4 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "BetaAdditiveWeibullHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedBetaAdditiveWeibullHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.14),
+                shape,
+                rate2,
+                power2,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.14 + 0.06 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedBetaAdditiveWeibullHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                rate2: rate2.clone(),
+                power2: power2.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wb = 0.0_f64;
+                let bj: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    let zb = z.powf(bj);
+                    if !zb.is_finite() || zb > 1.0e6 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wb += fb.gamma[t][j] * zb;
+                }
+                if wsum > 1e-12 && wb > 1e-18 {
+                    scale[j] = (0.5 * wsum / wb).clamp(0.08, 0.28);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedBetaAdditiveWeibullHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            rate2: rate2.clone(),
+            power2: power2.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedBetaAdditiveWeibullHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            rate2,
+            power2,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Exponentiated additive-Weibull HMM ($F^\alpha$, $\alpha\neq 1$).
+///
+/// Extra CDF power and $b\neq 1$, $d\neq b$, $c$ are hyperparameters, not identification `p`. Distinct from [`KumaraswamyAdditiveWeibullHmm`] and [`ExponentiatedExponentialHmm`].
+#[derive(Clone, Debug)]
+pub struct ExponentiatedAdditiveWeibullHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for ExponentiatedAdditiveWeibullHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl ExponentiatedAdditiveWeibullHmm {
+    /// `k`-state ExponentiatedAdditiveWeibullHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedAdditiveWeibullHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted ExponentiatedAdditiveWeibullHmm.
+#[derive(Clone, Debug)]
+pub struct FittedExponentiatedAdditiveWeibullHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// First hazard weights \(a_j\).
+    pub scale: Vector,
+    /// Pinned first powers \(b_j\neq 1\).
+    pub shape: Vector,
+    /// Pinned second hazard weights \(c_j\).
+    pub rate2: Vector,
+    /// Pinned second powers \(d_j\neq b_j\).
+    pub power2: Vector,
+    /// Extra CDF powers \(\alpha_j\neq 1\).
+    pub alpha: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedExponentiatedAdditiveWeibullHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_exp_aw(y, self.scale[j], self.shape[j], self.rate2[j], self.power2[j], self.alpha[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedExponentiatedAdditiveWeibullHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for ExponentiatedAdditiveWeibullHmm {
+    type Fitted = FittedExponentiatedAdditiveWeibullHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedAdditiveWeibullHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.70 + 0.15 * j as f64));
+        let rate2 = Vector::from_iter((0..k).map(|j| 0.015 + 0.010 * j as f64));
+        let power2 = Vector::from_iter((0..k).map(|j| 1.70 + 0.20 * j as f64));
+        let alpha = Vector::from_iter((0..k).map(|j| 1.6 + 0.3 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "ExponentiatedAdditiveWeibullHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedExponentiatedAdditiveWeibullHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.14),
+                shape,
+                rate2,
+                power2,
+                alpha,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.14 + 0.06 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedExponentiatedAdditiveWeibullHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                rate2: rate2.clone(),
+                power2: power2.clone(),
+                alpha: alpha.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wb = 0.0_f64;
+                let bj: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    let zb = z.powf(bj);
+                    if !zb.is_finite() || zb > 1.0e6 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wb += fb.gamma[t][j] * zb;
+                }
+                if wsum > 1e-12 && wb > 1e-18 {
+                    scale[j] = (0.5 * wsum / wb).clamp(0.08, 0.28);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedExponentiatedAdditiveWeibullHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            rate2: rate2.clone(),
+            power2: power2.clone(),
+                alpha: alpha.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedExponentiatedAdditiveWeibullHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            rate2,
+            power2,
+            alpha,
+            loglik,
+        })
+    }
+}
+
+/// Kumaraswamy–additive-Weibull HMM ($ab f F^{a-1}(1-F^a)^{b-1}$, $a,b\neq 1$).
+///
+/// Extra shapes and $b\neq 1$, $d\neq b$, $c$ are hyperparameters, not identification `p`. Distinct from [`BetaAdditiveWeibullHmm`] and [`KumaraswamyWeibullHmm`].
+#[derive(Clone, Debug)]
+pub struct KumaraswamyAdditiveWeibullHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for KumaraswamyAdditiveWeibullHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl KumaraswamyAdditiveWeibullHmm {
+    /// `k`-state KumaraswamyAdditiveWeibullHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyAdditiveWeibullHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted KumaraswamyAdditiveWeibullHmm.
+#[derive(Clone, Debug)]
+pub struct FittedKumaraswamyAdditiveWeibullHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// First hazard weights \(a_j\).
+    pub scale: Vector,
+    /// Pinned first powers \(b_j\neq 1\).
+    pub shape: Vector,
+    /// Pinned second hazard weights \(c_j\).
+    pub rate2: Vector,
+    /// Pinned second powers \(d_j\neq b_j\).
+    pub power2: Vector,
+    /// First extra shapes \(a_j\neq 1\).
+    pub a: Vector,
+    /// Second extra shapes \(b_j\neq 1\).
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedKumaraswamyAdditiveWeibullHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_kuma_aw(y, self.scale[j], self.shape[j], self.rate2[j], self.power2[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedKumaraswamyAdditiveWeibullHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for KumaraswamyAdditiveWeibullHmm {
+    type Fitted = FittedKumaraswamyAdditiveWeibullHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyAdditiveWeibullHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.70 + 0.15 * j as f64));
+        let rate2 = Vector::from_iter((0..k).map(|j| 0.015 + 0.010 * j as f64));
+        let power2 = Vector::from_iter((0..k).map(|j| 1.70 + 0.20 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.4 + 0.25 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 1.8 + 0.3 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "KumaraswamyAdditiveWeibullHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedKumaraswamyAdditiveWeibullHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.14),
+                shape,
+                rate2,
+                power2,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.14 + 0.06 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedKumaraswamyAdditiveWeibullHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                rate2: rate2.clone(),
+                power2: power2.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wb = 0.0_f64;
+                let bj: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    let zb = z.powf(bj);
+                    if !zb.is_finite() || zb > 1.0e6 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wb += fb.gamma[t][j] * zb;
+                }
+                if wsum > 1e-12 && wb > 1e-18 {
+                    scale[j] = (0.5 * wsum / wb).clamp(0.08, 0.28);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedKumaraswamyAdditiveWeibullHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            rate2: rate2.clone(),
+            power2: power2.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedKumaraswamyAdditiveWeibullHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            rate2,
+            power2,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Discrete additive-Weibull HMM ($P(K=k)=F(k+1)-F(k)$ on $\{1,2,\ldots\}$).
+///
+/// First weight $a$ is free from $\mathbb{E}[K^b]$; $b\neq 1$, $d\neq b$, $c$ are pinned, not identification `p`. Distinct from [`AdditiveWeibullHmm`] (continuous) and [`DiscreteHjorthHmm`].
+#[derive(Clone, Debug)]
+pub struct DiscreteAdditiveWeibullHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for DiscreteAdditiveWeibullHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl DiscreteAdditiveWeibullHmm {
+    /// `k`-state DiscreteAdditiveWeibullHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteAdditiveWeibullHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted DiscreteAdditiveWeibullHmm.
+#[derive(Clone, Debug)]
+pub struct FittedDiscreteAdditiveWeibullHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// First hazard weights \(a_j\).
+    pub scale: Vector,
+    /// Pinned first powers \(b_j\neq 1\).
+    pub shape: Vector,
+    /// Pinned second hazard weights \(c_j\).
+    pub rate2: Vector,
+    /// Pinned second powers \(d_j\neq b_j\).
+    pub power2: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedDiscreteAdditiveWeibullHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_disc_aw(y, self.scale[j], self.shape[j], self.rate2[j], self.power2[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedDiscreteAdditiveWeibullHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for DiscreteAdditiveWeibullHmm {
+    type Fitted = FittedDiscreteAdditiveWeibullHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteAdditiveWeibullHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.70 + 0.15 * j as f64));
+        let rate2 = Vector::from_iter((0..k).map(|j| 0.018 + 0.010 * j as f64));
+        let power2 = Vector::from_iter((0..k).map(|j| 1.45 + 0.20 * j as f64));
+let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y < 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "DiscreteAdditiveWeibullHmm skipped {n_skip} observations below 1"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedDiscreteAdditiveWeibullHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.14),
+                shape,
+                rate2,
+                power2,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.14 + 0.06 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedDiscreteAdditiveWeibullHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                rate2: rate2.clone(),
+                power2: power2.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wb = 0.0_f64;
+                let bj: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y < 1.0 {
+                        continue;
+                    }
+                    let z = y.round().max(1.0);
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    let zb = z.powf(bj);
+                    if !zb.is_finite() || zb > 1.0e6 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wb += fb.gamma[t][j] * zb;
+                }
+                if wsum > 1e-12 && wb > 1e-18 {
+                    scale[j] = (0.5 * wsum / wb).clamp(0.08, 0.28);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedDiscreteAdditiveWeibullHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            rate2: rate2.clone(),
+            power2: power2.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedDiscreteAdditiveWeibullHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            rate2,
+            power2,
+            loglik,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102642,6 +103842,26 @@ mod tests {
             .expect("khj");
         assert_eq!(khj.value.labels.len(), 80);
         assert!(khj.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let uwb = UnitAdditiveWeibullHmm::new(2)
+            .fit(&betx, &Session::new("uwb", "fit"))
+            .expect("uwb");
+        assert_eq!(uwb.value.labels.len(), 80);
+        assert!(uwb.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let bwb = BetaAdditiveWeibullHmm::new(2)
+            .fit(&xpos, &Session::new("bwb", "fit"))
+            .expect("bwb");
+        assert_eq!(bwb.value.labels.len(), 80);
+        assert!(bwb.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let ewb = ExponentiatedAdditiveWeibullHmm::new(2)
+            .fit(&xpos, &Session::new("ewb", "fit"))
+            .expect("ewb");
+        assert_eq!(ewb.value.labels.len(), 80);
+        assert!(ewb.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let kwb = KumaraswamyAdditiveWeibullHmm::new(2)
+            .fit(&xpos, &Session::new("kwb", "fit"))
+            .expect("kwb");
+        assert_eq!(kwb.value.labels.len(), 80);
+        assert!(kwb.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
@@ -103283,6 +104503,11 @@ mod tests {
             .expect("dhj");
         assert_eq!(dhj.value.labels.len(), 40);
         assert!(dhj.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let dwb = DiscreteAdditiveWeibullHmm::new(2)
+            .fit(&x, &Session::new("dwb", "fit"))
+            .expect("dwb");
+        assert_eq!(dwb.value.labels.len(), 40);
+        assert!(dwb.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
     }
 
     #[test]
