@@ -98364,6 +98364,1194 @@ let mut n_skip = 0usize;
     }
 }
 
+
+fn nh_cdf(y: f64, alpha: f64, beta: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || alpha <= 0.0 || beta <= 0.0 {
+        return 0.0;
+    }
+    let u = 1.0 + beta * y;
+    if !u.is_finite() || u <= 1.0 {
+        return 0.0;
+    }
+    let ua = u.powf(alpha);
+    if !ua.is_finite() || ua > 80.0 {
+        return 1.0 - 1e-15;
+    }
+    let s = (1.0 - ua).exp();
+    if !s.is_finite() {
+        return 1.0 - 1e-15;
+    }
+    (1.0 - s).clamp(0.0, 1.0 - 1e-15)
+}
+
+fn log_unit_nh(y: f64, beta: f64, alpha: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || y >= 1.0 || beta <= 0.0 || alpha <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    log_nadarajah_haghighi(y / (1.0 - y), alpha, beta) - 2.0 * (1.0 - y).ln()
+}
+
+fn log_beta_nh(y: f64, beta: f64, alpha: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || beta <= 0.0 || alpha <= 0.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = nh_cdf(y, alpha, beta);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let surv = (1.0 - cdf).max(1e-15);
+    log_nadarajah_haghighi(y, alpha, beta) + (a - 1.0) * cdf.ln() + (b - 1.0) * surv.ln()
+        - ln_beta(a, b)
+}
+
+fn log_exp_nh(y: f64, beta: f64, alpha: f64, power: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || beta <= 0.0 || alpha <= 0.0 || power <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = nh_cdf(y, alpha, beta);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    power.ln() + log_nadarajah_haghighi(y, alpha, beta) + (power - 1.0) * cdf.ln()
+}
+
+fn log_kuma_nh(y: f64, beta: f64, alpha: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || beta <= 0.0 || alpha <= 0.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = nh_cdf(y, alpha, beta);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let fa = cdf.powf(a);
+    let one_m = 1.0 - fa;
+    if one_m <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    a.ln()
+        + b.ln()
+        + log_nadarajah_haghighi(y, alpha, beta)
+        + (a - 1.0) * cdf.ln()
+        + (b - 1.0) * one_m.ln()
+}
+
+fn log_disc_nh(y: f64, beta: f64, alpha: f64) -> f64 {
+    if !y.is_finite() || y < 1.0 || beta <= 0.0 || alpha <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let k = y.round().max(1.0);
+    let p = (nh_cdf(k + 1.0, alpha, beta) - nh_cdf(k, alpha, beta)).max(0.0);
+    if p <= 1e-300 {
+        return f64::NEG_INFINITY;
+    }
+    p.ln()
+}
+
+/// Unit Nadarajah–Haghighi HMM on $(0,1)$ (NH on $u=x/(1-x)$).
+///
+/// Rate $\beta$ is free from the NH score; shape $\alpha\neq 1$ is pinned, not identification `p`. Distinct from [`NadarajahHaghighiHmm`] (half-line) and [`UnitLinearFailureRateHmm`].
+#[derive(Clone, Debug)]
+pub struct UnitNadarajahHaghighiHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for UnitNadarajahHaghighiHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl UnitNadarajahHaghighiHmm {
+    /// `k`-state UnitNadarajahHaghighiHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitNadarajahHaghighiHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted UnitNadarajahHaghighiHmm.
+#[derive(Clone, Debug)]
+pub struct FittedUnitNadarajahHaghighiHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Rates \(\beta_j\).
+    pub scale: Vector,
+    /// Pinned shapes \(\alpha_j\neq 1\).
+    pub shape: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedUnitNadarajahHaghighiHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_unit_nh(y, self.scale[j], self.shape[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedUnitNadarajahHaghighiHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for UnitNadarajahHaghighiHmm {
+    type Fitted = FittedUnitNadarajahHaghighiHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitNadarajahHaghighiHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.75 + 0.20 * j as f64));
+let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0 || y >= 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "UnitNadarajahHaghighiHmm skipped {n_skip} observations outside (0,1)"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedUnitNadarajahHaghighiHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.70),
+                shape,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.70 + 0.20 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedUnitNadarajahHaghighiHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let aj: f64 = shape[j];
+                let mut bj = scale[j];
+                for _ in 0..5 {
+                    let mut sc = 0.0_f64;
+                    let mut hp = 0.0_f64;
+                    for t in 0..t_len {
+                        let y = x.get(t, 0);
+                        if !y.is_finite() || y <= 0.0 || y >= 1.0 {
+                            continue;
+                        }
+                        let z = y / (1.0 - y);
+                        if !z.is_finite() || z <= 0.0 {
+                            continue;
+                        }
+                        let u = 1.0 + bj * z;
+                        if u <= 1.0 {
+                            continue;
+                        }
+                        let ua = u.powf(aj);
+                        if !ua.is_finite() || ua > 80.0 {
+                            continue;
+                        }
+                        let um1 = u.powf(aj - 1.0);
+                        if !um1.is_finite() {
+                            continue;
+                        }
+                        let w = fb.gamma[t][j];
+                        sc += w * (1.0 / bj + (aj - 1.0) * z / u - aj * z * um1);
+                        hp += w
+                            * (-1.0 / (bj * bj) - (aj - 1.0) * z * z / (u * u)
+                                - aj * (aj - 1.0) * z * z * u.powf(aj - 2.0));
+                    }
+                    if hp.abs() > 1e-12 {
+                        bj = (bj - sc / hp).clamp(0.50, 1.10);
+                    }
+                }
+                scale[j] = bj;
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedUnitNadarajahHaghighiHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedUnitNadarajahHaghighiHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            loglik,
+        })
+    }
+}
+
+/// Beta–Nadarajah–Haghighi HMM ($f F^{a-1}(1-F)^{b-1}/B(a,b)$, $a,b\neq 1$).
+///
+/// Extra shapes and $\alpha\neq 1$ are hyperparameters, not identification `p`. Distinct from [`KumaraswamyNadarajahHaghighiHmm`] and [`BetaExponentialHmm`].
+#[derive(Clone, Debug)]
+pub struct BetaNadarajahHaghighiHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for BetaNadarajahHaghighiHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl BetaNadarajahHaghighiHmm {
+    /// `k`-state BetaNadarajahHaghighiHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaNadarajahHaghighiHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted BetaNadarajahHaghighiHmm.
+#[derive(Clone, Debug)]
+pub struct FittedBetaNadarajahHaghighiHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Rates \(\beta_j\).
+    pub scale: Vector,
+    /// Pinned shapes \(\alpha_j\neq 1\).
+    pub shape: Vector,
+    /// First extra shapes \(a_j\neq 1\).
+    pub a: Vector,
+    /// Second extra shapes \(b_j\neq 1\).
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedBetaNadarajahHaghighiHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_beta_nh(y, self.scale[j], self.shape[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedBetaNadarajahHaghighiHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for BetaNadarajahHaghighiHmm {
+    type Fitted = FittedBetaNadarajahHaghighiHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaNadarajahHaghighiHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.65 + 0.20 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.5 + 0.3 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 2.2 + 0.4 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "BetaNadarajahHaghighiHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedBetaNadarajahHaghighiHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.12),
+                shape,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.12 + 0.06 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedBetaNadarajahHaghighiHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let aj: f64 = shape[j];
+                let mut bj = scale[j];
+                for _ in 0..5 {
+                    let mut sc = 0.0_f64;
+                    let mut hp = 0.0_f64;
+                    for t in 0..t_len {
+                        let y = x.get(t, 0);
+                        if !y.is_finite() || y <= 0.0 {
+                            continue;
+                        }
+                        let z = y;
+                        if !z.is_finite() || z <= 0.0 {
+                            continue;
+                        }
+                        let u = 1.0 + bj * z;
+                        if u <= 1.0 {
+                            continue;
+                        }
+                        let ua = u.powf(aj);
+                        if !ua.is_finite() || ua > 80.0 {
+                            continue;
+                        }
+                        let um1 = u.powf(aj - 1.0);
+                        if !um1.is_finite() {
+                            continue;
+                        }
+                        let w = fb.gamma[t][j];
+                        sc += w * (1.0 / bj + (aj - 1.0) * z / u - aj * z * um1);
+                        hp += w
+                            * (-1.0 / (bj * bj) - (aj - 1.0) * z * z / (u * u)
+                                - aj * (aj - 1.0) * z * z * u.powf(aj - 2.0));
+                    }
+                    if hp.abs() > 1e-12 {
+                        bj = (bj - sc / hp).clamp(0.08, 0.22);
+                    }
+                }
+                scale[j] = bj;
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedBetaNadarajahHaghighiHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedBetaNadarajahHaghighiHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Exponentiated Nadarajah–Haghighi HMM ($F^\alpha$, extra $\alpha\neq 1$).
+///
+/// Extra CDF power and NH shape $\alpha\neq 1$ are hyperparameters, not identification `p`. Distinct from [`KumaraswamyNadarajahHaghighiHmm`] and [`ExponentiatedExponentialHmm`].
+#[derive(Clone, Debug)]
+pub struct ExponentiatedNadarajahHaghighiHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for ExponentiatedNadarajahHaghighiHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl ExponentiatedNadarajahHaghighiHmm {
+    /// `k`-state ExponentiatedNadarajahHaghighiHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedNadarajahHaghighiHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted ExponentiatedNadarajahHaghighiHmm.
+#[derive(Clone, Debug)]
+pub struct FittedExponentiatedNadarajahHaghighiHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Rates \(\beta_j\).
+    pub scale: Vector,
+    /// Pinned shapes \(\alpha_j\neq 1\).
+    pub shape: Vector,
+    /// Extra CDF powers \(\alpha_j\neq 1\).
+    pub alpha: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedExponentiatedNadarajahHaghighiHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_exp_nh(y, self.scale[j], self.shape[j], self.alpha[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedExponentiatedNadarajahHaghighiHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for ExponentiatedNadarajahHaghighiHmm {
+    type Fitted = FittedExponentiatedNadarajahHaghighiHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedNadarajahHaghighiHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.65 + 0.20 * j as f64));
+        let alpha = Vector::from_iter((0..k).map(|j| 1.6 + 0.3 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "ExponentiatedNadarajahHaghighiHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedExponentiatedNadarajahHaghighiHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.12),
+                shape,
+                alpha,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.12 + 0.06 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedExponentiatedNadarajahHaghighiHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                alpha: alpha.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let aj: f64 = shape[j];
+                let mut bj = scale[j];
+                for _ in 0..5 {
+                    let mut sc = 0.0_f64;
+                    let mut hp = 0.0_f64;
+                    for t in 0..t_len {
+                        let y = x.get(t, 0);
+                        if !y.is_finite() || y <= 0.0 {
+                            continue;
+                        }
+                        let z = y;
+                        if !z.is_finite() || z <= 0.0 {
+                            continue;
+                        }
+                        let u = 1.0 + bj * z;
+                        if u <= 1.0 {
+                            continue;
+                        }
+                        let ua = u.powf(aj);
+                        if !ua.is_finite() || ua > 80.0 {
+                            continue;
+                        }
+                        let um1 = u.powf(aj - 1.0);
+                        if !um1.is_finite() {
+                            continue;
+                        }
+                        let w = fb.gamma[t][j];
+                        sc += w * (1.0 / bj + (aj - 1.0) * z / u - aj * z * um1);
+                        hp += w
+                            * (-1.0 / (bj * bj) - (aj - 1.0) * z * z / (u * u)
+                                - aj * (aj - 1.0) * z * z * u.powf(aj - 2.0));
+                    }
+                    if hp.abs() > 1e-12 {
+                        bj = (bj - sc / hp).clamp(0.08, 0.22);
+                    }
+                }
+                scale[j] = bj;
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedExponentiatedNadarajahHaghighiHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+                alpha: alpha.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedExponentiatedNadarajahHaghighiHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            alpha,
+            loglik,
+        })
+    }
+}
+
+/// Kumaraswamy–Nadarajah–Haghighi HMM ($ab f F^{a-1}(1-F^a)^{b-1}$, $a,b\neq 1$).
+///
+/// Extra shapes and $\alpha\neq 1$ are hyperparameters, not identification `p`. Distinct from [`BetaNadarajahHaghighiHmm`] and [`KumaraswamyExponentialHmm`].
+#[derive(Clone, Debug)]
+pub struct KumaraswamyNadarajahHaghighiHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for KumaraswamyNadarajahHaghighiHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl KumaraswamyNadarajahHaghighiHmm {
+    /// `k`-state KumaraswamyNadarajahHaghighiHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyNadarajahHaghighiHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted KumaraswamyNadarajahHaghighiHmm.
+#[derive(Clone, Debug)]
+pub struct FittedKumaraswamyNadarajahHaghighiHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Rates \(\beta_j\).
+    pub scale: Vector,
+    /// Pinned shapes \(\alpha_j\neq 1\).
+    pub shape: Vector,
+    /// First extra shapes \(a_j\neq 1\).
+    pub a: Vector,
+    /// Second extra shapes \(b_j\neq 1\).
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedKumaraswamyNadarajahHaghighiHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_kuma_nh(y, self.scale[j], self.shape[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedKumaraswamyNadarajahHaghighiHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for KumaraswamyNadarajahHaghighiHmm {
+    type Fitted = FittedKumaraswamyNadarajahHaghighiHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyNadarajahHaghighiHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.65 + 0.20 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.4 + 0.25 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 1.8 + 0.3 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "KumaraswamyNadarajahHaghighiHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedKumaraswamyNadarajahHaghighiHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.12),
+                shape,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.12 + 0.06 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedKumaraswamyNadarajahHaghighiHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let aj: f64 = shape[j];
+                let mut bj = scale[j];
+                for _ in 0..5 {
+                    let mut sc = 0.0_f64;
+                    let mut hp = 0.0_f64;
+                    for t in 0..t_len {
+                        let y = x.get(t, 0);
+                        if !y.is_finite() || y <= 0.0 {
+                            continue;
+                        }
+                        let z = y;
+                        if !z.is_finite() || z <= 0.0 {
+                            continue;
+                        }
+                        let u = 1.0 + bj * z;
+                        if u <= 1.0 {
+                            continue;
+                        }
+                        let ua = u.powf(aj);
+                        if !ua.is_finite() || ua > 80.0 {
+                            continue;
+                        }
+                        let um1 = u.powf(aj - 1.0);
+                        if !um1.is_finite() {
+                            continue;
+                        }
+                        let w = fb.gamma[t][j];
+                        sc += w * (1.0 / bj + (aj - 1.0) * z / u - aj * z * um1);
+                        hp += w
+                            * (-1.0 / (bj * bj) - (aj - 1.0) * z * z / (u * u)
+                                - aj * (aj - 1.0) * z * z * u.powf(aj - 2.0));
+                    }
+                    if hp.abs() > 1e-12 {
+                        bj = (bj - sc / hp).clamp(0.08, 0.22);
+                    }
+                }
+                scale[j] = bj;
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedKumaraswamyNadarajahHaghighiHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedKumaraswamyNadarajahHaghighiHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Discrete Nadarajah–Haghighi HMM ($P(K=k)=F(k+1)-F(k)$ on $\{1,2,\ldots\}$).
+///
+/// Rate $\beta$ is free from the NH score; shape $\alpha\neq 1$ is pinned, not identification `p`. Distinct from [`NadarajahHaghighiHmm`] (continuous) and [`DiscreteLinearFailureRateHmm`].
+#[derive(Clone, Debug)]
+pub struct DiscreteNadarajahHaghighiHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for DiscreteNadarajahHaghighiHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl DiscreteNadarajahHaghighiHmm {
+    /// `k`-state DiscreteNadarajahHaghighiHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteNadarajahHaghighiHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted DiscreteNadarajahHaghighiHmm.
+#[derive(Clone, Debug)]
+pub struct FittedDiscreteNadarajahHaghighiHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Rates \(\beta_j\).
+    pub scale: Vector,
+    /// Pinned shapes \(\alpha_j\neq 1\).
+    pub shape: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedDiscreteNadarajahHaghighiHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_disc_nh(y, self.scale[j], self.shape[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedDiscreteNadarajahHaghighiHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for DiscreteNadarajahHaghighiHmm {
+    type Fitted = FittedDiscreteNadarajahHaghighiHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteNadarajahHaghighiHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.65 + 0.20 * j as f64));
+let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y < 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "DiscreteNadarajahHaghighiHmm skipped {n_skip} observations below 1"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedDiscreteNadarajahHaghighiHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.18),
+                shape,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.18 + 0.08 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedDiscreteNadarajahHaghighiHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let aj: f64 = shape[j];
+                let mut bj = scale[j];
+                for _ in 0..5 {
+                    let mut sc = 0.0_f64;
+                    let mut hp = 0.0_f64;
+                    for t in 0..t_len {
+                        let y = x.get(t, 0);
+                        if !y.is_finite() || y < 1.0 {
+                            continue;
+                        }
+                        let z = y.round().max(1.0);
+                        if !z.is_finite() || z <= 0.0 {
+                            continue;
+                        }
+                        let u = 1.0 + bj * z;
+                        if u <= 1.0 {
+                            continue;
+                        }
+                        let ua = u.powf(aj);
+                        if !ua.is_finite() || ua > 80.0 {
+                            continue;
+                        }
+                        let um1 = u.powf(aj - 1.0);
+                        if !um1.is_finite() {
+                            continue;
+                        }
+                        let w = fb.gamma[t][j];
+                        sc += w * (1.0 / bj + (aj - 1.0) * z / u - aj * z * um1);
+                        hp += w
+                            * (-1.0 / (bj * bj) - (aj - 1.0) * z * z / (u * u)
+                                - aj * (aj - 1.0) * z * z * u.powf(aj - 2.0));
+                    }
+                    if hp.abs() > 1e-12 {
+                        bj = (bj - sc / hp).clamp(0.10, 0.40);
+                    }
+                }
+                scale[j] = bj;
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedDiscreteNadarajahHaghighiHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedDiscreteNadarajahHaghighiHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            loglik,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100208,6 +101396,26 @@ mod tests {
             .expect("klf");
         assert_eq!(klf.value.labels.len(), 80);
         assert!(klf.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let uhh = UnitNadarajahHaghighiHmm::new(2)
+            .fit(&betx, &Session::new("uhh", "fit"))
+            .expect("uhh");
+        assert_eq!(uhh.value.labels.len(), 80);
+        assert!(uhh.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let bhh = BetaNadarajahHaghighiHmm::new(2)
+            .fit(&xpos, &Session::new("bhh", "fit"))
+            .expect("bhh");
+        assert_eq!(bhh.value.labels.len(), 80);
+        assert!(bhh.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let ehh = ExponentiatedNadarajahHaghighiHmm::new(2)
+            .fit(&xpos, &Session::new("ehh", "fit"))
+            .expect("ehh");
+        assert_eq!(ehh.value.labels.len(), 80);
+        assert!(ehh.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let khh = KumaraswamyNadarajahHaghighiHmm::new(2)
+            .fit(&xpos, &Session::new("khh", "fit"))
+            .expect("khh");
+        assert_eq!(khh.value.labels.len(), 80);
+        assert!(khh.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
@@ -100839,6 +102047,11 @@ mod tests {
             .expect("dlf");
         assert_eq!(dlf.value.labels.len(), 40);
         assert!(dlf.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let dhh = DiscreteNadarajahHaghighiHmm::new(2)
+            .fit(&x, &Session::new("dhh", "fit"))
+            .expect("dhh");
+        assert_eq!(dhh.value.labels.len(), 40);
+        assert!(dhh.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
     }
 
     #[test]
