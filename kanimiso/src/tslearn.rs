@@ -182,6 +182,43 @@ pub fn ddtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>>
     ctx.finish(dtw_raw(&da, &db))
 }
 
+/// Weighted derivative DTW (Jeong–Jeong–Omitaomu `WDDTW`).
+///
+/// Applies [`wdtw`] to first-difference descriptors. Distinct from [`ddtw`]
+/// (unweighted) and [`wdtw`] (levels). Logistic slope `g` is not
+/// identification `p`.
+pub fn wddtw(a: &Vector, b: &Vector, g: f64, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("wddtw.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("wddtw.b") {
+        ctx.push(issue);
+    }
+    let g = if g.is_finite() && g >= 0.0 {
+        g
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("wddtw g={g} is not a finite ≥0 slope; using 0.1"))
+                .build(),
+        );
+        0.1
+    };
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("WDDTW on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let da = ddtw_deriv(a.as_slice());
+    let db = ddtw_deriv(b.as_slice());
+    ctx.finish(wdtw_raw(&da, &db, g))
+}
+
 fn shape_desc(s: &[f64]) -> Vec<f64> {
     let n = s.len();
     if n == 0 {
@@ -18936,6 +18973,8 @@ mod tests {
         assert!(erd.abs() < 1e-12, "edr={erd}");
         let ad = adtw(&a, &a, 0.1, &Session::new("ts", "adtw")).unwrap().value;
         assert!(ad.abs() < 1e-12, "adtw={ad}");
+        let wd = wddtw(&a, &a, 0.1, &Session::new("ts", "wddtw")).unwrap().value;
+        assert!(wd.abs() < 1e-12, "wddtw={wd}");
     }
 
     #[test]

@@ -6887,6 +6887,17 @@ const INVENTORY: &[Algorithm] = &[
     a("online.OnlineFa", "sklearn.decomposition.FactorAnalysis", "online"),
     a("tslearn.cdist_edr", "tslearn.metrics.cdist", "timeseries"),
     a("tslearn.cdist_adtw", "tslearn.metrics.cdist", "timeseries"),
+    a(
+        "hmm.GeneralizedInverseGaussianHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.SkewTHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.InverseBatscheletHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.CoxianHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.GeneralizedLogisticHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.OnlinePls", "sklearn.cross_decomposition.PLSRegression", "online"),
+    a("tslearn.wddtw", "tslearn.metrics.dtw", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7530,6 +7541,13 @@ mod tests {
             "online.OnlineFa",
             "tslearn.cdist_edr",
             "tslearn.cdist_adtw",
+            "hmm.GeneralizedInverseGaussianHmm",
+            "hmm.SkewTHmm",
+            "hmm.InverseBatscheletHmm",
+            "hmm.CoxianHmm",
+            "hmm.GeneralizedLogisticHmm",
+            "online.OnlinePls",
+            "tslearn.wddtw",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

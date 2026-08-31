@@ -44400,6 +44400,186 @@ impl Transform for OnlineFa {
     }
 }
 
+/// Streaming one-component NIPALS PLS on a column-split two-view stream.
+///
+/// The first `⌈p/2⌉` columns are view X, the rest view Y. Distinct from
+/// [`crate::linear_model::PlsRegression`] (batch NIPALS) and [`OnlineCca`]
+/// (Oja decay on the weights). The single latent pair is not identification
+/// `p`.
+#[derive(Clone, Debug)]
+pub struct OnlinePls {
+    /// NIPALS step.
+    pub learning_rate: f64,
+    mean_x: Vector,
+    mean_y: Vector,
+    u: Vector,
+    v: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlinePls {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            mean_x: Vector::zeros(0),
+            mean_y: Vector::zeros(0),
+            u: Vector::zeros(0),
+            v: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlinePls {
+    /// Streaming PLS with NIPALS step `learning_rate`.
+    pub fn new(learning_rate: f64) -> Self {
+        Self {
+            learning_rate,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlinePls {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        let (px, py) = split_views(p);
+        if !self.initialized {
+            self.mean_x = Vector::zeros(px);
+            self.mean_y = Vector::zeros(py);
+            self.u = Vector::filled(px, 0.0);
+            self.u[0] = 1.0;
+            self.v = Vector::filled(py, 0.0);
+            self.v[0] = 1.0;
+            self.initialized = true;
+        } else if self.u.len() != px || self.v.len() != py {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self.u.clone();
+        let lr0 = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let same = py == p && px == p;
+        for i in 0..x.nrows() {
+            self.n_seen += 1;
+            let n = self.n_seen as f64;
+            for j in 0..px {
+                self.mean_x[j] += (x.get(i, j) - self.mean_x[j]) / n;
+            }
+            for j in 0..py {
+                let src = if same { j } else { px + j };
+                self.mean_y[j] += (x.get(i, src) - self.mean_y[j]) / n;
+            }
+            let xc = Vector::from_iter((0..px).map(|j| x.get(i, j) - self.mean_x[j]));
+            let yc = Vector::from_iter((0..py).map(|j| {
+                let src = if same { j } else { px + j };
+                x.get(i, src) - self.mean_y[j]
+            }));
+            let yu = self.u.dot(&xc);
+            let yv = self.v.dot(&yc);
+            let lr = lr0 / n.sqrt();
+            for j in 0..px {
+                self.u[j] += lr * yv * xc[j];
+            }
+            for j in 0..py {
+                self.v[j] += lr * yu * yc[j];
+            }
+            let nu = self.u.norm();
+            if nu > 1e-12 {
+                for j in 0..px {
+                    self.u[j] /= nu;
+                }
+            }
+            let nv = self.v.norm();
+            if nv > 1e-12 {
+                for j in 0..py {
+                    self.v[j] /= nv;
+                }
+            }
+        }
+        self.updates += 1;
+        let delta = self.u.sub(&before);
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta.norm());
+        q.information_gain = Some(delta.norm().max(x.nrows() as f64));
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "OnlinePls NIPALS-updated a latent pair on {} rows; ||Δu||={:.6e}",
+            x.nrows(),
+            delta.norm()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "PLS directions",
+                "streaming two-view NIPALS; distinct from batch PLS and OnlineCca",
+                "previous u",
+                "updated u",
+            ),
+        )
+    }
+}
+
+impl Transform for OnlinePls {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), 2));
+        }
+        let px = self.u.len();
+        let py = self.v.len();
+        let same = px == x.ncols() && py == x.ncols();
+        ctx.finish(Matrix::from_fn(x.nrows(), 2, |i, c| {
+            if c == 0 {
+                let mut s = 0.0_f64;
+                for j in 0..px.min(x.ncols()) {
+                    s += self.u[j] * (x.get(i, j) - self.mean_x[j]);
+                }
+                s
+            } else {
+                let mut s = 0.0_f64;
+                for j in 0..py {
+                    let src = if same { j } else { px + j };
+                    if src < x.ncols() {
+                        s += self.v[j] * (x.get(i, src) - self.mean_y[j]);
+                    }
+                }
+                s
+            }
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45192,6 +45372,18 @@ mod tests {
         OnlineFa::new(1)
             .partial_fit(&x, None, &session)
             .expect("ofa");
+        {
+            let xcc = Matrix::from_fn(12, 2, |i, c| {
+                if c == 0 {
+                    i as f64
+                } else {
+                    2.0 * i as f64
+                }
+            });
+            OnlinePls::new(0.05)
+                .partial_fit(&xcc, None, &session)
+                .expect("opls");
+        }
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
