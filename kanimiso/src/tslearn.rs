@@ -3287,6 +3287,139 @@ pub fn cdist_neyman_chi_squared(
     ctx.finish(out)
 }
 
+fn additive_symmetric_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let p = a[i].abs() / sa;
+        let q = b[i].abs() / sb;
+        let den = (p + q).max(1e-18);
+        s += (p - q) * (p - q) / den;
+    }
+    s
+}
+
+fn k_divergence_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let p = (a[i].abs() / sa).max(1e-18);
+        let q = (b[i].abs() / sb).max(1e-18);
+        s += p * (2.0 * p / (p + q)).ln();
+    }
+    s.max(0.0)
+}
+
+/// Additive-symmetric \(\chi^2\) \(\sum(p_i-q_i)^2/(p_i+q_i)\) after \(\ell_1\).
+///
+/// Distinct from [`clark_distance`] (square-root form) and
+/// [`pearson_chi_squared_distance`]. Identical series score 0.
+pub fn additive_symmetric_distance(
+    a: &Vector,
+    b: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("additive_symmetric_distance.a")
+    {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("additive_symmetric_distance.b")
+    {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("additive_symmetric_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(additive_symmetric_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise additive-symmetric \(\chi^2\) distance.
+pub fn cdist_additive_symmetric(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        additive_symmetric_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+/// Kullback \(K\)-divergence \(\sum p_i\log(2p_i/(p_i+q_i))\) after \(\ell_1\).
+///
+/// Distinct from [`jensen_shannon_distance`] (symmetrised). Identical series
+/// score 0.
+pub fn k_divergence_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("k_divergence_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("k_divergence_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("k_divergence_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(k_divergence_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Kullback \(K\)-divergence.
+pub fn cdist_k_divergence(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        k_divergence_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -21953,6 +22086,10 @@ mod tests {
         assert!(pcs.abs() < 1e-12, "pearson_chi_squared_distance={pcs}");
         let ney = neyman_chi_squared_distance(&a, &a, &Session::new("ts", "ney")).unwrap().value;
         assert!(ney.abs() < 1e-12, "neyman_chi_squared_distance={ney}");
+        let ads = additive_symmetric_distance(&a, &a, &Session::new("ts", "ads")).unwrap().value;
+        assert!(ads.abs() < 1e-12, "additive_symmetric_distance={ads}");
+        let kdv = k_divergence_distance(&a, &a, &Session::new("ts", "kdv")).unwrap().value;
+        assert!(kdv.abs() < 1e-12, "k_divergence_distance={kdv}");
     }
 
     #[test]
@@ -23135,6 +23272,16 @@ mod tests {
             .value;
         assert_eq!(cny.shape(), (8, 8));
         assert!(cny.get(0, 0).abs() < 1e-12);
+        let cad = cdist_additive_symmetric(&x, &x, &Session::new("ts", "cad"))
+            .unwrap()
+            .value;
+        assert_eq!(cad.shape(), (8, 8));
+        assert!(cad.get(0, 0).abs() < 1e-12);
+        let ckv = cdist_k_divergence(&x, &x, &Session::new("ts", "ckv"))
+            .unwrap()
+            .value;
+        assert_eq!(ckv.shape(), (8, 8));
+        assert!(ckv.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

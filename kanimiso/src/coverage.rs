@@ -7518,6 +7518,45 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.UnitChenHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.BetaExponentialHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.ExponentiatedGammaHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.KumaraswamyLomaxHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.DiscreteLomaxHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.Loop", "river.anomaly.HalfSpaceTrees", "online"),
+    a("online.Ldof", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.additive_symmetric_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_additive_symmetric",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.k_divergence_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_k_divergence",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8428,6 +8467,17 @@ mod tests {
             "tslearn.cdist_pearson_chi_squared",
             "tslearn.neyman_chi_squared_distance",
             "tslearn.cdist_neyman_chi_squared",
+            "hmm.UnitChenHmm",
+            "hmm.BetaExponentialHmm",
+            "hmm.ExponentiatedGammaHmm",
+            "hmm.KumaraswamyLomaxHmm",
+            "hmm.DiscreteLomaxHmm",
+            "online.Loop",
+            "online.Ldof",
+            "tslearn.additive_symmetric_distance",
+            "tslearn.cdist_additive_symmetric",
+            "tslearn.k_divergence_distance",
+            "tslearn.cdist_k_divergence",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
