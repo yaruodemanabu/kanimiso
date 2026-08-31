@@ -72442,6 +72442,343 @@ impl Predict for LogTanejaAnomaly {
 }
 
 
+/// Score is $|\Delta^{32} x|/\overline{|x|}$ on the trailing thirty-two
+/// first-coordinates (binomial thirty-second difference).
+/// Distinct from [`WindowLag31`] (thirty-first difference) and [`WindowLag30`].
+#[derive(Clone, Debug)]
+pub struct WindowLag32 {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for WindowLag32 {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl WindowLag32 {
+    /// Empty windowed lag-32 detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        let y = x.get(i, 0);
+        if !y.is_finite() {
+            return 0.0;
+        }
+        let xs = reservoir_first_coords(&self.rows);
+        if xs.len() < 32 {
+            return 0.0;
+        }
+        let start = xs.len().saturating_sub(32);
+        let win = &xs[start..];
+        if win.len() < 32 {
+            return 0.0;
+        }
+        let mut mean_abs = 0.0_f64;
+        for v in win {
+            mean_abs += v.abs();
+        }
+        mean_abs /= win.len() as f64;
+        let n = win.len();
+        let p1 = win[n - 1];
+        let p2 = win[n - 2];
+        let p3 = win[n - 3];
+        let p4 = win[n - 4];
+        let p5 = win[n - 5];
+        let p6 = win[n - 6];
+        let p7 = win[n - 7];
+        let p8 = win[n - 8];
+        let p9 = win[n - 9];
+        let p10 = win[n - 10];
+        let p11 = win[n - 11];
+        let p12 = win[n - 12];
+        let p13 = win[n - 13];
+        let p14 = win[n - 14];
+        let p15 = win[n - 15];
+        let p16 = win[n - 16];
+        let p17 = win[n - 17];
+        let p18 = win[n - 18];
+        let p19 = win[n - 19];
+        let p20 = win[n - 20];
+        let p21 = win[n - 21];
+        let p22 = win[n - 22];
+        let p23 = win[n - 23];
+        let p24 = win[n - 24];
+        let p25 = win[n - 25];
+        let p26 = win[n - 26];
+        let p27 = win[n - 27];
+        let p28 = win[n - 28];
+        let p29 = win[n - 29];
+        let p30 = win[n - 30];
+        let p31 = win[n - 31];
+        let p32 = win[n - 32];
+        (y - 32.0 * p1 + 496.0 * p2 - 4960.0 * p3 + 35960.0 * p4 - 201376.0 * p5 + 906192.0 * p6 - 3365856.0 * p7 + 10518300.0 * p8 - 28048800.0 * p9 + 64512240.0 * p10 - 129024480.0 * p11 + 225792840.0 * p12 - 347373600.0 * p13 + 471435600.0 * p14 - 565722720.0 * p15 + 601080390.0 * p16 - 565722720.0 * p17 + 471435600.0 * p18 - 347373600.0 * p19 + 225792840.0 * p20 - 129024480.0 * p21 + 64512240.0 * p22 - 28048800.0 * p23 + 10518300.0 * p24 - 3365856.0 * p25 + 906192.0 * p26 - 201376.0 * p27 + 35960.0 * p28 - 4960.0 * p29 + 496.0 * p30 - 32.0 * p31 + 1.0 * p32)
+            .abs()
+            / mean_abs.max(1e-12)
+    }
+}
+
+impl PartialFit for WindowLag32 {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 32;
+        q.warmup = self.rows.len() < 32;
+        q.explanation = format!("window-lag32 reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed thirty-second-difference anomaly",
+                "WindowLag32 uses last-32 thirty-second difference; not WindowLag31 or WindowLag30",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for WindowLag32 {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
+fn log_motyka_rows(a: &[f64], b: &[f64]) -> f64 {
+    let p = a.len().min(b.len());
+    let mut num = 0.0_f64;
+    let mut den = 0.0_f64;
+    for j in 0..p {
+        let u = a[j].abs().max(1e-18).ln().abs();
+        let v = b[j].abs().max(1e-18).ln().abs();
+        num += u.max(v);
+        den += u + v;
+    }
+    if den < 1e-18 {
+        0.0
+    } else {
+        (num / den).max(0.0)
+    }
+}
+
+/// Log-Motyka $k$-NN anomaly.
+///
+/// Score is the mean of the $k$ smallest Motyka distances
+/// $\sum\max(|\ln|x||,|\ln|y||)/\sum(|\ln|x||+|\ln|y||)$ without $\ell_1$
+/// normalisation. Distinct from [`LogBrayCurtisAnomaly`] (absolute-difference
+/// form) and [`LogRuzickaAnomaly`].
+#[derive(Clone, Debug)]
+pub struct LogMotykaAnomaly {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for LogMotykaAnomaly {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl LogMotykaAnomaly {
+    /// Empty log-Motyka $k$-NN detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 3 || self.ncols == 0 {
+            return 0.0;
+        }
+        let p = self.ncols.min(x.ncols());
+        let mut qrow = Vec::with_capacity(p);
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return 0.0;
+            }
+            qrow.push(z);
+        }
+        let mut ds: Vec<f64> = self
+            .rows
+            .iter()
+            .map(|row| log_motyka_rows(&qrow, row))
+            .filter(|d| d.is_finite() && *d > 1e-15)
+            .collect();
+        if ds.is_empty() {
+            return 0.0;
+        }
+        ds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let kk = 5.min(ds.len());
+        let mut s = 0.0_f64;
+        for t in 0..kk {
+            s += ds[t];
+        }
+        s / kk as f64
+    }
+}
+
+impl PartialFit for LogMotykaAnomaly {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 3;
+        q.warmup = self.rows.len() < 3;
+        q.explanation = format!("log-motyka-knn reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "log-Motyka k-NN anomaly",
+                "LogMotykaAnomaly is raw log-Motyka k-NN; not log-Bray–Curtis or log-Ružička",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for LogMotykaAnomaly {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73750,6 +74087,12 @@ mod tests {
         LogTanejaAnomaly::new()
             .partial_fit(&x, None, &session)
             .expect("ltj");
+        WindowLag32::new()
+            .partial_fit(&x, None, &session)
+            .expect("w32");
+        LogMotykaAnomaly::new()
+            .partial_fit(&x, None, &session)
+            .expect("lmo");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
