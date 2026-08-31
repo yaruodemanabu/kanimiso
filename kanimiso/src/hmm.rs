@@ -115644,6 +115644,930 @@ impl FitUnsupervised for DiscreteGenGammaHmm {
 }
 
 
+
+fn dagum_g_cdf(y: f64, scale: f64, shape: f64, q: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || shape <= 0.0 || q <= 0.0 {
+        return 0.0;
+    }
+    let z = y / scale;
+    if !z.is_finite() || z <= 0.0 {
+        return 0.0;
+    }
+    let t = 1.0 + z.powf(-shape);
+    if !t.is_finite() || t <= 0.0 {
+        return 0.0;
+    }
+    t.powf(-q).clamp(0.0, 1.0 - 1e-15)
+}
+
+fn log_unit_dg(y: f64, scale: f64, shape: f64, q: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || y >= 1.0 || scale <= 0.0 || shape <= 0.0 || q <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    log_dagum(y / (1.0 - y), scale, shape, q) - 2.0 * (1.0 - y).ln()
+}
+
+fn log_beta_dg(y: f64, scale: f64, shape: f64, q: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || shape <= 0.0 || q <= 0.0 || a <= 0.0 || b <= 0.0
+    {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = dagum_g_cdf(y, scale, shape, q);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let surv = (1.0 - cdf).max(1e-15);
+    log_dagum(y, scale, shape, q) + (a - 1.0) * cdf.ln() + (b - 1.0) * surv.ln() - ln_beta(a, b)
+}
+
+fn log_exp_dg(y: f64, scale: f64, shape: f64, q: f64, power: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || shape <= 0.0 || q <= 0.0 || power <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = dagum_g_cdf(y, scale, shape, q);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    power.ln() + log_dagum(y, scale, shape, q) + (power - 1.0) * cdf.ln()
+}
+
+fn log_kuma_dg(y: f64, scale: f64, shape: f64, q: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || shape <= 0.0 || q <= 0.0 || a <= 0.0 || b <= 0.0
+    {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = dagum_g_cdf(y, scale, shape, q);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let fa = cdf.powf(a);
+    let one_m = 1.0 - fa;
+    if one_m <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    a.ln()
+        + b.ln()
+        + log_dagum(y, scale, shape, q)
+        + (a - 1.0) * cdf.ln()
+        + (b - 1.0) * one_m.ln()
+}
+
+
+/// Unit Dagum HMM on $(0,1)$ (inverse Burr on $u=x/(1-x)$).
+///
+/// Scale is free from $\exp(\mathbb{E}[\ln Y])$; Dagum $a\neq 1$ and $q\neq 1$ are pinned, not identification `p`. Distinct from [`DagumHmm`] (half-line) and [`UnitBurrHmm`].
+#[derive(Clone, Debug)]
+pub struct UnitDagumHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for UnitDagumHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl UnitDagumHmm {
+    /// `k`-state UnitDagumHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitDagumHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted UnitDagumHmm.
+#[derive(Clone, Debug)]
+pub struct FittedUnitDagumHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free Dagum scales.
+    pub scale: Vector,
+    /// Pinned Dagum first shapes $a_j\neq 1$.
+    pub shape: Vector,
+    /// Pinned Dagum second shapes $q_j\neq 1$.
+    pub q: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedUnitDagumHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_unit_dg(y, self.scale[j], self.shape[j], self.q[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedUnitDagumHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for UnitDagumHmm {
+    type Fitted = FittedUnitDagumHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitDagumHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 1.55 + 0.30 * j as f64));
+        let q = Vector::from_iter((0..k).map(|j| 1.40 + 0.30 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0 || y >= 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "UnitDagumHmm skipped {n_skip} observations outside (0,1)"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedUnitDagumHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 1.00),
+                shape,
+                q,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 1.00 + 0.20 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedUnitDagumHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                q: q.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wln = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 || y >= 1.0 {
+                        continue;
+                    }
+                    let z = y / (1.0 - y);
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wln += fb.gamma[t][j] * z.ln();
+                }
+                if wsum > 1e-12 {
+                    let hat = (wln / wsum).exp();
+                    if hat.is_finite() && hat > 0.0 {
+                        scale[j] = hat.clamp(0.50, 2.20);
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedUnitDagumHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+                shape: shape.clone(),
+                q: q.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedUnitDagumHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            q,
+            loglik,
+        })
+    }
+}
+
+
+/// Beta–Dagum HMM ($f F^{a-1}(1-F)^{b-1}/B(a,b)$, $a,b\neq 1$).
+///
+/// Scale is free from $\exp(\mathbb{E}[\ln Y])$; Dagum $a\neq 1$ and $q\neq 1$ are pinned, not identification `p`. Distinct from [`KumaraswamyDagumHmm`] and [`DiscreteDagumHmm`].
+#[derive(Clone, Debug)]
+pub struct BetaDagumHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for BetaDagumHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl BetaDagumHmm {
+    /// `k`-state BetaDagumHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaDagumHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted BetaDagumHmm.
+#[derive(Clone, Debug)]
+pub struct FittedBetaDagumHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free Dagum scales.
+    pub scale: Vector,
+    /// Pinned Dagum first shapes $a_j\neq 1$.
+    pub shape: Vector,
+    /// Pinned Dagum second shapes $q_j\neq 1$.
+    pub q: Vector,
+    /// First extra shapes $a_j\neq 1$.
+    pub a: Vector,
+    /// Second extra shapes $b_j\neq 1$.
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedBetaDagumHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_beta_dg(y, self.scale[j], self.shape[j], self.q[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedBetaDagumHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for BetaDagumHmm {
+    type Fitted = FittedBetaDagumHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaDagumHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 1.45 + 0.30 * j as f64));
+        let q = Vector::from_iter((0..k).map(|j| 1.35 + 0.30 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.35 + 0.25 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 1.55 + 0.20 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "BetaDagumHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedBetaDagumHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 5.40),
+                shape,
+                q,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 5.40 + 0.50 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedBetaDagumHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                q: q.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wln = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wln += fb.gamma[t][j] * z.ln();
+                }
+                if wsum > 1e-12 {
+                    let hat = (wln / wsum).exp();
+                    if hat.is_finite() && hat > 0.0 {
+                        scale[j] = hat.clamp(3.40, 9.20);
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedBetaDagumHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+                shape: shape.clone(),
+                q: q.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedBetaDagumHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            q,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+
+/// Exponentiated Dagum HMM ($a f F^{a-1}$, $a\neq 1$).
+///
+/// Scale is free from $\exp(\mathbb{E}[\ln Y])$; Dagum $a\neq 1$ and $q\neq 1$ are pinned, not identification `p`. Distinct from [`KumaraswamyDagumHmm`] and [`ExpWeibullHmm`].
+#[derive(Clone, Debug)]
+pub struct ExponentiatedDagumHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for ExponentiatedDagumHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl ExponentiatedDagumHmm {
+    /// `k`-state ExponentiatedDagumHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedDagumHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted ExponentiatedDagumHmm.
+#[derive(Clone, Debug)]
+pub struct FittedExponentiatedDagumHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free Dagum scales.
+    pub scale: Vector,
+    /// Pinned Dagum first shapes $a_j\neq 1$.
+    pub shape: Vector,
+    /// Pinned Dagum second shapes $q_j\neq 1$.
+    pub q: Vector,
+    /// Extra CDF powers $a_j\neq 1$.
+    pub alpha: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedExponentiatedDagumHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_exp_dg(y, self.scale[j], self.shape[j], self.q[j], self.alpha[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedExponentiatedDagumHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for ExponentiatedDagumHmm {
+    type Fitted = FittedExponentiatedDagumHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedDagumHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 1.45 + 0.30 * j as f64));
+        let q = Vector::from_iter((0..k).map(|j| 1.35 + 0.30 * j as f64));
+        let alpha = Vector::from_iter((0..k).map(|j| 1.45 + 0.30 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "ExponentiatedDagumHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedExponentiatedDagumHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 5.40),
+                shape,
+                q,
+                alpha,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 5.40 + 0.50 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedExponentiatedDagumHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                q: q.clone(),
+                alpha: alpha.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wln = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wln += fb.gamma[t][j] * z.ln();
+                }
+                if wsum > 1e-12 {
+                    let hat = (wln / wsum).exp();
+                    if hat.is_finite() && hat > 0.0 {
+                        scale[j] = hat.clamp(3.40, 9.20);
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedExponentiatedDagumHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+                shape: shape.clone(),
+                q: q.clone(),
+                alpha: alpha.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedExponentiatedDagumHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            q,
+            alpha,
+            loglik,
+        })
+    }
+}
+
+
+/// Kumaraswamy–Dagum HMM ($ab f F^{a-1}(1-F^a)^{b-1}$, $a,b\neq 1$).
+///
+/// Scale is free from $\exp(\mathbb{E}[\ln Y])$; Dagum $a\neq 1$ and $q\neq 1$ are pinned, not identification `p`. Distinct from [`BetaDagumHmm`] and [`UnitBurrHmm`].
+#[derive(Clone, Debug)]
+pub struct KumaraswamyDagumHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for KumaraswamyDagumHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl KumaraswamyDagumHmm {
+    /// `k`-state KumaraswamyDagumHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyDagumHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted KumaraswamyDagumHmm.
+#[derive(Clone, Debug)]
+pub struct FittedKumaraswamyDagumHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free Dagum scales.
+    pub scale: Vector,
+    /// Pinned Dagum first shapes $a_j\neq 1$.
+    pub shape: Vector,
+    /// Pinned Dagum second shapes $q_j\neq 1$.
+    pub q: Vector,
+    /// First extra shapes $a_j\neq 1$.
+    pub a: Vector,
+    /// Second extra shapes $b_j\neq 1$.
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedKumaraswamyDagumHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_kuma_dg(y, self.scale[j], self.shape[j], self.q[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedKumaraswamyDagumHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for KumaraswamyDagumHmm {
+    type Fitted = FittedKumaraswamyDagumHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyDagumHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 1.45 + 0.30 * j as f64));
+        let q = Vector::from_iter((0..k).map(|j| 1.35 + 0.30 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.55 + 0.20 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 2.10 + 0.25 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "KumaraswamyDagumHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedKumaraswamyDagumHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 5.40),
+                shape,
+                q,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 5.40 + 0.50 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedKumaraswamyDagumHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                q: q.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wln = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wln += fb.gamma[t][j] * z.ln();
+                }
+                if wsum > 1e-12 {
+                    let hat = (wln / wsum).exp();
+                    if hat.is_finite() && hat > 0.0 {
+                        scale[j] = hat.clamp(3.40, 9.20);
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedKumaraswamyDagumHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+                shape: shape.clone(),
+                q: q.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedKumaraswamyDagumHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            q,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117793,6 +118717,26 @@ mod tests {
             .expect("kgn");
         assert_eq!(kgn.value.labels.len(), 80);
         assert!(kgn.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let udg = UnitDagumHmm::new(2)
+            .fit(&betx, &Session::new("udg", "fit"))
+            .expect("udg");
+        assert_eq!(udg.value.labels.len(), 80);
+        assert!(udg.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let bdg = BetaDagumHmm::new(2)
+            .fit(&xpos, &Session::new("bdg", "fit"))
+            .expect("bdg");
+        assert_eq!(bdg.value.labels.len(), 80);
+        assert!(bdg.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let edg = ExponentiatedDagumHmm::new(2)
+            .fit(&xpos, &Session::new("edg", "fit"))
+            .expect("edg");
+        assert_eq!(edg.value.labels.len(), 80);
+        assert!(edg.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let kdg = KumaraswamyDagumHmm::new(2)
+            .fit(&xpos, &Session::new("kdg", "fit"))
+            .expect("kdg");
+        assert_eq!(kdg.value.labels.len(), 80);
+        assert!(kdg.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
