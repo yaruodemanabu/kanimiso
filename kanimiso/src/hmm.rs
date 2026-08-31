@@ -44585,7 +44585,7 @@ fn log_wrapped_stable(y: f64, loc: f64, scale: f64, alpha: f64) -> f64 {
     let th = wrap_pi(y);
     let mu = wrap_pi(loc);
     let mut dens = 1.0 / std::f64::consts::TAU;
-    for k in 1..17 {
+    for k in 1..49 {
         let kf = k as f64;
         let damp = (-(scale * kf).powf(alpha)).exp();
         if damp < 1e-18 {
@@ -44593,11 +44593,9 @@ fn log_wrapped_stable(y: f64, loc: f64, scale: f64, alpha: f64) -> f64 {
         }
         dens += damp * (kf * (th - mu)).cos() / std::f64::consts::PI;
     }
-    if dens <= 1e-300 {
-        f64::NEG_INFINITY
-    } else {
-        dens.ln()
-    }
+    // Truncated Poisson summation can dip below 0; a floor keeps the
+    // observation feasible under every state.
+    dens.max(1e-12).ln()
 }
 
 fn log_fisher_nc_hyper(y: f64, n_pop: f64, k_succ: f64, n_draw: f64, omega: f64) -> f64 {
