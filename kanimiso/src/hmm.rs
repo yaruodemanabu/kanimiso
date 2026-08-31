@@ -46714,6 +46714,854 @@ impl FitUnsupervised for WalleniusNoncentralHypergeometricHmm {
     }
 }
 
+fn ln_beta(a: f64, b: f64) -> f64 {
+    if a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    crate::special::ln_gamma(a) + crate::special::ln_gamma(b) - crate::special::ln_gamma(a + b)
+}
+
+fn log_kuma_weibull(y: f64, scale: f64, shape: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || shape <= 0.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let z = (y / scale).powf(shape);
+    if !z.is_finite() {
+        return f64::NEG_INFINITY;
+    }
+    let s0 = (-z).exp();
+    let f0 = (1.0 - s0).max(1e-15);
+    let f0a = f0.powf(a);
+    let one = (1.0 - f0a).max(1e-15);
+    a.ln()
+        + b.ln()
+        + shape.ln()
+        - scale.ln()
+        + (shape - 1.0) * (y.ln() - scale.ln())
+        - z
+        + (a - 1.0) * f0.ln()
+        + (b - 1.0) * one.ln()
+}
+
+fn log_beta_nb(y: f64, r: f64, alpha: f64, beta: f64) -> f64 {
+    if !y.is_finite() || y < 0.0 || r <= 0.0 || alpha <= 0.0 || beta <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let y = y.round();
+    ln_choose(y + r - 1.0, y) + ln_beta(alpha + r, beta + y) - ln_beta(alpha, beta)
+}
+
+fn log_wrapped_sech(y: f64, loc: f64, scale: f64) -> f64 {
+    if !y.is_finite() || !loc.is_finite() || scale <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let theta = wrap_pi(y);
+    let mut terms = Vec::with_capacity(7);
+    for k in -3..=3 {
+        let t = theta + (k as f64) * std::f64::consts::TAU;
+        let v = log_hyperbolic_secant(t, loc, scale);
+        if v.is_finite() {
+            terms.push(v);
+        }
+    }
+    if terms.is_empty() {
+        f64::NEG_INFINITY
+    } else {
+        logsumexp(&terms)
+    }
+}
+
+fn log_disc_burr(y: f64, scale: f64, c: f64, k: f64) -> f64 {
+    if !y.is_finite() || scale <= 0.0 || c <= 0.0 || k <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let y = y.round();
+    if y < 1.0 {
+        return f64::NEG_INFINITY;
+    }
+    let surv = |x: f64| {
+        if x < 1.0 {
+            1.0
+        } else {
+            (1.0 + (x / scale).powf(c)).powf(-k)
+        }
+    };
+    let p = (surv(y) - surv(y + 1.0)).max(0.0);
+    if p <= 1e-300 {
+        f64::NEG_INFINITY
+    } else {
+        p.ln()
+    }
+}
+
+/// Kumaraswamy–Weibull HMM (\(a,b\neq 1\)).
+///
+/// Extra shapes are hyperparameters, not identification `p`. Distinct from
+/// [`WeibullHmm`] (\(a=b=1\)) and [`KumaraswamyHmm`] (unit interval).
+#[derive(Clone, Debug)]
+pub struct KumaraswamyWeibullHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for KumaraswamyWeibullHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl KumaraswamyWeibullHmm {
+    /// `k`-state Kumaraswamy–Weibull HMM.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyWeibullHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted Kumaraswamy–Weibull HMM.
+#[derive(Clone, Debug)]
+pub struct FittedKumaraswamyWeibullHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Scales \(s_j\).
+    pub scale: Vector,
+    /// Weibull shapes \(c_j\).
+    pub shape: Vector,
+    /// Kumaraswamy \(a_j\neq 1\).
+    pub a: Vector,
+    /// Kumaraswamy \(b_j\neq 1\).
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedKumaraswamyWeibullHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] =
+                    log_kuma_weibull(y, self.scale[j], self.shape[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedKumaraswamyWeibullHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for KumaraswamyWeibullHmm {
+    type Fitted = FittedKumaraswamyWeibullHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyWeibullHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 1.4 + 0.5 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.5 + 0.6 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 2.2 + 0.5 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            if x.get(i, 0).is_finite() && x.get(i, 0) <= 0.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "KumaraswamyWeibullHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedKumaraswamyWeibullHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 1.0),
+                shape,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 1.2 + 0.8 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedKumaraswamyWeibullHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wy = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wy += fb.gamma[t][j] * y;
+                }
+                if wsum > 1e-12 {
+                    scale[j] = (wy / wsum).clamp(0.05, 40.0);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedKumaraswamyWeibullHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            a: a.clone(),
+            b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedKumaraswamyWeibullHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Beta–negative-binomial HMM (Beta-mixed NB, \(r\neq 1\)).
+///
+/// Dispersion \(r\) is a hyperparameter, not identification `p`. Distinct from
+/// [`NegativeBinomialHmm`] (fixed \(p\)) and [`BetaBinomialHmm`].
+#[derive(Clone, Debug)]
+pub struct BetaNegativeBinomialHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for BetaNegativeBinomialHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl BetaNegativeBinomialHmm {
+    /// `k`-state beta–negative-binomial HMM.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaNegativeBinomialHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted beta–negative-binomial HMM.
+#[derive(Clone, Debug)]
+pub struct FittedBetaNegativeBinomialHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Dispersions \(r_j\neq 1\).
+    pub r: Vector,
+    /// Beta \(\alpha_j\).
+    pub alpha: Vector,
+    /// Beta \(\beta_j\).
+    pub beta: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedBetaNegativeBinomialHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.r.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_beta_nb(y, self.r[j], self.alpha[j], self.beta[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedBetaNegativeBinomialHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for BetaNegativeBinomialHmm {
+    type Fitted = FittedBetaNegativeBinomialHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaNegativeBinomialHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let r = Vector::from_iter((0..k).map(|j| 2.4 + 1.2 * j as f64));
+        let alpha = Vector::from_iter((0..k).map(|j| 1.5 + 0.4 * j as f64));
+        if t_len == 0 {
+            return ctx.finish(FittedBetaNegativeBinomialHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                r,
+                alpha,
+                beta: Vector::filled(k, 1.8),
+                loglik: f64::NAN,
+            });
+        }
+        let mut beta = Vector::from_iter((0..k).map(|j| 1.4 + 0.6 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedBetaNegativeBinomialHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                r: r.clone(),
+                alpha: alpha.clone(),
+                beta: beta.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wy = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y < 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wy += fb.gamma[t][j] * y;
+                }
+                if wsum > 1e-12 {
+                    let mu = wy / wsum;
+                    let den = (alpha[j] - 1.0).max(0.2);
+                    beta[j] = (mu * den / r[j].max(1e-6)).clamp(0.2, 40.0);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedBetaNegativeBinomialHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            r: r.clone(),
+            alpha: alpha.clone(),
+            beta: beta.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedBetaNegativeBinomialHmm {
+            labels,
+            start,
+            trans,
+            r,
+            alpha,
+            beta,
+            loglik,
+        })
+    }
+}
+
+/// Wrapped hyperbolic-secant HMM.
+///
+/// Scale is not identification `p`. Distinct from [`HyperbolicSecantHmm`]
+/// (line) and [`WrappedLogisticHmm`].
+#[derive(Clone, Debug)]
+pub struct WrappedHyperbolicSecantHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for WrappedHyperbolicSecantHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl WrappedHyperbolicSecantHmm {
+    /// `k`-state wrapped-sech HMM.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedWrappedHyperbolicSecantHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted wrapped hyperbolic-secant HMM.
+#[derive(Clone, Debug)]
+pub struct FittedWrappedHyperbolicSecantHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Mean directions \(\mu_j\).
+    pub loc: Vector,
+    /// Scales \(s_j\).
+    pub scale: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedWrappedHyperbolicSecantHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.loc.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_wrapped_sech(y, self.loc[j], self.scale[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedWrappedHyperbolicSecantHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for WrappedHyperbolicSecantHmm {
+    type Fitted = FittedWrappedHyperbolicSecantHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedWrappedHyperbolicSecantHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        if t_len == 0 {
+            return ctx.finish(FittedWrappedHyperbolicSecantHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                loc: Vector::zeros(k),
+                scale: Vector::filled(k, 0.6),
+                loglik: f64::NAN,
+            });
+        }
+        let mut loc = Vector::from_iter((0..k).map(|j| -0.3 + 0.6 * j as f64));
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.4 + 0.25 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedWrappedHyperbolicSecantHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                loc: loc.clone(),
+                scale: scale.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut sx = 0.0_f64;
+                let mut sy = 0.0_f64;
+                let mut wsum = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() {
+                        continue;
+                    }
+                    let th = wrap_pi(y);
+                    let w = fb.gamma[t][j];
+                    sx += w * th.cos();
+                    sy += w * th.sin();
+                    wsum += w;
+                }
+                let r2 = sx * sx + sy * sy;
+                if r2 > 1e-18 {
+                    loc[j] = wrap_pi(sy.atan2(sx));
+                    if wsum > 1e-12 {
+                        let res = (r2.sqrt() / wsum).clamp(1e-6, 1.0 - 1e-6);
+                        scale[j] = ((1.0 - res) / res.max(1e-6)).clamp(0.08, 2.5);
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedWrappedHyperbolicSecantHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            loc: loc.clone(),
+            scale: scale.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedWrappedHyperbolicSecantHmm {
+            labels,
+            start,
+            trans,
+            loc,
+            scale,
+            loglik,
+        })
+    }
+}
+
+/// Discrete Burr HMM (\(S(x)=[1+(x/s)^c]^{-k}\), \(c,k\neq 1\)).
+///
+/// Shapes are hyperparameters, not identification `p`. Distinct from
+/// [`BurrHmm`] (continuous) and [`DiscreteWeibullHmm`].
+#[derive(Clone, Debug)]
+pub struct DiscreteBurrHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for DiscreteBurrHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl DiscreteBurrHmm {
+    /// `k`-state discrete-Burr HMM.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteBurrHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted discrete Burr HMM.
+#[derive(Clone, Debug)]
+pub struct FittedDiscreteBurrHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Scales \(s_j\).
+    pub scale: Vector,
+    /// Powers \(c_j\neq 1\).
+    pub c: Vector,
+    /// Tails \(k_j\neq 1\).
+    pub k: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedDiscreteBurrHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_disc_burr(y, self.scale[j], self.c[j], self.k[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedDiscreteBurrHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for DiscreteBurrHmm {
+    type Fitted = FittedDiscreteBurrHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteBurrHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let c = Vector::from_iter((0..k).map(|j| 1.6 + 0.7 * j as f64));
+        let tail = Vector::from_iter((0..k).map(|j| 2.3 + 0.6 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            if x.get(i, 0).is_finite() && x.get(i, 0) < 1.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "DiscreteBurrHmm skipped {n_skip} observations below 1"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedDiscreteBurrHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 2.0),
+                c,
+                k: tail,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 2.0 + 1.2 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedDiscreteBurrHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                c: c.clone(),
+                k: tail.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wy = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y < 1.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wy += fb.gamma[t][j] * y;
+                }
+                if wsum > 1e-12 {
+                    scale[j] = (wy / wsum).clamp(0.5, 40.0);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedDiscreteBurrHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            c: c.clone(),
+            k: tail.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedDiscreteBurrHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            c,
+            k: tail,
+            loglik,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47588,6 +48436,16 @@ mod tests {
             .expect("wlo");
         assert_eq!(wlo.value.labels.len(), 80);
         assert!(wlo.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let kwh = KumaraswamyWeibullHmm::new(2)
+            .fit(&xpos, &Session::new("kwh", "fit"))
+            .expect("kwh");
+        assert_eq!(kwh.value.labels.len(), 80);
+        assert!(kwh.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let wse = WrappedHyperbolicSecantHmm::new(2)
+            .fit(&x, &Session::new("wse", "fit"))
+            .expect("wse");
+        assert_eq!(wse.value.labels.len(), 80);
+        assert!(wse.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
@@ -47974,6 +48832,16 @@ mod tests {
             .expect("diw");
         assert_eq!(diw.value.labels.len(), 40);
         assert!(diw.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let bnb = BetaNegativeBinomialHmm::new(2)
+            .fit(&x, &Session::new("bnb", "fit"))
+            .expect("bnb");
+        assert_eq!(bnb.value.labels.len(), 40);
+        assert!(bnb.value.r.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let dbu = DiscreteBurrHmm::new(2)
+            .fit(&x, &Session::new("dbu", "fit"))
+            .expect("dbu");
+        assert_eq!(dbu.value.labels.len(), 40);
+        assert!(dbu.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
     }
 
     #[test]

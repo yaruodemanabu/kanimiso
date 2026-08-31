@@ -46865,6 +46865,193 @@ impl Predict for ApproxNdcg {
     }
 }
 
+/// RankCosine (Cao et al.): cosine loss between scores and relevance.
+///
+/// Distinct from [`ListNet`] (top-1 CE) and [`SoftRank`] (Gaussian rank MSE).
+#[derive(Clone, Debug)]
+pub struct RankCosine {
+    /// Latent rank.
+    pub n_factors: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    /// \(\ell_2\) on factors.
+    pub l2: f64,
+    pu: Vec<Vec<f64>>,
+    qi: Vec<Vec<f64>>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RankCosine {
+    fn default() -> Self {
+        Self {
+            n_factors: 4,
+            learning_rate: 0.05,
+            l2: 0.01,
+            pu: Vec::new(),
+            qi: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RankCosine {
+    /// RankCosine with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn grow(&mut self, u: usize, i: usize) {
+        let k = self.n_factors.max(1);
+        while self.pu.len() <= u {
+            self.pu.push(vec![0.01; k]);
+        }
+        while self.qi.len() <= i {
+            self.qi.push(vec![0.01; k]);
+        }
+    }
+
+    fn score(&self, u: usize, i: usize) -> f64 {
+        let mut s = 0.0_f64;
+        if u < self.pu.len() && i < self.qi.len() {
+            for f in 0..self.n_factors.min(self.pu[u].len()).min(self.qi[i].len()) {
+                s += self.pu[u][f] * self.qi[i][f];
+            }
+        }
+        s
+    }
+}
+
+impl PartialFit for RankCosine {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("RankCosine needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let lr = self.learning_rate.max(1e-6);
+        let l2 = self.l2.max(0.0);
+        let mut by_user: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+        for r in 0..x.nrows().min(y.len()) {
+            if !y[r].is_finite() {
+                continue;
+            }
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.grow(u, i);
+            by_user.entry(u).or_default().push((i, y[r].max(0.0)));
+        }
+        let mut dsum = 0.0_f64;
+        let mut lists = 0u64;
+        for (u, items) in by_user {
+            if items.len() < 2 {
+                continue;
+            }
+            let scores: Vec<f64> = items.iter().map(|&(ii, _)| self.score(u, ii)).collect();
+            let mut dot = 0.0_f64;
+            let mut ns = 0.0_f64;
+            let mut ny = 0.0_f64;
+            for t in 0..items.len() {
+                dot += scores[t] * items[t].1;
+                ns += scores[t] * scores[t];
+                ny += items[t].1 * items[t].1;
+            }
+            let den = (ns.sqrt() * ny.sqrt()).max(1e-12);
+            // ∂/∂s_t of ⟨s,y⟩/(|s||y|) = y_t/den - ⟨s,y⟩ s_t / (|s|³ |y|)
+            let nsn = ns.sqrt().max(1e-12);
+            let nyn = ny.sqrt().max(1e-12);
+            for t in 0..items.len() {
+                let i = items[t].0;
+                let gs = items[t].1 / den - dot * scores[t] / (nsn * nsn * nsn * nyn);
+                let err = -gs;
+                for f in 0..self.n_factors {
+                    let pu = self.pu[u][f];
+                    let qi = self.qi[i][f];
+                    self.pu[u][f] -= lr * (err * qi + l2 * pu);
+                    self.qi[i][f] -= lr * (err * pu + l2 * qi);
+                    dsum += (self.pu[u][f] - pu).abs() + (self.qi[i][f] - qi).abs();
+                }
+            }
+            lists += 1;
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        if lists == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message("RankCosine needs two items per user in the batch")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(lists as f64);
+        q.still_identified = lists > 0;
+        q.warmup = lists == 0;
+        q.explanation = format!(
+            "RankCosine lists={lists} ||Δ||₁={dsum:.4e} users={} items={}",
+            self.pu.len(),
+            self.qi.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "RankCosine listwise step",
+                "ascent on cosine(s, relevance); not ListNet CE or SoftRank MSE",
+                "pre-batch factors",
+                format!("lists={lists} dsum={dsum:.4e}"),
+            ),
+        )
+    }
+}
+
+impl Predict for RankCosine {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("RankCosine predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.score(u, i)
+        })))
+    }
+}
+
 /// RankNet pairwise ranking (logistic loss on \(s_i-s_j\) for \(y_i>y_j\)).
 ///
 /// Distinct from [`ListNet`] (listwise softmax CE), [`Bpr`] (one unweighted
@@ -50687,6 +50874,158 @@ impl Predict for Ecod {
     }
 }
 
+/// Copula-based outlier detector (Li et al. COPOD).
+///
+/// Score \(-\log C_n(x)-\log C_n^{surv}(x)\) from the empirical copula.
+/// Distinct from [`Ecod`] (sum of univariate tails) and [`Hbos`].
+#[derive(Clone, Debug)]
+pub struct Copod {
+    samples: Vec<Vec<f64>>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for Copod {
+    fn default() -> Self {
+        Self {
+            samples: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl Copod {
+    /// Empty COPOD detector.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        let p = self.samples.len().min(x.ncols());
+        if p == 0 {
+            return 0.0;
+        }
+        let n = self.samples[0].len();
+        if n == 0 {
+            return 0.0;
+        }
+        let mut left = 0.0_f64;
+        let mut right = 0.0_f64;
+        for t in 0..n {
+            let mut le = true;
+            let mut ge = true;
+            for j in 0..p {
+                if t >= self.samples[j].len() {
+                    le = false;
+                    ge = false;
+                    break;
+                }
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    le = false;
+                    ge = false;
+                    break;
+                }
+                if self.samples[j][t] > z {
+                    le = false;
+                }
+                if self.samples[j][t] < z {
+                    ge = false;
+                }
+            }
+            if le {
+                left += 1.0;
+            }
+            if ge {
+                right += 1.0;
+            }
+        }
+        let nf = n as f64;
+        let cl = (left / nf).clamp(1e-6, 1.0);
+        let cr = (right / nf).clamp(1e-6, 1.0);
+        -cl.ln() - cr.ln()
+    }
+}
+
+impl PartialFit for Copod {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.samples = vec![Vec::new(); p];
+            self.initialized = true;
+        } else if self.samples.len() != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    continue;
+                }
+                if self.samples[j].len() >= 512 {
+                    self.samples[j].remove(0);
+                }
+                self.samples[j].push(z);
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!("COPOD updated empirical copula on {} rows", x.nrows());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "empirical copula tails",
+                "COPOD uses joint C_n and survival C_n; not ECOD univariate tails",
+                "previous sample cloud",
+                "updated sample cloud",
+            ),
+        )
+    }
+}
+
+impl Predict for Copod {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51527,6 +51866,9 @@ mod tests {
         ApproxNdcg::new(2)
             .partial_fit(&xui, Some(&y), &session)
             .expect("ndc");
+        RankCosine::new(2)
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("rcs");
         RankNet::new(2)
             .partial_fit(&xui, Some(&y), &session)
             .expect("rnet");
@@ -51593,6 +51935,9 @@ mod tests {
         Ecod::new()
             .partial_fit(&x, None, &session)
             .expect("eco");
+        Copod::new()
+            .partial_fit(&x, None, &session)
+            .expect("cpd");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

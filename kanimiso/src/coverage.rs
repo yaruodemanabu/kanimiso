@@ -7262,6 +7262,44 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a(
+        "hmm.KumaraswamyWeibullHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.BetaNegativeBinomialHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.WrappedHyperbolicSecantHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.DiscreteBurrHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.Copod", "river.anomaly.HalfSpaceTrees", "online"),
+    a("online.RankCosine", "river.reco.FM", "online"),
+    a(
+        "tslearn.squared_euclidean_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_squared_euclidean",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.dice_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_dice",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8096,6 +8134,16 @@ mod tests {
             "tslearn.cdist_minkowski3",
             "tslearn.clark_distance",
             "tslearn.cdist_clark",
+            "hmm.KumaraswamyWeibullHmm",
+            "hmm.BetaNegativeBinomialHmm",
+            "hmm.WrappedHyperbolicSecantHmm",
+            "hmm.DiscreteBurrHmm",
+            "online.Copod",
+            "online.RankCosine",
+            "tslearn.squared_euclidean_distance",
+            "tslearn.cdist_squared_euclidean",
+            "tslearn.dice_distance",
+            "tslearn.cdist_dice",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

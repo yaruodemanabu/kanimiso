@@ -2458,6 +2458,121 @@ pub fn cdist_clark(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualifie
     ctx.finish(out)
 }
 
+fn squared_euclidean_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let d = a[i] - b[i];
+        s += d * d;
+    }
+    s
+}
+
+fn dice_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut num = 0.0_f64;
+    let mut na = 0.0_f64;
+    let mut nb = 0.0_f64;
+    for i in 0..n {
+        num += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    let den = na + nb;
+    if den < 1e-18 {
+        return 0.0;
+    }
+    1.0 - 2.0 * num / den
+}
+
+/// Squared Euclidean distance \(\sum(a_i-b_i)^2\) on aligned prefixes.
+///
+/// Distinct from [`minkowski3_distance`] and [`decay_euclidean`]. Identical
+/// series score 0.
+pub fn squared_euclidean_distance(
+    a: &Vector,
+    b: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("squared_euclidean_distance.a")
+    {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("squared_euclidean_distance.b")
+    {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("squared_euclidean_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(squared_euclidean_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise squared Euclidean distance.
+pub fn cdist_squared_euclidean(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        squared_euclidean_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+/// Dice / Sørensen distance \(1-2\langle a,b\rangle/(\|a\|^2+\|b\|^2)\).
+///
+/// Distinct from [`cosine_distance`] (geometric mean in the denominator) and
+/// [`braycurtis_distance`]. Identical series score 0.
+pub fn dice_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("dice_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("dice_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("dice_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(dice_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Dice distance.
+pub fn cdist_dice(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        dice_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -21096,6 +21211,10 @@ mod tests {
         assert!(mnk.abs() < 1e-12, "minkowski3_distance={mnk}");
         let clr = clark_distance(&a, &a, &Session::new("ts", "clr")).unwrap().value;
         assert!(clr.abs() < 1e-12, "clark_distance={clr}");
+        let sqe = squared_euclidean_distance(&a, &a, &Session::new("ts", "sqe")).unwrap().value;
+        assert!(sqe.abs() < 1e-12, "squared_euclidean_distance={sqe}");
+        let dic = dice_distance(&a, &a, &Session::new("ts", "dic")).unwrap().value;
+        assert!(dic.abs() < 1e-12, "dice_distance={dic}");
     }
 
     #[test]
@@ -22208,6 +22327,16 @@ mod tests {
             .value;
         assert_eq!(ccl.shape(), (8, 8));
         assert!(ccl.get(0, 0).abs() < 1e-12);
+        let cqe = cdist_squared_euclidean(&x, &x, &Session::new("ts", "cqe"))
+            .unwrap()
+            .value;
+        assert_eq!(cqe.shape(), (8, 8));
+        assert!(cqe.get(0, 0).abs() < 1e-12);
+        let cdi = cdist_dice(&x, &x, &Session::new("ts", "cdi"))
+            .unwrap()
+            .value;
+        assert_eq!(cdi.shape(), (8, 8));
+        assert!(cdi.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;
