@@ -6654,6 +6654,14 @@ const INVENTORY: &[Algorithm] = &[
     a("tsa.GarchM", "arch.univariate.GARCH", "forecast"),
     a("tslearn.Motif", "stumpy.motifs", "timeseries"),
     a("tslearn.Mpx", "stumpy.mpx", "timeseries"),
+    a("hmm.InverseGammaHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.GumbelHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.WrappedCauchyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "online.OnlineWelschRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7226,6 +7234,8 @@ mod tests {
             "hmm.LaplaceHmm",
             "stats.LinearDml",
             "tsa.GarchM",
+            "hmm.GumbelHmm",
+            "online.OnlineWelschRegressor",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
