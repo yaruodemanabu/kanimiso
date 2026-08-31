@@ -52496,6 +52496,379 @@ impl Predict for Loci {
     }
 }
 
+/// Cluster-based local outlier factor (He–Wang–Deng CBLOF).
+///
+/// Score is Euclidean distance to the nearest large-cluster centre on a
+/// two-means reservoir. Distinct from [`Sod`] (subspace 1-NN), [`Inne`], and
+/// [`Loci`] (MDEF).
+#[derive(Clone, Debug)]
+pub struct Cblof {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+    c0: Vec<f64>,
+    c1: Vec<f64>,
+    n0: f64,
+    n1: f64,
+}
+
+impl Default for Cblof {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+            c0: Vec::new(),
+            c1: Vec::new(),
+            n0: 0.0,
+            n1: 0.0,
+        }
+    }
+}
+
+impl Cblof {
+    /// Empty CBLOF detector (reservoir cap 64, two centres).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn euclid(a: &[f64], b: &[f64]) -> f64 {
+        let p = a.len().min(b.len());
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let d = a[j] - b[j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn dist_row(&self, x: &Matrix, i: usize, center: &[f64]) -> f64 {
+        if center.is_empty() {
+            return f64::INFINITY;
+        }
+        let p = self.ncols.min(x.ncols()).min(center.len());
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return f64::INFINITY;
+            }
+            let d = z - center[j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn refit_centers(&mut self) {
+        if self.rows.len() < 2 || self.ncols == 0 {
+            return;
+        }
+        let p = self.ncols;
+        let mut c0 = self.rows[0].clone();
+        let last = self.rows.len() - 1;
+        let mut c1 = self.rows[last].clone();
+        if c0.len() < p || c1.len() < p {
+            return;
+        }
+        let mut n0 = 0.0_f64;
+        let mut n1 = 0.0_f64;
+        for _ in 0..5 {
+            let mut s0 = vec![0.0_f64; p];
+            let mut s1 = vec![0.0_f64; p];
+            n0 = 0.0;
+            n1 = 0.0;
+            for row in &self.rows {
+                if row.len() < p {
+                    continue;
+                }
+                if Self::euclid(row, &c0) <= Self::euclid(row, &c1) {
+                    for j in 0..p {
+                        s0[j] += row[j];
+                    }
+                    n0 += 1.0;
+                } else {
+                    for j in 0..p {
+                        s1[j] += row[j];
+                    }
+                    n1 += 1.0;
+                }
+            }
+            if n0 > 0.0 {
+                for j in 0..p {
+                    c0[j] = s0[j] / n0;
+                }
+            }
+            if n1 > 0.0 {
+                for j in 0..p {
+                    c1[j] = s1[j] / n1;
+                }
+            }
+        }
+        self.c0 = c0;
+        self.c1 = c1;
+        self.n0 = n0;
+        self.n1 = n1;
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 2 || self.ncols == 0 || self.c0.is_empty() {
+            return 0.0;
+        }
+        let d0 = self.dist_row(x, i, &self.c0);
+        let d1 = self.dist_row(x, i, &self.c1);
+        if !d0.is_finite() && !d1.is_finite() {
+            return 0.0;
+        }
+        if (self.n0 - self.n1).abs() < 1e-12 {
+            return d0.min(d1);
+        }
+        if self.n0 > self.n1 {
+            d0
+        } else {
+            d1
+        }
+    }
+}
+
+impl PartialFit for Cblof {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.refit_centers();
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 2;
+        q.warmup = self.rows.len() < 2;
+        q.explanation = format!("CBLOF reservoir n={} large n0={:.0} n1={:.0}", self.rows.len(), self.n0, self.n1);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "large-cluster distances",
+                "CBLOF scores distance to the nearest large 2-means centre; not SOD/INNE/LOCI",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for Cblof {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
+/// Mean \(k\)-NN distance anomaly scorer on a reservoir.
+///
+/// Score is the mean Euclidean distance to \(k=\min(5,n-1)\) neighbours.
+/// Distinct from [`Sod`] (axis-aligned 1-NN) and [`Loci`] (MDEF).
+#[derive(Clone, Debug)]
+pub struct KnnAnomaly {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for KnnAnomaly {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl KnnAnomaly {
+    /// Empty \(k\)-NN anomaly detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn dist_row(&self, x: &Matrix, i: usize, row: &[f64]) -> f64 {
+        let p = self.ncols.min(x.ncols()).min(row.len());
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return f64::INFINITY;
+            }
+            let d = z - row[j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 2 || self.ncols == 0 {
+            return 0.0;
+        }
+        let mut ds: Vec<f64> = self
+            .rows
+            .iter()
+            .map(|row| self.dist_row(x, i, row))
+            .filter(|d| d.is_finite() && *d > 1e-15)
+            .collect();
+        if ds.is_empty() {
+            return 0.0;
+        }
+        ds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let kk = 5.min(ds.len());
+        let mut s = 0.0_f64;
+        for t in 0..kk {
+            s += ds[t];
+        }
+        s / kk as f64
+    }
+}
+
+impl PartialFit for KnnAnomaly {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 2;
+        q.warmup = self.rows.len() < 2;
+        q.explanation = format!("k-NN anomaly reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "mean k-NN distances",
+                "KnnAnomaly is mean Euclidean k-NN in the full space; not SOD/LOCI",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for KnnAnomaly {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53432,6 +53805,12 @@ mod tests {
         Loci::new()
             .partial_fit(&x, None, &session)
             .expect("lci");
+        Cblof::new()
+            .partial_fit(&x, None, &session)
+            .expect("cbl");
+        KnnAnomaly::new()
+            .partial_fit(&x, None, &session)
+            .expect("kna");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

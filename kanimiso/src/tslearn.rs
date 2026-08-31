@@ -3027,6 +3027,124 @@ pub fn cdist_hassanat(a: &Matrix, b: &Matrix, session: &Session) -> Result<Quali
     ctx.finish(out)
 }
 
+fn fidelity_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut bc = 0.0_f64;
+    for i in 0..n {
+        bc += ((a[i].abs() / sa) * (b[i].abs() / sb)).sqrt();
+    }
+    (1.0 - bc).max(0.0)
+}
+
+fn whittaker_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        s += (a[i].abs() / sa - b[i].abs() / sb).abs();
+    }
+    0.5 * s
+}
+
+/// Fidelity distance \(1-\sum\sqrt{p_i q_i}\) after \(\ell_1\) norm.
+///
+/// Distinct from [`bhattacharyya_distance`] (\(-\log\) BC). Identical series
+/// score 0.
+pub fn fidelity_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("fidelity_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("fidelity_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("fidelity_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(fidelity_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise fidelity distance.
+pub fn cdist_fidelity(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        fidelity_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+/// Whittaker distance \(\tfrac12\sum|p_i-q_i|\) after \(\ell_1\) norm.
+///
+/// Distinct from [`manhattan_distance`] (unnormalized) and the tsa Whittaker
+/// smoother. Identical series score 0.
+pub fn whittaker_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("whittaker_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("whittaker_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("whittaker_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(whittaker_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Whittaker distance.
+pub fn cdist_whittaker(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        whittaker_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -21685,6 +21803,10 @@ mod tests {
         assert!(bha.abs() < 1e-12, "bhattacharyya_distance={bha}");
         let has = hassanat_distance(&a, &a, &Session::new("ts", "has")).unwrap().value;
         assert!(has.abs() < 1e-12, "hassanat_distance={has}");
+        let fid = fidelity_distance(&a, &a, &Session::new("ts", "fid")).unwrap().value;
+        assert!(fid.abs() < 1e-12, "fidelity_distance={fid}");
+        let wtd = whittaker_distance(&a, &a, &Session::new("ts", "wtd")).unwrap().value;
+        assert!(wtd.abs() < 1e-12, "whittaker_distance={wtd}");
     }
 
     #[test]
@@ -22847,6 +22969,16 @@ mod tests {
             .value;
         assert_eq!(csa.shape(), (8, 8));
         assert!(csa.get(0, 0).abs() < 1e-12);
+        let cfi = cdist_fidelity(&x, &x, &Session::new("ts", "cfi"))
+            .unwrap()
+            .value;
+        assert_eq!(cfi.shape(), (8, 8));
+        assert!(cfi.get(0, 0).abs() < 1e-12);
+        let cwt = cdist_whittaker(&x, &x, &Session::new("ts", "cwt"))
+            .unwrap()
+            .value;
+        assert_eq!(cwt.shape(), (8, 8));
+        assert!(cwt.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

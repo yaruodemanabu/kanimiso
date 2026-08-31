@@ -7444,6 +7444,49 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.UnitBurrHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaLindleyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.KumaraswamyGammaHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.DiscreteInverseGompertzHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.DiscreteInverseChenHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("online.Cblof", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "online.KnnAnomaly",
+        "river.anomaly.HalfSpaceTrees",
+        "online",
+    ),
+    a(
+        "tslearn.fidelity_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_fidelity",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.whittaker_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_whittaker",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8332,6 +8375,17 @@ mod tests {
             "tslearn.cdist_bhattacharyya",
             "tslearn.hassanat_distance",
             "tslearn.cdist_hassanat",
+            "hmm.UnitBurrHmm",
+            "hmm.BetaLindleyHmm",
+            "hmm.KumaraswamyGammaHmm",
+            "hmm.DiscreteInverseGompertzHmm",
+            "hmm.DiscreteInverseChenHmm",
+            "online.Cblof",
+            "online.KnnAnomaly",
+            "tslearn.fidelity_distance",
+            "tslearn.cdist_fidelity",
+            "tslearn.whittaker_distance",
+            "tslearn.cdist_whittaker",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
