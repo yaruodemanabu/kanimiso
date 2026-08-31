@@ -3145,6 +3145,148 @@ pub fn cdist_whittaker(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qual
     ctx.finish(out)
 }
 
+fn pearson_chi_squared_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let p = a[i].abs() / sa;
+        let q = b[i].abs() / sb;
+        s += (p - q) * (p - q) / p.max(1e-18);
+    }
+    s
+}
+
+fn neyman_chi_squared_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let p = a[i].abs() / sa;
+        let q = b[i].abs() / sb;
+        s += (p - q) * (p - q) / q.max(1e-18);
+    }
+    s
+}
+
+/// Pearson \(\chi^2\) distance \(\sum(p_i-q_i)^2/p_i\) after \(\ell_1\) norm.
+///
+/// Distinct from [`clark_distance`] and [`neyman_chi_squared_distance`].
+/// Identical series score 0.
+pub fn pearson_chi_squared_distance(
+    a: &Vector,
+    b: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("pearson_chi_squared_distance.a")
+    {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("pearson_chi_squared_distance.b")
+    {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("pearson_chi_squared_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(pearson_chi_squared_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Pearson \(\chi^2\) distance.
+pub fn cdist_pearson_chi_squared(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        pearson_chi_squared_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+/// Neyman \(\chi^2\) distance \(\sum(p_i-q_i)^2/q_i\) after \(\ell_1\) norm.
+///
+/// Distinct from [`pearson_chi_squared_distance`] (denominator \(p\)) and
+/// [`clark_distance`]. Identical series score 0.
+pub fn neyman_chi_squared_distance(
+    a: &Vector,
+    b: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("neyman_chi_squared_distance.a")
+    {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("neyman_chi_squared_distance.b")
+    {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("neyman_chi_squared_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(neyman_chi_squared_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Neyman \(\chi^2\) distance.
+pub fn cdist_neyman_chi_squared(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        neyman_chi_squared_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -21807,6 +21949,10 @@ mod tests {
         assert!(fid.abs() < 1e-12, "fidelity_distance={fid}");
         let wtd = whittaker_distance(&a, &a, &Session::new("ts", "wtd")).unwrap().value;
         assert!(wtd.abs() < 1e-12, "whittaker_distance={wtd}");
+        let pcs = pearson_chi_squared_distance(&a, &a, &Session::new("ts", "pcs")).unwrap().value;
+        assert!(pcs.abs() < 1e-12, "pearson_chi_squared_distance={pcs}");
+        let ney = neyman_chi_squared_distance(&a, &a, &Session::new("ts", "ney")).unwrap().value;
+        assert!(ney.abs() < 1e-12, "neyman_chi_squared_distance={ney}");
     }
 
     #[test]
@@ -22979,6 +23125,16 @@ mod tests {
             .value;
         assert_eq!(cwt.shape(), (8, 8));
         assert!(cwt.get(0, 0).abs() < 1e-12);
+        let cpc = cdist_pearson_chi_squared(&x, &x, &Session::new("ts", "cpc"))
+            .unwrap()
+            .value;
+        assert_eq!(cpc.shape(), (8, 8));
+        assert!(cpc.get(0, 0).abs() < 1e-12);
+        let cny = cdist_neyman_chi_squared(&x, &x, &Session::new("ts", "cny"))
+            .unwrap()
+            .value;
+        assert_eq!(cny.shape(), (8, 8));
+        assert!(cny.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

@@ -52869,6 +52869,447 @@ impl Predict for KnnAnomaly {
     }
 }
 
+/// Connectivity-based outlier factor (Tang–Chen–Fu–Cheung COF).
+///
+/// Score is \(\mathrm{acn}(x)/\overline{\mathrm{acn}}(\mathcal N_k(x))\) from
+/// set-chaining distances. Distinct from [`OnlineLof`] (k-distance),
+/// [`KnnAnomaly`] (mean k-NN), and [`Loci`] (MDEF).
+#[derive(Clone, Debug)]
+pub struct Cof {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for Cof {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl Cof {
+    /// Empty COF detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn dist_row(&self, x: &Matrix, i: usize, row: &[f64]) -> f64 {
+        let p = self.ncols.min(x.ncols()).min(row.len());
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return f64::INFINITY;
+            }
+            let d = z - row[j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn dist_stored(&self, a: usize, b: usize) -> f64 {
+        if a >= self.rows.len() || b >= self.rows.len() {
+            return f64::INFINITY;
+        }
+        let p = self.ncols;
+        if self.rows[a].len() < p || self.rows[b].len() < p {
+            return f64::INFINITY;
+        }
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let d = self.rows[a][j] - self.rows[b][j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn knn_indices(&self, x: &Matrix, i: usize, k: usize) -> Vec<usize> {
+        let mut ds: Vec<(f64, usize)> = self
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(t, row)| (self.dist_row(x, i, row), t))
+            .filter(|(d, _)| d.is_finite() && *d > 1e-15)
+            .collect();
+        ds.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        ds.into_iter().take(k).map(|(_, t)| t).collect()
+    }
+
+    fn dist_to_seed(&self, cand: usize, query: Option<(&Matrix, usize)>, stored: Option<usize>) -> f64 {
+        let mut d = f64::INFINITY;
+        if let Some((xm, ri)) = query {
+            d = d.min(self.dist_row(xm, ri, &self.rows[cand]));
+        }
+        if let Some(si) = stored {
+            d = d.min(self.dist_stored(si, cand));
+        }
+        d
+    }
+
+    fn acn_from_chain(
+        &self,
+        query: Option<(&Matrix, usize)>,
+        stored: Option<usize>,
+        neigh: &[usize],
+    ) -> f64 {
+        let k = neigh.len();
+        if k == 0 {
+            return 0.0;
+        }
+        let mut remaining: Vec<usize> = neigh.to_vec();
+        let mut in_set: Vec<usize> = Vec::new();
+        let mut weighted = 0.0_f64;
+        for step in 0..k {
+            let mut best_d = f64::INFINITY;
+            let mut best_idx = 0usize;
+            let mut best_pos = 0usize;
+            for (pos, &cand) in remaining.iter().enumerate() {
+                let mut d = self.dist_to_seed(cand, query, stored);
+                for &s in &in_set {
+                    d = d.min(self.dist_stored(s, cand));
+                }
+                if d < best_d {
+                    best_d = d;
+                    best_idx = cand;
+                    best_pos = pos;
+                }
+            }
+            if !best_d.is_finite() {
+                break;
+            }
+            weighted += (k - step) as f64 * best_d;
+            in_set.push(best_idx);
+            remaining.remove(best_pos);
+        }
+        2.0 * weighted / (k as f64 * (k as f64 + 1.0))
+    }
+
+    fn acn_query(&self, x: &Matrix, i: usize, neigh: &[usize]) -> f64 {
+        self.acn_from_chain(Some((x, i)), None, neigh)
+    }
+
+    fn acn_stored(&self, idx: usize, neigh: &[usize]) -> f64 {
+        self.acn_from_chain(None, Some(idx), neigh)
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 3 || self.ncols == 0 {
+            return 0.0;
+        }
+        let k = 5.min(self.rows.len().saturating_sub(1)).max(1);
+        let neigh = self.knn_indices(x, i, k);
+        if neigh.is_empty() {
+            return 0.0;
+        }
+        let acn_x = self.acn_query(x, i, &neigh);
+        let mut mean = 0.0_f64;
+        let mut n = 0.0_f64;
+        for &t in &neigh {
+            let mut ds: Vec<(f64, usize)> = (0..self.rows.len())
+                .filter(|&u| u != t)
+                .map(|u| (self.dist_stored(t, u), u))
+                .filter(|(d, _)| d.is_finite())
+                .collect();
+            ds.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let tn: Vec<usize> = ds.into_iter().take(k).map(|(_, u)| u).collect();
+            if tn.is_empty() {
+                continue;
+            }
+            mean += self.acn_stored(t, &tn);
+            n += 1.0;
+        }
+        if n < 1.0 || mean < 1e-18 {
+            0.0
+        } else {
+            acn_x / (mean / n)
+        }
+    }
+}
+
+impl PartialFit for Cof {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 3;
+        q.warmup = self.rows.len() < 3;
+        q.explanation = format!("COF reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "chaining acn ratios",
+                "COF is acn(x)/mean acn of neighbours; not LOF/kNN/LOCI",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for Cof {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
+/// Influenced outlierness (Jin–Tung–Han–Wang INFLO).
+///
+/// Score is mean density on the influence space \(k\mathrm{NN}\cup RN_k\)
+/// over own density. Distinct from [`OnlineLof`] (k-distance) and [`Cof`].
+#[derive(Clone, Debug)]
+pub struct Inflo {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for Inflo {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl Inflo {
+    /// Empty INFLO detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn dist_row(&self, x: &Matrix, i: usize, row: &[f64]) -> f64 {
+        let p = self.ncols.min(x.ncols()).min(row.len());
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return f64::INFINITY;
+            }
+            let d = z - row[j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn dist_stored(&self, a: usize, b: usize) -> f64 {
+        if a >= self.rows.len() || b >= self.rows.len() {
+            return f64::INFINITY;
+        }
+        let p = self.ncols;
+        if self.rows[a].len() < p || self.rows[b].len() < p {
+            return f64::INFINITY;
+        }
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let d = self.rows[a][j] - self.rows[b][j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn k_distance_stored(&self, idx: usize, k: usize) -> f64 {
+        let mut ds: Vec<f64> = (0..self.rows.len())
+            .filter(|&t| t != idx)
+            .map(|t| self.dist_stored(idx, t))
+            .filter(|d| d.is_finite())
+            .collect();
+        if ds.is_empty() {
+            return f64::INFINITY;
+        }
+        ds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        ds[(k.min(ds.len()) - 1).min(ds.len() - 1)]
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 3 || self.ncols == 0 {
+            return 0.0;
+        }
+        let k = 5.min(self.rows.len().saturating_sub(1)).max(1);
+        let mut qds: Vec<(f64, usize)> = self
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(t, row)| (self.dist_row(x, i, row), t))
+            .filter(|(d, _)| d.is_finite() && *d > 1e-15)
+            .collect();
+        if qds.len() < k {
+            return 0.0;
+        }
+        qds.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let kd_q = qds[k - 1].0.max(1e-12);
+        let mut infl: Vec<usize> = qds.iter().take(k).map(|(_, t)| *t).collect();
+        for t in 0..self.rows.len() {
+            let d = self.dist_row(x, i, &self.rows[t]);
+            if d.is_finite() && d <= self.k_distance_stored(t, k) && !infl.contains(&t) {
+                infl.push(t);
+            }
+        }
+        if infl.is_empty() {
+            return 0.0;
+        }
+        let mut mean_den = 0.0_f64;
+        for &t in &infl {
+            mean_den += 1.0 / self.k_distance_stored(t, k).max(1e-12);
+        }
+        mean_den /= infl.len() as f64;
+        mean_den * kd_q
+    }
+}
+
+impl PartialFit for Inflo {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 3;
+        q.warmup = self.rows.len() < 3;
+        q.explanation = format!("INFLO reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "influence-space density ratios",
+                "INFLO is mean density of kNN∪RN over own density; not LOF/COF",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for Inflo {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53811,6 +54252,12 @@ mod tests {
         KnnAnomaly::new()
             .partial_fit(&x, None, &session)
             .expect("kna");
+        Cof::new()
+            .partial_fit(&x, None, &session)
+            .expect("cof");
+        Inflo::new()
+            .partial_fit(&x, None, &session)
+            .expect("ilo");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
