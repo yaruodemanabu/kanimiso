@@ -7713,6 +7713,37 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.UnitHalfNormalHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaHalfNormalHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.ExponentiatedHalfNormalHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.KumaraswamyHalfNormalHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.DiscreteHalfNormalHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("online.Rod", "river.anomaly.GaussianScorer", "online"),
+    a("online.GmmAnomaly", "river.anomaly.GaussianScorer", "online"),
+    a(
+        "tslearn.jaccard_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a("tslearn.cdist_jaccard", "tslearn.metrics.cdist", "timeseries"),
+    a(
+        "tslearn.jeffreys_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a("tslearn.cdist_jeffreys", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8678,6 +8709,17 @@ mod tests {
             "tslearn.cdist_min_symmetric_chi_squared",
             "tslearn.l1_squared_euclidean_distance",
             "tslearn.cdist_l1_squared_euclidean",
+            "hmm.UnitHalfNormalHmm",
+            "hmm.BetaHalfNormalHmm",
+            "hmm.ExponentiatedHalfNormalHmm",
+            "hmm.KumaraswamyHalfNormalHmm",
+            "hmm.DiscreteHalfNormalHmm",
+            "online.Rod",
+            "online.GmmAnomaly",
+            "tslearn.jaccard_distance",
+            "tslearn.cdist_jaccard",
+            "tslearn.jeffreys_distance",
+            "tslearn.cdist_jeffreys",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

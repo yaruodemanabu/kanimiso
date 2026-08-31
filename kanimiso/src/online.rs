@@ -55301,6 +55301,387 @@ impl Predict for Knnw {
     }
 }
 
+fn rod_median(xs: &mut [f64]) -> f64 {
+    if xs.is_empty() {
+        return 0.0;
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = xs.len();
+    if n % 2 == 1 {
+        xs[n / 2]
+    } else {
+        0.5 * (xs[n / 2 - 1] + xs[n / 2])
+    }
+}
+
+fn rod_mad(xs: &[f64], med: f64) -> f64 {
+    let mut d: Vec<f64> = xs.iter().map(|v| (v - med).abs()).collect();
+    rod_median(&mut d).max(1e-12)
+}
+
+/// Rotation-based outlier detection (random 1-D projections, max MAD z-score).
+///
+/// Distinct from [`GaussianScorer`] (mean/sd on raw coordinates) and
+/// [`PcaAnomaly`] (first-PC residual).
+#[derive(Clone, Debug)]
+pub struct Rod {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+    rng: Rng,
+}
+
+impl Default for Rod {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+            rng: Rng::new(41),
+        }
+    }
+}
+
+impl Rod {
+    /// Empty ROD detector (reservoir cap 64, eight random projections).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 3 || self.ncols == 0 {
+            return 0.0;
+        }
+        let p = self.ncols.min(x.ncols());
+        if p == 0 {
+            return 0.0;
+        }
+        let mut rng = self.rng.clone();
+        let n_proj = 8usize;
+        let mut worst = 0.0_f64;
+        for _ in 0..n_proj {
+            let mut dir = vec![0.0_f64; p];
+            let mut nrm = 0.0_f64;
+            for v in dir.iter_mut() {
+                *v = rng.standard_normal();
+                nrm += *v * *v;
+            }
+            let nrm = nrm.sqrt().max(1e-12);
+            for v in dir.iter_mut() {
+                *v /= nrm;
+            }
+            let mut projs: Vec<f64> = self
+                .rows
+                .iter()
+                .map(|row| {
+                    let mut s = 0.0_f64;
+                    for j in 0..p.min(row.len()) {
+                        s += row[j] * dir[j];
+                    }
+                    s
+                })
+                .collect();
+            let med = rod_median(&mut projs);
+            let mad = rod_mad(&projs, med);
+            let mut q = 0.0_f64;
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                q += z * dir[j];
+            }
+            if !ok {
+                continue;
+            }
+            let z = (q - med).abs() / mad;
+            if z > worst {
+                worst = z;
+            }
+        }
+        worst
+    }
+}
+
+impl PartialFit for Rod {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 3;
+        q.warmup = self.rows.len() < 3;
+        q.explanation = format!("ROD reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "rotation-based outlier detection",
+                "ROD is max MAD z-score over random 1-D projections; not GaussianScorer/PCA",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for Rod {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
+fn gmm_logpdf(y: f64, mu: f64, var: f64) -> f64 {
+    let v = var.max(1e-12);
+    -0.5 * ((y - mu) * (y - mu) / v + v.ln() + std::f64::consts::LN_2 + std::f64::consts::PI.ln())
+}
+
+/// Two-component 1-D GMM anomaly scorer on the first coordinate.
+///
+/// Distinct from [`GaussianScorer`] (single Gaussian) and [`PcaAnomaly`].
+#[derive(Clone, Debug)]
+pub struct GmmAnomaly {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for GmmAnomaly {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl GmmAnomaly {
+    /// Empty two-component GMM detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 4 || self.ncols == 0 {
+            return 0.0;
+        }
+        let y = x.get(i, 0);
+        if !y.is_finite() {
+            return 0.0;
+        }
+        let xs: Vec<f64> = self
+            .rows
+            .iter()
+            .filter_map(|row| row.get(0).copied())
+            .filter(|v| v.is_finite())
+            .collect();
+        if xs.len() < 4 {
+            return 0.0;
+        }
+        let mut sorted = xs.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = sorted.len();
+        let mut mu1 = sorted[n / 4];
+        let mut mu2 = sorted[(3 * n) / 4];
+        if (mu2 - mu1).abs() < 1e-9 {
+            mu2 = mu1 + 1.0;
+        }
+        let mut var1 = 1.0_f64;
+        let mut var2 = 1.0_f64;
+        let mut w1 = 0.5_f64;
+        let mut w2 = 0.5_f64;
+        for _ in 0..8 {
+            let mut sw1 = 0.0_f64;
+            let mut sw2 = 0.0_f64;
+            let mut sy1 = 0.0_f64;
+            let mut sy2 = 0.0_f64;
+            let mut sy21 = 0.0_f64;
+            let mut sy22 = 0.0_f64;
+            for &z in &xs {
+                let l1 = (w1.max(1e-12)).ln() + gmm_logpdf(z, mu1, var1);
+                let l2 = (w2.max(1e-12)).ln() + gmm_logpdf(z, mu2, var2);
+                let m = l1.max(l2);
+                let e1 = (l1 - m).exp();
+                let e2 = (l2 - m).exp();
+                let den = (e1 + e2).max(1e-18);
+                let r1 = e1 / den;
+                let r2 = e2 / den;
+                sw1 += r1;
+                sw2 += r2;
+                sy1 += r1 * z;
+                sy2 += r2 * z;
+                sy21 += r1 * z * z;
+                sy22 += r2 * z * z;
+            }
+            let tot = (sw1 + sw2).max(1e-12);
+            w1 = (sw1 / tot).clamp(0.05, 0.95);
+            w2 = 1.0 - w1;
+            if sw1 > 1e-8 {
+                mu1 = sy1 / sw1;
+                var1 = (sy21 / sw1 - mu1 * mu1).max(1e-6);
+            }
+            if sw2 > 1e-8 {
+                mu2 = sy2 / sw2;
+                var2 = (sy22 / sw2 - mu2 * mu2).max(1e-6);
+            }
+        }
+        let l1 = w1.max(1e-12).ln() + gmm_logpdf(y, mu1, var1);
+        let l2 = w2.max(1e-12).ln() + gmm_logpdf(y, mu2, var2);
+        let m = l1.max(l2);
+        let dens = m.exp() * ((l1 - m).exp() + (l2 - m).exp());
+        -dens.max(1e-300).ln()
+    }
+}
+
+impl PartialFit for GmmAnomaly {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 4;
+        q.warmup = self.rows.len() < 4;
+        q.explanation = format!("GMM-anomaly reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "two-component 1-D GMM anomaly",
+                "GmmAnomaly is a mixture density score; not GaussianScorer",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for GmmAnomaly {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56279,6 +56660,12 @@ mod tests {
         Knnw::new()
             .partial_fit(&x, None, &session)
             .expect("knw");
+        Rod::new()
+            .partial_fit(&x, None, &session)
+            .expect("rod");
+        GmmAnomaly::new()
+            .partial_fit(&x, None, &session)
+            .expect("gma");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

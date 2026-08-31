@@ -3953,6 +3953,134 @@ pub fn cdist_l1_squared_euclidean(
     ctx.finish(out)
 }
 
+fn jaccard_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut smin = 0.0_f64;
+    let mut smax = 0.0_f64;
+    for i in 0..n {
+        let p = a[i].abs() / sa;
+        let q = b[i].abs() / sb;
+        smin += p.min(q);
+        smax += p.max(q);
+    }
+    if smax < 1e-18 {
+        0.0
+    } else {
+        (1.0 - smin / smax).max(0.0)
+    }
+}
+
+fn jeffreys_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let p = (a[i].abs() / sa).max(1e-18);
+        let q = (b[i].abs() / sb).max(1e-18);
+        s += (p - q) * (p / q).ln();
+    }
+    s.max(0.0)
+}
+
+/// Probability Jaccard \(1-\sum\min/\sum\max\) after \(\ell_1\).
+///
+/// Distinct from [`crate::metrics::jaccard_distances`] (binary support) and
+/// [`intersection_distance`] (\(1-\sum\min\)). Identical series score 0.
+pub fn jaccard_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("jaccard_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("jaccard_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("jaccard_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(jaccard_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise probability Jaccard distance.
+pub fn cdist_jaccard(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        jaccard_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+/// Jeffreys divergence \(\sum(p-q)\ln(p/q)\) after \(\ell_1\).
+///
+/// Distinct from [`k_divergence_distance`] (one-sided) and [`topsoe_distance`]
+/// (two-sided \(K\) to the mean). Identical series score 0.
+pub fn jeffreys_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("jeffreys_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("jeffreys_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("jeffreys_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(jeffreys_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Jeffreys divergence.
+pub fn cdist_jeffreys(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        jeffreys_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -22639,6 +22767,10 @@ mod tests {
         assert!(mns.abs() < 1e-12, "min_symmetric_chi_squared_distance={mns}");
         let pse = l1_squared_euclidean_distance(&a, &a, &Session::new("ts", "pse")).unwrap().value;
         assert!(pse.abs() < 1e-12, "l1_squared_euclidean_distance={pse}");
+        let jcd = jaccard_distance(&a, &a, &Session::new("ts", "jcd")).unwrap().value;
+        assert!(jcd.abs() < 1e-12, "jaccard_distance={jcd}");
+        let jef = jeffreys_distance(&a, &a, &Session::new("ts", "jef")).unwrap().value;
+        assert!(jef.abs() < 1e-12, "jeffreys_distance={jef}");
     }
 
     #[test]
@@ -23871,6 +24003,16 @@ mod tests {
             .value;
         assert_eq!(cpe.shape(), (8, 8));
         assert!(cpe.get(0, 0).abs() < 1e-12);
+        let cjd = cdist_jaccard(&x, &x, &Session::new("ts", "cjd"))
+            .unwrap()
+            .value;
+        assert_eq!(cjd.shape(), (8, 8));
+        assert!(cjd.get(0, 0).abs() < 1e-12);
+        let cjf = cdist_jeffreys(&x, &x, &Session::new("ts", "cjf"))
+            .unwrap()
+            .value;
+        assert_eq!(cjf.shape(), (8, 8));
+        assert!(cjf.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;
