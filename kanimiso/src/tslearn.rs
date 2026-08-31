@@ -17478,6 +17478,331 @@ impl Mpx {
     }
 }
 
+/// Regime snippets (stumpy `snippets`).
+///
+/// Snippet count is not identification `p`. Distinct from [`Motif`] (tightest
+/// nearest neighbours) and [`Merlin`] (discords).
+#[derive(Clone, Debug)]
+pub struct Snippets {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+    /// Number of regimes. Not identification `p`.
+    pub n_snippets: usize,
+}
+
+impl Default for Snippets {
+    fn default() -> Self {
+        Self {
+            window: 3,
+            n_snippets: 2,
+        }
+    }
+}
+
+impl Snippets {
+    /// Snippet search with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Greedy facility-location snippets on pairwise subsequence distances.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedSnippets>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_vector(y),
+            Some(y),
+            &ctx.policy,
+        );
+        let m = self.window.max(2);
+        let k = self.n_snippets.max(1);
+        if m >= y.len() {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .severity(Severity::Warning)
+                    .message(format!("snippets window={m} is unusable for n={}", y.len()))
+                    .build(),
+            );
+            return ctx.finish(FittedSnippets {
+                indices: Vector::zeros(0),
+                scores: Vector::zeros(0),
+            });
+        }
+        let n_sub = y.len() + 1 - m;
+        let mut dist = vec![vec![0.0_f64; n_sub]; n_sub];
+        for i in 0..n_sub {
+            for j in (i + 1)..n_sub {
+                let d = subsequence_dist(y, i, y, j, m);
+                dist[i][j] = d;
+                dist[j][i] = d;
+            }
+        }
+        let mut chosen: Vec<usize> = Vec::new();
+        let mut scores = Vector::zeros(k);
+        for s in 0..k.min(n_sub) {
+            let mut best_i = 0usize;
+            let mut best = f64::INFINITY;
+            for i in 0..n_sub {
+                if chosen.contains(&i) {
+                    continue;
+                }
+                let mut cost = 0.0_f64;
+                for j in 0..n_sub {
+                    let mut d = dist[j][i];
+                    for &c in &chosen {
+                        if dist[j][c] < d {
+                            d = dist[j][c];
+                        }
+                    }
+                    cost += d;
+                }
+                if cost < best {
+                    best = cost;
+                    best_i = i;
+                }
+            }
+            chosen.push(best_i);
+            scores[s] = if best.is_finite() { best } else { 0.0 };
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Snippets is greedy facility location, not published stumpy snippets")
+                .compromise(NumericalCompromise::new(
+                    "stumpy snippets",
+                    "k-medoid facility location on pairwise subsequence distances",
+                    "the published area profile and MPdist regime kernel are omitted",
+                    "read the indices as a diverse-regime sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedSnippets {
+            indices: Vector::from_iter(chosen.iter().map(|i| *i as f64)),
+            scores,
+        })
+    }
+}
+
+/// Fitted snippet set.
+#[derive(Clone, Debug)]
+pub struct FittedSnippets {
+    /// Snippet starts.
+    pub indices: Vector,
+    /// Facility-location costs after each pick.
+    pub scores: Vector,
+}
+
+/// Incremental STAMP (stumpy `stampi`).
+///
+/// Window length is not identification `p`. Distinct from [`Stamp`] (batch
+/// nested loops) and [`Scrimp`] (random diagonals).
+#[derive(Clone, Debug)]
+pub struct Stampi {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+}
+
+impl Default for Stampi {
+    fn default() -> Self {
+        Self { window: 3 }
+    }
+}
+
+impl Stampi {
+    /// STAMPI with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+        }
+    }
+
+    /// Left-to-right streaming matrix profile.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_vector(y),
+            Some(y),
+            &ctx.policy,
+        );
+        let n = y.len();
+        let m = self.window.max(2);
+        if m >= n {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .severity(Severity::Warning)
+                    .message(format!("STAMPI window={m} is unusable for n={n}"))
+                    .build(),
+            );
+            return ctx.finish(StompResult {
+                profile: Vector::zeros(0),
+                nn_index: Vector::zeros(0),
+            });
+        }
+        let n_sub = n + 1 - m;
+        let excl = (m / 4).max(1);
+        let mut profile = Vector::filled(n_sub, f64::INFINITY);
+        let mut nn_index = Vector::zeros(n_sub);
+        for i in 0..n_sub {
+            for j in 0..i {
+                if i.abs_diff(j) < excl {
+                    continue;
+                }
+                let d = subsequence_dist(y, i, y, j, m);
+                if d < profile[i] {
+                    profile[i] = d;
+                    nn_index[i] = j as f64;
+                }
+                if d < profile[j] {
+                    profile[j] = d;
+                    nn_index[j] = i as f64;
+                }
+            }
+        }
+        for i in 0..n_sub {
+            if !profile[i].is_finite() {
+                profile[i] = 0.0;
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("STAMPI is a left-to-right prefix profile, not published incremental STAMP")
+                .compromise(NumericalCompromise::new(
+                    "stumpy stampi",
+                    "each new subsequence updates the profile of all earlier windows",
+                    "the published streaming buffer and z-normalized kernel are omitted",
+                    "read the profile as an incremental matrix-profile sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(StompResult { profile, nn_index })
+    }
+}
+
+/// Consensus motif across several series (stumpy `ostinato`).
+///
+/// Window length is not identification `p`. Distinct from [`Motif`] (one
+/// series) and [`mpdist`] (scalar two-series distance).
+pub fn ostinato(x: &Matrix, window: usize, session: &Session) -> Result<Qualified<OstinatoResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    let m = window.max(2);
+    let (n_series, tlen) = x.shape();
+    if m >= tlen || n_series < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "ostinato window={m} is unusable for n_series={n_series} length={tlen}"
+                ))
+                .build(),
+        );
+        return ctx.finish(OstinatoResult {
+            series: 0.0,
+            start: 0.0,
+            score: f64::NAN,
+        });
+    }
+    let n_sub = tlen + 1 - m;
+    let mut best_s = 0usize;
+    let mut best_i = 0usize;
+    let mut best = f64::INFINITY;
+    for s in 0..n_series {
+        for i in 0..n_sub {
+            let mut acc = 0.0_f64;
+            let mut ok = 0usize;
+            for k in 0..n_series {
+                if k == s {
+                    continue;
+                }
+                let mut nearest = f64::INFINITY;
+                for j in 0..n_sub {
+                    let mut d = 0.0_f64;
+                    for t in 0..m {
+                        let e = x.get(s, i + t) - x.get(k, j + t);
+                        d += e * e;
+                    }
+                    let d = d.max(0.0).sqrt();
+                    if d < nearest {
+                        nearest = d;
+                    }
+                }
+                if nearest.is_finite() {
+                    acc += nearest;
+                    ok += 1;
+                }
+            }
+            if ok > 0 {
+                let score = acc / ok as f64;
+                if score < best {
+                    best = score;
+                    best_s = s;
+                    best_i = i;
+                }
+            }
+        }
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("ostinato is mean nearest-neighbour radius, not published Ostinato")
+            .compromise(NumericalCompromise::new(
+                "stumpy ostinato",
+                "argmin over (series, start) of the mean min-distance to every other series",
+                "the published radius search and z-normalized kernel are omitted",
+                "read the index as a consensus-motif sketch",
+            ))
+            .build(),
+    );
+    ctx.finish(OstinatoResult {
+        series: best_s as f64,
+        start: best_i as f64,
+        score: if best.is_finite() { best } else { f64::NAN },
+    })
+}
+
+/// Consensus motif payload.
+#[derive(Clone, Debug)]
+pub struct OstinatoResult {
+    /// Series (row) that hosts the motif.
+    pub series: f64,
+    /// Start index inside that series.
+    pub start: f64,
+    /// Mean nearest-neighbour radius.
+    pub score: f64,
+}
+
+/// Named Ostinato consensus-motif search.
+#[derive(Clone, Debug)]
+pub struct Ostinato {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+}
+
+impl Default for Ostinato {
+    fn default() -> Self {
+        Self { window: 3 }
+    }
+}
+
+impl Ostinato {
+    /// Ostinato with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+        }
+    }
+
+    /// Consensus motif of the rows of `x`.
+    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<OstinatoResult>> {
+        ostinato(x, self.window, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -18120,6 +18445,21 @@ mod tests {
             mpx.value.profile.as_slice().iter().all(|v| v.is_finite())
                 || mpx.value.profile.is_empty()
         );
+        let snp = Snippets::new(3)
+            .fit(&yr, &Session::new("ts", "snp"))
+            .unwrap();
+        assert_eq!(snp.value.indices.len(), 2);
+        let sti = Stampi::new(3)
+            .fit(&yr, &Session::new("ts", "sti"))
+            .unwrap();
+        assert!(
+            sti.value.profile.as_slice().iter().all(|v| v.is_finite())
+                || sti.value.profile.is_empty()
+        );
+        let ost = Ostinato::new(3)
+            .fit(&x, &Session::new("ts", "ost"))
+            .unwrap();
+        assert!(ost.value.score.is_finite());
         let igs = InformationGainSegmentation::new()
             .fit(&yr, &Session::new("ts", "igs"))
             .unwrap();

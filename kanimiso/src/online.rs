@@ -40049,6 +40049,460 @@ impl Predict for OnlineWelschRegressor {
     }
 }
 
+/// Online expectile regressor (river asymmetric \(L_2\)).
+///
+/// SGD on \(\tau r_+^2+(1-\tau)r_-^2\). Level \(\tau\) is not identification
+/// `p`. Distinct from [`OnlineQuantileRegressor`] (pinball) and
+/// [`OnlineHuberRegressor`] (piecewise \(L_2/L_1\)).
+#[derive(Clone, Debug)]
+pub struct OnlineExpectileRegressor {
+    /// Expectile level in \((0,1)\). Not identification `p`.
+    pub tau: f64,
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineExpectileRegressor {
+    fn default() -> Self {
+        Self {
+            tau: 0.25,
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineExpectileRegressor {
+    /// Expectile regressor at level `tau`.
+    pub fn new(tau: f64) -> Self {
+        Self {
+            tau,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineExpectileRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineExpectileRegressor",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected expectile update"),
+            );
+        };
+        self.initialized = true;
+        let tau = if self.tau.is_finite() && self.tau > 0.0 && self.tau < 1.0 {
+            self.tau
+        } else {
+            0.25
+        };
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let r = y[i] - eta;
+            let w = if r >= 0.0 { tau } else { 1.0 - tau };
+            loss_before += w * r * r;
+            let g = -2.0 * w * r;
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            let ra = y[i] - ea;
+            let wa = if ra >= 0.0 { tau } else { 1.0 - tau };
+            loss_after += wa * ra * ra;
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online expectile regressor",
+            "SGD on the asymmetric L2 expectile; τ is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineExpectileRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
+/// Online Hampel redescending regressor (river robust loss).
+///
+/// Three-part \(\psi\) with cutoffs \(a<b<c\), none of which are identification
+/// `p`. Distinct from [`OnlineHuberRegressor`] (no hard zero) and
+/// [`OnlineTukeyRegressor`] (quartic bowl).
+#[derive(Clone, Debug)]
+pub struct OnlineHampelRegressor {
+    /// Inner Huber radius. Not identification `p`.
+    pub a: f64,
+    /// Linear-to-descend hinge. Not identification `p`.
+    pub b: f64,
+    /// Hard-reject radius. Not identification `p`.
+    pub c: f64,
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineHampelRegressor {
+    fn default() -> Self {
+        Self {
+            a: 1.5,
+            b: 3.5,
+            c: 8.0,
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineHampelRegressor {
+    /// Hampel regressor with inner cutoff `a`.
+    pub fn new(a: f64) -> Self {
+        Self {
+            a,
+            ..Self::default()
+        }
+    }
+}
+
+fn hampel_psi(r: f64, a: f64, b: f64, c: f64) -> (f64, f64) {
+    let ar = r.abs();
+    let sign = if r >= 0.0 { 1.0 } else { -1.0 };
+    if ar <= a {
+        (0.5 * r * r, r)
+    } else if ar <= b {
+        (a * ar - 0.5 * a * a, sign * a)
+    } else if ar < c {
+        let t = (c - ar) / (c - b).max(1e-8);
+        let rho = a * b - 0.5 * a * a + 0.5 * a * (c - b) * (1.0 - t * t);
+        (rho, sign * a * t)
+    } else {
+        let rho = a * b - 0.5 * a * a + 0.5 * a * (c - b);
+        (rho, 0.0)
+    }
+}
+
+impl PartialFit for OnlineHampelRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineHampelRegressor",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected Hampel update"),
+            );
+        };
+        self.initialized = true;
+        let a = if self.a.is_finite() && self.a > 0.0 {
+            self.a
+        } else {
+            1.5
+        };
+        let b = if self.b.is_finite() && self.b > a {
+            self.b
+        } else {
+            a + 2.0
+        };
+        let c = if self.c.is_finite() && self.c > b {
+            self.c
+        } else {
+            b + 4.0
+        };
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let r = y[i] - eta;
+            let (rho, psi) = hampel_psi(r, a, b, c);
+            loss_before += rho;
+            let g = -psi;
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            loss_after += hampel_psi(y[i] - ea, a, b, c).0;
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online Hampel regressor",
+            "SGD on the three-part Hampel ψ; a,b,c are not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineHampelRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
+/// Online Andrews sine-wave regressor (river robust loss).
+///
+/// \(\psi(r)=\sin(r/c)\) for \(|r|\le\pi c\), else 0. Scale \(c\) is not
+/// identification `p`. Distinct from [`OnlineHampelRegressor`] (linear
+/// middle) and [`OnlineTukeyRegressor`] (quartic).
+#[derive(Clone, Debug)]
+pub struct OnlineAndrewsRegressor {
+    /// Andrews scale \(c>0\). Not identification `p`.
+    pub scale: f64,
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineAndrewsRegressor {
+    fn default() -> Self {
+        Self {
+            scale: 1.339,
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineAndrewsRegressor {
+    /// Andrews regressor with scale `scale`.
+    pub fn new(scale: f64) -> Self {
+        Self {
+            scale,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineAndrewsRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineAndrewsRegressor",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected Andrews update"),
+            );
+        };
+        self.initialized = true;
+        let c = if self.scale.is_finite() && self.scale > 0.0 {
+            self.scale
+        } else {
+            1.339
+        };
+        let lim = std::f64::consts::PI * c;
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let r = y[i] - eta;
+            let rho = if r.abs() <= lim {
+                c * c * (1.0 - (r / c).cos())
+            } else {
+                2.0 * c * c
+            };
+            loss_before += rho;
+            let psi = if r.abs() <= lim { (r / c).sin() } else { 0.0 };
+            let g = -psi;
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            let ra = y[i] - ea;
+            loss_after += if ra.abs() <= lim {
+                c * c * (1.0 - (ra / c).cos())
+            } else {
+                2.0 * c * c
+            };
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online Andrews regressor",
+            "SGD on the Andrews sine wave; the scale is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineAndrewsRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40751,6 +41205,15 @@ mod tests {
         OnlineWelschRegressor::new(2.985)
             .partial_fit(&x, Some(&y), &session)
             .expect("owel");
+        OnlineExpectileRegressor::new(0.25)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("oexp");
+        OnlineHampelRegressor::new(1.5)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("oham");
+        OnlineAndrewsRegressor::new(1.339)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("oand");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

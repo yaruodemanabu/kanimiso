@@ -6662,6 +6662,35 @@ const INVENTORY: &[Algorithm] = &[
         "river.linear_model.LinearRegression",
         "online",
     ),
+    a("hmm.CauchyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.LogisticHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.RayleighHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.RiceHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.NakagamiHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.ZeroInflatedBinomialHmm",
+        "hmmlearn.hmm.MultinomialHMM",
+        "hmm",
+    ),
+    a(
+        "online.OnlineExpectileRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
+    a(
+        "online.OnlineHampelRegressor",
+        "river.optim.losses.Huber",
+        "online",
+    ),
+    a(
+        "online.OnlineAndrewsRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
+    a("tslearn.Snippets", "stumpy.snippets", "timeseries"),
+    a("tslearn.Stampi", "stumpy.stampi", "timeseries"),
+    a("tslearn.ostinato", "stumpy.ostinato", "function"),
+    a("tslearn.Ostinato", "stumpy.ostinato", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7236,6 +7265,11 @@ mod tests {
             "tsa.GarchM",
             "hmm.GumbelHmm",
             "online.OnlineWelschRegressor",
+            "hmm.CauchyHmm",
+            "hmm.RiceHmm",
+            "online.OnlineExpectileRegressor",
+            "tslearn.Snippets",
+            "tslearn.ostinato",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
