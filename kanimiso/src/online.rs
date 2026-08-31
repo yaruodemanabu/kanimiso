@@ -56243,6 +56243,311 @@ impl Predict for QuantileAnomaly {
     }
 }
 
+/// \(k\)-th nearest-neighbour anomaly (Ramaswamy \(k\)-distance).
+///
+/// Distinct from [`KnnAnomaly`] (mean), [`Knnw`] (harmonic mean), and
+/// [`KnnMedian`] (median).
+#[derive(Clone, Debug)]
+pub struct KnnKth {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for KnnKth {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl KnnKth {
+    /// Empty \(k\)-distance detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn dist_row(&self, x: &Matrix, i: usize, row: &[f64]) -> f64 {
+        let p = self.ncols.min(x.ncols()).min(row.len());
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return f64::INFINITY;
+            }
+            let d = z - row[j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 3 || self.ncols == 0 {
+            return 0.0;
+        }
+        let k = 5.min(self.rows.len().saturating_sub(1)).max(1);
+        let mut ds: Vec<f64> = self
+            .rows
+            .iter()
+            .map(|row| self.dist_row(x, i, row))
+            .filter(|d| d.is_finite() && *d > 1e-15)
+            .collect();
+        if ds.len() < k {
+            return 0.0;
+        }
+        ds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        ds[k - 1]
+    }
+}
+
+impl PartialFit for KnnKth {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 3;
+        q.warmup = self.rows.len() < 3;
+        q.explanation = format!("kNN-kth reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "k-th neighbour distance",
+                "KnnKth is the k-distance; not KnnAnomaly/KNNW/KnnMedian",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for KnnKth {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
+fn euclid_rows(a: &[f64], b: &[f64]) -> f64 {
+    let p = a.len().min(b.len());
+    let mut s = 0.0_f64;
+    for j in 0..p {
+        let d = a[j] - b[j];
+        s += d * d;
+    }
+    s.sqrt()
+}
+
+/// Energy-distance anomaly of a query against the reservoir.
+///
+/// Score is \(2\mathrm{E}\|x-Y\|-\mathrm{E}\|Y-Y'\|\). Distinct from
+/// [`KnnAnomaly`] (mean of \(k\) neighbours only).
+#[derive(Clone, Debug)]
+pub struct EnergyAnomaly {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for EnergyAnomaly {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl EnergyAnomaly {
+    /// Empty energy-distance detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 3 || self.ncols == 0 {
+            return 0.0;
+        }
+        let p = self.ncols.min(x.ncols());
+        let mut qrow = Vec::with_capacity(p);
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return 0.0;
+            }
+            qrow.push(z);
+        }
+        let n = self.rows.len();
+        let mut mean_xy = 0.0_f64;
+        for row in &self.rows {
+            mean_xy += euclid_rows(&qrow, row);
+        }
+        mean_xy /= n as f64;
+        let mut mean_yy = 0.0_f64;
+        let mut pairs = 0.0_f64;
+        for a in 0..n {
+            for b in (a + 1)..n {
+                mean_yy += euclid_rows(&self.rows[a], &self.rows[b]);
+                pairs += 1.0;
+            }
+        }
+        if pairs > 0.0 {
+            mean_yy /= pairs;
+        }
+        (2.0 * mean_xy - mean_yy).max(0.0)
+    }
+}
+
+impl PartialFit for EnergyAnomaly {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 3;
+        q.warmup = self.rows.len() < 3;
+        q.explanation = format!("energy-anomaly reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "energy distance anomaly",
+                "EnergyAnomaly is 2E||x-Y||-E||Y-Y'||; not k-NN mean",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for EnergyAnomaly {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57239,6 +57544,12 @@ mod tests {
         QuantileAnomaly::new()
             .partial_fit(&x, None, &session)
             .expect("qan");
+        KnnKth::new()
+            .partial_fit(&x, None, &session)
+            .expect("knx");
+        EnergyAnomaly::new()
+            .partial_fit(&x, None, &session)
+            .expect("egy");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

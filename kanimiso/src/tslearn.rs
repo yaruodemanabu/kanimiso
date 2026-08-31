@@ -4358,6 +4358,141 @@ pub fn cdist_tanimoto_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qu
     ctx.finish(out)
 }
 
+fn dice_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut num = 0.0_f64;
+    let mut na = 0.0_f64;
+    let mut nb = 0.0_f64;
+    for i in 0..n {
+        let p = a[i].abs() / sa;
+        let q = b[i].abs() / sb;
+        num += p * q;
+        na += p * p;
+        nb += q * q;
+    }
+    let den = na + nb;
+    if den < 1e-18 {
+        return 0.0;
+    }
+    (1.0 - 2.0 * num / den).max(0.0)
+}
+
+fn vicis_symmetric_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let p = (a[i].abs() / sa).max(1e-18);
+        let q = (b[i].abs() / sb).max(1e-18);
+        let d = p - q;
+        let m = p.min(q);
+        s += d * d / (m * m);
+    }
+    s.max(0.0)
+}
+
+/// Dice / Sørensen distance after \(\ell_1\) normalisation.
+///
+/// Distinct from [`dice_distance`] (raw coordinates). Identical series score 0.
+pub fn dice_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("dice_l1_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("dice_l1_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("dice_l1_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(dice_l1_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise \(\ell_1\)-normalised Dice distance.
+pub fn cdist_dice_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        dice_l1_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+/// Vicis-symmetric χ² \(\sum(p-q)^2/\min(p,q)^2\) after \(\ell_1\).
+///
+/// Distinct from [`min_symmetric_chi_squared_distance`] (divide by \(\min\),
+/// not \(\min^2\)). Identical series score 0.
+pub fn vicis_symmetric_distance(
+    a: &Vector,
+    b: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("vicis_symmetric_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("vicis_symmetric_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("vicis_symmetric_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(vicis_symmetric_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Vicis-symmetric χ² distance.
+pub fn cdist_vicis_symmetric(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        vicis_symmetric_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -23056,6 +23191,10 @@ mod tests {
         assert!(pco.abs() < 1e-12, "cosine_l1_distance={pco}");
         let ptn = tanimoto_l1_distance(&a, &a, &Session::new("ts", "ptn")).unwrap().value;
         assert!(ptn.abs() < 1e-12, "tanimoto_l1_distance={ptn}");
+        let dl1 = dice_l1_distance(&a, &a, &Session::new("ts", "dl1")).unwrap().value;
+        assert!(dl1.abs() < 1e-12, "dice_l1_distance={dl1}");
+        let vsc = vicis_symmetric_distance(&a, &a, &Session::new("ts", "vsc")).unwrap().value;
+        assert!(vsc.abs() < 1e-12, "vicis_symmetric_distance={vsc}");
     }
 
     #[test]
@@ -24318,6 +24457,16 @@ mod tests {
             .value;
         assert_eq!(cpt.shape(), (8, 8));
         assert!(cpt.get(0, 0).abs() < 1e-12);
+        let cd1 = cdist_dice_l1(&x, &x, &Session::new("ts", "cd1"))
+            .unwrap()
+            .value;
+        assert_eq!(cd1.shape(), (8, 8));
+        assert!(cd1.get(0, 0).abs() < 1e-12);
+        let cvc = cdist_vicis_symmetric(&x, &x, &Session::new("ts", "cvc"))
+            .unwrap()
+            .value;
+        assert_eq!(cvc.shape(), (8, 8));
+        assert!(cvc.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;
