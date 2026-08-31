@@ -17803,6 +17803,339 @@ impl Ostinato {
     }
 }
 
+/// PRESCIAMP-style coarse-to-fine matrix profile (stumpy `prescrimp`).
+///
+/// Stride is not identification `p`. Distinct from [`Scrimp`] (random
+/// diagonals) and [`Stampi`] (left-to-right prefix).
+#[derive(Clone, Debug)]
+pub struct Prescrimp {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+    /// Coarse stride. Not identification `p`.
+    pub stride: usize,
+}
+
+impl Default for Prescrimp {
+    fn default() -> Self {
+        Self {
+            window: 3,
+            stride: 2,
+        }
+    }
+}
+
+impl Prescrimp {
+    /// PRESCIAMP with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Coarse grid profile, then a local refinement around each neighbour.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_vector(y),
+            Some(y),
+            &ctx.policy,
+        );
+        let n = y.len();
+        let m = self.window.max(2);
+        if m >= n {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .severity(Severity::Warning)
+                    .message(format!("PRESCIAMP window={m} is unusable for n={n}"))
+                    .build(),
+            );
+            return ctx.finish(StompResult {
+                profile: Vector::zeros(0),
+                nn_index: Vector::zeros(0),
+            });
+        }
+        let n_sub = n + 1 - m;
+        let excl = (m / 4).max(1);
+        let step = self.stride.max(2);
+        let mut profile = Vector::filled(n_sub, f64::INFINITY);
+        let mut nn_index = Vector::zeros(n_sub);
+        for i in 0..n_sub {
+            for j in 0..n_sub {
+                if i.abs_diff(j) < excl {
+                    continue;
+                }
+                if i % step != 0 && j % step != 0 {
+                    continue;
+                }
+                let d = subsequence_dist(y, i, y, j, m);
+                if d < profile[i] {
+                    profile[i] = d;
+                    nn_index[i] = j as f64;
+                }
+            }
+        }
+        for i in 0..n_sub {
+            let center = nn_index[i] as usize;
+            let lo = center.saturating_sub(step);
+            let hi = (center + step + 1).min(n_sub);
+            for j in lo..hi {
+                if i.abs_diff(j) < excl {
+                    continue;
+                }
+                let d = subsequence_dist(y, i, y, j, m);
+                if d < profile[i] {
+                    profile[i] = d;
+                    nn_index[i] = j as f64;
+                }
+            }
+        }
+        for i in 0..n_sub {
+            if !profile[i].is_finite() {
+                profile[i] = 0.0;
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("PRESCIAMP is a coarse-grid plus local refine, not published prescrimp")
+                .compromise(NumericalCompromise::new(
+                    "stumpy prescrimp",
+                    "stride-grid pairwise distances followed by a neighbourhood polish",
+                    "the published PRESCIAMP queue and z-normalized kernel are omitted",
+                    "read the profile as a coarse-to-fine matrix-profile sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(StompResult { profile, nn_index })
+    }
+}
+
+/// Non-normalized all-pairs matrix profile (stumpy `aamp`).
+///
+/// Window length is not identification `p`. Distinct from [`Mpx`]
+/// (z-normalized) and [`Stampi`] (prefix only).
+#[derive(Clone, Debug)]
+pub struct Aamp {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+}
+
+impl Default for Aamp {
+    fn default() -> Self {
+        Self { window: 3 }
+    }
+}
+
+impl Aamp {
+    /// AAMP with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+        }
+    }
+
+    /// Raw-Euclidean self nearest-neighbour profile.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_vector(y),
+            Some(y),
+            &ctx.policy,
+        );
+        let n = y.len();
+        let m = self.window.max(2);
+        if m >= n {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .severity(Severity::Warning)
+                    .message(format!("AAMP window={m} is unusable for n={n}"))
+                    .build(),
+            );
+            return ctx.finish(StompResult {
+                profile: Vector::zeros(0),
+                nn_index: Vector::zeros(0),
+            });
+        }
+        let n_sub = n + 1 - m;
+        let excl = (m / 4).max(1);
+        let mut profile = Vector::filled(n_sub, f64::INFINITY);
+        let mut nn_index = Vector::zeros(n_sub);
+        for i in 0..n_sub {
+            for j in 0..n_sub {
+                if i.abs_diff(j) < excl {
+                    continue;
+                }
+                let d = subsequence_dist(y, i, y, j, m);
+                if d < profile[i] {
+                    profile[i] = d;
+                    nn_index[i] = j as f64;
+                }
+            }
+        }
+        for i in 0..n_sub {
+            if !profile[i].is_finite() {
+                profile[i] = 0.0;
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("AAMP is a direct unnormalized self profile, not published AAMP")
+                .compromise(NumericalCompromise::new(
+                    "stumpy aamp",
+                    "raw Euclidean nearest neighbour of every subsequence",
+                    "the published FFT / Pearson kernel is omitted",
+                    "read the profile as an amplitude-aware matrix-profile sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(StompResult { profile, nn_index })
+    }
+}
+
+/// Unnormalized MASS distance profile (stumpy `mass_absolute`).
+///
+/// Query length is not identification `p`. Distinct from [`mass`]
+/// (z-normalized) and [`Aamp`] (self profile).
+pub fn mass_absolute(
+    query: &Vector,
+    series: &Vector,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(series),
+        Some(series),
+        &ctx.policy,
+    );
+    if let Some(issue) = signlred::scan_finite(query.as_slice()).to_issue("mass_absolute.query") {
+        ctx.push(issue);
+    }
+    let m = query.len();
+    if m < 2 || m > series.len() {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "mass_absolute query length={m} is unusable for n={}",
+                    series.len()
+                ))
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(0));
+    }
+    let n_sub = series.len() + 1 - m;
+    let out = Vector::from_iter((0..n_sub).map(|i| subsequence_dist(query, 0, series, i, m)));
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("mass_absolute is a direct sliding Euclidean profile, not FFT MASS")
+            .compromise(NumericalCompromise::new(
+                "stumpy mass_absolute",
+                "raw Euclidean distance of the query at every offset",
+                "the published FFT convolution is omitted",
+                "read the vector as an unnormalized MASS sketch",
+            ))
+            .build(),
+    );
+    ctx.finish(out)
+}
+
+/// Complexity annotation vector (stumpy `core.make_complexity_av`).
+///
+/// Window length is not identification `p`. Distinct from [`Aamp`] (distances)
+/// and [`Motif`] (argmin selection).
+pub fn annotation_vector(
+    y: &Vector,
+    window: usize,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y),
+        Some(y),
+        &ctx.policy,
+    );
+    let m = window.max(2);
+    if m >= y.len() {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .severity(Severity::Warning)
+                .message(format!("annotation_vector window={m} is unusable for n={}", y.len()))
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(0));
+    }
+    let n_sub = y.len() + 1 - m;
+    let mut raw = Vector::zeros(n_sub);
+    let mut mx = 0.0_f64;
+    for i in 0..n_sub {
+        let mut s = 0.0_f64;
+        let mut ss = 0.0_f64;
+        for t in 0..m {
+            let v = y[i + t];
+            s += v;
+            ss += v * v;
+        }
+        let mean = s / m as f64;
+        let std = (ss / m as f64 - mean * mean).max(0.0).sqrt();
+        raw[i] = std;
+        if std > mx {
+            mx = std;
+        }
+    }
+    let out = if mx > 1e-12 {
+        Vector::from_iter((0..n_sub).map(|i| raw[i] / mx))
+    } else {
+        Vector::filled(n_sub, 1.0)
+    };
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("annotation_vector is subsequence std, not the published complexity AV")
+            .compromise(NumericalCompromise::new(
+                "stumpy complexity annotation vector",
+                "normalized standard deviation of each window",
+                "the published path-length complexity and correctors are omitted",
+                "read the vector as a complexity-weight sketch",
+            ))
+            .build(),
+    );
+    ctx.finish(out)
+}
+
+/// Named complexity annotation-vector transform.
+#[derive(Clone, Debug)]
+pub struct AnnotationVector {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+}
+
+impl Default for AnnotationVector {
+    fn default() -> Self {
+        Self { window: 3 }
+    }
+}
+
+impl AnnotationVector {
+    /// Annotation vector with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+        }
+    }
+
+    /// Complexity weights for every subsequence of `y`.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        annotation_vector(y, self.window, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -18460,6 +18793,26 @@ mod tests {
             .fit(&x, &Session::new("ts", "ost"))
             .unwrap();
         assert!(ost.value.score.is_finite());
+        let prc = Prescrimp::new(3)
+            .fit(&yr, &Session::new("ts", "prc"))
+            .unwrap();
+        assert!(
+            prc.value.profile.as_slice().iter().all(|v| v.is_finite())
+                || prc.value.profile.is_empty()
+        );
+        let aamp = Aamp::new(3)
+            .fit(&yr, &Session::new("ts", "aamp"))
+            .unwrap();
+        assert!(
+            aamp.value.profile.as_slice().iter().all(|v| v.is_finite())
+                || aamp.value.profile.is_empty()
+        );
+        let masa = mass_absolute(&qy, &yr, &Session::new("ts", "masa")).unwrap();
+        assert!(masa.value.as_slice().iter().all(|v| v.is_finite()) || masa.value.is_empty());
+        let anv = AnnotationVector::new(3)
+            .fit(&yr, &Session::new("ts", "anv"))
+            .unwrap();
+        assert!(anv.value.as_slice().iter().all(|v| v.is_finite()) || anv.value.is_empty());
         let igs = InformationGainSegmentation::new()
             .fit(&yr, &Session::new("ts", "igs"))
             .unwrap();

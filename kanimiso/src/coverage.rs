@@ -6691,6 +6691,40 @@ const INVENTORY: &[Algorithm] = &[
     a("tslearn.Stampi", "stumpy.stampi", "timeseries"),
     a("tslearn.ostinato", "stumpy.ostinato", "function"),
     a("tslearn.Ostinato", "stumpy.ostinato", "timeseries"),
+    a("hmm.AsymmetricLaplaceHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.FrechetHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.WrappedNormalHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.KumaraswamyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.LogLogisticHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.HurdlePoissonHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a(
+        "online.OnlineGemanMcClureRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
+    a(
+        "online.OnlineRamsayRegressor",
+        "statsmodels.robust.norms.RamsayE",
+        "online",
+    ),
+    a(
+        "online.OnlineLpRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
+    a("tslearn.Prescrimp", "stumpy.prescrimp", "timeseries"),
+    a("tslearn.Aamp", "stumpy.aamp", "timeseries"),
+    a("tslearn.mass_absolute", "stumpy.mass_absolute", "function"),
+    a(
+        "tslearn.annotation_vector",
+        "stumpy.core.make_complexity_av",
+        "function",
+    ),
+    a(
+        "tslearn.AnnotationVector",
+        "stumpy.core.make_complexity_av",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7270,6 +7304,11 @@ mod tests {
             "online.OnlineExpectileRegressor",
             "tslearn.Snippets",
             "tslearn.ostinato",
+            "hmm.AsymmetricLaplaceHmm",
+            "hmm.HurdlePoissonHmm",
+            "online.OnlineGemanMcClureRegressor",
+            "tslearn.Prescrimp",
+            "tslearn.Aamp",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
