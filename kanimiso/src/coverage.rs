@@ -7033,6 +7033,19 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.ChenHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.WeightedLindleyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.AdditiveWeibullHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.PoissonLindleyHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a("hmm.DiscreteLaplaceHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.OzaBoost", "river.ensemble.AdaBoostClassifier", "online"),
+    a("online.Climf", "river.reco.BPR", "online"),
+    a("tslearn.sakoe_chiba_dtw", "tslearn.metrics.dtw", "timeseries"),
+    a(
+        "tslearn.cdist_sakoe_chiba_dtw",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7770,6 +7783,15 @@ mod tests {
             "tslearn.cdist_lb_yi",
             "tslearn.itakura_dtw",
             "tslearn.cdist_itakura_dtw",
+            "hmm.ChenHmm",
+            "hmm.WeightedLindleyHmm",
+            "hmm.AdditiveWeibullHmm",
+            "hmm.PoissonLindleyHmm",
+            "hmm.DiscreteLaplaceHmm",
+            "online.OzaBoost",
+            "online.Climf",
+            "tslearn.sakoe_chiba_dtw",
+            "tslearn.cdist_sakoe_chiba_dtw",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

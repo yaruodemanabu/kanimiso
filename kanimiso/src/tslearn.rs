@@ -1389,6 +1389,87 @@ pub fn cdist_itakura_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qu
     ctx.finish(out)
 }
 
+fn sakoe_ok(i: usize, j: usize, n: usize, m: usize, radius: usize) -> bool {
+    let expected = j as f64 * n as f64 / m.max(1) as f64;
+    (i as f64 - expected).abs() <= radius as f64 + 1.0
+}
+
+fn sakoe_chiba_dtw_raw(a: &[f64], b: &[f64], radius: usize) -> f64 {
+    let n = a.len();
+    let m = b.len();
+    if n == 0 || m == 0 {
+        return f64::NAN;
+    }
+    let inf = 1e300_f64;
+    let r = radius.max(1);
+    let mut prev = vec![inf; m + 1];
+    let mut cur = vec![inf; m + 1];
+    prev[0] = 0.0;
+    for i in 1..=n {
+        cur[0] = inf;
+        for j in 1..=m {
+            if !sakoe_ok(i - 1, j - 1, n, m, r) {
+                cur[j] = inf;
+                continue;
+            }
+            let cost = (a[i - 1] - b[j - 1]).abs();
+            cur[j] = cost + prev[j].min(cur[j - 1]).min(prev[j - 1]);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[m]
+}
+
+/// Sakoe–Chiba banded DTW (width \(r\) around the diagonal).
+///
+/// Distinct from unconstrained [`dtw`] and parallelogram [`itakura_dtw`].
+/// Radius is not identification `p`.
+pub fn sakoe_chiba_dtw(
+    a: &Vector,
+    b: &Vector,
+    radius: usize,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("sakoe_chiba_dtw.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("sakoe_chiba_dtw.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("sakoe_chiba_dtw on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(sakoe_chiba_dtw_raw(a.as_slice(), b.as_slice(), radius.max(1)))
+}
+
+/// Pairwise Sakoe–Chiba DTW.
+///
+/// Radius is not identification `p`. Distinct from [`cdist_dtw`] and
+/// [`cdist_itakura_dtw`].
+pub fn cdist_sakoe_chiba_dtw(
+    a: &Matrix,
+    b: &Matrix,
+    radius: usize,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let r = radius.max(1);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        sakoe_chiba_dtw_raw(ai.as_slice(), bj.as_slice(), r)
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -19991,6 +20072,8 @@ mod tests {
         assert!(lby.abs() < 1e-12, "lb_yi={lby}");
         let itk = itakura_dtw(&a, &a, &Session::new("ts", "itk")).unwrap().value;
         assert!(itk.abs() < 1e-12, "itakura_dtw={itk}");
+        let scb = sakoe_chiba_dtw(&a, &a, 1, &Session::new("ts", "scb")).unwrap().value;
+        assert!(scb.abs() < 1e-12, "sakoe_chiba_dtw={scb}");
     }
 
     #[test]
@@ -21013,6 +21096,11 @@ mod tests {
             .value;
         assert_eq!(cit.shape(), (8, 8));
         assert!(cit.get(0, 0).abs() < 1e-12);
+        let csc = cdist_sakoe_chiba_dtw(&x, &x, 2, &Session::new("ts", "csc"))
+            .unwrap()
+            .value;
+        assert_eq!(csc.shape(), (8, 8));
+        assert!(csc.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

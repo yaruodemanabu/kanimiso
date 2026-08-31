@@ -47979,6 +47979,358 @@ impl Predict for LambdaMart {
     }
 }
 
+/// Oza online boosting: Poisson(\(\lambda\)) replay with \(\lambda\) updated by
+/// each member's running error.
+///
+/// Distinct from [`AdaBoostClassifier`] / [`OnlineAdaBoost`] (batch vote
+/// reweight, no Poisson replay). Member count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct OzaBoost {
+    /// Committee size.
+    pub n_models: usize,
+    models: Vec<Perceptron>,
+    err: Vec<f64>,
+    seen: Vec<f64>,
+    rng: Rng,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for OzaBoost {
+    fn default() -> Self {
+        Self {
+            n_models: 3,
+            models: Vec::new(),
+            err: Vec::new(),
+            seen: Vec::new(),
+            rng: Rng::new(43),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl OzaBoost {
+    /// Oza boost with `n_models` perceptrons.
+    pub fn new(n_models: usize) -> Self {
+        Self {
+            n_models: n_models.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OzaBoost {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() == 0 || x.nrows() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "empty"),
+            );
+        }
+        let m = self.n_models.max(1);
+        if self.models.len() != m {
+            self.models = vec![Perceptron::new(); m];
+            self.err = vec![0.0; m];
+            self.seen = vec![0.0; m];
+        }
+        let mut dsum = 0.0_f64;
+        let mut replays = 0u64;
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let row = Matrix::from_fn(1, x.ncols(), |_, j| x.get(i, j));
+            let yi = Vector::from_iter(std::iter::once(y[i]));
+            let mut lam = 1.0_f64;
+            for t in 0..m {
+                let k = self.rng.poisson(lam.min(20.0));
+                for _ in 0..k {
+                    let _ = self.models[t].partial_fit(
+                        &row,
+                        Some(&yi),
+                        &session.child(format!("oza_{t}")),
+                    );
+                    replays += 1;
+                    dsum += 1.0;
+                }
+                let pred = self
+                    .models[t]
+                    .predict(&row, &session.child(format!("ozap_{t}")))
+                    .map(|q| q.value.as_slice().first().copied().unwrap_or(0.0))
+                    .unwrap_or(0.0);
+                let hit = (pred - y[i]).abs() < 0.5;
+                self.seen[t] += 1.0;
+                if !hit {
+                    self.err[t] += 1.0;
+                }
+                let e = (self.err[t] / self.seen[t].max(1.0)).clamp(1e-3, 1.0 - 1e-3);
+                if hit {
+                    lam *= 1.0 / (2.0 * (1.0 - e));
+                } else {
+                    lam *= 1.0 / (2.0 * e);
+                }
+                lam = lam.clamp(1e-3, 20.0);
+            }
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(replays as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!(
+            "OzaBoost Poisson replay={replays} members={}",
+            self.models.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Oza online boosting step",
+                "Poisson(λ) replay with error-driven λ; distinct from OnlineAdaBoost vote weights",
+                "pre-batch perceptrons",
+                format!("replays={replays}"),
+            ),
+        )
+    }
+}
+
+impl Predict for OzaBoost {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if self.models.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let mut acc = vec![0.0_f64; x.nrows()];
+        for (t, model) in self.models.iter().enumerate() {
+            if let Ok(pq) = model.predict(x, &session.child(format!("ozap_{t}"))) {
+                for i in 0..x.nrows().min(pq.value.len()) {
+                    acc[i] += if pq.value[i] >= 0.5 { 1.0 } else { -1.0 };
+                }
+            }
+        }
+        ctx.finish(Vector::from_iter(acc.iter().map(|v| if *v >= 0.0 { 1.0 } else { 0.0 })))
+    }
+}
+
+/// CLiMF (Shi et al.): reciprocal-rank logistic on relevant pairs.
+///
+/// Distinct from [`Bpr`] (one unweighted negative) and [`LambdaRank`]
+/// (\(|\Delta\mathrm{NDCG}|\)). Rank is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Climf {
+    /// Latent rank.
+    pub n_factors: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    /// \(\ell_2\) on factors.
+    pub l2: f64,
+    pu: Vec<Vec<f64>>,
+    qi: Vec<Vec<f64>>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for Climf {
+    fn default() -> Self {
+        Self {
+            n_factors: 4,
+            learning_rate: 0.05,
+            l2: 0.01,
+            pu: Vec::new(),
+            qi: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl Climf {
+    /// CLiMF with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn grow(&mut self, u: usize, i: usize) {
+        let k = self.n_factors.max(1);
+        while self.pu.len() <= u {
+            self.pu.push(vec![0.01; k]);
+        }
+        while self.qi.len() <= i {
+            self.qi.push(vec![0.01; k]);
+        }
+    }
+
+    fn score(&self, u: usize, i: usize) -> f64 {
+        let mut s = 0.0_f64;
+        if u < self.pu.len() && i < self.qi.len() {
+            for f in 0..self.n_factors.min(self.pu[u].len()).min(self.qi[i].len()) {
+                s += self.pu[u][f] * self.qi[i][f];
+            }
+        }
+        s
+    }
+}
+
+impl PartialFit for Climf {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("Climf needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let lr = self.learning_rate.max(1e-6);
+        let l2 = self.l2.max(0.0);
+        let mut by_user: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+        for r in 0..x.nrows().min(y.len()) {
+            if !y[r].is_finite() || y[r] <= 0.0 {
+                continue;
+            }
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.grow(u, i);
+            by_user.entry(u).or_default().push((i, y[r]));
+        }
+        let mut dsum = 0.0_f64;
+        let mut pairs = 0u64;
+        for (u, items) in by_user {
+            if items.is_empty() {
+                continue;
+            }
+            let scores: Vec<f64> = items.iter().map(|&(i, _)| self.score(u, i)).collect();
+            for a in 0..items.len() {
+                let ia = items[a].0;
+                let sa = scores[a];
+                let g1 = 1.0 - sigmoid(sa);
+                for f in 0..self.n_factors {
+                    let pua = self.pu[u][f];
+                    let qia = self.qi[ia][f];
+                    self.pu[u][f] += lr * (g1 * qia - l2 * pua);
+                    self.qi[ia][f] += lr * (g1 * pua - l2 * qia);
+                    dsum += (self.pu[u][f] - pua).abs() + (self.qi[ia][f] - qia).abs();
+                }
+                for b in 0..items.len() {
+                    if a == b {
+                        continue;
+                    }
+                    let ib = items[b].0;
+                    let sb = scores[b];
+                    let gij = 1.0 - sigmoid(sa - sb);
+                    let gji = 1.0 - sigmoid(sb - sa);
+                    let g = gij - gji;
+                    for f in 0..self.n_factors {
+                        let pua = self.pu[u][f];
+                        let qia = self.qi[ia][f];
+                        let qib = self.qi[ib][f];
+                        self.pu[u][f] += lr * (g * (qia - qib) - l2 * pua);
+                        self.qi[ia][f] += lr * (g * pua - l2 * qia);
+                        self.qi[ib][f] += lr * (-g * pua - l2 * qib);
+                        dsum += (self.pu[u][f] - pua).abs()
+                            + (self.qi[ia][f] - qia).abs()
+                            + (self.qi[ib][f] - qib).abs();
+                    }
+                    pairs += 1;
+                }
+            }
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        if pairs == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message("Climf needs two relevant items for a user")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(pairs as f64);
+        q.still_identified = pairs > 0;
+        q.warmup = pairs == 0;
+        q.explanation = format!(
+            "Climf pairs={pairs} ||Δ||₁={dsum:.4e} users={} items={}",
+            self.pu.len(),
+            self.qi.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "CLiMF reciprocal-rank logistic step",
+                "smoothed RR among relevant items; distinct from BPR and LambdaRank",
+                "pre-batch factors",
+                format!("pairs={pairs} dsum={dsum:.4e}"),
+            ),
+        )
+    }
+}
+
+impl Predict for Climf {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("Climf predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.score(u, i)
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48837,6 +49189,12 @@ mod tests {
         LambdaMart::new(2)
             .partial_fit(&xui, Some(&y), &session)
             .expect("lmart");
+        OzaBoost::new(2)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("oza");
+        Climf::new(2)
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("clf");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
