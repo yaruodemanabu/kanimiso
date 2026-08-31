@@ -44744,6 +44744,351 @@ impl Predict for OnlineFda {
     }
 }
 
+/// Streaming dictionary learning (ISTA sparse codes + residual atom update).
+///
+/// Distinct from [`crate::decompose::MiniBatchDictionaryLearning`] (batched
+/// MU on stacked blocks) and [`OnlineNmf`] (nonnegative, no soft-threshold).
+/// Atom count is not identification `p` on a 1-row stream.
+#[derive(Clone, Debug)]
+pub struct OnlineDictionaryLearning {
+    /// Dictionary atoms. Not identification `p` for a streaming update.
+    pub n_components: usize,
+    /// ISTA threshold.
+    pub l1: f64,
+    /// Residual step.
+    pub learning_rate: f64,
+    atoms: Vec<Vector>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineDictionaryLearning {
+    fn default() -> Self {
+        Self {
+            n_components: 1,
+            l1: 0.1,
+            learning_rate: 0.1,
+            atoms: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineDictionaryLearning {
+    /// Track `n_components` unit-norm atoms.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components: n_components.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineDictionaryLearning {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        let k = self.n_components.max(1).min(p);
+        if !self.initialized {
+            self.atoms = (0..k)
+                .map(|c| {
+                    let mut col = Vector::zeros(p);
+                    col[c % p] = 1.0;
+                    col
+                })
+                .collect();
+            self.initialized = true;
+        } else if self.atoms.as_slice().first().map(|c| c.len()) != Some(p) {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self
+            .atoms
+            .as_slice()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Vector::zeros(p));
+        let lr = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.1
+        };
+        let lam = if self.l1.is_finite() && self.l1 >= 0.0 {
+            self.l1
+        } else {
+            0.1
+        };
+        for i in 0..x.nrows() {
+            let xi = Vector::from_iter((0..p).map(|j| x.get(i, j)));
+            let h = Vector::from_iter(self.atoms.iter().map(|atom| {
+                let raw = atom.dot(&xi);
+                let mag = (raw.abs() - lam).max(0.0);
+                if raw >= 0.0 {
+                    mag
+                } else {
+                    -mag
+                }
+            }));
+            let recon = Vector::from_iter((0..p).map(|j| {
+                let mut s = 0.0_f64;
+                for c in 0..self.atoms.len() {
+                    s += self.atoms[c][j] * h[c];
+                }
+                s
+            }));
+            for c in 0..self.atoms.len() {
+                for j in 0..p {
+                    self.atoms[c][j] += lr * (xi[j] - recon[j]) * h[c];
+                }
+                let nrm = self.atoms[c].norm();
+                if nrm > 1e-12 {
+                    for j in 0..p {
+                        self.atoms[c][j] /= nrm;
+                    }
+                }
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self
+            .atoms
+            .as_slice()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Vector::zeros(p));
+        let delta = after.sub(&before);
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta.norm());
+        q.information_gain = Some(delta.norm().max(x.nrows() as f64));
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "OnlineDictionaryLearning ISTA-updated {k} atoms on {} rows; ||Δd0||={:.6e}",
+            x.nrows(),
+            delta.norm()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "dictionary atoms",
+                "streaming ISTA dictionary; distinct from mini-batch MU and OnlineNmf",
+                "previous D",
+                "updated D",
+            ),
+        )
+    }
+}
+
+impl Transform for OnlineDictionaryLearning {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), self.n_components.max(1)));
+        }
+        let k = self.atoms.len();
+        let lam = if self.l1.is_finite() && self.l1 >= 0.0 {
+            self.l1
+        } else {
+            0.1
+        };
+        ctx.finish(Matrix::from_fn(x.nrows(), k, |i, c| {
+            let mut raw = 0.0_f64;
+            for j in 0..x.ncols().min(self.atoms[c].len()) {
+                raw += self.atoms[c][j] * x.get(i, j);
+            }
+            let mag = (raw.abs() - lam).max(0.0);
+            if raw >= 0.0 {
+                mag
+            } else {
+                -mag
+            }
+        }))
+    }
+}
+
+/// Incremental alternating least squares matrix factorisation.
+///
+/// One-observation ridge updates of \(p_u\) then \(q_i\). Distinct from
+/// [`FunkMf`] (SGD) and [`BiasedMf`]. Rank is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct AlsReco {
+    /// Latent rank.
+    pub n_factors: usize,
+    /// Ridge on the rank-1 Gram.
+    pub l2: f64,
+    pu: Vec<Vec<f64>>,
+    qi: Vec<Vec<f64>>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for AlsReco {
+    fn default() -> Self {
+        Self {
+            n_factors: 4,
+            l2: 0.1,
+            pu: Vec::new(),
+            qi: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl AlsReco {
+    /// ALS reco with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn grow(&mut self, u: usize, i: usize) {
+        let k = self.n_factors.max(1);
+        while self.pu.len() <= u {
+            self.pu.push(vec![0.01; k]);
+        }
+        while self.qi.len() <= i {
+            self.qi.push(vec![0.01; k]);
+        }
+    }
+
+    fn pred(&self, u: usize, i: usize) -> f64 {
+        let mut s = 0.0_f64;
+        if u < self.pu.len() && i < self.qi.len() {
+            for f in 0..self.n_factors.min(self.pu[u].len()).min(self.qi[i].len()) {
+                s += self.pu[u][f] * self.qi[i][f];
+            }
+        }
+        s
+    }
+}
+
+impl PartialFit for AlsReco {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("AlsReco needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let l2 = if self.l2.is_finite() && self.l2 >= 0.0 {
+            self.l2
+        } else {
+            0.1
+        };
+        let mut sse = 0.0_f64;
+        let mut dsum = 0.0_f64;
+        for r in 0..x.nrows().min(y.len()) {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.grow(u, i);
+            let pred = self.pred(u, i);
+            let e = y[r] - pred;
+            sse += e * e;
+            let mut qn = 0.0_f64;
+            for f in 0..self.n_factors {
+                qn += self.qi[i][f] * self.qi[i][f];
+            }
+            let den_u = (qn + l2).max(1e-8);
+            for f in 0..self.n_factors {
+                let old = self.pu[u][f];
+                self.pu[u][f] = y[r] * self.qi[i][f] / den_u;
+                dsum += (self.pu[u][f] - old).abs();
+            }
+            let mut pn = 0.0_f64;
+            for f in 0..self.n_factors {
+                pn += self.pu[u][f] * self.pu[u][f];
+            }
+            let den_i = (pn + l2).max(1e-8);
+            for f in 0..self.n_factors {
+                let old = self.qi[i][f];
+                self.qi[i][f] = y[r] * self.pu[u][f] / den_i;
+                dsum += (self.qi[i][f] - old).abs();
+            }
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        let warmup = self.n_seen < 8;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.loss_before = Some(sse);
+        q.loss_after = Some(sse);
+        q.information_gain = Some(dsum.max(x.nrows() as f64));
+        q.still_identified = !warmup;
+        q.warmup = warmup;
+        q.explanation = format!(
+            "AlsReco rank-1 ridge ALS on {} ratings; ||ΔP,Q||₁={:.6e}",
+            x.nrows(),
+            dsum
+        );
+        if warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("AlsReco is still warming up")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                format!("ALS on {} ratings", x.nrows()),
+                "one-observation ridge ALS; distinct from FunkMF SGD",
+                "previous factors",
+                "updated factors",
+            ),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45551,6 +45896,12 @@ mod tests {
         OnlineFda::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("ofda");
+        OnlineDictionaryLearning::new(1)
+            .partial_fit(&x, None, &session)
+            .expect("odl");
+        AlsReco::new(2)
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("alsr");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

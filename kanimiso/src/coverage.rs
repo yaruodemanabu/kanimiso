@@ -6908,6 +6908,20 @@ const INVENTORY: &[Algorithm] = &[
         "online",
     ),
     a("tslearn.cdist_wddtw", "tslearn.metrics.cdist", "timeseries"),
+    a("hmm.NoncentralFHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.PearsonTypeIvHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.LambertWHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.PowerNormalHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BilateralGammaHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.PoissonInverseGammaHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a(
+        "online.OnlineDictionaryLearning",
+        "sklearn.decomposition.MiniBatchDictionaryLearning",
+        "online",
+    ),
+    a("online.AlsReco", "river.reco.ALS", "online"),
+    a("tslearn.swale", "tslearn.metrics.lcss", "timeseries"),
+    a("tslearn.lb_kim", "tslearn.metrics.lb_keogh", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7564,6 +7578,16 @@ mod tests {
             "hmm.HyperPoissonHmm",
             "online.OnlineFda",
             "tslearn.cdist_wddtw",
+            "hmm.NoncentralFHmm",
+            "hmm.PearsonTypeIvHmm",
+            "hmm.LambertWHmm",
+            "hmm.PowerNormalHmm",
+            "hmm.BilateralGammaHmm",
+            "hmm.PoissonInverseGammaHmm",
+            "online.OnlineDictionaryLearning",
+            "online.AlsReco",
+            "tslearn.swale",
+            "tslearn.lb_kim",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

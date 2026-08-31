@@ -3841,6 +3841,96 @@ pub fn lb_keogh(
     ctx.finish(lb)
 }
 
+/// LB_Kim DTW lower bound (first / last / min / max features).
+///
+/// Distinct from [`lb_keogh`] (sliding envelope). Feature count is not
+/// identification `p`.
+pub fn lb_kim(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if a.is_empty() || b.is_empty() {
+        ctx.push(Issue::builder(IssueCode::EmptyMatrix).build());
+        return ctx.finish(f64::NAN);
+    }
+    let as_ = a.as_slice();
+    let bs = b.as_slice();
+    let af = as_[0];
+    let al = as_[as_.len() - 1];
+    let bf = bs[0];
+    let bl = bs[bs.len() - 1];
+    let mut amin = af;
+    let mut amax = af;
+    for &v in as_ {
+        amin = amin.min(v);
+        amax = amax.max(v);
+    }
+    let mut bmin = bf;
+    let mut bmax = bf;
+    for &v in bs {
+        bmin = bmin.min(v);
+        bmax = bmax.max(v);
+    }
+    let lb = (af - bf)
+        .abs()
+        .max((al - bl).abs())
+        .max((amax - bmax).abs())
+        .max((amin - bmin).abs());
+    ctx.finish(lb)
+}
+
+/// Sequence Weighted Alignment distance (SWALE).
+///
+/// Matches under an \(\varepsilon\)-tube earn \(1/(1+|i-j|)\). Distinct from
+/// [`lcss`] (unweighted matches) and [`edr`] (unit edit cost). `ε` is not
+/// identification `p`.
+pub fn swale(a: &Vector, b: &Vector, eps: f64, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("swale.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("swale.b") {
+        ctx.push(issue);
+    }
+    let eps = if eps.is_finite() && eps >= 0.0 {
+        eps
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("swale ε={eps} is not a finite ≥0 match radius; using 0"))
+                .build(),
+        );
+        0.0
+    };
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("swale on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let as_ = a.as_slice();
+    let bs = b.as_slice();
+    let n = as_.len();
+    let m = bs.len();
+    let mut prev = vec![0.0_f64; m + 1];
+    let mut cur = vec![0.0_f64; m + 1];
+    for i in 1..=n {
+        for j in 1..=m {
+            let skip = prev[j].max(cur[j - 1]);
+            if (as_[i - 1] - bs[j - 1]).abs() <= eps {
+                let w = 1.0 / (1.0 + (i as f64 - j as f64).abs());
+                cur[j] = skip.max(prev[j - 1] + w);
+            } else {
+                cur[j] = skip;
+            }
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    let denom = n.min(m) as f64;
+    ctx.finish(1.0 - prev[m] / denom.max(1.0))
+}
+
 /// Edit Distance with Real Penalty (tslearn `erp`).
 ///
 /// The gap value `g` is not identification `p`.
@@ -19009,6 +19099,10 @@ mod tests {
         assert!(ad.abs() < 1e-12, "adtw={ad}");
         let wd = wddtw(&a, &a, 0.1, &Session::new("ts", "wddtw")).unwrap().value;
         assert!(wd.abs() < 1e-12, "wddtw={wd}");
+        let sw = swale(&a, &a, 0.1, &Session::new("ts", "swale")).unwrap().value;
+        assert!(sw.abs() < 1e-12, "swale={sw}");
+        let lk = lb_kim(&a, &a, &Session::new("ts", "lbkim")).unwrap().value;
+        assert!(lk.abs() < 1e-12, "lb_kim={lk}");
     }
 
     #[test]
