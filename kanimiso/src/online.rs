@@ -42823,6 +42823,433 @@ impl Predict for OnlineCwClassifier {
     }
 }
 
+/// Streaming power-method / Oja PCA (river `decomposition.PCA`).
+///
+/// Distinct from [`crate::decompose::IncrementalPca`] (SKL / sequential
+/// Karhunen–Loève SVD on stacked batches). Component count is not
+/// identification `p` on a 1-row stream.
+#[derive(Clone, Debug)]
+pub struct OnlinePca {
+    /// Axes to track. Not identification `p` for a streaming update.
+    pub n_components: usize,
+    /// Base Oja step; effective rate is `lr / (n_seen + 1)`.
+    pub learning_rate: f64,
+    mean: Vector,
+    components: Vec<Vector>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlinePca {
+    fn default() -> Self {
+        Self {
+            n_components: 1,
+            learning_rate: 1.0,
+            mean: Vector::zeros(0),
+            components: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlinePca {
+    /// Track `n_components` Oja axes.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components: n_components.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlinePca {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        let k = self.n_components.max(1).min(p);
+        if !self.initialized {
+            self.mean = Vector::zeros(p);
+            self.components = (0..k)
+                .map(|c| {
+                    let mut w = Vector::zeros(p);
+                    w[c % p] = 1.0;
+                    w
+                })
+                .collect();
+            self.initialized = true;
+        } else if self.mean.len() != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self
+            .components
+            .as_slice()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Vector::zeros(p));
+        let lr0 = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            1.0
+        };
+        for i in 0..x.nrows() {
+            self.n_seen += 1;
+            let n = self.n_seen as f64;
+            for j in 0..p {
+                self.mean[j] += (x.get(i, j) - self.mean[j]) / n;
+            }
+            let mut residual = Vector::from_iter((0..p).map(|j| x.get(i, j) - self.mean[j]));
+            let lr = lr0 / n;
+            for c in 0..self.components.len() {
+                let y = self.components[c].dot(&residual);
+                for j in 0..p {
+                    self.components[c][j] += lr * y * residual[j];
+                }
+                for prev in 0..c {
+                    let proj = self.components[c].dot(&self.components[prev]);
+                    for j in 0..p {
+                        self.components[c][j] -= proj * self.components[prev][j];
+                    }
+                }
+                let nrm = self.components[c].norm();
+                if nrm > 1e-12 {
+                    for j in 0..p {
+                        self.components[c][j] /= nrm;
+                    }
+                }
+                let y2 = self.components[c].dot(&residual);
+                for j in 0..p {
+                    residual[j] -= y2 * self.components[c][j];
+                }
+            }
+        }
+        self.updates += 1;
+        let after = self
+            .components
+            .as_slice()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Vector::zeros(p));
+        let delta = after.sub(&before);
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta.norm());
+        q.information_gain = Some(delta.norm().max(x.nrows() as f64));
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < (p as u64).saturating_add(2);
+        q.explanation = format!(
+            "OnlinePca Oja-updated {k} axes on {} rows; ||Δw0||={:.6e}",
+            x.nrows(),
+            delta.norm()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Oja principal axes",
+                "streaming power-method PCA; distinct from SKL IncrementalPca",
+                "previous axes",
+                "updated axes",
+            ),
+        )
+    }
+}
+
+impl Transform for OnlinePca {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), self.n_components.max(1)));
+        }
+        let k = self.components.len();
+        let p = self.mean.len();
+        ctx.finish(Matrix::from_fn(x.nrows(), k, |i, c| {
+            let mut s = 0.0_f64;
+            for j in 0..x.ncols().min(p) {
+                s += self.components[c][j] * (x.get(i, j) - self.mean[j]);
+            }
+            s
+        }))
+    }
+}
+
+/// One DWM linear expert (Rosenblatt weights; not a public [`Perceptron`]).
+#[derive(Clone, Debug)]
+struct DwmExpert {
+    coef: Vector,
+    intercept: f64,
+}
+
+impl DwmExpert {
+    fn new(p: usize) -> Self {
+        Self {
+            coef: Vector::zeros(p),
+            intercept: 0.0,
+        }
+    }
+
+    fn score_pm(&self, x: &Matrix, i: usize) -> f64 {
+        let mut s = self.intercept;
+        for j in 0..x.ncols().min(self.coef.len()) {
+            s += self.coef[j] * x.get(i, j);
+        }
+        if s >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        }
+    }
+
+    fn update(&mut self, x: &Matrix, i: usize, ys: f64) {
+        if self.coef.len() != x.ncols() {
+            *self = Self::new(x.ncols());
+        }
+        let mut s = self.intercept;
+        for j in 0..x.ncols() {
+            s += self.coef[j] * x.get(i, j);
+        }
+        if ys * s <= 0.0 {
+            for j in 0..x.ncols() {
+                self.coef[j] += ys * x.get(i, j);
+            }
+            self.intercept += ys;
+        }
+    }
+}
+
+/// Dynamic Weighted Majority classifier (Kolter & Maloof; river `ensemble.DWMClassifier`).
+///
+/// Experts are born on ensemble mistakes and die when their weight falls below
+/// `θ`. Distinct from [`BoleClassifier`] (fixed pool, train-on-mistake only)
+/// and [`HedgeRegressor`] (no expert birth/death). `β` and `θ` are not
+/// identification `p`.
+#[derive(Clone, Debug)]
+pub struct DwmClassifier {
+    /// Multiplicative penalty on an expert mistake.
+    pub beta: f64,
+    /// Removal threshold.
+    pub theta: f64,
+    /// Cap on the expert pool. Not identification `p`.
+    pub max_experts: usize,
+    experts: Vec<DwmExpert>,
+    weights: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for DwmClassifier {
+    fn default() -> Self {
+        Self {
+            beta: 0.5,
+            theta: 0.01,
+            max_experts: 8,
+            experts: Vec::new(),
+            weights: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl DwmClassifier {
+    /// DWM with mistake penalty `beta`.
+    pub fn new(beta: f64) -> Self {
+        Self {
+            beta,
+            ..Self::default()
+        }
+    }
+
+    fn vote_pm(&self, x: &Matrix, i: usize) -> f64 {
+        let mut acc = 0.0_f64;
+        let mut wsum = 0.0_f64;
+        for (e, w) in self.experts.iter().zip(self.weights.iter()) {
+            acc += *w * e.score_pm(x, i);
+            wsum += *w;
+        }
+        if wsum <= 0.0 {
+            0.0
+        } else if acc >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        }
+    }
+
+    fn prune_and_normalize(&mut self) {
+        let th = if self.theta.is_finite() && self.theta > 0.0 {
+            self.theta
+        } else {
+            0.01
+        };
+        if self.experts.len() > 1 {
+            let keep: Vec<usize> = self
+                .weights
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| **w >= th)
+                .map(|(i, _)| i)
+                .collect();
+            if !keep.is_empty() {
+                self.experts = keep.iter().map(|&i| self.experts[i].clone()).collect();
+                self.weights = keep.iter().map(|&i| self.weights[i]).collect();
+            }
+        }
+        let wsum: f64 = self.weights.iter().sum();
+        if wsum > 1e-15 {
+            for w in self.weights.iter_mut() {
+                *w /= wsum;
+            }
+        }
+    }
+}
+
+impl PartialFit for DwmClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "DWM needs a target"),
+            );
+        };
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        if self.initialized {
+            if self
+                .experts
+                .as_slice()
+                .first()
+                .map(|e| e.coef.len())
+                != Some(x.ncols())
+            {
+                ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+                return finish_explain(
+                    ctx,
+                    reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+                );
+            }
+        } else {
+            self.experts.push(DwmExpert::new(x.ncols()));
+            self.weights.push(1.0);
+            self.initialized = true;
+        }
+        let beta = if self.beta.is_finite() && self.beta > 0.0 && self.beta < 1.0 {
+            self.beta
+        } else {
+            0.5
+        };
+        let cap = self.max_experts.max(1);
+        let mut births = 0u64;
+        let mut mistakes = 0u64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let ys = as_pm(y[i]);
+            let vote = self.vote_pm(x, i);
+            if vote != ys {
+                mistakes += 1;
+            }
+            for (e, w) in self.experts.iter().zip(self.weights.iter_mut()) {
+                if e.score_pm(x, i) != ys {
+                    *w *= beta;
+                }
+            }
+            for e in self.experts.iter_mut() {
+                e.update(x, i, ys);
+            }
+            if vote != ys && self.experts.len() < cap {
+                let mut newborn = DwmExpert::new(x.ncols());
+                newborn.update(x, i, ys);
+                self.experts.push(newborn);
+                self.weights.push(1.0);
+                births += 1;
+            }
+            self.prune_and_normalize();
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), n_rows, self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(births as f64 + mistakes as f64);
+        q.information_gain = Some((mistakes + births) as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "DWM {mistakes} ensemble mistakes, {births} births, {} experts remain",
+            self.experts.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "DWM expert pool",
+                "dynamic weighted majority with birth on mistakes and death below θ",
+                "previous expert weights",
+                "updated expert weights",
+            ),
+        )
+    }
+}
+
+impl Predict for DwmClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            if self.vote_pm(x, i) >= 0.0 {
+                1.0
+            } else {
+                0.0
+            }
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -43582,6 +44009,12 @@ mod tests {
         OnlineCwClassifier::new(0.7)
             .partial_fit(&x, Some(&yb), &session)
             .expect("ocw");
+        OnlinePca::new(1)
+            .partial_fit(&x, None, &session)
+            .expect("opca");
+        DwmClassifier::new(0.5)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("dwm");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

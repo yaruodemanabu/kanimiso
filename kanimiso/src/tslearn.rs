@@ -462,6 +462,67 @@ pub fn cdist_hausdorff(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qual
     ctx.finish(out)
 }
 
+/// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
+///
+/// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
+/// or substitute costs 1. Distinct from [`edit_distance`] (absolute-cost
+/// substitution) and [`erp`] (real-valued gap penalty). `ε` is not
+/// identification `p`.
+pub fn edr(a: &Vector, b: &Vector, eps: f64, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("edr.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("edr.b") {
+        ctx.push(issue);
+    }
+    let eps = if eps.is_finite() && eps >= 0.0 {
+        eps
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("edr ε={eps} is not a finite ≥0 match radius; using 0"))
+                .build(),
+        );
+        0.0
+    };
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("edr on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(edr_raw(a.as_slice(), b.as_slice(), eps))
+}
+
+fn edr_raw(a: &[f64], b: &[f64], eps: f64) -> f64 {
+    let n = a.len();
+    let m = b.len();
+    let mut prev = vec![0.0; m + 1];
+    let mut cur = vec![0.0; m + 1];
+    for j in 0..=m {
+        prev[j] = j as f64;
+    }
+    for i in 1..=n {
+        cur[0] = i as f64;
+        for j in 1..=m {
+            if (a[i - 1] - b[j - 1]).abs() <= eps {
+                cur[j] = prev[j - 1];
+            } else {
+                let sub = prev[j - 1] + 1.0;
+                let del = prev[j] + 1.0;
+                let ins = cur[j - 1] + 1.0;
+                cur[j] = sub.min(del).min(ins);
+            }
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[m]
+}
+
 /// Pairwise weighted DTW (tslearn `cdist` with WDTW).
 ///
 /// Series / pair counts are not identification `p`. The logistic slope `g`
@@ -18751,6 +18812,8 @@ mod tests {
         assert!(fr.abs() < 1e-12, "frechet={fr}");
         let hd = hausdorff(&a, &a, &Session::new("ts", "hd")).unwrap().value;
         assert!(hd.abs() < 1e-12, "hausdorff={hd}");
+        let erd = edr(&a, &a, 0.1, &Session::new("ts", "edr")).unwrap().value;
+        assert!(erd.abs() < 1e-12, "edr={erd}");
     }
 
     #[test]
