@@ -8926,13 +8926,28 @@ impl FitUnsupervised for LeftRightHsmm {
             trans = nt;
             for i in 0..k {
                 trans.set(i, i, 0.0);
+                for j in 0..i {
+                    trans.set(i, j, 0.0);
+                }
             }
-            renormalize_rows(&mut trans, TRANS_FLOOR);
+            for i in 0..k {
+                let mut s = 0.0_f64;
+                for j in (i + 1)..k {
+                    s += trans.get(i, j).max(0.0);
+                }
+                if s > 0.0 {
+                    for j in (i + 1)..k {
+                        trans.set(i, j, trans.get(i, j).max(0.0) / s);
+                    }
+                }
+            }
             enforce_left_right(&mut start, &mut trans);
             for i in 0..k {
                 trans.set(i, i, 0.0);
+                for j in 0..i {
+                    trans.set(i, j, 0.0);
+                }
             }
-            renormalize_rows(&mut trans, TRANS_FLOOR);
         }
         ctx.finish(FittedLeftRightHsmm {
             labels,
