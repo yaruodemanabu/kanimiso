@@ -2358,6 +2358,106 @@ pub fn cdist_angular(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualif
     ctx.finish(out)
 }
 
+fn minkowski3_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let d = (a[i] - b[i]).abs();
+        s += d * d * d;
+    }
+    s.cbrt()
+}
+
+fn clark_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let den = a[i].abs() + b[i].abs();
+        if den > 1e-18 {
+            let u = (a[i] - b[i]) / den;
+            s += u * u;
+        }
+    }
+    s.sqrt()
+}
+
+/// Minkowski \(p=3\) distance \((\sum|a_i-b_i|^3)^{1/3}\) on aligned prefixes.
+///
+/// Distinct from [`manhattan_distance`] (\(p=1\)) and [`chebyshev_distance`]
+/// (\(p=\infty\)). Identical series score 0.
+pub fn minkowski3_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski3_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("minkowski3_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("minkowski3_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(minkowski3_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Minkowski \(p=3\) distance.
+pub fn cdist_minkowski3(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        minkowski3_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+/// Clark distance \(\sqrt{\sum((a_i-b_i)/(|a_i|+|b_i|))^2}\) on aligned prefixes.
+///
+/// Distinct from [`canberra_distance`] (no square/sqrt). Identical series score 0.
+pub fn clark_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("clark_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("clark_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("clark_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(clark_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Clark distance.
+pub fn cdist_clark(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        clark_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -20992,6 +21092,10 @@ mod tests {
         assert!(lor.abs() < 1e-12, "lorentzian_distance={lor}");
         let ang = angular_distance(&a, &a, &Session::new("ts", "ang")).unwrap().value;
         assert!(ang.abs() < 1e-12, "angular_distance={ang}");
+        let mnk = minkowski3_distance(&a, &a, &Session::new("ts", "mnk")).unwrap().value;
+        assert!(mnk.abs() < 1e-12, "minkowski3_distance={mnk}");
+        let clr = clark_distance(&a, &a, &Session::new("ts", "clr")).unwrap().value;
+        assert!(clr.abs() < 1e-12, "clark_distance={clr}");
     }
 
     #[test]
@@ -22094,6 +22198,16 @@ mod tests {
             .value;
         assert_eq!(cag.shape(), (8, 8));
         assert!(cag.get(0, 0).abs() < 1e-12);
+        let cmn = cdist_minkowski3(&x, &x, &Session::new("ts", "cmn"))
+            .unwrap()
+            .value;
+        assert_eq!(cmn.shape(), (8, 8));
+        assert!(cmn.get(0, 0).abs() < 1e-12);
+        let ccl = cdist_clark(&x, &x, &Session::new("ts", "ccl"))
+            .unwrap()
+            .value;
+        assert_eq!(ccl.shape(), (8, 8));
+        assert!(ccl.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

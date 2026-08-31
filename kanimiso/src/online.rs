@@ -46640,6 +46640,231 @@ impl Predict for SoftRank {
     }
 }
 
+/// ApproxNDCG (Qin / SoftNDCG): sigmoid-smoothed DCG on latent scores.
+///
+/// \(\hat r_i=1+\sum_{j\neq i}\sigma((s_j-s_i)/\tau)\). Distinct from
+/// [`SoftRank`] (Gaussian rank MSE) and [`LambdaRank`] (λ-pairwise).
+/// Temperature \(\tau\) is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ApproxNdcg {
+    /// Latent rank.
+    pub n_factors: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    /// \(\ell_2\) on factors.
+    pub l2: f64,
+    /// Rank-smoothing temperature. Not identification `p`.
+    pub tau: f64,
+    pu: Vec<Vec<f64>>,
+    qi: Vec<Vec<f64>>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for ApproxNdcg {
+    fn default() -> Self {
+        Self {
+            n_factors: 4,
+            learning_rate: 0.05,
+            l2: 0.01,
+            tau: 0.5,
+            pu: Vec::new(),
+            qi: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl ApproxNdcg {
+    /// ApproxNDCG with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn grow(&mut self, u: usize, i: usize) {
+        let k = self.n_factors.max(1);
+        while self.pu.len() <= u {
+            self.pu.push(vec![0.01; k]);
+        }
+        while self.qi.len() <= i {
+            self.qi.push(vec![0.01; k]);
+        }
+    }
+
+    fn score(&self, u: usize, i: usize) -> f64 {
+        let mut s = 0.0_f64;
+        if u < self.pu.len() && i < self.qi.len() {
+            for f in 0..self.n_factors.min(self.pu[u].len()).min(self.qi[i].len()) {
+                s += self.pu[u][f] * self.qi[i][f];
+            }
+        }
+        s
+    }
+}
+
+impl PartialFit for ApproxNdcg {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ApproxNDCG needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let lr = self.learning_rate.max(1e-6);
+        let l2 = self.l2.max(0.0);
+        let tau = if self.tau.is_finite() && self.tau > 0.0 {
+            self.tau
+        } else {
+            0.5
+        };
+        let mut by_user: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+        for r in 0..x.nrows().min(y.len()) {
+            if !y[r].is_finite() {
+                continue;
+            }
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.grow(u, i);
+            by_user.entry(u).or_default().push((i, y[r]));
+        }
+        let mut dsum = 0.0_f64;
+        let mut lists = 0u64;
+        for (u, items) in by_user {
+            if items.len() < 2 {
+                continue;
+            }
+            let n = items.len();
+            let scores: Vec<f64> = items.iter().map(|&(ii, _)| self.score(u, ii)).collect();
+            let gains: Vec<f64> = items
+                .iter()
+                .map(|&(_, rel)| 2.0_f64.powf(rel.max(0.0).min(20.0)) - 1.0)
+                .collect();
+            let mut hat = vec![1.0_f64; n];
+            let mut dsig = vec![vec![0.0_f64; n]; n];
+            for ii in 0..n {
+                for jj in 0..n {
+                    if ii == jj {
+                        continue;
+                    }
+                    let z = (scores[jj] - scores[ii]) / tau;
+                    let sg = sigmoid(z);
+                    dsig[jj][ii] = sg * (1.0 - sg) / tau;
+                    hat[ii] += sg;
+                }
+            }
+            let mut ddcg_dr = vec![0.0_f64; n];
+            for ii in 0..n {
+                let one_r = 1.0 + hat[ii];
+                let ln = one_r.ln().max(1e-12);
+                ddcg_dr[ii] = -gains[ii] * std::f64::consts::LN_2 / (one_r * ln * ln);
+            }
+            let mut gs = vec![0.0_f64; n];
+            for kk in 0..n {
+                let mut acc = 0.0_f64;
+                let mut sum_d = 0.0_f64;
+                for jj in 0..n {
+                    if jj != kk {
+                        sum_d += dsig[jj][kk];
+                    }
+                }
+                acc += ddcg_dr[kk] * (-sum_d);
+                for ii in 0..n {
+                    if ii != kk {
+                        acc += ddcg_dr[ii] * dsig[kk][ii];
+                    }
+                }
+                gs[kk] = acc;
+            }
+            for t in 0..n {
+                let i = items[t].0;
+                let err = -gs[t];
+                for f in 0..self.n_factors {
+                    let pu = self.pu[u][f];
+                    let qi = self.qi[i][f];
+                    self.pu[u][f] -= lr * (err * qi + l2 * pu);
+                    self.qi[i][f] -= lr * (err * pu + l2 * qi);
+                    dsum += (self.pu[u][f] - pu).abs() + (self.qi[i][f] - qi).abs();
+                }
+            }
+            lists += 1;
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        if lists == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message("ApproxNDCG needs two items per user in the batch")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(lists as f64);
+        q.still_identified = lists > 0;
+        q.warmup = lists == 0;
+        q.explanation = format!(
+            "ApproxNDCG lists={lists} ||Δ||₁={dsum:.4e} users={} items={}",
+            self.pu.len(),
+            self.qi.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "ApproxNDCG sigmoid-smoothed DCG step",
+                "ascent on 1/log2(1+soft-rank); not SoftRank MSE or LambdaRank pairs",
+                "pre-batch factors",
+                format!("lists={lists} dsum={dsum:.4e}"),
+            ),
+        )
+    }
+}
+
+impl Predict for ApproxNdcg {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ApproxNDCG predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.score(u, i)
+        })))
+    }
+}
+
 /// RankNet pairwise ranking (logistic loss on \(s_i-s_j\) for \(y_i>y_j\)).
 ///
 /// Distinct from [`ListNet`] (listwise softmax CE), [`Bpr`] (one unweighted
@@ -50329,6 +50554,139 @@ impl Predict for Hbos {
     }
 }
 
+/// Empirical-CDF outlier detector (Li et al. ECOD).
+///
+/// Score \(-\sum_j\log(2\min\{F_j,1-F_j\})\). Distinct from [`Hbos`]
+/// (histogram density) and [`Loda`] (random projections).
+#[derive(Clone, Debug)]
+pub struct Ecod {
+    samples: Vec<Vec<f64>>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for Ecod {
+    fn default() -> Self {
+        Self {
+            samples: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl Ecod {
+    /// Empty ECOD detector.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        let p = self.samples.len().min(x.ncols());
+        let mut acc = 0.0_f64;
+        let mut ok = 0usize;
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() || self.samples[j].is_empty() {
+                continue;
+            }
+            let n = self.samples[j].len() as f64;
+            let mut r = 0.0_f64;
+            for &v in &self.samples[j] {
+                if v <= z {
+                    r += 1.0;
+                }
+            }
+            let f = (r / n).clamp(1e-6, 1.0 - 1e-6);
+            acc -= (2.0 * f.min(1.0 - f)).ln();
+            ok += 1;
+        }
+        if ok == 0 {
+            0.0
+        } else {
+            acc
+        }
+    }
+}
+
+impl PartialFit for Ecod {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.samples = vec![Vec::new(); p];
+            self.initialized = true;
+        } else if self.samples.len() != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    continue;
+                }
+                if self.samples[j].len() >= 512 {
+                    self.samples[j].remove(0);
+                }
+                self.samples[j].push(z);
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!("ECOD updated {p} empirical CDFs on {} rows", x.nrows());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "empirical tail scores",
+                "ECOD scores 2 min(F,1-F) per feature; not HBOS bins",
+                "previous order statistics",
+                "updated order statistics",
+            ),
+        )
+    }
+}
+
+impl Predict for Ecod {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51166,6 +51524,9 @@ mod tests {
         SoftRank::new(2)
             .partial_fit(&xui, Some(&y), &session)
             .expect("srk");
+        ApproxNdcg::new(2)
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("ndc");
         RankNet::new(2)
             .partial_fit(&xui, Some(&y), &session)
             .expect("rnet");
@@ -51229,6 +51590,9 @@ mod tests {
         Hbos::new(8)
             .partial_fit(&x, None, &session)
             .expect("hbo");
+        Ecod::new()
+            .partial_fit(&x, None, &session)
+            .expect("eco");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

@@ -7219,6 +7219,49 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a(
+        "hmm.ExponentiatedGompertzHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.MarshallOlkinLindleyHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.WrappedLogisticHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.DiscreteInverseWeibullHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.WalleniusNoncentralHypergeometricHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("online.Ecod", "river.anomaly.HalfSpaceTrees", "online"),
+    a("online.ApproxNdcg", "river.reco.FM", "online"),
+    a(
+        "tslearn.minkowski3_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_minkowski3",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.clark_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_clark",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8042,6 +8085,17 @@ mod tests {
             "tslearn.cdist_lorentzian",
             "tslearn.angular_distance",
             "tslearn.cdist_angular",
+            "hmm.ExponentiatedGompertzHmm",
+            "hmm.MarshallOlkinLindleyHmm",
+            "hmm.WrappedLogisticHmm",
+            "hmm.DiscreteInverseWeibullHmm",
+            "hmm.WalleniusNoncentralHypergeometricHmm",
+            "online.Ecod",
+            "online.ApproxNdcg",
+            "tslearn.minkowski3_distance",
+            "tslearn.cdist_minkowski3",
+            "tslearn.clark_distance",
+            "tslearn.cdist_clark",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
