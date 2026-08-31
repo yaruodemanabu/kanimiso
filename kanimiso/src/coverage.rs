@@ -7061,6 +7061,21 @@ const INVENTORY: &[Algorithm] = &[
     a("tslearn.cdist_cyclic_dtw", "tslearn.metrics.cdist", "timeseries"),
     a("tslearn.obe_dtw", "tslearn.metrics.dtw", "timeseries"),
     a("tslearn.cdist_obe_dtw", "tslearn.metrics.cdist", "timeseries"),
+    a("hmm.LinearFailureRateHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.XgammaHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.NadarajahHaghighiHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.HjorthHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaGeometricHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a("online.Mddm", "river.drift.HDDM_A", "online"),
+    a("online.CusumDrift", "river.drift.PageHinkley", "online"),
+    a("tslearn.amss", "tslearn.metrics.dtw", "timeseries"),
+    a("tslearn.cdist_amss", "tslearn.metrics.cdist", "timeseries"),
+    a("tslearn.decay_euclidean", "tslearn.metrics.dtw", "timeseries"),
+    a(
+        "tslearn.cdist_decay_euclidean",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7818,6 +7833,17 @@ mod tests {
             "tslearn.cdist_cyclic_dtw",
             "tslearn.obe_dtw",
             "tslearn.cdist_obe_dtw",
+            "hmm.LinearFailureRateHmm",
+            "hmm.XgammaHmm",
+            "hmm.NadarajahHaghighiHmm",
+            "hmm.HjorthHmm",
+            "hmm.BetaGeometricHmm",
+            "online.Mddm",
+            "online.CusumDrift",
+            "tslearn.amss",
+            "tslearn.cdist_amss",
+            "tslearn.decay_euclidean",
+            "tslearn.cdist_decay_euclidean",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

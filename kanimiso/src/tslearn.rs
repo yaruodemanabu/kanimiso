@@ -1589,6 +1589,150 @@ pub fn cdist_obe_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualif
     ctx.finish(out)
 }
 
+fn amss_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len();
+    let m = b.len();
+    if n < 2 || m < 2 {
+        return dtw_raw(a, b);
+    }
+    let inf = 1e300_f64;
+    let mut prev = vec![inf; m];
+    let mut cur = vec![inf; m];
+    for j in 0..m - 1 {
+        let db = b[j + 1] - b[j];
+        let da = a[1] - a[0];
+        let na = (1.0 + da * da).sqrt();
+        let nb = (1.0 + db * db).sqrt();
+        prev[j] = 1.0 - (1.0 + da * db) / (na * nb);
+    }
+    for i in 1..n - 1 {
+        let da = a[i + 1] - a[i];
+        let na = (1.0 + da * da).sqrt();
+        for j in 0..m - 1 {
+            let db = b[j + 1] - b[j];
+            let nb = (1.0 + db * db).sqrt();
+            let cost = 1.0 - (1.0 + da * db) / (na * nb);
+            let mut best = prev[j];
+            if j > 0 {
+                best = best.min(cur[j - 1]).min(prev[j - 1]);
+            }
+            cur[j] = cost + best;
+        }
+        std::mem::swap(&mut prev, &mut cur);
+        for v in cur.iter_mut() {
+            *v = inf;
+        }
+    }
+    prev[..m - 1].iter().copied().fold(inf, f64::min)
+}
+
+/// Angular metric for shape similarity (Yokoyama et al. AMSS).
+///
+/// Local cost is \(1-\cos\) of consecutive increment vectors. Distinct from
+/// [`dtw`] (level cost) and [`ddtw`] (derivative magnitude).
+pub fn amss(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("amss.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("amss.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("amss on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(amss_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise AMSS.
+///
+/// Distinct from [`cdist_dtw`] and [`cdist_ddtw`].
+pub fn cdist_amss(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        amss_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+fn decay_euclidean_raw(a: &[f64], b: &[f64], gamma: f64) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let g = if gamma.is_finite() && gamma >= 0.0 {
+        gamma
+    } else {
+        0.1
+    };
+    let mut s = 0.0_f64;
+    let den = (n - 1).max(1) as f64;
+    for i in 0..n {
+        let w = (-g * (n - 1 - i) as f64 / den).exp();
+        let d = a[i] - b[i];
+        s += w * d * d;
+    }
+    s.sqrt()
+}
+
+/// Time-decay Euclidean (recent samples weighted more; no warping).
+///
+/// Distinct from [`wdtw`] (warped) and unconstrained Euclidean. Decay
+/// \(\gamma\) is not identification `p`.
+pub fn decay_euclidean(
+    a: &Vector,
+    b: &Vector,
+    gamma: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("decay_euclidean.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("decay_euclidean.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("decay_euclidean on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(decay_euclidean_raw(a.as_slice(), b.as_slice(), gamma))
+}
+
+/// Pairwise time-decay Euclidean.
+///
+/// Distinct from [`cdist_wdtw`].
+pub fn cdist_decay_euclidean(
+    a: &Matrix,
+    b: &Matrix,
+    gamma: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let g = gamma;
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        decay_euclidean_raw(ai.as_slice(), bj.as_slice(), g)
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -20197,6 +20341,10 @@ mod tests {
         assert!(cyc.abs() < 1e-12, "cyclic_dtw={cyc}");
         let obe = obe_dtw(&a, &a, &Session::new("ts", "obe")).unwrap().value;
         assert!(obe.abs() < 1e-12, "obe_dtw={obe}");
+        let ams = amss(&a, &a, &Session::new("ts", "ams")).unwrap().value;
+        assert!(ams.abs() < 1e-12, "amss={ams}");
+        let dew = decay_euclidean(&a, &a, 0.2, &Session::new("ts", "dew")).unwrap().value;
+        assert!(dew.abs() < 1e-12, "decay_euclidean={dew}");
     }
 
     #[test]
@@ -21234,6 +21382,16 @@ mod tests {
             .value;
         assert_eq!(cob.shape(), (8, 8));
         assert!(cob.get(0, 0).abs() < 1e-12);
+        let cam = cdist_amss(&x, &x, &Session::new("ts", "cam"))
+            .unwrap()
+            .value;
+        assert_eq!(cam.shape(), (8, 8));
+        assert!(cam.get(0, 0).abs() < 1e-12);
+        let cde = cdist_decay_euclidean(&x, &x, 0.2, &Session::new("ts", "cde"))
+            .unwrap()
+            .value;
+        assert_eq!(cde.shape(), (8, 8));
+        assert!(cde.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

@@ -48748,6 +48748,272 @@ impl Predict for SpotAnomaly {
     }
 }
 
+/// McDiarmid drift detector (river `drift.MDDM_A`).
+///
+/// Sliding-window mean gap vs McDiarmid bound. Distinct from [`Hddm`]
+/// (Hoeffding on a running error rate) and [`Kswin`] (KS). Window length is
+/// not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Mddm {
+    /// Window length. Not identification `p`.
+    pub window_size: usize,
+    /// Recent half used for the gap.
+    pub stat_size: usize,
+    /// Type-I level \(\delta\).
+    pub delta: f64,
+    window: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for Mddm {
+    fn default() -> Self {
+        Self {
+            window_size: 16,
+            stat_size: 6,
+            delta: 0.01,
+            window: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl Mddm {
+    /// MDDM with window `window_size`.
+    pub fn new(window_size: usize) -> Self {
+        Self {
+            window_size: window_size.max(4),
+            ..Self::default()
+        }
+    }
+
+    /// Consume one scalar.
+    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+        let mut ctx = FitCtx::with_session(session.child("update"));
+        if x.is_finite() {
+            self.window.push(x);
+        }
+        if self.window.len() > self.window_size {
+            let drop = self.window.len() - self.window_size;
+            self.window.drain(0..drop);
+        }
+        self.n_seen += 1;
+        let r = self.stat_size.min(self.window.len() / 2).max(1);
+        if self.window.len() < r * 2 {
+            return ctx.finish(DriftDecision::Stable);
+        }
+        let n = self.window.len();
+        let recent = &self.window[n - r..];
+        let past = &self.window[..n - r];
+        let mu_r = recent.iter().sum::<f64>() / recent.len() as f64;
+        let mu_p = past.iter().sum::<f64>() / past.len() as f64;
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for v in self.window.iter() {
+            if *v < lo {
+                lo = *v;
+            }
+            if *v > hi {
+                hi = *v;
+            }
+        }
+        let range = (hi - lo).max(1e-6);
+        let del = if self.delta.is_finite() && self.delta > 0.0 && self.delta < 1.0 {
+            self.delta
+        } else {
+            0.01
+        };
+        let eps = range
+            * ((-0.5 * del.ln()) * (1.0 / past.len() as f64 + 1.0 / recent.len() as f64)).sqrt();
+        let stat = (mu_r - mu_p).abs();
+        if stat > eps {
+            ctx.push(
+                Issue::builder(IssueCode::ConceptDriftDetected)
+                    .message(format!("MDDM |Δμ|={stat:.4e} > ε={eps:.4e}"))
+                    .metric("drift_statistic", stat)
+                    .build(),
+            );
+            self.window.clear();
+            return ctx.finish(DriftDecision::Drift { statistic: stat });
+        }
+        ctx.finish(DriftDecision::Stable)
+    }
+}
+
+impl PartialFit for Mddm {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let mut fired = 0.0_f64;
+        let mut last = 0.0_f64;
+        for i in 0..x.nrows() {
+            match self.update(x.get(i, 0), &session.child("mddm")) {
+                Ok(q) => {
+                    if let DriftDecision::Drift { statistic } = q.value {
+                        fired += 1.0;
+                        last = statistic;
+                    }
+                }
+                Err(e) => {
+                    if e.primary().code == IssueCode::ConceptDriftDetected {
+                        fired += 1.0;
+                    }
+                }
+            }
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.information_gain = Some(fired);
+        q.drift_statistic = Some(last);
+        q.still_identified = self.window.len() >= 4;
+        q.warmup = self.window.len() < 4;
+        q.explanation = format!("MDDM window={} drift_cuts={fired}", self.window.len());
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "McDiarmid window-mean gap",
+                "range-scaled McDiarmid ε; distinct from HDDM Hoeffding",
+                "pre-batch window",
+                format!("fired={fired} n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
+/// Classic CUSUM on a stream mean (not Page–Hinkley).
+///
+/// \(S^\pm\) reset at 0; drift when \(|S|>h\). Distinct from [`PageHinkley`]
+/// (fading min/max of a single cumulative). Threshold is not identification
+/// `p`.
+#[derive(Clone, Debug)]
+pub struct CusumDrift {
+    /// Allowance \(k\).
+    pub k: f64,
+    /// Decision threshold \(h\).
+    pub h: f64,
+    mean: f64,
+    s_pos: f64,
+    s_neg: f64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for CusumDrift {
+    fn default() -> Self {
+        Self {
+            k: 0.5,
+            h: 8.0,
+            mean: 0.0,
+            s_pos: 0.0,
+            s_neg: 0.0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl CusumDrift {
+    /// CUSUM with allowance `k` and threshold `h`.
+    pub fn new(k: f64, h: f64) -> Self {
+        Self {
+            k,
+            h,
+            ..Self::default()
+        }
+    }
+
+    /// Consume one scalar.
+    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+        let mut ctx = FitCtx::with_session(session.child("update"));
+        if !x.is_finite() {
+            return ctx.finish(DriftDecision::Stable);
+        }
+        self.n_seen += 1;
+        self.mean += (x - self.mean) / self.n_seen as f64;
+        let kk = if self.k.is_finite() && self.k > 0.0 {
+            self.k
+        } else {
+            0.5
+        };
+        let hh = if self.h.is_finite() && self.h > 0.0 {
+            self.h
+        } else {
+            8.0
+        };
+        self.s_pos = (self.s_pos + x - self.mean - kk).max(0.0);
+        self.s_neg = (self.s_neg + x - self.mean + kk).min(0.0);
+        let stat = self.s_pos.max(-self.s_neg);
+        if stat > hh {
+            ctx.push(
+                Issue::builder(IssueCode::ConceptDriftDetected)
+                    .message(format!("CUSUM S={stat:.4e} > h={hh:.4e}"))
+                    .metric("drift_statistic", stat)
+                    .build(),
+            );
+            self.s_pos = 0.0;
+            self.s_neg = 0.0;
+            return ctx.finish(DriftDecision::Drift { statistic: stat });
+        }
+        ctx.finish(DriftDecision::Stable)
+    }
+}
+
+impl PartialFit for CusumDrift {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let mut fired = 0.0_f64;
+        for i in 0..x.nrows() {
+            match self.update(x.get(i, 0), &session.child("cusum")) {
+                Ok(q) => {
+                    if matches!(q.value, DriftDecision::Drift { .. }) {
+                        fired += 1.0;
+                    }
+                }
+                Err(e) => {
+                    if e.primary().code == IssueCode::ConceptDriftDetected {
+                        fired += 1.0;
+                    }
+                }
+            }
+        }
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.information_gain = Some(fired);
+        q.drift_statistic = Some(self.s_pos.max(-self.s_neg));
+        q.still_identified = self.n_seen >= 4;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "CUSUM S+={:.4e} S-={:.4e} cuts={fired}",
+            self.s_pos, self.s_neg
+        );
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "two-sided CUSUM step",
+                "reset-to-zero CUSUM; distinct from Page–Hinkley fading extrema",
+                "pre-batch S",
+                format!("fired={fired} n={}", self.n_seen),
+            ),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49618,6 +49884,12 @@ mod tests {
         SpotAnomaly::new(1e-3)
             .partial_fit(&x, None, &session)
             .expect("spo");
+        Mddm::new(12)
+            .partial_fit(&x, None, &session)
+            .expect("mdd");
+        CusumDrift::new(0.5, 8.0)
+            .partial_fit(&x, None, &session)
+            .expect("csu");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
