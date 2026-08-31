@@ -7845,6 +7845,23 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.UnitHalfTHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaHalfTHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ExponentiatedHalfTHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.KumaraswamyHalfTHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.DiscreteHalfTHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.WindowZscore", "river.anomaly.GaussianScorer", "online"),
+    a("online.SsdAnomaly", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.correlation_l1_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_correlation_l1",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8854,6 +8871,15 @@ mod tests {
             "tslearn.cdist_dice_l1",
             "tslearn.vicis_symmetric_distance",
             "tslearn.cdist_vicis_symmetric",
+            "hmm.UnitHalfTHmm",
+            "hmm.BetaHalfTHmm",
+            "hmm.ExponentiatedHalfTHmm",
+            "hmm.KumaraswamyHalfTHmm",
+            "hmm.DiscreteHalfTHmm",
+            "online.WindowZscore",
+            "online.SsdAnomaly",
+            "tslearn.correlation_l1_distance",
+            "tslearn.cdist_correlation_l1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

@@ -4493,6 +4493,104 @@ pub fn cdist_vicis_symmetric(a: &Matrix, b: &Matrix, session: &Session) -> Resul
     ctx.finish(out)
 }
 
+
+fn correlation_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    if n == 1 {
+        let p = a[0].abs() / sa;
+        let q = b[0].abs() / sb;
+        return if (p - q).abs() < 1e-15 { 0.0 } else { 1.0 };
+    }
+    let na = n as f64;
+    let mut ma = 0.0_f64;
+    let mut mb = 0.0_f64;
+    for i in 0..n {
+        ma += a[i].abs() / sa;
+        mb += b[i].abs() / sb;
+    }
+    ma /= na;
+    mb /= na;
+    let mut num = 0.0_f64;
+    let mut va = 0.0_f64;
+    let mut vb = 0.0_f64;
+    for i in 0..n {
+        let da = a[i].abs() / sa - ma;
+        let db = b[i].abs() / sb - mb;
+        num += da * db;
+        va += da * da;
+        vb += db * db;
+    }
+    let den = (va * vb).sqrt();
+    if den < 1e-18 {
+        let mut same = true;
+        for i in 0..n {
+            let p = a[i].abs() / sa;
+            let q = b[i].abs() / sb;
+            if (p - q).abs() >= 1e-12 {
+                same = false;
+                break;
+            }
+        }
+        return if same { 0.0 } else { 1.0 };
+    }
+    let r = (num / den).clamp(-1.0, 1.0);
+    (1.0 - r).max(0.0)
+}
+
+/// Pearson correlation distance \(1-r\) after \(\ell_1\) normalisation.
+///
+/// Distinct from [`correlation_distance`] (raw coordinates) and
+/// [`cosine_l1_distance`] (no centering). Identical series score 0.
+pub fn correlation_l1_distance(
+    a: &Vector,
+    b: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("correlation_l1_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("correlation_l1_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("correlation_l1_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(correlation_l1_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise \(\ell_1\)-normalised Pearson correlation distance.
+pub fn cdist_correlation_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        correlation_l1_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -23195,6 +23293,8 @@ mod tests {
         assert!(dl1.abs() < 1e-12, "dice_l1_distance={dl1}");
         let vsc = vicis_symmetric_distance(&a, &a, &Session::new("ts", "vsc")).unwrap().value;
         assert!(vsc.abs() < 1e-12, "vicis_symmetric_distance={vsc}");
+        let prl = correlation_l1_distance(&a, &a, &Session::new("ts", "prl")).unwrap().value;
+        assert!(prl.abs() < 1e-12, "correlation_l1_distance={prl}");
     }
 
     #[test]
@@ -24467,6 +24567,11 @@ mod tests {
             .value;
         assert_eq!(cvc.shape(), (8, 8));
         assert!(cvc.get(0, 0).abs() < 1e-12);
+        let cpr = cdist_correlation_l1(&x, &x, &Session::new("ts", "cpr"))
+            .unwrap()
+            .value;
+        assert_eq!(cpr.shape(), (8, 8));
+        assert!(cpr.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;
