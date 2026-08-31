@@ -7133,6 +7133,35 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.AlphaMuHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.KappaMuHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.MarshallOlkinWeibullHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.QuasiLindleyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.Rddm", "river.drift.binary.DDM", "online"),
+    a(
+        "tslearn.chebyshev_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_chebyshev",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.manhattan_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_manhattan",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7930,6 +7959,15 @@ mod tests {
             "online.Ecdd",
             "tslearn.cosine_distance",
             "tslearn.cdist_cosine",
+            "hmm.AlphaMuHmm",
+            "hmm.KappaMuHmm",
+            "hmm.MarshallOlkinWeibullHmm",
+            "hmm.QuasiLindleyHmm",
+            "online.Rddm",
+            "tslearn.chebyshev_distance",
+            "tslearn.cdist_chebyshev",
+            "tslearn.manhattan_distance",
+            "tslearn.cdist_manhattan",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

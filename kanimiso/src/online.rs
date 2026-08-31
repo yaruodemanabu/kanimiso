@@ -49606,6 +49606,151 @@ impl PartialFit for Ecdd {
     }
 }
 
+/// Reactive drift detection (Barros et al.; RDDM).
+///
+/// DDM-style \(p+s\) with warning 1.773 and drift 2.258, plus a forced
+/// detection after a long warning streak. Distinct from [`Ddm`] (2/3
+/// thresholds, no streak) and [`Eddm`]. Thresholds are not identification
+/// `p`.
+#[derive(Clone, Debug)]
+pub struct Rddm {
+    /// Minimum instances before a decision.
+    pub min_instances: u64,
+    /// Warning-streak force length.
+    pub max_warnings: u64,
+    n: u64,
+    p: f64,
+    p_min: f64,
+    s_min: f64,
+    warn_streak: u64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for Rddm {
+    fn default() -> Self {
+        Self {
+            min_instances: 30,
+            max_warnings: 30,
+            n: 0,
+            p: 0.0,
+            p_min: f64::INFINITY,
+            s_min: f64::INFINITY,
+            warn_streak: 0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl Rddm {
+    /// RDDM with `min_instances`.
+    pub fn new(min_instances: u64) -> Self {
+        Self {
+            min_instances: min_instances.max(8),
+            ..Self::default()
+        }
+    }
+
+    /// Consume one 0/1 error indicator.
+    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+        let mut ctx = FitCtx::with_session(session.child("update"));
+        if !x.is_finite() {
+            return ctx.finish(DriftDecision::Stable);
+        }
+        let e = if x > 0.5 { 1.0 } else { 0.0 };
+        self.n += 1;
+        self.n_seen += 1;
+        self.p += (e - self.p) / self.n as f64;
+        let s = (self.p * (1.0 - self.p) / self.n as f64).max(0.0).sqrt();
+        if self.p + s < self.p_min + self.s_min {
+            self.p_min = self.p;
+            self.s_min = s;
+        }
+        let stat = self.p + s;
+        let ready = self.n >= self.min_instances;
+        let drift = ready && stat > self.p_min + 2.258 * self.s_min;
+        let warn = ready && stat > self.p_min + 1.773 * self.s_min;
+        if warn {
+            self.warn_streak += 1;
+        } else {
+            self.warn_streak = 0;
+        }
+        let forced = self.warn_streak >= self.max_warnings;
+        if drift || forced {
+            ctx.push(
+                Issue::builder(IssueCode::ConceptDriftDetected)
+                    .message(format!("RDDM p+s={stat:.4e} streak={}", self.warn_streak))
+                    .metric("drift_statistic", stat)
+                    .build(),
+            );
+            self.n = 0;
+            self.p = 0.0;
+            self.p_min = f64::INFINITY;
+            self.s_min = f64::INFINITY;
+            self.warn_streak = 0;
+            return ctx.finish(DriftDecision::Drift { statistic: stat });
+        }
+        if warn {
+            return ctx.finish(DriftDecision::Warning { statistic: stat });
+        }
+        ctx.finish(DriftDecision::Stable)
+    }
+}
+
+impl PartialFit for Rddm {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let mut fired = 0.0_f64;
+        for i in 0..x.nrows() {
+            match self.update(x.get(i, 0), &session.child("rddm")) {
+                Ok(q) => {
+                    if matches!(q.value, DriftDecision::Drift { .. }) {
+                        fired += 1.0;
+                    }
+                }
+                Err(e) => {
+                    if e.primary().code == IssueCode::ConceptDriftDetected {
+                        fired += 1.0;
+                    }
+                }
+            }
+        }
+        self.updates += 1;
+        let warmed = self.n_seen >= self.min_instances;
+        if !warmed {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message("RDDM needs min_instances before a decision")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.information_gain = Some(fired);
+        q.drift_statistic = Some(self.p + (self.p * (1.0 - self.p) / self.n.max(1) as f64).sqrt());
+        q.still_identified = warmed;
+        q.warmup = !warmed;
+        q.explanation = format!("RDDM p={:.4e} cuts={fired}", self.p);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "RDDM reactive p+s step",
+                "Barros 1.773/2.258 levels plus warning streak; not DDM 2/3",
+                "pre-batch p",
+                format!("p={:.4e} fired={fired}", self.p),
+            ),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50494,6 +50639,9 @@ mod tests {
         Ecdd::new(0.2)
             .partial_fit(&x, None, &session)
             .expect("ecd");
+        Rddm::new(12)
+            .partial_fit(&x, None, &session)
+            .expect("rdd");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

@@ -2055,6 +2055,103 @@ pub fn cdist_cosine(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualifi
     ctx.finish(out)
 }
 
+fn chebyshev_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut m = 0.0_f64;
+    for i in 0..n {
+        let d = (a[i] - b[i]).abs();
+        if d > m {
+            m = d;
+        }
+    }
+    m
+}
+
+fn manhattan_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        s += (a[i] - b[i]).abs();
+    }
+    s
+}
+
+/// Chebyshev (\(L^\infty\)) distance on aligned prefixes.
+///
+/// Distinct from [`dtw`] (warped \(L^1\)) and [`decay_euclidean`].
+pub fn chebyshev_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("chebyshev_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("chebyshev_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("chebyshev_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(chebyshev_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Chebyshev distance.
+pub fn cdist_chebyshev(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        chebyshev_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+/// Manhattan (\(L^1\)) distance on aligned prefixes (no warping).
+///
+/// Distinct from [`dtw`] (warped \(L^1\)) and [`chebyshev_distance`].
+pub fn manhattan_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("manhattan_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("manhattan_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("manhattan_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(manhattan_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Manhattan distance.
+pub fn cdist_manhattan(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        manhattan_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -20677,6 +20774,10 @@ mod tests {
         assert!(crd.abs() < 1e-12, "correlation_distance={crd}");
         let cnd = cosine_distance(&a, &a, &Session::new("ts", "cnd")).unwrap().value;
         assert!(cnd.abs() < 1e-12, "cosine_distance={cnd}");
+        let chb = chebyshev_distance(&a, &a, &Session::new("ts", "chb")).unwrap().value;
+        assert!(chb.abs() < 1e-12, "chebyshev_distance={chb}");
+        let man = manhattan_distance(&a, &a, &Session::new("ts", "man")).unwrap().value;
+        assert!(man.abs() < 1e-12, "manhattan_distance={man}");
     }
 
     #[test]
@@ -21749,6 +21850,16 @@ mod tests {
             .value;
         assert_eq!(ccd.shape(), (8, 8));
         assert!(ccd.get(0, 0).abs() < 1e-12);
+        let cch = cdist_chebyshev(&x, &x, &Session::new("ts", "cch"))
+            .unwrap()
+            .value;
+        assert_eq!(cch.shape(), (8, 8));
+        assert!(cch.get(0, 0).abs() < 1e-12);
+        let cma = cdist_manhattan(&x, &x, &Session::new("ts", "cma"))
+            .unwrap()
+            .value;
+        assert_eq!(cma.shape(), (8, 8));
+        assert!(cma.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;
