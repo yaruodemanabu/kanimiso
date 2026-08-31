@@ -3668,7 +3668,7 @@ pub fn cdist_harmonic_mean(a: &Matrix, b: &Matrix, session: &Session) -> Result<
     ctx.finish(out)
 }
 
-fn inner_product_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+fn max_symmetric_chi_squared_distance_raw(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len().min(b.len());
     if n == 0 {
         return f64::NAN;
@@ -3686,11 +3686,12 @@ fn inner_product_distance_raw(a: &[f64], b: &[f64]) -> f64 {
     sb = sb.max(1e-18);
     let mut s = 0.0_f64;
     for i in 0..n {
-        let p = a[i].abs() / sa;
-        let q = b[i].abs() / sb;
-        s += p * q;
+        let p = (a[i].abs() / sa).max(1e-18);
+        let q = (b[i].abs() / sb).max(1e-18);
+        let d = p - q;
+        s += d * d / p.max(q);
     }
-    (1.0 - s).max(0.0)
+    s.max(0.0)
 }
 
 fn intersection_distance_raw(a: &[f64], b: &[f64]) -> f64 {
@@ -3718,38 +3719,51 @@ fn intersection_distance_raw(a: &[f64], b: &[f64]) -> f64 {
     (1.0 - s).max(0.0)
 }
 
-/// Inner-product distance \(1-\sum pq\) after \(\ell_1\).
+/// Max-symmetric χ² \(\sum(p-q)^2/\max(p,q)\) after \(\ell_1\).
 ///
-/// Distinct from [`cosine_distance`] (unnormalized geometric norms) and
-/// [`fidelity_distance`] (\(\sum\sqrt{pq}\)). Identical series score 0.
-pub fn inner_product_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+/// Distinct from [`pearson_chi_squared_distance`] (divide by \(p\)),
+/// [`neyman_chi_squared_distance`] (divide by \(q\)), and
+/// [`additive_symmetric_distance`] (divide by \(p+q\)). Identical series score 0.
+pub fn max_symmetric_chi_squared_distance(
+    a: &Vector,
+    b: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
-    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("inner_product_distance.a") {
+    if let Some(issue) =
+        signlred::scan_finite(a.as_slice()).to_issue("max_symmetric_chi_squared_distance.a")
+    {
         ctx.push(issue);
     }
-    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("inner_product_distance.b") {
+    if let Some(issue) =
+        signlred::scan_finite(b.as_slice()).to_issue("max_symmetric_chi_squared_distance.b")
+    {
         ctx.push(issue);
     }
     if a.is_empty() || b.is_empty() {
         ctx.push(
             Issue::builder(IssueCode::EmptyMatrix)
-                .message("inner_product_distance on an empty series")
+                .message("max_symmetric_chi_squared_distance on an empty series")
                 .build(),
         );
         return ctx.finish(f64::NAN);
     }
-    ctx.finish(inner_product_distance_raw(a.as_slice(), b.as_slice()))
+    ctx.finish(max_symmetric_chi_squared_distance_raw(a.as_slice(), b.as_slice()))
 }
 
-/// Pairwise inner-product distance.
-pub fn cdist_inner_product(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+/// Pairwise max-symmetric χ² distance.
+pub fn cdist_max_symmetric_chi_squared(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
     let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
         let ai = a.row(i);
         let bj = b.row(j);
-        inner_product_distance_raw(ai.as_slice(), bj.as_slice())
+        max_symmetric_chi_squared_distance_raw(ai.as_slice(), bj.as_slice())
     });
     ctx.finish(out)
 }
@@ -22468,8 +22482,8 @@ mod tests {
         assert!(kjn.abs() < 1e-12, "kumar_johnson_distance={kjn}");
         let hmn = harmonic_mean_distance(&a, &a, &Session::new("ts", "hmn")).unwrap().value;
         assert!(hmn.abs() < 1e-12, "harmonic_mean_distance={hmn}");
-        let ipd = inner_product_distance(&a, &a, &Session::new("ts", "ipd")).unwrap().value;
-        assert!(ipd.abs() < 1e-12, "inner_product_distance={ipd}");
+        let msc = max_symmetric_chi_squared_distance(&a, &a, &Session::new("ts", "msc")).unwrap().value;
+        assert!(msc.abs() < 1e-12, "max_symmetric_chi_squared_distance={msc}");
         let isc = intersection_distance(&a, &a, &Session::new("ts", "isc")).unwrap().value;
         assert!(isc.abs() < 1e-12, "intersection_distance={isc}");
     }
@@ -23684,11 +23698,11 @@ mod tests {
             .value;
         assert_eq!(chm.shape(), (8, 8));
         assert!(chm.get(0, 0).abs() < 1e-12);
-        let cip = cdist_inner_product(&x, &x, &Session::new("ts", "cip"))
+        let cms = cdist_max_symmetric_chi_squared(&x, &x, &Session::new("ts", "cms"))
             .unwrap()
             .value;
-        assert_eq!(cip.shape(), (8, 8));
-        assert!(cip.get(0, 0).abs() < 1e-12);
+        assert_eq!(cms.shape(), (8, 8));
+        assert!(cms.get(0, 0).abs() < 1e-12);
         let cis = cdist_intersection(&x, &x, &Session::new("ts", "cis"))
             .unwrap()
             .value;

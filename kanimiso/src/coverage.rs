@@ -7655,12 +7655,12 @@ const INVENTORY: &[Algorithm] = &[
     a("online.Nof", "river.anomaly.HalfSpaceTrees", "online"),
     a("online.FastAbod", "river.anomaly.HalfSpaceTrees", "online"),
     a(
-        "tslearn.inner_product_distance",
+        "tslearn.max_symmetric_chi_squared_distance",
         "tslearn.metrics.dtw",
         "timeseries",
     ),
     a(
-        "tslearn.cdist_inner_product",
+        "tslearn.cdist_max_symmetric_chi_squared",
         "tslearn.metrics.cdist",
         "timeseries",
     ),
@@ -8624,8 +8624,8 @@ mod tests {
             "hmm.DiscreteNakagamiHmm",
             "online.Nof",
             "online.FastAbod",
-            "tslearn.inner_product_distance",
-            "tslearn.cdist_inner_product",
+            "tslearn.max_symmetric_chi_squared_distance",
+            "tslearn.cdist_max_symmetric_chi_squared",
             "tslearn.intersection_distance",
             "tslearn.cdist_intersection",
         ] {
