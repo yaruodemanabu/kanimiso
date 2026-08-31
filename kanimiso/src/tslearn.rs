@@ -13544,6 +13544,67 @@ pub fn cdist_minkowski137_l1(a: &Matrix, b: &Matrix, session: &Session) -> Resul
     ctx.finish(out)
 }
 
+
+fn minkowski138_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let p = a[i].abs() / sa;
+        let q = b[i].abs() / sb;
+        s += (p - q).abs().powi(138);
+    }
+    s.powf(1.0 / 138.0)
+}
+
+/// Minkowski \(p=138\) distance after \(\ell_1\) normalisation.
+///
+/// Distinct from [`minkowski137_l1_distance`] and [`minkowski136_l1_distance`].
+/// Identical series score 0.
+pub fn minkowski138_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski138_l1_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("minkowski138_l1_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("minkowski138_l1_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(minkowski138_l1_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise \(\ell_1\)-normalised Minkowski \(p=138\) distance.
+pub fn cdist_minkowski138_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        minkowski138_l1_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -32536,6 +32597,8 @@ mod tests {
         assert!(m136.abs() < 1e-12, "minkowski136_l1_distance={m136}");
         let m137 = minkowski137_l1_distance(&a, &a, &Session::new("ts", "m137")).unwrap().value;
         assert!(m137.abs() < 1e-12, "minkowski137_l1_distance={m137}");
+        let m138 = minkowski138_l1_distance(&a, &a, &Session::new("ts", "m138")).unwrap().value;
+        assert!(m138.abs() < 1e-12, "minkowski138_l1_distance={m138}");
     }
 
     #[test]
@@ -34533,6 +34596,11 @@ mod tests {
             .value;
         assert_eq!(cd137.shape(), (8, 8));
         assert!(cd137.get(0, 0).abs() < 1e-12);
+        let cd138 = cdist_minkowski138_l1(&x, &x, &Session::new("ts", "cd138"))
+            .unwrap()
+            .value;
+        assert_eq!(cd138.shape(), (8, 8));
+        assert!(cd138.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;
