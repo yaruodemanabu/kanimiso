@@ -16980,6 +16980,286 @@ pub struct FittedPanMatrixProfile {
     pub discord_scores: Vector,
 }
 
+fn subsequence_dist(a: &Vector, ia: usize, b: &Vector, ib: usize, m: usize) -> f64 {
+    let mut s = 0.0_f64;
+    for t in 0..m {
+        let e = a[ia + t] - b[ib + t];
+        s += e * e;
+    }
+    s.max(0.0).sqrt()
+}
+
+/// Matrix-profile distance between two series (stumpy `mpdist`).
+///
+/// Window length is not identification `p`. Distinct from [`dtw`] (alignment)
+/// and [`matrix_profile`] (self nearest neighbour).
+pub fn mpdist(
+    a: &Vector,
+    b: &Vector,
+    window: usize,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(a),
+        Some(a),
+        &ctx.policy,
+    );
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("mpdist.b") {
+        ctx.push(issue);
+    }
+    let m = window;
+    if m < 2 || m > a.len() || m > b.len() {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "mpdist window={m} is unusable for n_a={} n_b={}",
+                    a.len(),
+                    b.len()
+                ))
+                .build(),
+        );
+        return ctx.finish(0.0);
+    }
+    let na = a.len() + 1 - m;
+    let nb = b.len() + 1 - m;
+    let mut acc = 0.0_f64;
+    let mut n = 0usize;
+    for i in 0..na {
+        let mut best = f64::INFINITY;
+        for j in 0..nb {
+            let d = subsequence_dist(a, i, b, j, m);
+            if d < best {
+                best = d;
+            }
+        }
+        if best.is_finite() {
+            acc += best;
+            n += 1;
+        }
+    }
+    for j in 0..nb {
+        let mut best = f64::INFINITY;
+        for i in 0..na {
+            let d = subsequence_dist(b, j, a, i, m);
+            if d < best {
+                best = d;
+            }
+        }
+        if best.is_finite() {
+            acc += best;
+            n += 1;
+        }
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("mpdist is the mean of both one-way min-distance profiles")
+            .compromise(NumericalCompromise::new(
+                "stumpy mpdist",
+                "mean of A→B and B→A subsequence nearest-neighbour distances",
+                "the published k-th percentile and z-normalized MASS kernel are omitted",
+                "read the scalar as a two-series matrix-profile distance sketch",
+            ))
+            .build(),
+    );
+    ctx.finish(if n == 0 { 0.0 } else { acc / n as f64 })
+}
+
+/// Anytime SCRIMP matrix profile (stumpy `scrimp`).
+///
+/// `sample_frac` is not identification `p`. Distinct from [`Stomp`] (every
+/// diagonal) and [`Stamp`] (full nested loops).
+#[derive(Clone, Debug)]
+pub struct Scrimp {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+    /// Fraction of STOMP diagonals. Not identification `p`.
+    pub sample_frac: f64,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for Scrimp {
+    fn default() -> Self {
+        Self {
+            window: 3,
+            sample_frac: 0.5,
+            seed: 7,
+        }
+    }
+}
+
+impl Scrimp {
+    /// SCRIMP with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Anytime matrix profile from a random diagonal subset.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_vector(y),
+            Some(y),
+            &ctx.policy,
+        );
+        let n = y.len();
+        let m = self.window.max(2);
+        if m >= n {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .severity(Severity::Warning)
+                    .message(format!("SCRIMP window={m} is unusable for n={n}"))
+                    .build(),
+            );
+            return ctx.finish(StompResult {
+                profile: Vector::zeros(0),
+                nn_index: Vector::zeros(0),
+            });
+        }
+        let n_sub = n + 1 - m;
+        let excl = (m / 4).max(1);
+        let frac = if self.sample_frac.is_finite() && self.sample_frac > 0.0 {
+            self.sample_frac.min(1.0)
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "SCRIMP sample_frac={} is not in (0, 1]; using 0.5",
+                        self.sample_frac
+                    ))
+                    .build(),
+            );
+            0.5
+        };
+        let mut diags: Vec<usize> = (1..n_sub).collect();
+        let mut rng = Rng::new(self.seed);
+        rng.shuffle(&mut diags);
+        let keep = ((diags.len() as f64) * frac).ceil() as usize;
+        diags.truncate(keep.max(1).min(diags.len().max(1)));
+        let mut profile = Vector::filled(n_sub, f64::INFINITY);
+        let mut nn_index = Vector::zeros(n_sub);
+        for &diag in &diags {
+            let mut prev = f64::NAN;
+            for i in 0..(n_sub - diag) {
+                let j = i + diag;
+                if i.abs_diff(j) < excl {
+                    prev = f64::NAN;
+                    continue;
+                }
+                let d = if !prev.is_finite() {
+                    subsequence_dist(y, i, y, j, m)
+                } else {
+                    let leave = y[i - 1] - y[j - 1];
+                    let enter = y[i + m - 1] - y[j + m - 1];
+                    (prev * prev - leave * leave + enter * enter).max(0.0).sqrt()
+                };
+                prev = d;
+                if d < profile[i] {
+                    profile[i] = d;
+                    nn_index[i] = j as f64;
+                }
+                if d < profile[j] {
+                    profile[j] = d;
+                    nn_index[j] = i as f64;
+                }
+            }
+        }
+        for i in 0..n_sub {
+            if !profile[i].is_finite() {
+                profile[i] = 0.0;
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SCRIMP is a random STOMP-diagonal subset, not published anytime SCRIMP")
+                .compromise(NumericalCompromise::new(
+                    "stumpy scrimp",
+                    "shuffled STOMP diagonals truncated to sample_frac",
+                    "the published pre-scrimp refinement and z-normalized kernel are omitted",
+                    "read the profile as an anytime matrix-profile sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(StompResult { profile, nn_index })
+    }
+}
+
+/// MASS sliding z-normalized distance profile (stumpy `mass`).
+///
+/// Query length is not identification `p`. Distinct from [`mpdist`] (two-way
+/// mean) and [`matrix_profile`] (self nearest neighbour).
+pub fn mass(query: &Vector, series: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(series),
+        Some(series),
+        &ctx.policy,
+    );
+    if let Some(issue) = signlred::scan_finite(query.as_slice()).to_issue("mass.query") {
+        ctx.push(issue);
+    }
+    let m = query.len();
+    if m < 2 || m > series.len() {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "mass query length={m} is unusable for n={}",
+                    series.len()
+                ))
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(0));
+    }
+    let qmean = query.mean();
+    let qstd = query.std().max(1e-12);
+    let n_sub = series.len() + 1 - m;
+    let out = Vector::from_iter((0..n_sub).map(|i| {
+        let mut s = 0.0_f64;
+        let mut ss = 0.0_f64;
+        for t in 0..m {
+            let v = series[i + t];
+            s += v;
+            ss += v * v;
+        }
+        let n = m as f64;
+        let mean = s / n;
+        let std = ((ss / n - mean * mean).max(0.0).sqrt()).max(1e-12);
+        let mut d = 0.0_f64;
+        for t in 0..m {
+            let zq = (query[t] - qmean) / qstd;
+            let zs = (series[i + t] - mean) / std;
+            let e = zq - zs;
+            d += e * e;
+        }
+        d.max(0.0).sqrt()
+    }));
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("mass is a direct z-normalized sliding profile, not FFT MASS")
+            .compromise(NumericalCompromise::new(
+                "stumpy mass",
+                "z-normalized Euclidean distance of the query at every offset",
+                "the published FFT convolution is omitted",
+                "read the vector as a MASS distance-profile sketch",
+            ))
+            .build(),
+    );
+    ctx.finish(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -17599,6 +17879,18 @@ mod tests {
             .unwrap();
         assert_eq!(pmp.value.windows.len(), 2);
         assert!(pmp.value.discords.as_slice().iter().all(|v| v.is_finite()));
+        let mpd = mpdist(&yr, &yr, 3, &Session::new("ts", "mpdist")).unwrap();
+        assert!(mpd.value.is_finite() && mpd.value >= 0.0);
+        let scr = Scrimp::new(3)
+            .fit(&yr, &Session::new("ts", "scrimp"))
+            .unwrap();
+        assert!(
+            scr.value.profile.as_slice().iter().all(|v| v.is_finite())
+                || scr.value.profile.is_empty()
+        );
+        let qy = Vector::from_iter(yr.as_slice().iter().take(3).copied());
+        let mas = mass(&qy, &yr, &Session::new("ts", "mass")).unwrap();
+        assert!(mas.value.as_slice().iter().all(|v| v.is_finite()) || mas.value.is_empty());
         let igs = InformationGainSegmentation::new()
             .fit(&yr, &Session::new("ts", "igs"))
             .unwrap();

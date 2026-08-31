@@ -30692,6 +30692,279 @@ impl FittedRbfCate {
     }
 }
 
+/// Linear DRIV (econml `LinearDRIV` lite).
+///
+/// AIPW \(\psi_Y,\psi_D\), then OLS of \(\psi_Y\) on \(\psi_D[1,X]\). Distinct
+/// from [`SparseLinearDriv`] (ISTA \(L_1\)) and [`Driv`] (scalar ratio).
+#[derive(Clone, Debug, Default)]
+pub struct LinearDriv;
+
+impl LinearDriv {
+    /// Default linear DRIV.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit OLS Robinson on AIPW scores.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        instrument: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLinearDriv>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x
+            .nrows()
+            .min(y.len())
+            .min(treat.len())
+            .min(instrument.len());
+        let q = 1 + x.ncols();
+        let idx: Vec<usize> = (0..n).collect();
+        if !instrument_varies(instrument, &idx) || !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("LinearDriv needs treatment and instrument variation")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "linear DRIV",
+                        "AIPW ITT and the first stage need Z and D contrast",
+                        "collect a non-degenerate instrument and both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedLinearDriv {
+                coef: Vector::zeros(q),
+            });
+        }
+        let (psi_y, _, _, _, _, _, _) = dr_pseudo_outcome(x, y, instrument, n, &ctx.policy);
+        let (psi_d, _, _, _, _, _, _) = dr_pseudo_outcome(x, treat, instrument, n, &ctx.policy);
+        let design = Matrix::from_fn(n, q, |i, j| {
+            if j == 0 {
+                psi_d[i]
+            } else {
+                psi_d[i] * x.get(i, j - 1)
+            }
+        });
+        let mut scratch = Report::new("linear-driv", "ols");
+        let coef = least_squares(&mut scratch, &design, &psi_y, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(q));
+        for issue in scratch.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("LinearDriv is OLS on AIPW scores, not Syrgkanis DRIV")
+                .compromise(NumericalCompromise::new(
+                    "econml LinearDRIV",
+                    "AIPW(Z→Y) and AIPW(Z→D), then OLS of ψY on ψD[1,X]",
+                    "cross-fitting and the published influence SE are omitted",
+                    "read CATE as a linear DR residual-ratio sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedLinearDriv { coef })
+    }
+}
+
+/// Fitted linear DRIV.
+#[derive(Clone, Debug)]
+pub struct FittedLinearDriv {
+    /// Slopes on \([1,X]\).
+    pub coef: Vector,
+}
+
+impl FittedLinearDriv {
+    /// Linear CATE.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.coef.as_slice().first().copied().unwrap_or(0.0);
+            for j in 0..x.ncols() {
+                if 1 + j < self.coef.len() {
+                    s += x.get(i, j) * self.coef[1 + j];
+                }
+            }
+            s
+        })))
+    }
+}
+
+/// Kernel R-learner DML (econml `KernelDML` lite).
+///
+/// Residualize \(Y,D\), then the dual
+/// \((\mathrm{diag}(\tilde D)^2 K+\lambda I)\alpha=\mathrm{diag}(\tilde D)\tilde Y\).
+/// Dual size is not identification `p`. Distinct from [`NonParamDml`] (local
+/// ratio) and [`RbfCate`] (landmark OLS).
+#[derive(Clone, Debug)]
+pub struct KernelDml {
+    /// RBF length-scale. Not identification `p`.
+    pub bandwidth: f64,
+    /// Dual ridge. Not identification `p`.
+    pub ridge: f64,
+}
+
+impl Default for KernelDml {
+    fn default() -> Self {
+        Self {
+            bandwidth: 2.0,
+            ridge: 0.1,
+        }
+    }
+}
+
+impl KernelDml {
+    /// Kernel DML with bandwidth `h`.
+    pub fn new(bandwidth: f64) -> Self {
+        Self {
+            bandwidth,
+            ..Self::default()
+        }
+    }
+
+    /// Residualize then solve the dual R-learner.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedKernelDml>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let idx: Vec<usize> = (0..n).collect();
+        let h = if self.bandwidth.is_finite() && self.bandwidth > 0.0 {
+            self.bandwidth
+        } else {
+            2.0
+        };
+        let ridge = if self.ridge.is_finite() && self.ridge >= 0.0 {
+            self.ridge
+        } else {
+            0.1
+        };
+        if !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("KernelDml needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "kernel DML",
+                        "D̃ is unidentified with a single arm",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedKernelDml {
+                alpha: Vector::zeros(n),
+                x_train: Matrix::from_fn(0, x.ncols(), |_, _| 0.0),
+                bandwidth: h,
+                ridge,
+            });
+        }
+        let (by, ay) = ols_arm(x, y, &idx, &ctx.policy);
+        let (bd, ad) = ols_arm(x, treat, &idx, &ctx.policy);
+        let yres = Vector::from_iter((0..n).map(|i| y[i] - mu_lin(x, i, ay, &by)));
+        let dres = Vector::from_iter((0..n).map(|i| treat[i] - mu_lin(x, i, ad, &bd)));
+        let h2 = (2.0 * h * h).max(1e-12);
+        let mut kmat = Mat::<f64>::zeros(n, n);
+        for i in 0..n {
+            for j in 0..n {
+                let mut dist = 0.0_f64;
+                for c in 0..x.ncols() {
+                    let d = x.get(i, c) - x.get(j, c);
+                    dist += d * d;
+                }
+                kmat[(i, j)] = (-dist / h2).exp();
+            }
+        }
+        // Symmetric: A = K diag(D̃)² K + λ K, rhs = K diag(D̃) Ỹ
+        let mut a = Mat::<f64>::zeros(n, n);
+        let mut rhs = Vector::zeros(n);
+        for i in 0..n {
+            let mut ri = 0.0_f64;
+            for b in 0..n {
+                ri += kmat[(i, b)] * dres[b] * yres[b];
+            }
+            rhs[i] = ri;
+            for j in 0..n {
+                let mut m = 0.0_f64;
+                for b in 0..n {
+                    m += kmat[(i, b)] * dres[b] * dres[b] * kmat[(b, j)];
+                }
+                a[(i, j)] = m + ridge * kmat[(i, j)];
+            }
+            a[(i, i)] += 1e-8;
+        }
+        let mut scratch = Report::new("kernel-dml", "dual");
+        let alpha = chol_solve(&mut scratch, &a, &rhs, &ctx.policy).unwrap_or_else(|| Vector::zeros(n));
+        for issue in scratch.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("KernelDml is a dual R-learner, not published KernelDML")
+                .compromise(NumericalCompromise::new(
+                    "econml KernelDML",
+                    "OLS residualize, then (K D̃² K + λK)α = K D̃ Ỹ",
+                    "cross-fitting and a data-driven bandwidth are omitted",
+                    "read CATE as a kernel residual-ratio sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedKernelDml {
+            alpha,
+            x_train: Matrix::from_fn(n, x.ncols(), |i, j| x.get(i, j)),
+            bandwidth: h,
+            ridge,
+        })
+    }
+}
+
+/// Fitted kernel DML.
+#[derive(Clone, Debug)]
+pub struct FittedKernelDml {
+    alpha: Vector,
+    x_train: Matrix,
+    bandwidth: f64,
+    /// Dual ridge used at fit.
+    pub ridge: f64,
+}
+
+impl FittedKernelDml {
+    /// Dual kernel CATE \(f(x)=\sum_j\alpha_j k(x,x_j)\).
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let h2 = (2.0 * self.bandwidth * self.bandwidth).max(1e-12);
+        let p = x.ncols().min(self.x_train.ncols());
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = 0.0_f64;
+            for j in 0..self.x_train.nrows().min(self.alpha.len()) {
+                let mut dist = 0.0_f64;
+                for c in 0..p {
+                    let d = x.get(i, c) - self.x_train.get(j, c);
+                    dist += d * d;
+                }
+                s += self.alpha[j] * (-dist / h2).exp();
+            }
+            s
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -32143,6 +32416,28 @@ mod tests {
             rbc.value
                 .predict_cate(&xate, &Session::new("rbcp", "t"))
                 .expect("rbcp")
+                .value
+                .len(),
+            20
+        );
+        let ldv = LinearDriv::new()
+            .fit(&xate, &dur, &grp, &ivz, &Session::new("ldv", "t"))
+            .expect("ldv");
+        assert_eq!(
+            ldv.value
+                .predict_cate(&xate, &Session::new("ldvp", "t"))
+                .expect("ldvp")
+                .value
+                .len(),
+            20
+        );
+        let kdm = KernelDml::new(2.0)
+            .fit(&xate, &dur, &grp, &Session::new("kdm", "t"))
+            .expect("kdm");
+        assert_eq!(
+            kdm.value
+                .predict_cate(&xate, &Session::new("kdmp", "t"))
+                .expect("kdmp")
                 .value
                 .len(),
             20

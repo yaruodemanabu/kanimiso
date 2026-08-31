@@ -7813,6 +7813,186 @@ impl FitSeries for Tarch {
     }
 }
 
+/// Asymmetric power GARCH (arch `APARCH`):
+/// \(\sigma_t^\delta=\omega+\alpha(|\varepsilon_{t-1}|-\gamma\varepsilon_{t-1})^\delta+\beta\sigma_{t-1}^\delta\).
+///
+/// Power \(\delta\) is not identification `p`. Distinct from [`Tarch`]
+/// (absolute scale, no power) and [`GjrGarch`] (indicator on \(\varepsilon^2\)).
+#[derive(Clone, Debug)]
+pub struct Apgarch {
+    /// Coordinate-search iterations.
+    pub max_iter: usize,
+}
+
+impl Default for Apgarch {
+    fn default() -> Self {
+        Self { max_iter: 24 }
+    }
+}
+
+impl Apgarch {
+    /// Default APARCH settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted APARCH scales.
+#[derive(Clone, Debug)]
+pub struct FittedApgarch {
+    /// \(\omega\).
+    pub omega: f64,
+    /// ARCH coefficient.
+    pub alpha: f64,
+    /// Asymmetry.
+    pub gamma: f64,
+    /// Persistence of \(\sigma^\delta\).
+    pub beta: f64,
+    /// Power \(\delta\).
+    pub delta: f64,
+    /// Conditional variances \(\sigma_t^2\).
+    pub sigma2: Vector,
+    /// Demeaned residuals.
+    pub resid: Vector,
+}
+
+fn apgarch_sigma(
+    e: &[f64],
+    omega: f64,
+    alpha: f64,
+    gamma: f64,
+    beta: f64,
+    delta: f64,
+) -> Vec<f64> {
+    let var0 = e.iter().map(|v| v * v).sum::<f64>() / e.len().max(1) as f64;
+    let mut s = vec![var0.max(1e-12).sqrt(); e.len()];
+    let dlt = delta.clamp(0.5, 3.0);
+    for t in 1..e.len() {
+        let shock = (e[t - 1].abs() - gamma * e[t - 1]).max(0.0);
+        let sd = omega + alpha * shock.powf(dlt) + beta * s[t - 1].powf(dlt);
+        let sd = if sd.is_finite() && sd > 0.0 {
+            sd
+        } else {
+            omega.max(1e-8)
+        };
+        s[t] = sd.powf(1.0 / dlt);
+        if !s[t].is_finite() || s[t] <= 0.0 {
+            s[t] = omega.max(1e-8).powf(1.0 / dlt);
+        }
+    }
+    s
+}
+
+fn apgarch_nll(
+    e: &[f64],
+    omega: f64,
+    alpha: f64,
+    gamma: f64,
+    beta: f64,
+    delta: f64,
+) -> f64 {
+    if omega <= 0.0 || alpha < 0.0 || beta < 0.0 || gamma.abs() >= 1.0 || delta <= 0.0 {
+        return f64::INFINITY;
+    }
+    let s = apgarch_sigma(e, omega, alpha, gamma, beta, delta);
+    let mut nll = 0.0;
+    for t in 0..e.len() {
+        let v = (s[t] * s[t]).max(1e-12);
+        nll += 0.5 * (v.ln() + e[t] * e[t] / v);
+    }
+    nll
+}
+
+impl FitSeries for Apgarch {
+    type Fitted = FittedApgarch;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedApgarch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_univariate(&mut ctx, y);
+        if y.len() < 8 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message("APARCH QMLE needs a longer series")
+                    .build(),
+            );
+        }
+        let mean = y.mean();
+        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
+        let sd = e
+            .as_slice()
+            .iter()
+            .map(|v| v * v)
+            .sum::<f64>()
+            / y.len().max(1) as f64;
+        let mut omega = 0.05 * sd.max(1e-8).sqrt();
+        let mut alpha = 0.05;
+        let mut gamma = 0.10;
+        let mut beta = 0.80;
+        let mut delta = 1.50;
+        let mut best = apgarch_nll(e.as_slice(), omega, alpha, gamma, beta, delta);
+        let mut step = 0.04;
+        for it in 0..self.max_iter {
+            let mut improved = false;
+            for (i, cur) in [omega, alpha, gamma, beta, delta].into_iter().enumerate() {
+                for dir in [-step, step] {
+                    let mut cand = [omega, alpha, gamma, beta, delta];
+                    cand[i] = cur + dir;
+                    if i == 2 {
+                        cand[i] = cand[i].clamp(-0.99, 0.99);
+                    } else if i == 4 {
+                        cand[i] = cand[i].clamp(0.5, 3.0);
+                    } else {
+                        cand[i] = cand[i].max(1e-8);
+                    }
+                    let nll = apgarch_nll(
+                        e.as_slice(),
+                        cand[0],
+                        cand[1],
+                        cand[2],
+                        cand[3],
+                        cand[4],
+                    );
+                    if nll < best {
+                        best = nll;
+                        omega = cand[0];
+                        alpha = cand[1];
+                        gamma = cand[2];
+                        beta = cand[3];
+                        delta = cand[4];
+                        improved = true;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, best, None);
+            if !improved {
+                step *= 0.5;
+                if step < 1e-5 {
+                    ctx.session.converged("APARCH coordinate search", it as u64);
+                    break;
+                }
+            }
+        }
+        if !best.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("APARCH QMLE likelihood is non-finite")
+                    .build(),
+            );
+        }
+        let sig = apgarch_sigma(e.as_slice(), omega, alpha, gamma, beta, delta);
+        ctx.finish(FittedApgarch {
+            omega,
+            alpha,
+            gamma,
+            beta,
+            delta,
+            sigma2: Vector::from_iter(sig.iter().map(|s| s * s)),
+            resid: e,
+        })
+    }
+}
+
 /// Absolute-value GARCH (arch `AVGARCH`): \(\sigma_t=\omega+\alpha|\varepsilon_{t-1}|+\beta\sigma_{t-1}\).
 #[derive(Clone, Debug)]
 pub struct Avgarch {
@@ -20597,6 +20777,15 @@ impl FittedMiddleOutReconciler {
             .fit_series(&y, &Session::new("tarch", "fit"))
             .expect("tarch");
         assert!(ta
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        let apg = Apgarch::new()
+            .fit_series(&y, &Session::new("apg", "fit"))
+            .expect("apg");
+        assert!(apg
             .value
             .sigma2
             .as_slice()

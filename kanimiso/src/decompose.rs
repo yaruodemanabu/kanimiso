@@ -3492,6 +3492,263 @@ impl FittedSeeminglyUnrelated {
     }
 }
 
+/// Random-effects growth curve (statsmodels LGM second moments).
+///
+/// Occasion count is not identification `p`. Distinct from [`LatentGrowth`]
+/// (no intercept/slope covariance) and [`ConfirmatoryFactor`] (no time coding).
+#[derive(Clone, Debug, Default)]
+pub struct GrowthCurve;
+
+impl GrowthCurve {
+    /// Empty random-effects growth curve.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedGrowthCurve>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted random-effects growth curve.
+#[derive(Clone, Debug)]
+pub struct FittedGrowthCurve {
+    /// Per-row intercepts.
+    pub intercepts: Vector,
+    /// Per-row slopes.
+    pub slopes: Vector,
+    /// Mean intercept.
+    pub mean_intercept: f64,
+    /// Mean slope.
+    pub mean_slope: f64,
+    /// Intercept variance.
+    pub var_intercept: f64,
+    /// Slope variance.
+    pub var_slope: f64,
+    /// Intercept–slope covariance.
+    pub cov_is: f64,
+}
+
+impl FitUnsupervised for GrowthCurve {
+    type Fitted = FittedGrowthCurve;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedGrowthCurve>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (n, p) = x.shape();
+        if p < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .severity(Severity::Warning)
+                    .message("GrowthCurve needs at least two occasion columns")
+                    .build(),
+            );
+            return ctx.finish(FittedGrowthCurve {
+                intercepts: Vector::zeros(n),
+                slopes: Vector::zeros(n),
+                mean_intercept: 0.0,
+                mean_slope: 0.0,
+                var_intercept: 0.0,
+                var_slope: 0.0,
+                cov_is: 0.0,
+            });
+        }
+        let intercepts = Vector::from_iter((0..n).map(|i| latent_growth_row(x, i).0));
+        let slopes = Vector::from_iter((0..n).map(|i| latent_growth_row(x, i).1));
+        let mi = intercepts.mean();
+        let ms = slopes.mean();
+        let df = (n.saturating_sub(1)).max(1) as f64;
+        let mut vi = 0.0_f64;
+        let mut vs = 0.0_f64;
+        let mut cv = 0.0_f64;
+        for i in 0..n {
+            let di = intercepts[i] - mi;
+            let ds = slopes[i] - ms;
+            vi += di * di;
+            vs += ds * ds;
+            cv += di * ds;
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("GrowthCurve is sample second moments of per-row OLS, not a published LGM")
+                .compromise(NumericalCompromise::new(
+                    "statsmodels latent growth model",
+                    "row-wise [1, t] OLS, then the intercept/slope covariance",
+                    "ML random-effects, time-varying loadings, and a structured Ψ are omitted",
+                    "read the covariance as a growth-curve moment sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedGrowthCurve {
+            intercepts,
+            slopes,
+            mean_intercept: mi,
+            mean_slope: ms,
+            var_intercept: vi / df,
+            var_slope: vs / df,
+            cov_is: cv / df,
+        })
+    }
+}
+
+/// Observed-plus-latent structural equation (LISREL-lite with \(X\) slopes).
+///
+/// Factor count is not identification `p`. Distinct from [`Lisrel`] (no
+/// observed \(X\) in the structural equation) and [`Mimic`] (cause/indicator
+/// split).
+#[derive(Clone, Debug, Default)]
+pub struct StructuralEquation;
+
+impl StructuralEquation {
+    /// Empty SEM.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// CFA scores of \(X\), then OLS of \(y\) on \([1,X,f]\).
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedStructuralEquation>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len());
+        let p = x.ncols();
+        let mut cfa = ConfirmatoryFactor::new();
+        let q = match cfa.fit(x, &session.child("sem-cfa")) {
+            Ok(q) => q,
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                        | IssueCode::MeaninglessFit
+                        | IssueCode::CholeskyFailed
+                ) {
+                    ctx.push(e.primary);
+                }
+                return ctx.finish(FittedStructuralEquation {
+                    intercept: y.mean(),
+                    coef_x: Vector::zeros(p),
+                    slope_factor: 0.0,
+                    scores: Vector::zeros(n),
+                });
+            }
+        };
+        for issue in q.report.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::MeaninglessFit
+                    | IssueCode::CholeskyFailed
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let scores = match q.value.transform(x, &session.child("sem-f")) {
+            Ok(z) => Vector::from_iter((0..z.value.nrows()).map(|i| z.value.get(i, 0))),
+            Err(_) => Vector::zeros(n),
+        };
+        let qols = 2 + p;
+        let design = Matrix::from_fn(n, qols, |i, j| {
+            if j == 0 {
+                1.0
+            } else if j <= p {
+                x.get(i, j - 1)
+            } else {
+                scores[i]
+            }
+        });
+        let mut scratch = Report::new("sem", "ols");
+        let coef = least_squares(&mut scratch, &design, y, &ctx.policy)
+            .unwrap_or_else(|| Vector::from_slice(&[y.mean()]));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::CholeskyFailed
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("StructuralEquation is CFA scores plus OLS on [1, X, f], not published LISREL")
+                .compromise(NumericalCompromise::new(
+                    "LISREL / SEM",
+                    "MINRES scores of X, then OLS of y on [1, X, f]",
+                    "a user path diagram, ML, and measurement-error correction are omitted",
+                    "read coefficients as an observed-plus-latent SEM sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedStructuralEquation {
+            intercept: coef.as_slice().first().copied().unwrap_or(0.0),
+            coef_x: Vector::from_iter((0..p).map(|j| {
+                coef.as_slice().get(1 + j).copied().unwrap_or(0.0)
+            })),
+            slope_factor: coef.as_slice().get(1 + p).copied().unwrap_or(0.0),
+            scores,
+        })
+    }
+}
+
+/// Fitted observed-plus-latent SEM.
+#[derive(Clone, Debug)]
+pub struct FittedStructuralEquation {
+    /// Structural intercept.
+    pub intercept: f64,
+    /// Slopes on the observed columns of \(X\).
+    pub coef_x: Vector,
+    /// Slope on the latent score.
+    pub slope_factor: f64,
+    /// Training factor scores.
+    pub scores: Vector,
+}
+
+impl FittedStructuralEquation {
+    /// Predict \(y\) from new \(X\) using stored CFA scores of the new rows.
+    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef_x.len()) {
+                s += x.get(i, j) * self.coef_x[j];
+            }
+            let f = if i < self.scores.len() {
+                self.scores[i]
+            } else {
+                0.0
+            };
+            s + self.slope_factor * f
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3660,5 +3917,20 @@ mod tests {
             .value;
         assert_eq!(surp.len(), x.nrows());
         assert!(surp.as_slice().iter().all(|v| v.is_finite()));
+        let gcw = GrowthCurve::new()
+            .fit(&x, &Session::new("gcw", "fit"))
+            .expect("gcw");
+        assert!(gcw.value.var_intercept.is_finite());
+        assert_eq!(gcw.value.intercepts.len(), x.nrows());
+        let seq = StructuralEquation::new()
+            .fit(&x, &ycca, &Session::new("seq", "fit"))
+            .expect("seq");
+        let seqp = seq
+            .value
+            .predict(&x, &Session::new("seq", "p"))
+            .expect("seqp")
+            .value;
+        assert_eq!(seqp.len(), x.nrows());
+        assert!(seqp.as_slice().iter().all(|v| v.is_finite()));
     }
 }

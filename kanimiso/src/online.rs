@@ -39213,6 +39213,430 @@ impl Predict for OnlineLogCoshRegressor {
     }
 }
 
+/// Online Cauchy regressor (river robust loss).
+///
+/// SGD on \(\log(1+(r/c)^2)\). Scale \(c\) is not identification `p`. Distinct
+/// from [`OnlineHuberRegressor`] (piecewise \(L_2/L_1\)) and
+/// [`OnlineLogCoshRegressor`] (log-cosh).
+#[derive(Clone, Debug)]
+pub struct OnlineCauchyRegressor {
+    /// Cauchy scale \(c>0\). Not identification `p`.
+    pub scale: f64,
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineCauchyRegressor {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineCauchyRegressor {
+    /// Cauchy regressor with scale `scale`.
+    pub fn new(scale: f64) -> Self {
+        Self {
+            scale,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineCauchyRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineCauchyRegressor",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected Cauchy update"),
+            );
+        };
+        self.initialized = true;
+        let c = if self.scale.is_finite() && self.scale > 0.0 {
+            self.scale
+        } else {
+            1.0
+        };
+        let c2 = c * c;
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let r = (y[i] - eta).clamp(-1.0e6, 1.0e6);
+            loss_before += (1.0 + (r * r) / c2).ln();
+            let g = -2.0 * r / (c2 + r * r);
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            let ra = (y[i] - ea).clamp(-1.0e6, 1.0e6);
+            loss_after += (1.0 + (ra * ra) / c2).ln();
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online Cauchy regressor",
+            "SGD on log(1+(r/c)^2); the scale is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineCauchyRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
+/// Online Tukey biweight regressor (river robust loss).
+///
+/// SGD on Tukey's \(\rho\). Cutoff \(c\) is not identification `p`. Distinct
+/// from [`OnlineHuberRegressor`] (hard \(L_1\) tail) and
+/// [`OnlineCauchyRegressor`] (no hard zero).
+#[derive(Clone, Debug)]
+pub struct OnlineTukeyRegressor {
+    /// Biweight cutoff \(c>0\). Not identification `p`.
+    pub cutoff: f64,
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineTukeyRegressor {
+    fn default() -> Self {
+        Self {
+            cutoff: 4.685,
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineTukeyRegressor {
+    /// Tukey regressor with cutoff `cutoff`.
+    pub fn new(cutoff: f64) -> Self {
+        Self {
+            cutoff,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineTukeyRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineTukeyRegressor",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected Tukey update"),
+            );
+        };
+        self.initialized = true;
+        let c = if self.cutoff.is_finite() && self.cutoff > 0.0 {
+            self.cutoff
+        } else {
+            4.685
+        };
+        let c2 = c * c;
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let r = y[i] - eta;
+            let u = r / c;
+            let rho = if r.abs() <= c {
+                let t = 1.0 - u * u;
+                (c2 / 6.0) * (1.0 - t * t * t)
+            } else {
+                c2 / 6.0
+            };
+            loss_before += rho;
+            let g = if r.abs() <= c {
+                let t = 1.0 - u * u;
+                -r * t * t
+            } else {
+                0.0
+            };
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            let ra = y[i] - ea;
+            let ua = ra / c;
+            loss_after += if ra.abs() <= c {
+                let t = 1.0 - ua * ua;
+                (c2 / 6.0) * (1.0 - t * t * t)
+            } else {
+                c2 / 6.0
+            };
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online Tukey regressor",
+            "SGD on Tukey's biweight; the cutoff is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineTukeyRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
+/// Online Laplace / \(L_1\) regressor (river MAE SGD).
+///
+/// SGD on \(|y-\eta|\). Distinct from [`OnlineHuberRegressor`] (quadratic
+/// bowl) and [`OnlineQuantileRegressor`] (asymmetric pinball).
+#[derive(Clone, Debug)]
+pub struct OnlineLaplaceRegressor {
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineLaplaceRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineLaplaceRegressor {
+    /// Laplace regressor with step `learning_rate`.
+    pub fn new(learning_rate: f64) -> Self {
+        Self {
+            learning_rate,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineLaplaceRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineLaplaceRegressor",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected Laplace update"),
+            );
+        };
+        self.initialized = true;
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let r = y[i] - eta;
+            loss_before += r.abs();
+            let g = if r > 0.0 {
+                -1.0
+            } else if r < 0.0 {
+                1.0
+            } else {
+                0.0
+            };
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            loss_after += (y[i] - ea).abs();
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online Laplace regressor",
+            "SGD on |y − η|; the L1 loss is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineLaplaceRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -39897,6 +40321,15 @@ mod tests {
         OnlineLogCoshRegressor::new(0.05)
             .partial_fit(&x, Some(&y), &session)
             .expect("olcr");
+        OnlineCauchyRegressor::new(1.0)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("ocau");
+        OnlineTukeyRegressor::new(4.685)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("otuk");
+        OnlineLaplaceRegressor::new(0.05)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("olap");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

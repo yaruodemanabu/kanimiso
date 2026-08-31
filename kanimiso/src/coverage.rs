@@ -6600,6 +6600,41 @@ const INVENTORY: &[Algorithm] = &[
         "river.linear_model.LinearRegression",
         "online",
     ),
+    a("hmm.BinomialHmm", "hmmlearn.hmm.MultinomialHMM", "hmm"),
+    a("hmm.GeometricHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a("hmm.BetaBinomialHmm", "hmmlearn.hmm.MultinomialHMM", "hmm"),
+    a("hmm.OrdinalHmm", "hmmlearn.hmm.MultinomialHMM", "hmm"),
+    a(
+        "decompose.GrowthCurve",
+        "statsmodels.multivariate.factor.Factor",
+        "estimator",
+    ),
+    a(
+        "decompose.StructuralEquation",
+        "statsmodels.multivariate.factor.Factor",
+        "estimator",
+    ),
+    a("stats.LinearDriv", "econml.iv.dr.LinearDRIV", "estimator"),
+    a("stats.KernelDml", "econml.dml.KernelDML", "estimator"),
+    a(
+        "online.OnlineCauchyRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
+    a(
+        "online.OnlineTukeyRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
+    a(
+        "online.OnlineLaplaceRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
+    a("tsa.Apgarch", "arch.univariate.APARCH", "forecast"),
+    a("tslearn.mpdist", "stumpy.mpdist", "function"),
+    a("tslearn.Scrimp", "stumpy.scrimp", "timeseries"),
+    a("tslearn.mass", "stumpy.mass", "function"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7164,6 +7199,11 @@ mod tests {
             "decompose.SeeminglyUnrelated",
             "tsa.MiddleOutReconcilerForecaster",
             "online.OnlineLogCoshRegressor",
+            "hmm.BinomialHmm",
+            "stats.LinearDriv",
+            "decompose.GrowthCurve",
+            "tsa.Apgarch",
+            "tslearn.mpdist",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
