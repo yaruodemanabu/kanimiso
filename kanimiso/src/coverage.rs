@@ -8324,6 +8324,18 @@ const INVENTORY: &[Algorithm] = &[
         "timeseries",
     ),
     a("tslearn.cdist_minkowski14_l1", "tslearn.metrics.cdist", "timeseries"),
+    a("hmm.UnitInverseExponentialHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaInverseExponentialHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ExponentiatedInverseExponentialHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.KumaraswamyInverseExponentialHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.WindowEntropy", "river.anomaly.GaussianScorer", "online"),
+    a("online.JensenShannonAnomaly", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.minkowski16_l1_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a("tslearn.cdist_minkowski16_l1", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -9548,6 +9560,14 @@ mod tests {
             "online.HellingerAnomaly",
             "tslearn.minkowski14_l1_distance",
             "tslearn.cdist_minkowski14_l1",
+            "hmm.UnitInverseExponentialHmm",
+            "hmm.BetaInverseExponentialHmm",
+            "hmm.ExponentiatedInverseExponentialHmm",
+            "hmm.KumaraswamyInverseExponentialHmm",
+            "online.WindowEntropy",
+            "online.JensenShannonAnomaly",
+            "tslearn.minkowski16_l1_distance",
+            "tslearn.cdist_minkowski16_l1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
