@@ -2152,6 +2152,109 @@ pub fn cdist_manhattan(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qual
     ctx.finish(out)
 }
 
+fn canberra_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let den = a[i].abs() + b[i].abs();
+        if den > 1e-18 {
+            s += (a[i] - b[i]).abs() / den;
+        }
+    }
+    s
+}
+
+fn braycurtis_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut num = 0.0_f64;
+    let mut den = 0.0_f64;
+    for i in 0..n {
+        num += (a[i] - b[i]).abs();
+        den += (a[i] + b[i]).abs();
+    }
+    if den < 1e-18 {
+        return if num < 1e-18 { 0.0 } else { 1.0 };
+    }
+    num / den
+}
+
+/// Canberra distance \(\sum |a_i-b_i|/(|a_i|+|b_i|)\) on aligned prefixes.
+///
+/// Distinct from [`manhattan_distance`] (no per-coordinate scale) and
+/// [`correlation_distance`].
+pub fn canberra_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("canberra_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("canberra_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("canberra_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(canberra_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Canberra distance.
+pub fn cdist_canberra(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        canberra_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+/// Bray–Curtis dissimilarity \(\sum|a-b|/\sum|a+b|\) on aligned prefixes.
+///
+/// Distinct from [`manhattan_distance`] and [`canberra_distance`].
+pub fn braycurtis_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("braycurtis_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("braycurtis_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("braycurtis_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(braycurtis_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Bray–Curtis dissimilarity.
+pub fn cdist_braycurtis(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        braycurtis_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -20778,6 +20881,10 @@ mod tests {
         assert!(chb.abs() < 1e-12, "chebyshev_distance={chb}");
         let man = manhattan_distance(&a, &a, &Session::new("ts", "man")).unwrap().value;
         assert!(man.abs() < 1e-12, "manhattan_distance={man}");
+        let can = canberra_distance(&a, &a, &Session::new("ts", "can")).unwrap().value;
+        assert!(can.abs() < 1e-12, "canberra_distance={can}");
+        let brc = braycurtis_distance(&a, &a, &Session::new("ts", "brc")).unwrap().value;
+        assert!(brc.abs() < 1e-12, "braycurtis_distance={brc}");
     }
 
     #[test]
@@ -21860,6 +21967,16 @@ mod tests {
             .value;
         assert_eq!(cma.shape(), (8, 8));
         assert!(cma.get(0, 0).abs() < 1e-12);
+        let cca = cdist_canberra(&x, &x, &Session::new("ts", "cca"))
+            .unwrap()
+            .value;
+        assert_eq!(cca.shape(), (8, 8));
+        assert!(cca.get(0, 0).abs() < 1e-12);
+        let cbr = cdist_braycurtis(&x, &x, &Session::new("ts", "cbr"))
+            .unwrap()
+            .value;
+        assert_eq!(cbr.shape(), (8, 8));
+        assert!(cbr.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

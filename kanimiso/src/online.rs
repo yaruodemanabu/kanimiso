@@ -46222,6 +46222,192 @@ impl Predict for ListNet {
     }
 }
 
+/// ListMLE (Xia et al.): Plackett–Luce likelihood of the relevance order.
+///
+/// Distinct from [`ListNet`] (top-1 softmax CE) and [`LambdaRank`]
+/// (λ-weighted pairwise). Rank is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ListMle {
+    /// Latent rank.
+    pub n_factors: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    /// \(\ell_2\) on factors.
+    pub l2: f64,
+    pu: Vec<Vec<f64>>,
+    qi: Vec<Vec<f64>>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for ListMle {
+    fn default() -> Self {
+        Self {
+            n_factors: 4,
+            learning_rate: 0.05,
+            l2: 0.01,
+            pu: Vec::new(),
+            qi: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl ListMle {
+    /// ListMLE with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn grow(&mut self, u: usize, i: usize) {
+        let k = self.n_factors.max(1);
+        while self.pu.len() <= u {
+            self.pu.push(vec![0.01; k]);
+        }
+        while self.qi.len() <= i {
+            self.qi.push(vec![0.01; k]);
+        }
+    }
+
+    fn score(&self, u: usize, i: usize) -> f64 {
+        let mut s = 0.0_f64;
+        if u < self.pu.len() && i < self.qi.len() {
+            for f in 0..self.n_factors.min(self.pu[u].len()).min(self.qi[i].len()) {
+                s += self.pu[u][f] * self.qi[i][f];
+            }
+        }
+        s
+    }
+}
+
+impl PartialFit for ListMle {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ListMLE needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let lr = self.learning_rate.max(1e-6);
+        let l2 = self.l2.max(0.0);
+        let mut by_user: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+        for r in 0..x.nrows().min(y.len()) {
+            if !y[r].is_finite() {
+                continue;
+            }
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.grow(u, i);
+            by_user.entry(u).or_default().push((i, y[r]));
+        }
+        let mut dsum = 0.0_f64;
+        let mut lists = 0u64;
+        for (u, items) in by_user {
+            if items.len() < 2 {
+                continue;
+            }
+            let mut order: Vec<usize> = (0..items.len()).collect();
+            order.sort_by(|a, b| {
+                items[*b]
+                    .1
+                    .partial_cmp(&items[*a].1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for start in 0..order.len() {
+                let rest = &order[start..];
+                let scores: Vec<f64> = rest.iter().map(|&t| self.score(u, items[t].0)).collect();
+                let p = softmax_scores(&scores);
+                for (j, &t) in rest.iter().enumerate() {
+                    let err = p[j] - if j == 0 { 1.0 } else { 0.0 };
+                    let i = items[t].0;
+                    for f in 0..self.n_factors {
+                        let pu = self.pu[u][f];
+                        let qi = self.qi[i][f];
+                        self.pu[u][f] -= lr * (err * qi + l2 * pu);
+                        self.qi[i][f] -= lr * (err * pu + l2 * qi);
+                        dsum += (self.pu[u][f] - pu).abs() + (self.qi[i][f] - qi).abs();
+                    }
+                }
+            }
+            lists += 1;
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        if lists == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message("ListMLE needs two items per user in the batch")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(lists as f64);
+        q.still_identified = lists > 0;
+        q.warmup = lists == 0;
+        q.explanation = format!(
+            "ListMLE lists={lists} ||Δ||₁={dsum:.4e} users={} items={}",
+            self.pu.len(),
+            self.qi.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "ListMLE Plackett–Luce step",
+                "likelihood of the relevance permutation; not ListNet top-1 CE",
+                "pre-batch factors",
+                format!("lists={lists} dsum={dsum:.4e}"),
+            ),
+        )
+    }
+}
+
+impl Predict for ListMle {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ListMLE predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.score(u, i)
+        })))
+    }
+}
+
 /// RankNet pairwise ranking (logistic loss on \(s_i-s_j\) for \(y_i>y_j\)).
 ///
 /// Distinct from [`ListNet`] (listwise softmax CE), [`Bpr`] (one unweighted
@@ -50582,6 +50768,9 @@ mod tests {
         ListNet::new(2)
             .partial_fit(&xui, Some(&y), &session)
             .expect("lnet");
+        ListMle::new(2)
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("lml");
         RankNet::new(2)
             .partial_fit(&xui, Some(&y), &session)
             .expect("rnet");

@@ -7162,6 +7162,28 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.AmarendraHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.ListMle", "river.reco.FM", "online"),
+    a(
+        "tslearn.canberra_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_canberra",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.braycurtis_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_braycurtis",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7968,6 +7990,12 @@ mod tests {
             "tslearn.cdist_chebyshev",
             "tslearn.manhattan_distance",
             "tslearn.cdist_manhattan",
+            "hmm.AmarendraHmm",
+            "online.ListMle",
+            "tslearn.canberra_distance",
+            "tslearn.cdist_canberra",
+            "tslearn.braycurtis_distance",
+            "tslearn.cdist_braycurtis",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

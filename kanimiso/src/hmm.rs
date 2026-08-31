@@ -44349,6 +44349,207 @@ impl FitUnsupervised for QuasiLindleyHmm {
     }
 }
 
+fn log_amarendra(y: f64, theta: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || theta <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let t2 = theta * theta;
+    let t3 = t2 * theta;
+    4.0 * theta.ln() - (t3 + t2 + 2.0 * theta + 6.0).ln() + (1.0 + y + y * y + y * y * y).ln()
+        - theta * y
+}
+
+/// Amarendra lifetime HMM (\((1+x+x^2+x^3)e^{-\\theta x}\)).
+///
+/// Rate \(\theta\) is not identification `p`. Distinct from [`SujathaHmm`]
+/// (degree 2) and [`PranavHmm`] (\((1+x^3)\)).
+#[derive(Clone, Debug)]
+pub struct AmarendraHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for AmarendraHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl AmarendraHmm {
+    /// `k`-state Amarendra HMM.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedAmarendraHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted Amarendra HMM.
+#[derive(Clone, Debug)]
+pub struct FittedAmarendraHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Rates \(\theta_j\).
+    pub theta: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedAmarendraHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.theta.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_amarendra(y, self.theta[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedAmarendraHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for AmarendraHmm {
+    type Fitted = FittedAmarendraHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedAmarendraHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            if x.get(i, 0).is_finite() && x.get(i, 0) <= 0.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!("AmarendraHmm skipped {n_skip} non-positive observations"))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedAmarendraHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                theta: Vector::filled(k, 0.8),
+                loglik: f64::NAN,
+            });
+        }
+        let mut theta = Vector::from_iter((0..k).map(|j| 0.3 + 0.25 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedAmarendraHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                theta: theta.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wy = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wy += fb.gamma[t][j] * y;
+                }
+                if wsum <= 1e-12 {
+                    continue;
+                }
+                let m = (wy / wsum).max(1e-4);
+                let mut th = theta[j];
+                for _ in 0..6 {
+                    let t2 = th * th;
+                    let den = t2 * th + t2 + 2.0 * th + 6.0;
+                    let num = 3.0 * t2 + 2.0 * th + 2.0;
+                    let g = 4.0 / th - num / den - m;
+                    let gp = -4.0 / (th * th)
+                        - ((6.0 * th + 2.0) * den - num * num) / (den * den);
+                    if gp.abs() > 1e-12 {
+                        th = (th - g / gp).clamp(1e-3, 40.0);
+                    }
+                }
+                theta[j] = th;
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedAmarendraHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            theta: theta.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedAmarendraHmm {
+            labels,
+            start,
+            trans,
+            theta,
+            loglik,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45183,6 +45384,11 @@ mod tests {
             .expect("qli");
         assert_eq!(qli.value.labels.len(), 80);
         assert!(qli.value.theta.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let ama = AmarendraHmm::new(2)
+            .fit(&xpos, &Session::new("ama", "fit"))
+            .expect("ama");
+        assert_eq!(ama.value.labels.len(), 80);
+        assert!(ama.value.theta.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
