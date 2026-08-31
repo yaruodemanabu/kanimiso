@@ -42662,6 +42662,167 @@ impl Predict for OnlineScwClassifier {
     }
 }
 
+/// Confidence-Weighted classifier (Crammer, Dredze, Pereira).
+///
+/// Probability \(\varphi\) is not identification `p`. Distinct from
+/// [`OnlineArowClassifier`] (no \(\varphi\sqrt{v}\) constraint) and
+/// [`OnlineScwClassifier`] (soft cap).
+#[derive(Clone, Debug)]
+pub struct OnlineCwClassifier {
+    /// Target probability. Not identification `p`.
+    pub phi: f64,
+    coef: Vector,
+    intercept: f64,
+    sigma: Vector,
+    intercept_var: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineCwClassifier {
+    fn default() -> Self {
+        Self {
+            phi: 0.7,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            sigma: Vector::zeros(0),
+            intercept_var: 1.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineCwClassifier {
+    /// CW classifier with target probability `phi`.
+    pub fn new(phi: f64) -> Self {
+        Self {
+            phi,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineCwClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, _)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            0.05,
+            "OnlineCwClassifier",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected CW update"),
+            );
+        };
+        if !self.initialized {
+            self.sigma = Vector::filled(x.ncols(), 1.0);
+            self.intercept_var = 1.0;
+        } else if self.sigma.len() != x.ncols() {
+            self.sigma = Vector::filled(x.ncols(), 1.0);
+        }
+        self.initialized = true;
+        let phi = if self.phi.is_finite() && self.phi > 0.0 {
+            self.phi.clamp(0.05, 0.95)
+        } else {
+            0.7
+        };
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let ys = if y[i] >= 0.5 { 1.0 } else { -1.0 };
+            let mut eta = self.intercept;
+            let mut v = self.intercept_var;
+            for j in 0..x.ncols() {
+                let xj = x.get(i, j);
+                eta += self.coef[j] * xj;
+                v += self.sigma[j] * xj * xj;
+            }
+            let m = ys * eta;
+            let gap = phi * v.sqrt() - m;
+            loss_before += gap.max(0.0);
+            if gap > 0.0 {
+                let den = v.max(1e-8) * (1.0 + phi * v.sqrt() * 0.5);
+                let alpha = (gap / den).max(0.0);
+                let beta = 2.0 * alpha * phi / (1.0 + 2.0 * alpha * phi * v).max(1e-8);
+                self.intercept += alpha * ys * self.intercept_var;
+                self.intercept_var = (self.intercept_var
+                    - beta * self.intercept_var * self.intercept_var)
+                    .max(1e-8);
+                for j in 0..x.ncols() {
+                    let xj = x.get(i, j);
+                    self.coef[j] += alpha * ys * self.sigma[j] * xj;
+                    let sj = self.sigma[j];
+                    self.sigma[j] = (sj - beta * (sj * xj) * (sj * xj)).max(1e-8);
+                }
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            let va = self.intercept_var
+                + (0..x.ncols())
+                    .map(|j| self.sigma[j] * x.get(i, j) * x.get(i, j))
+                    .sum::<f64>();
+            loss_after += (phi * va.max(0.0).sqrt() - ys * ea).max(0.0);
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online CW classifier",
+            "confidence-weighted update with φ√v margin; φ is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineCwClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -43418,6 +43579,9 @@ mod tests {
         OnlineScwClassifier::new(0.7)
             .partial_fit(&x, Some(&yb), &session)
             .expect("oscw");
+        OnlineCwClassifier::new(0.7)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("ocw");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
