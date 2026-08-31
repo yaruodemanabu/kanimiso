@@ -8117,6 +8117,39 @@ const INVENTORY: &[Algorithm] = &[
         "timeseries",
     ),
     a("tslearn.cdist_minkowski4_l1", "tslearn.metrics.cdist", "timeseries"),
+    a(
+        "hmm.UnitReciprocalInverseGaussianHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.BetaReciprocalInverseGaussianHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.ExponentiatedReciprocalInverseGaussianHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.KumaraswamyReciprocalInverseGaussianHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.DiscreteReciprocalInverseGaussianHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("online.WindowHarmonic", "river.anomaly.GaussianScorer", "online"),
+    a("online.ClarkAnomaly", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.minkowski15_l1_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a("tslearn.cdist_minkowski15_l1", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -9234,6 +9267,15 @@ mod tests {
             "online.TanimotoAnomaly",
             "tslearn.minkowski4_l1_distance",
             "tslearn.cdist_minkowski4_l1",
+            "hmm.UnitReciprocalInverseGaussianHmm",
+            "hmm.BetaReciprocalInverseGaussianHmm",
+            "hmm.ExponentiatedReciprocalInverseGaussianHmm",
+            "hmm.KumaraswamyReciprocalInverseGaussianHmm",
+            "hmm.DiscreteReciprocalInverseGaussianHmm",
+            "online.WindowHarmonic",
+            "online.ClarkAnomaly",
+            "tslearn.minkowski15_l1_distance",
+            "tslearn.cdist_minkowski15_l1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
