@@ -7862,6 +7862,31 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.UnitInverseMaxwellHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaInverseMaxwellHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.ExponentiatedInverseMaxwellHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.KumaraswamyInverseMaxwellHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.DiscreteInverseMaxwellHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.WindowMad", "river.anomaly.GaussianScorer", "online"),
+    a("online.LinfAnomaly", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.hellinger_l1_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_hellinger_l1",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8880,6 +8905,15 @@ mod tests {
             "online.SsdAnomaly",
             "tslearn.correlation_l1_distance",
             "tslearn.cdist_correlation_l1",
+            "hmm.UnitInverseMaxwellHmm",
+            "hmm.BetaInverseMaxwellHmm",
+            "hmm.ExponentiatedInverseMaxwellHmm",
+            "hmm.KumaraswamyInverseMaxwellHmm",
+            "hmm.DiscreteInverseMaxwellHmm",
+            "online.WindowMad",
+            "online.LinfAnomaly",
+            "tslearn.hellinger_l1_distance",
+            "tslearn.cdist_hellinger_l1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
