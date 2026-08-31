@@ -7744,6 +7744,49 @@ const INVENTORY: &[Algorithm] = &[
         "timeseries",
     ),
     a("tslearn.cdist_jeffreys", "tslearn.metrics.cdist", "timeseries"),
+    a("hmm.UnitHalfCauchyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaHalfCauchyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.ExponentiatedHalfCauchyHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.KumaraswamyHalfCauchyHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.DiscreteHalfCauchyHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("online.IqrAnomaly", "river.anomaly.GaussianScorer", "online"),
+    a(
+        "online.StudentTAnomaly",
+        "river.anomaly.GaussianScorer",
+        "online",
+    ),
+    a(
+        "tslearn.squared_chord_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_squared_chord",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.kullback_leibler_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_kullback_leibler",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8720,6 +8763,17 @@ mod tests {
             "tslearn.cdist_jaccard",
             "tslearn.jeffreys_distance",
             "tslearn.cdist_jeffreys",
+            "hmm.UnitHalfCauchyHmm",
+            "hmm.BetaHalfCauchyHmm",
+            "hmm.ExponentiatedHalfCauchyHmm",
+            "hmm.KumaraswamyHalfCauchyHmm",
+            "hmm.DiscreteHalfCauchyHmm",
+            "online.IqrAnomaly",
+            "online.StudentTAnomaly",
+            "tslearn.squared_chord_distance",
+            "tslearn.cdist_squared_chord",
+            "tslearn.kullback_leibler_distance",
+            "tslearn.cdist_kullback_leibler",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

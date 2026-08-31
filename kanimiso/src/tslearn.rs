@@ -4081,6 +4081,145 @@ pub fn cdist_jeffreys(a: &Matrix, b: &Matrix, session: &Session) -> Result<Quali
     ctx.finish(out)
 }
 
+fn squared_chord_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let p = (a[i].abs() / sa).sqrt();
+        let q = (b[i].abs() / sb).sqrt();
+        let d = p - q;
+        s += d * d;
+    }
+    s.max(0.0)
+}
+
+fn kullback_leibler_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let p = (a[i].abs() / sa).max(1e-18);
+        let q = (b[i].abs() / sb).max(1e-18);
+        s += p * (p / q).ln();
+    }
+    s.max(0.0)
+}
+
+/// Squared-chord \(\sum(\sqrt{p}-\sqrt{q})^2\) after \(\ell_1\).
+///
+/// Distinct from [`hellinger_distance`] (no \(\ell_1\), and a \(\sqrt{1/2}\)
+/// factor). Identical series score 0.
+pub fn squared_chord_distance(
+    a: &Vector,
+    b: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("squared_chord_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("squared_chord_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("squared_chord_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(squared_chord_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise squared-chord distance.
+pub fn cdist_squared_chord(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        squared_chord_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+/// Kullback–Leibler \(\sum p\ln(p/q)\) after \(\ell_1\).
+///
+/// Distinct from [`k_divergence_distance`] (\(p\ln(2p/(p+q))\)) and
+/// [`jeffreys_distance`] (symmetric). Identical series score 0.
+pub fn kullback_leibler_distance(
+    a: &Vector,
+    b: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) =
+        signlred::scan_finite(a.as_slice()).to_issue("kullback_leibler_distance.a")
+    {
+        ctx.push(issue);
+    }
+    if let Some(issue) =
+        signlred::scan_finite(b.as_slice()).to_issue("kullback_leibler_distance.b")
+    {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("kullback_leibler_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(kullback_leibler_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Kullback–Leibler divergence.
+pub fn cdist_kullback_leibler(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        kullback_leibler_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -22771,6 +22910,10 @@ mod tests {
         assert!(jcd.abs() < 1e-12, "jaccard_distance={jcd}");
         let jef = jeffreys_distance(&a, &a, &Session::new("ts", "jef")).unwrap().value;
         assert!(jef.abs() < 1e-12, "jeffreys_distance={jef}");
+        let sqc = squared_chord_distance(&a, &a, &Session::new("ts", "sqc")).unwrap().value;
+        assert!(sqc.abs() < 1e-12, "squared_chord_distance={sqc}");
+        let kld = kullback_leibler_distance(&a, &a, &Session::new("ts", "kld")).unwrap().value;
+        assert!(kld.abs() < 1e-12, "kullback_leibler_distance={kld}");
     }
 
     #[test]
@@ -24013,6 +24156,16 @@ mod tests {
             .value;
         assert_eq!(cjf.shape(), (8, 8));
         assert!(cjf.get(0, 0).abs() < 1e-12);
+        let cqc = cdist_squared_chord(&x, &x, &Session::new("ts", "cqc"))
+            .unwrap()
+            .value;
+        assert_eq!(cqc.shape(), (8, 8));
+        assert!(cqc.get(0, 0).abs() < 1e-12);
+        let ckl = cdist_kullback_leibler(&x, &x, &Session::new("ts", "ckl"))
+            .unwrap()
+            .value;
+        assert_eq!(ckl.shape(), (8, 8));
+        assert!(ckl.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

@@ -55682,6 +55682,286 @@ impl Predict for GmmAnomaly {
     }
 }
 
+fn reservoir_first_coords(rows: &[Vec<f64>]) -> Vec<f64> {
+    rows.iter()
+        .filter_map(|row| row.get(0).copied())
+        .filter(|v| v.is_finite())
+        .collect()
+}
+
+/// Interquartile-range anomaly scorer on the first coordinate.
+///
+/// Score is \(|x-m|/\mathrm{IQR}\). Distinct from [`Rod`] (MAD on random
+/// projections) and [`GaussianScorer`] (mean/sd).
+#[derive(Clone, Debug)]
+pub struct IqrAnomaly {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for IqrAnomaly {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl IqrAnomaly {
+    /// Empty IQR detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        let y = x.get(i, 0);
+        if !y.is_finite() || self.rows.len() < 4 {
+            return 0.0;
+        }
+        let mut xs = reservoir_first_coords(&self.rows);
+        if xs.len() < 4 {
+            return 0.0;
+        }
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = xs.len();
+        let q1 = xs[n / 4];
+        let q3 = xs[(3 * n) / 4];
+        let med = rod_median(&mut xs);
+        let iqr = (q3 - q1).max(1e-12);
+        (y - med).abs() / iqr
+    }
+}
+
+impl PartialFit for IqrAnomaly {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 4;
+        q.warmup = self.rows.len() < 4;
+        q.explanation = format!("IQR-anomaly reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "IQR fence anomaly",
+                "IqrAnomaly is |x-median|/IQR; not Rod/GaussianScorer",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for IqrAnomaly {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
+fn student_t_logpdf(y: f64, loc: f64, scale: f64, nu: f64) -> f64 {
+    if !y.is_finite() || !loc.is_finite() || scale <= 0.0 || nu <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let z = (y - loc) / scale;
+    crate::special::ln_gamma((nu + 1.0) * 0.5)
+        - crate::special::ln_gamma(nu * 0.5)
+        - 0.5 * (nu * std::f64::consts::PI).ln()
+        - scale.ln()
+        - 0.5 * (nu + 1.0) * (1.0 + z * z / nu).ln()
+}
+
+/// Student-\(t\) density anomaly scorer (median/MAD, \(\nu=4\)).
+///
+/// Distinct from [`GaussianScorer`] (normal mean/sd) and [`IqrAnomaly`].
+#[derive(Clone, Debug)]
+pub struct StudentTAnomaly {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for StudentTAnomaly {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl StudentTAnomaly {
+    /// Empty Student-\(t\) detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        let y = x.get(i, 0);
+        if !y.is_finite() || self.rows.len() < 4 {
+            return 0.0;
+        }
+        let mut xs = reservoir_first_coords(&self.rows);
+        if xs.len() < 4 {
+            return 0.0;
+        }
+        let med = rod_median(&mut xs);
+        let mad = rod_mad(&xs, med);
+        -student_t_logpdf(y, med, mad, 4.0)
+    }
+}
+
+impl PartialFit for StudentTAnomaly {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 4;
+        q.warmup = self.rows.len() < 4;
+        q.explanation = format!("Student-t anomaly reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Student-t density anomaly",
+                "StudentTAnomaly is -log t_4(median, MAD); not GaussianScorer",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for StudentTAnomaly {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56666,6 +56946,12 @@ mod tests {
         GmmAnomaly::new()
             .partial_fit(&x, None, &session)
             .expect("gma");
+        IqrAnomaly::new()
+            .partial_fit(&x, None, &session)
+            .expect("iqa");
+        StudentTAnomaly::new()
+            .partial_fit(&x, None, &session)
+            .expect("sta");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
