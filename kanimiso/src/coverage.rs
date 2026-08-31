@@ -7557,6 +7557,49 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.UnitLomaxHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaLomaxHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.ExponentiatedLomaxHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.KumaraswamyRayleighHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.DiscreteInverseLomaxHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("online.Odin", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "online.KdeAnomaly",
+        "river.anomaly.GaussianScorer",
+        "online",
+    ),
+    a(
+        "tslearn.topsoe_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_topsoe",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.taneja_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_taneja",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8478,6 +8521,17 @@ mod tests {
             "tslearn.cdist_additive_symmetric",
             "tslearn.k_divergence_distance",
             "tslearn.cdist_k_divergence",
+            "hmm.UnitLomaxHmm",
+            "hmm.BetaLomaxHmm",
+            "hmm.ExponentiatedLomaxHmm",
+            "hmm.KumaraswamyRayleighHmm",
+            "hmm.DiscreteInverseLomaxHmm",
+            "online.Odin",
+            "online.KdeAnomaly",
+            "tslearn.topsoe_distance",
+            "tslearn.cdist_topsoe",
+            "tslearn.taneja_distance",
+            "tslearn.cdist_taneja",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

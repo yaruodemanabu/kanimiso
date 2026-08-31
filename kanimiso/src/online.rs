@@ -53722,6 +53722,354 @@ impl Predict for Ldof {
     }
 }
 
+/// ODIN reverse \(k\)-NN in-degree outlier score (Hautamäki et al.).
+///
+/// Score is \((k-\min(\mathrm{in}\text{-}\mathrm{degree},k))/k\). Distinct from
+/// [`Inflo`] (density ratio) and [`KnnAnomaly`] (mean distance).
+#[derive(Clone, Debug)]
+pub struct Odin {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for Odin {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl Odin {
+    /// Empty ODIN detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn dist_row(&self, x: &Matrix, i: usize, row: &[f64]) -> f64 {
+        let p = self.ncols.min(x.ncols()).min(row.len());
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return f64::INFINITY;
+            }
+            let d = z - row[j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn dist_stored(&self, a: usize, b: usize) -> f64 {
+        if a >= self.rows.len() || b >= self.rows.len() {
+            return f64::INFINITY;
+        }
+        let p = self.ncols;
+        if self.rows[a].len() < p || self.rows[b].len() < p {
+            return f64::INFINITY;
+        }
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let d = self.rows[a][j] - self.rows[b][j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn k_distance_stored(&self, idx: usize, k: usize) -> f64 {
+        let mut ds: Vec<f64> = (0..self.rows.len())
+            .filter(|&t| t != idx)
+            .map(|t| self.dist_stored(idx, t))
+            .filter(|d| d.is_finite())
+            .collect();
+        if ds.is_empty() {
+            return f64::INFINITY;
+        }
+        ds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        ds[(k.min(ds.len()) - 1).min(ds.len() - 1)]
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 3 || self.ncols == 0 {
+            return 0.0;
+        }
+        let k = 5.min(self.rows.len().saturating_sub(1)).max(1);
+        let mut indeg = 0.0_f64;
+        for t in 0..self.rows.len() {
+            let d = self.dist_row(x, i, &self.rows[t]);
+            if d.is_finite() && d <= self.k_distance_stored(t, k) {
+                indeg += 1.0;
+            }
+        }
+        (k as f64 - indeg.min(k as f64)).max(0.0) / k as f64
+    }
+}
+
+impl PartialFit for Odin {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 3;
+        q.warmup = self.rows.len() < 3;
+        q.explanation = format!("ODIN reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "reverse k-NN in-degree scores",
+                "ODIN is (k-in-degree)/k; not INFLO/kNN",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for Odin {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
+/// Gaussian kernel-density anomaly scorer on a reservoir.
+///
+/// Score is \(-\log\) of the mean RBF kernel. Distinct from [`GaussianScorer`]
+/// (one Gaussian) and [`Hbos`] (axis histograms).
+#[derive(Clone, Debug)]
+pub struct KdeAnomaly {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+    bandwidth: f64,
+}
+
+impl Default for KdeAnomaly {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+            bandwidth: 1.0,
+        }
+    }
+}
+
+impl KdeAnomaly {
+    /// Empty KDE anomaly detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn dist2_row(&self, x: &Matrix, i: usize, row: &[f64]) -> f64 {
+        let p = self.ncols.min(x.ncols()).min(row.len());
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return f64::INFINITY;
+            }
+            let d = z - row[j];
+            s += d * d;
+        }
+        s
+    }
+
+    fn refit_bandwidth(&mut self) {
+        if self.rows.len() < 2 || self.ncols == 0 {
+            return;
+        }
+        let n = self.rows.len() as f64;
+        let mut mean = 0.0_f64;
+        let mut m2 = 0.0_f64;
+        let mut c = 0.0_f64;
+        for row in &self.rows {
+            if row.is_empty() {
+                continue;
+            }
+            let z = row[0];
+            c += 1.0;
+            let d = z - mean;
+            mean += d / c;
+            m2 += d * (z - mean);
+        }
+        let sd = if c > 1.0 { (m2 / (c - 1.0)).sqrt() } else { 1.0 };
+        self.bandwidth = (1.06 * sd.max(1e-6) * n.powf(-0.2)).clamp(1e-3, 20.0);
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.is_empty() || self.ncols == 0 {
+            return 0.0;
+        }
+        let h2 = (2.0 * self.bandwidth * self.bandwidth).max(1e-12);
+        let mut s = 0.0_f64;
+        let mut n = 0.0_f64;
+        for row in &self.rows {
+            let d2 = self.dist2_row(x, i, row);
+            if d2.is_finite() {
+                s += (-d2 / h2).exp();
+                n += 1.0;
+            }
+        }
+        if n < 1.0 || s <= 1e-18 {
+            20.0
+        } else {
+            -(s / n).ln()
+        }
+    }
+}
+
+impl PartialFit for KdeAnomaly {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.refit_bandwidth();
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 2;
+        q.warmup = self.rows.len() < 2;
+        q.explanation = format!("KDE anomaly reservoir n={} h={:.6e}", self.rows.len(), self.bandwidth);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "KDE surprise scores",
+                "KdeAnomaly is -log mean RBF kernel; not GaussianScorer/HBOS",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for KdeAnomaly {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54676,6 +55024,12 @@ mod tests {
         Ldof::new()
             .partial_fit(&x, None, &session)
             .expect("ldo");
+        Odin::new()
+            .partial_fit(&x, None, &session)
+            .expect("odn");
+        KdeAnomaly::new()
+            .partial_fit(&x, None, &session)
+            .expect("kda");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
