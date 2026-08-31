@@ -7076,6 +7076,29 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.AkashHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.InverseExponentialHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.MarshallOlkinExponentialHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.MuthHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.WrappedGumbelHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.OnlineMahalanobis", "river.anomaly.GaussianScorer", "online"),
+    a("online.EwmaChart", "river.drift.PageHinkley", "online"),
+    a("tslearn.shape_euclidean", "tslearn.metrics.dtw", "timeseries"),
+    a(
+        "tslearn.cdist_shape_euclidean",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a("tslearn.open_begin_dtw", "tslearn.metrics.dtw", "timeseries"),
+    a(
+        "tslearn.cdist_open_begin_dtw",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7844,6 +7867,17 @@ mod tests {
             "tslearn.cdist_amss",
             "tslearn.decay_euclidean",
             "tslearn.cdist_decay_euclidean",
+            "hmm.AkashHmm",
+            "hmm.InverseExponentialHmm",
+            "hmm.MarshallOlkinExponentialHmm",
+            "hmm.MuthHmm",
+            "hmm.WrappedGumbelHmm",
+            "online.OnlineMahalanobis",
+            "online.EwmaChart",
+            "tslearn.shape_euclidean",
+            "tslearn.cdist_shape_euclidean",
+            "tslearn.open_begin_dtw",
+            "tslearn.cdist_open_begin_dtw",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

@@ -49014,6 +49014,297 @@ impl PartialFit for CusumDrift {
     }
 }
 
+/// Streaming Mahalanobis anomaly score.
+///
+/// Welford mean and scatter, ridge-stabilized quadratic form. Distinct from
+/// [`GaussianScorer`] (per-coordinate z) and [`MultivariateGaussian`]
+/// (accumulator only). Dimension is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct OnlineMahalanobis {
+    mean: Vector,
+    m2: Matrix,
+    n: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineMahalanobis {
+    fn default() -> Self {
+        Self {
+            mean: Vector::zeros(0),
+            m2: Matrix::zeros(0, 0),
+            n: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineMahalanobis {
+    /// Empty Mahalanobis scorer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        let p = self.mean.len();
+        if p == 0 || self.n < 2.0 {
+            return 0.0;
+        }
+        let mut d = vec![0.0_f64; p];
+        for j in 0..p {
+            d[j] = x.get(i, j) - self.mean[j];
+        }
+        if p == 1 {
+            let v = (self.m2.get(0, 0) / self.n + 1e-4).max(1e-8);
+            return d[0] * d[0] / v;
+        }
+        if p == 2 {
+            let a = self.m2.get(0, 0) / self.n + 1e-4;
+            let b = self.m2.get(0, 1) / self.n;
+            let c = self.m2.get(1, 1) / self.n + 1e-4;
+            let det = a * c - b * b;
+            if det.abs() < 1e-12 {
+                return d[0] * d[0] / a + d[1] * d[1] / c;
+            }
+            return (c * d[0] * d[0] - 2.0 * b * d[0] * d[1] + a * d[1] * d[1]) / det;
+        }
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let v = (self.m2.get(j, j) / self.n + 1e-4).max(1e-8);
+            s += d[j] * d[j] / v;
+        }
+        s
+    }
+}
+
+impl PartialFit for OnlineMahalanobis {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let p = x.ncols();
+        if p == 0 || x.nrows() == 0 {
+            if !self.initialized {
+                ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            }
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "empty"),
+            );
+        }
+        if !self.initialized {
+            self.mean = Vector::zeros(p);
+            self.m2 = Matrix::zeros(p, p);
+            self.initialized = true;
+        } else if self.mean.len() != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self.mean.clone();
+        let mut dsum = 0.0_f64;
+        for i in 0..x.nrows() {
+            self.n += 1.0;
+            self.n_seen += 1;
+            let mut delta = Vector::zeros(p);
+            for j in 0..p {
+                delta[j] = x.get(i, j) - self.mean[j];
+                self.mean[j] += delta[j] / self.n;
+            }
+            for a in 0..p {
+                for b in 0..p {
+                    let db = x.get(i, b) - self.mean[b];
+                    self.m2.set(a, b, self.m2.get(a, b) + delta[a] * db);
+                }
+            }
+            dsum += self.score_row(x, i);
+        }
+        self.updates += 1;
+        let dmean = self.mean.sub(&before);
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n;
+        q.parameter_delta_norm = Some(dmean.norm());
+        q.information_gain = Some(dsum);
+        q.still_identified = self.n >= 2.0;
+        q.warmup = self.n < 2.0;
+        if q.warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message("OnlineMahalanobis needs two rows for a covariance")
+                    .build(),
+            );
+        }
+        q.explanation = format!("OnlineMahalanobis n={:.0} Σd²={dsum:.4e}", self.n);
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Mahalanobis scatter step",
+                "Welford mean/scatter then (x-μ)ᵀΣ⁺(x-μ); not per-axis z-scores",
+                format!("||μ||={:.6e}", before.norm()),
+                format!("||μ||={:.6e} n={:.0}", self.mean.norm(), self.n),
+            ),
+        )
+    }
+}
+
+impl Predict for OnlineMahalanobis {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.initialized || self.n < 2.0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
+/// EWMA control chart (Roberts; river-style drift on a smoothed mean).
+///
+/// \(z_t=λ x_t+(1-λ)z_{t-1}\); limits use \(\sigma\sqrt{λ/(2-λ)}\). Distinct
+/// from [`CusumDrift`] and [`EwMean`] (no limits). \(λ\) is not identification
+/// `p`.
+#[derive(Clone, Debug)]
+pub struct EwmaChart {
+    /// Smoothing \(λ\in(0,1]\).
+    pub lambda: f64,
+    /// Limit width \(L\).
+    pub l: f64,
+    z: f64,
+    mu0: f64,
+    var: f64,
+    n_seen: u64,
+    updates: u64,
+    warmed: bool,
+}
+
+impl Default for EwmaChart {
+    fn default() -> Self {
+        Self {
+            lambda: 0.2,
+            l: 3.0,
+            z: 0.0,
+            mu0: 0.0,
+            var: 1.0,
+            n_seen: 0,
+            updates: 0,
+            warmed: false,
+        }
+    }
+}
+
+impl EwmaChart {
+    /// Chart with smoothing `lambda`.
+    pub fn new(lambda: f64) -> Self {
+        Self {
+            lambda,
+            ..Self::default()
+        }
+    }
+
+    /// Consume one scalar.
+    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+        let mut ctx = FitCtx::with_session(session.child("update"));
+        if !x.is_finite() {
+            return ctx.finish(DriftDecision::Stable);
+        }
+        self.n_seen += 1;
+        if !self.warmed {
+            let n = self.n_seen as f64;
+            self.mu0 += (x - self.mu0) / n;
+            let d = x - self.mu0;
+            self.var += (d * d - self.var) / n;
+            self.z = self.mu0;
+            if self.n_seen >= 4 {
+                self.warmed = true;
+            }
+            return ctx.finish(DriftDecision::Stable);
+        }
+        let lam = if self.lambda.is_finite() && self.lambda > 0.0 && self.lambda <= 1.0 {
+            self.lambda
+        } else {
+            0.2
+        };
+        self.z = lam * x + (1.0 - lam) * self.z;
+        let sig = self.var.max(1e-8).sqrt();
+        let half = self.l.max(1e-3) * sig * (lam / (2.0 - lam)).sqrt();
+        let stat = (self.z - self.mu0).abs();
+        if stat > half {
+            ctx.push(
+                Issue::builder(IssueCode::ConceptDriftDetected)
+                    .message(format!("EWMA |z-μ|={stat:.4e} > Lσ√(λ/(2-λ))={half:.4e}"))
+                    .metric("drift_statistic", stat)
+                    .build(),
+            );
+            return ctx.finish(DriftDecision::Drift { statistic: stat });
+        }
+        ctx.finish(DriftDecision::Stable)
+    }
+}
+
+impl PartialFit for EwmaChart {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let mut fired = 0.0_f64;
+        for i in 0..x.nrows() {
+            match self.update(x.get(i, 0), &session.child("ewma")) {
+                Ok(q) => {
+                    if matches!(q.value, DriftDecision::Drift { .. }) {
+                        fired += 1.0;
+                    }
+                }
+                Err(e) => {
+                    if e.primary().code == IssueCode::ConceptDriftDetected {
+                        fired += 1.0;
+                    }
+                }
+            }
+        }
+        self.updates += 1;
+        if !self.warmed {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message("EwmaChart is estimating μ₀,σ")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.information_gain = Some(fired);
+        q.drift_statistic = Some((self.z - self.mu0).abs());
+        q.still_identified = self.warmed;
+        q.warmup = !self.warmed;
+        q.explanation = format!("EWMA z={:.4e} cuts={fired}", self.z);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "EWMA control-chart step",
+                "Roberts chart on a smoothed mean; distinct from CUSUM and EwMean",
+                "pre-batch z",
+                format!("z={:.4e} fired={fired}", self.z),
+            ),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49890,6 +50181,12 @@ mod tests {
         CusumDrift::new(0.5, 8.0)
             .partial_fit(&x, None, &session)
             .expect("csu");
+        OnlineMahalanobis::new()
+            .partial_fit(&x, None, &session)
+            .expect("maha");
+        EwmaChart::new(0.2)
+            .partial_fit(&x, None, &session)
+            .expect("ewc");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

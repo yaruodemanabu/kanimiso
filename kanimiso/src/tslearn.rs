@@ -1733,6 +1733,127 @@ pub fn cdist_decay_euclidean(
     ctx.finish(out)
 }
 
+fn shape_euclidean_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n < 2 {
+        return if n == 0 {
+            f64::NAN
+        } else {
+            (a[0] - b[0]).abs()
+        };
+    }
+    let mut s = 0.0_f64;
+    for i in 0..n - 1 {
+        let da = a[i + 1] - a[i];
+        let db = b[i + 1] - b[i];
+        let d = da - db;
+        s += d * d;
+    }
+    s.sqrt()
+}
+
+/// Euclidean distance on first differences (no warping).
+///
+/// Distinct from [`ddtw`] (warped derivatives) and [`amss`] (angular cost).
+pub fn shape_euclidean(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("shape_euclidean.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("shape_euclidean.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("shape_euclidean on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(shape_euclidean_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise first-difference Euclidean.
+///
+/// Distinct from [`cdist_ddtw`] and [`cdist_amss`].
+pub fn cdist_shape_euclidean(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        shape_euclidean_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+fn open_begin_dtw_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len();
+    let m = b.len();
+    if n == 0 || m == 0 {
+        return f64::NAN;
+    }
+    let mut prev = vec![0.0_f64; m];
+    for j in 0..m {
+        prev[j] = (a[0] - b[j]).abs();
+    }
+    let mut cur = vec![0.0_f64; m];
+    for i in 1..n {
+        cur[0] = prev[0] + (a[i] - b[0]).abs();
+        for j in 1..m {
+            let cost = (a[i] - b[j]).abs();
+            cur[j] = cost + prev[j].min(cur[j - 1]).min(prev[j - 1]);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[m - 1]
+}
+
+/// Open-begin, closed-end DTW (free start on `b`, pinned end).
+///
+/// Distinct from [`dtw`] (closed–closed), [`obe_dtw`] (open–open), and
+/// [`dtw_subsequence`] (open end on the longer series).
+pub fn open_begin_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("open_begin_dtw.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("open_begin_dtw.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("open_begin_dtw on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(open_begin_dtw_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise open-begin DTW.
+///
+/// Distinct from [`cdist_dtw`], [`cdist_obe_dtw`], and
+/// [`cdist_dtw_subsequence`].
+pub fn cdist_open_begin_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        open_begin_dtw_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -20345,6 +20466,10 @@ mod tests {
         assert!(ams.abs() < 1e-12, "amss={ams}");
         let dew = decay_euclidean(&a, &a, 0.2, &Session::new("ts", "dew")).unwrap().value;
         assert!(dew.abs() < 1e-12, "decay_euclidean={dew}");
+        let seu = shape_euclidean(&a, &a, &Session::new("ts", "seu")).unwrap().value;
+        assert!(seu.abs() < 1e-12, "shape_euclidean={seu}");
+        let opb = open_begin_dtw(&a, &a, &Session::new("ts", "opb")).unwrap().value;
+        assert!(opb.abs() < 1e-12, "open_begin_dtw={opb}");
     }
 
     #[test]
@@ -21392,6 +21517,16 @@ mod tests {
             .value;
         assert_eq!(cde.shape(), (8, 8));
         assert!(cde.get(0, 0).abs() < 1e-12);
+        let cse = cdist_shape_euclidean(&x, &x, &Session::new("ts", "cse"))
+            .unwrap()
+            .value;
+        assert_eq!(cse.shape(), (8, 8));
+        assert!(cse.get(0, 0).abs() < 1e-12);
+        let cop = cdist_open_begin_dtw(&x, &x, &Session::new("ts", "cop"))
+            .unwrap()
+            .value;
+        assert_eq!(cop.shape(), (8, 8));
+        assert!(cop.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;
