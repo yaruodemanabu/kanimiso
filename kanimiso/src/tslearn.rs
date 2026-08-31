@@ -16634,7 +16634,7 @@ impl Fluss {
     /// Local minima of the corrected arc curve.
     pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         let q = floss_change_point(y, self.window, session)?;
-        let mut ctx = FitCtx::with_session(session.child("fluss"));
+        let ctx = FitCtx::with_session(session.child("fluss"));
         let cac = &q.value.cac;
         let n = cac.len();
         let want = self.n_regimes.max(2).saturating_sub(1);
