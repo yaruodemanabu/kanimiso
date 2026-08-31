@@ -8150,6 +8150,31 @@ const INVENTORY: &[Algorithm] = &[
         "timeseries",
     ),
     a("tslearn.cdist_minkowski15_l1", "tslearn.metrics.cdist", "timeseries"),
+    a("hmm.UnitHyperexponentialHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaHyperexponentialHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.ExponentiatedHyperexponentialHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.KumaraswamyHyperexponentialHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.DiscreteHyperexponentialHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("online.WindowMedian", "river.anomaly.GaussianScorer", "online"),
+    a("online.WaveHedgesAnomaly", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.minkowski5_l1_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a("tslearn.cdist_minkowski5_l1", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -9276,6 +9301,15 @@ mod tests {
             "online.ClarkAnomaly",
             "tslearn.minkowski15_l1_distance",
             "tslearn.cdist_minkowski15_l1",
+            "hmm.UnitHyperexponentialHmm",
+            "hmm.BetaHyperexponentialHmm",
+            "hmm.ExponentiatedHyperexponentialHmm",
+            "hmm.KumaraswamyHyperexponentialHmm",
+            "hmm.DiscreteHyperexponentialHmm",
+            "online.WindowMedian",
+            "online.WaveHedgesAnomaly",
+            "tslearn.minkowski5_l1_distance",
+            "tslearn.cdist_minkowski5_l1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
