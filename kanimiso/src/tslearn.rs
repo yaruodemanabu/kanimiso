@@ -684,6 +684,126 @@ pub fn cdist_cid(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<
     ctx.finish(out)
 }
 
+fn lb_keogh_raw(query: &[f64], candidate: &[f64], r: usize) -> f64 {
+    let n = query.len().min(candidate.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let w = r.max(1);
+    let mut lb = 0.0_f64;
+    for i in 0..n {
+        let a = i.saturating_sub(w);
+        let b = (i + w + 1).min(n);
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for t in a..b {
+            lo = lo.min(query[t]);
+            hi = hi.max(query[t]);
+        }
+        let c = candidate[i];
+        if c > hi {
+            let d = c - hi;
+            lb += d * d;
+        } else if c < lo {
+            let d = lo - c;
+            lb += d * d;
+        }
+    }
+    lb
+}
+
+fn lb_improved_raw(query: &[f64], candidate: &[f64], r: usize) -> f64 {
+    let n = query.len().min(candidate.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let w = r.max(1);
+    let mut leftover = vec![false; n];
+    let mut lb = 0.0_f64;
+    for i in 0..n {
+        let a = i.saturating_sub(w);
+        let b = (i + w + 1).min(n);
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for t in a..b {
+            lo = lo.min(query[t]);
+            hi = hi.max(query[t]);
+        }
+        let c = candidate[i];
+        if c > hi {
+            let d = c - hi;
+            lb += d * d;
+        } else if c < lo {
+            let d = lo - c;
+            lb += d * d;
+        } else {
+            leftover[i] = true;
+        }
+    }
+    for i in 0..n {
+        if !leftover[i] {
+            continue;
+        }
+        let a = i.saturating_sub(w);
+        let b = (i + w + 1).min(n);
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for t in a..b {
+            lo = lo.min(candidate[t]);
+            hi = hi.max(candidate[t]);
+        }
+        let qv = query[i];
+        if qv > hi {
+            let d = qv - hi;
+            lb += d * d;
+        } else if qv < lo {
+            let d = lo - qv;
+            lb += d * d;
+        }
+    }
+    lb
+}
+
+/// Pairwise LB_Keogh (tslearn-style `cdist` with [`lb_keogh`]).
+///
+/// Window width is not identification `p`. Distinct from [`cdist_dtw`].
+pub fn cdist_lb_keogh(
+    a: &Matrix,
+    b: &Matrix,
+    r: usize,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        lb_keogh_raw(ai.as_slice(), bj.as_slice(), r)
+    });
+    ctx.finish(out)
+}
+
+/// Pairwise LB_Improved (tslearn-style `cdist` with [`lb_improved`]).
+///
+/// Window width is not identification `p`. Distinct from [`cdist_lb_keogh`].
+pub fn cdist_lb_improved(
+    a: &Matrix,
+    b: &Matrix,
+    r: usize,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        lb_improved_raw(ai.as_slice(), bj.as_slice(), r)
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -20239,6 +20359,16 @@ mod tests {
             .value;
         assert_eq!(ccid.shape(), (8, 8));
         assert!(ccid.get(0, 0).abs() < 1e-12);
+        let clk = cdist_lb_keogh(&x, &x, 1, &Session::new("ts", "clk"))
+            .unwrap()
+            .value;
+        assert_eq!(clk.shape(), (8, 8));
+        assert!(clk.get(0, 0).abs() < 1e-12);
+        let cli = cdist_lb_improved(&x, &x, 1, &Session::new("ts", "cli"))
+            .unwrap()
+            .value;
+        assert_eq!(cli.shape(), (8, 8));
+        assert!(cli.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

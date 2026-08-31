@@ -45906,6 +45906,322 @@ impl Transform for OnlineKernelPca {
     }
 }
 
+/// Isolation Forest + ADWIN (river `anomaly.IForestASD`).
+///
+/// Scores isolation paths, then resets the forest when ADWIN cuts the
+/// score window. Distinct from [`HalfSpaceTrees`] (no reset) and batch
+/// [`crate::anomaly::IsolationForest`]. Tree count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct IForestAsd {
+    /// Isolation trees. Not identification `p` on a stream.
+    pub n_trees: usize,
+    /// Maximum isolation depth.
+    pub max_depth: usize,
+    forest: HalfSpaceTrees,
+    adwin: Adwin,
+    warmed: bool,
+    resets: u64,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for IForestAsd {
+    fn default() -> Self {
+        Self {
+            n_trees: 8,
+            max_depth: 6,
+            forest: HalfSpaceTrees::new(8, 6),
+            adwin: Adwin::new(0.002),
+            warmed: false,
+            resets: 0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl IForestAsd {
+    /// IForestASD with `n_trees` isolation trees.
+    pub fn new(n_trees: usize) -> Self {
+        let n_trees = n_trees.max(1);
+        Self {
+            n_trees,
+            forest: HalfSpaceTrees::new(n_trees, 6),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for IForestAsd {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 || x.nrows() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "empty"),
+            );
+        }
+        let mut drifted = false;
+        if self.warmed {
+            let scores = self.forest.predict(x, &session.child("score"))?;
+            for i in 0..scores.value.len() {
+                let dec = self
+                    .adwin
+                    .update(scores.value[i], &session.child(format!("adwin{i}")))?;
+                if matches!(dec.value, DriftDecision::Drift { .. }) {
+                    drifted = true;
+                }
+            }
+        }
+        if drifted {
+            self.forest = HalfSpaceTrees::new(self.n_trees.max(1), self.max_depth.max(1));
+            self.adwin.reset();
+            self.warmed = false;
+            self.resets += 1;
+            ctx.push(
+                Issue::builder(IssueCode::ConceptDriftDetected)
+                    .severity(Severity::Warning)
+                    .message(format!("IForestAsd reset the forest (resets={})", self.resets))
+                    .build(),
+            );
+        }
+        self.forest
+            .partial_fit(x, None, &session.child("forest"))?;
+        self.warmed = true;
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(self.resets as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 4;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "IForestAsd isolation+ADWIN on {} rows; resets={}",
+            x.nrows(),
+            self.resets
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "isolation forest with ADWIN reset",
+                "river IForestASD; distinct from HalfSpaceTrees (no reset)",
+                "previous forest",
+                "updated or reset forest",
+            ),
+        )
+    }
+}
+
+impl Predict for IForestAsd {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.forest.predict(x, session)
+    }
+}
+
+fn softmax_scores(xs: &[f64]) -> Vec<f64> {
+    let m = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if !m.is_finite() {
+        let n = xs.len().max(1) as f64;
+        return vec![1.0 / n; xs.len()];
+    }
+    let mut e: Vec<f64> = xs.iter().map(|v| (v - m).exp()).collect();
+    let s: f64 = e.iter().sum();
+    let s = s.max(1e-12);
+    for v in e.iter_mut() {
+        *v /= s;
+    }
+    e
+}
+
+/// ListNet listwise ranking (softmax cross-entropy on a user's items).
+///
+/// Distinct from [`Bpr`] (one pairwise negative) and [`WarpReco`]
+/// (sample-until-violation). Rank is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ListNet {
+    /// Latent rank.
+    pub n_factors: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    /// \(\ell_2\) on factors.
+    pub l2: f64,
+    pu: Vec<Vec<f64>>,
+    qi: Vec<Vec<f64>>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for ListNet {
+    fn default() -> Self {
+        Self {
+            n_factors: 4,
+            learning_rate: 0.05,
+            l2: 0.01,
+            pu: Vec::new(),
+            qi: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl ListNet {
+    /// ListNet with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn grow(&mut self, u: usize, i: usize) {
+        let k = self.n_factors.max(1);
+        while self.pu.len() <= u {
+            self.pu.push(vec![0.01; k]);
+        }
+        while self.qi.len() <= i {
+            self.qi.push(vec![0.01; k]);
+        }
+    }
+
+    fn score(&self, u: usize, i: usize) -> f64 {
+        let mut s = 0.0_f64;
+        if u < self.pu.len() && i < self.qi.len() {
+            for f in 0..self.n_factors.min(self.pu[u].len()).min(self.qi[i].len()) {
+                s += self.pu[u][f] * self.qi[i][f];
+            }
+        }
+        s
+    }
+}
+
+impl PartialFit for ListNet {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ListNet needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let lr = self.learning_rate.max(1e-6);
+        let l2 = self.l2.max(0.0);
+        let mut by_user: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+        for r in 0..x.nrows().min(y.len()) {
+            if !y[r].is_finite() {
+                continue;
+            }
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.grow(u, i);
+            by_user.entry(u).or_default().push((i, y[r]));
+        }
+        let mut dsum = 0.0_f64;
+        let mut lists = 0u64;
+        for (u, items) in by_user {
+            if items.len() < 2 {
+                continue;
+            }
+            let scores: Vec<f64> = items.iter().map(|&(i, _)| self.score(u, i)).collect();
+            let rel: Vec<f64> = items.iter().map(|&(_, r)| r).collect();
+            let p = softmax_scores(&scores);
+            let q = softmax_scores(&rel);
+            for t in 0..items.len() {
+                let err = p[t] - q[t];
+                let i = items[t].0;
+                for f in 0..self.n_factors {
+                    let pu = self.pu[u][f];
+                    let qi = self.qi[i][f];
+                    self.pu[u][f] -= lr * (err * qi + l2 * pu);
+                    self.qi[i][f] -= lr * (err * pu + l2 * qi);
+                    dsum += (self.pu[u][f] - pu).abs() + (self.qi[i][f] - qi).abs();
+                }
+            }
+            lists += 1;
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        if lists == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message("ListNet needs two items per user in the batch")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(lists as f64);
+        q.still_identified = lists > 0;
+        q.warmup = lists == 0;
+        q.explanation = format!(
+            "ListNet lists={lists} ||Δ||₁={dsum:.4e} users={} items={}",
+            self.pu.len(),
+            self.qi.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "ListNet listwise softmax step",
+                "softmax CE on a user's items; distinct from pairwise BPR/WARP",
+                "pre-batch factors",
+                format!("lists={lists} dsum={dsum:.4e}"),
+            ),
+        )
+    }
+}
+
+impl Predict for ListNet {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("ListNet predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.score(u, i)
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -46731,6 +47047,12 @@ mod tests {
         OnlineKernelPca::new(1)
             .partial_fit(&x, None, &session)
             .expect("okp");
+        IForestAsd::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("ifa");
+        ListNet::new(2)
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("lnet");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
