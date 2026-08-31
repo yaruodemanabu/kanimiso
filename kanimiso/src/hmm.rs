@@ -97236,6 +97236,1134 @@ impl FitUnsupervised for KumaraswamyInverseChenHmm {
     }
 }
 
+
+fn lfr_cdf(y: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || a <= 0.0 || b <= 0.0 {
+        return 0.0;
+    }
+    let h = a * y + 0.5 * b * y * y;
+    if !h.is_finite() {
+        return 1.0 - 1e-15;
+    }
+    let s = (-h).exp();
+    if !s.is_finite() {
+        return 1.0 - 1e-15;
+    }
+    (1.0 - s).clamp(0.0, 1.0 - 1e-15)
+}
+
+fn log_unit_lfr(y: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || y >= 1.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    log_lfr(y / (1.0 - y), a, b) - 2.0 * (1.0 - y).ln()
+}
+
+fn log_beta_lfr(y: f64, a: f64, b: f64, alpha: f64, beta: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || a <= 0.0 || b <= 0.0 || alpha <= 0.0 || beta <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = lfr_cdf(y, a, b);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let surv = (1.0 - cdf).max(1e-15);
+    log_lfr(y, a, b) + (alpha - 1.0) * cdf.ln() + (beta - 1.0) * surv.ln() - ln_beta(alpha, beta)
+}
+
+fn log_exp_lfr(y: f64, a: f64, b: f64, power: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || a <= 0.0 || b <= 0.0 || power <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = lfr_cdf(y, a, b);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    power.ln() + log_lfr(y, a, b) + (power - 1.0) * cdf.ln()
+}
+
+fn log_kuma_lfr(y: f64, a: f64, b: f64, alpha: f64, beta: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || a <= 0.0 || b <= 0.0 || alpha <= 0.0 || beta <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = lfr_cdf(y, a, b);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let fa = cdf.powf(alpha);
+    let one_m = 1.0 - fa;
+    if one_m <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    alpha.ln()
+        + beta.ln()
+        + log_lfr(y, a, b)
+        + (alpha - 1.0) * cdf.ln()
+        + (beta - 1.0) * one_m.ln()
+}
+
+fn log_disc_lfr(y: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y < 1.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let k = y.round().max(1.0);
+    let p = (lfr_cdf(k + 1.0, a, b) - lfr_cdf(k, a, b)).max(0.0);
+    if p <= 1e-300 {
+        return f64::NEG_INFINITY;
+    }
+    p.ln()
+}
+
+/// Unit linear-failure-rate HMM on $(0,1)$ (LFR on $u=x/(1-x)$).
+///
+/// Intercept $a$ is free from the LFR score; slope $b\neq 0$ is pinned, not identification `p`. Distinct from [`LinearFailureRateHmm`] (half-line) and [`UnitInverseChenHmm`].
+#[derive(Clone, Debug)]
+pub struct UnitLinearFailureRateHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for UnitLinearFailureRateHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl UnitLinearFailureRateHmm {
+    /// `k`-state UnitLinearFailureRateHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitLinearFailureRateHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted UnitLinearFailureRateHmm.
+#[derive(Clone, Debug)]
+pub struct FittedUnitLinearFailureRateHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Intercept hazards \(a_j\).
+    pub scale: Vector,
+    /// Pinned slopes \(b_j\neq 0\).
+    pub shape: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedUnitLinearFailureRateHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_unit_lfr(y, self.scale[j], self.shape[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedUnitLinearFailureRateHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for UnitLinearFailureRateHmm {
+    type Fitted = FittedUnitLinearFailureRateHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitLinearFailureRateHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.08 + 0.06 * j as f64));
+let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0 || y >= 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "UnitLinearFailureRateHmm skipped {n_skip} observations outside (0,1)"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedUnitLinearFailureRateHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.40),
+                shape,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.40 + 0.12 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedUnitLinearFailureRateHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let bj: f64 = shape[j];
+                let mut aj = scale[j];
+                for _ in 0..5 {
+                    let mut sc = 0.0_f64;
+                    let mut hp = 0.0_f64;
+                    for t in 0..t_len {
+                        let y = x.get(t, 0);
+                        if !y.is_finite() || y <= 0.0 || y >= 1.0 {
+                            continue;
+                        }
+                        let z = y / (1.0 - y);
+                        if !z.is_finite() || z <= 0.0 {
+                            continue;
+                        }
+                        let d = aj + bj * z;
+                        if d > 1e-8 {
+                            let w = fb.gamma[t][j];
+                            sc += w * (1.0 / d - z);
+                            hp -= w / (d * d);
+                        }
+                    }
+                    if hp.abs() > 1e-12 {
+                        aj = (aj - sc / hp).clamp(0.28, 0.75);
+                    }
+                }
+                scale[j] = aj;
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedUnitLinearFailureRateHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedUnitLinearFailureRateHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            loglik,
+        })
+    }
+}
+
+/// Beta–linear-failure-rate HMM ($f F^{a-1}(1-F)^{b-1}/B(a,b)$, $a,b\neq 1$).
+///
+/// Extra shapes and slope $b\neq 0$ are hyperparameters, not identification `p`. Distinct from [`KumaraswamyLinearFailureRateHmm`] and [`BetaExponentialHmm`].
+#[derive(Clone, Debug)]
+pub struct BetaLinearFailureRateHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for BetaLinearFailureRateHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl BetaLinearFailureRateHmm {
+    /// `k`-state BetaLinearFailureRateHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaLinearFailureRateHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted BetaLinearFailureRateHmm.
+#[derive(Clone, Debug)]
+pub struct FittedBetaLinearFailureRateHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Intercept hazards \(a_j\).
+    pub scale: Vector,
+    /// Pinned slopes \(b_j\neq 0\).
+    pub shape: Vector,
+    /// First extra shapes \(a_j\neq 1\).
+    pub a: Vector,
+    /// Second extra shapes \(b_j\neq 1\).
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedBetaLinearFailureRateHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_beta_lfr(y, self.scale[j], self.shape[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedBetaLinearFailureRateHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for BetaLinearFailureRateHmm {
+    type Fitted = FittedBetaLinearFailureRateHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaLinearFailureRateHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.012 + 0.008 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.5 + 0.3 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 2.2 + 0.4 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "BetaLinearFailureRateHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedBetaLinearFailureRateHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.10),
+                shape,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.10 + 0.06 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedBetaLinearFailureRateHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let bj: f64 = shape[j];
+                let mut aj = scale[j];
+                for _ in 0..5 {
+                    let mut sc = 0.0_f64;
+                    let mut hp = 0.0_f64;
+                    for t in 0..t_len {
+                        let y = x.get(t, 0);
+                        if !y.is_finite() || y <= 0.0 {
+                            continue;
+                        }
+                        let z = y;
+                        if !z.is_finite() || z <= 0.0 {
+                            continue;
+                        }
+                        let d = aj + bj * z;
+                        if d > 1e-8 {
+                            let w = fb.gamma[t][j];
+                            sc += w * (1.0 / d - z);
+                            hp -= w / (d * d);
+                        }
+                    }
+                    if hp.abs() > 1e-12 {
+                        aj = (aj - sc / hp).clamp(0.04, 0.28);
+                    }
+                }
+                scale[j] = aj;
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedBetaLinearFailureRateHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedBetaLinearFailureRateHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Exponentiated linear-failure-rate HMM ($F^\alpha$, $\alpha\neq 1$).
+///
+/// Power and slope $b\neq 0$ are hyperparameters, not identification `p`. Distinct from [`KumaraswamyLinearFailureRateHmm`] and [`ExponentiatedExponentialHmm`].
+#[derive(Clone, Debug)]
+pub struct ExponentiatedLinearFailureRateHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for ExponentiatedLinearFailureRateHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl ExponentiatedLinearFailureRateHmm {
+    /// `k`-state ExponentiatedLinearFailureRateHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedLinearFailureRateHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted ExponentiatedLinearFailureRateHmm.
+#[derive(Clone, Debug)]
+pub struct FittedExponentiatedLinearFailureRateHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Intercept hazards \(a_j\).
+    pub scale: Vector,
+    /// Pinned slopes \(b_j\neq 0\).
+    pub shape: Vector,
+    /// Extra CDF powers \(\alpha_j\neq 1\).
+    pub alpha: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedExponentiatedLinearFailureRateHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_exp_lfr(y, self.scale[j], self.shape[j], self.alpha[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedExponentiatedLinearFailureRateHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for ExponentiatedLinearFailureRateHmm {
+    type Fitted = FittedExponentiatedLinearFailureRateHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedLinearFailureRateHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.012 + 0.008 * j as f64));
+        let alpha = Vector::from_iter((0..k).map(|j| 1.6 + 0.3 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "ExponentiatedLinearFailureRateHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedExponentiatedLinearFailureRateHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.10),
+                shape,
+                alpha,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.10 + 0.06 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedExponentiatedLinearFailureRateHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                alpha: alpha.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let bj: f64 = shape[j];
+                let mut aj = scale[j];
+                for _ in 0..5 {
+                    let mut sc = 0.0_f64;
+                    let mut hp = 0.0_f64;
+                    for t in 0..t_len {
+                        let y = x.get(t, 0);
+                        if !y.is_finite() || y <= 0.0 {
+                            continue;
+                        }
+                        let z = y;
+                        if !z.is_finite() || z <= 0.0 {
+                            continue;
+                        }
+                        let d = aj + bj * z;
+                        if d > 1e-8 {
+                            let w = fb.gamma[t][j];
+                            sc += w * (1.0 / d - z);
+                            hp -= w / (d * d);
+                        }
+                    }
+                    if hp.abs() > 1e-12 {
+                        aj = (aj - sc / hp).clamp(0.04, 0.28);
+                    }
+                }
+                scale[j] = aj;
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedExponentiatedLinearFailureRateHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+                alpha: alpha.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedExponentiatedLinearFailureRateHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            alpha,
+            loglik,
+        })
+    }
+}
+
+/// Kumaraswamy–linear-failure-rate HMM ($ab f F^{a-1}(1-F^a)^{b-1}$, $a,b\neq 1$).
+///
+/// Extra shapes and slope $b\neq 0$ are hyperparameters, not identification `p`. Distinct from [`BetaLinearFailureRateHmm`] and [`KumaraswamyExponentialHmm`].
+#[derive(Clone, Debug)]
+pub struct KumaraswamyLinearFailureRateHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for KumaraswamyLinearFailureRateHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl KumaraswamyLinearFailureRateHmm {
+    /// `k`-state KumaraswamyLinearFailureRateHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyLinearFailureRateHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted KumaraswamyLinearFailureRateHmm.
+#[derive(Clone, Debug)]
+pub struct FittedKumaraswamyLinearFailureRateHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Intercept hazards \(a_j\).
+    pub scale: Vector,
+    /// Pinned slopes \(b_j\neq 0\).
+    pub shape: Vector,
+    /// First extra shapes \(a_j\neq 1\).
+    pub a: Vector,
+    /// Second extra shapes \(b_j\neq 1\).
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedKumaraswamyLinearFailureRateHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_kuma_lfr(y, self.scale[j], self.shape[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedKumaraswamyLinearFailureRateHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for KumaraswamyLinearFailureRateHmm {
+    type Fitted = FittedKumaraswamyLinearFailureRateHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyLinearFailureRateHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.012 + 0.008 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.4 + 0.25 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 1.8 + 0.3 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "KumaraswamyLinearFailureRateHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedKumaraswamyLinearFailureRateHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.10),
+                shape,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.10 + 0.06 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedKumaraswamyLinearFailureRateHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let bj: f64 = shape[j];
+                let mut aj = scale[j];
+                for _ in 0..5 {
+                    let mut sc = 0.0_f64;
+                    let mut hp = 0.0_f64;
+                    for t in 0..t_len {
+                        let y = x.get(t, 0);
+                        if !y.is_finite() || y <= 0.0 {
+                            continue;
+                        }
+                        let z = y;
+                        if !z.is_finite() || z <= 0.0 {
+                            continue;
+                        }
+                        let d = aj + bj * z;
+                        if d > 1e-8 {
+                            let w = fb.gamma[t][j];
+                            sc += w * (1.0 / d - z);
+                            hp -= w / (d * d);
+                        }
+                    }
+                    if hp.abs() > 1e-12 {
+                        aj = (aj - sc / hp).clamp(0.04, 0.28);
+                    }
+                }
+                scale[j] = aj;
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedKumaraswamyLinearFailureRateHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedKumaraswamyLinearFailureRateHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Discrete linear-failure-rate HMM ($P(K=k)=F(k+1)-F(k)$ on $\{1,2,\ldots\}$).
+///
+/// Intercept $a$ is free from the LFR score; slope $b\neq 0$ is pinned, not identification `p`. Distinct from [`LinearFailureRateHmm`] (continuous) and [`DiscretePowerLindleyHmm`].
+#[derive(Clone, Debug)]
+pub struct DiscreteLinearFailureRateHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for DiscreteLinearFailureRateHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl DiscreteLinearFailureRateHmm {
+    /// `k`-state DiscreteLinearFailureRateHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteLinearFailureRateHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted DiscreteLinearFailureRateHmm.
+#[derive(Clone, Debug)]
+pub struct FittedDiscreteLinearFailureRateHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Intercept hazards \(a_j\).
+    pub scale: Vector,
+    /// Pinned slopes \(b_j\neq 0\).
+    pub shape: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedDiscreteLinearFailureRateHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_disc_lfr(y, self.scale[j], self.shape[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedDiscreteLinearFailureRateHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for DiscreteLinearFailureRateHmm {
+    type Fitted = FittedDiscreteLinearFailureRateHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteLinearFailureRateHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.012 + 0.008 * j as f64));
+let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y < 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "DiscreteLinearFailureRateHmm skipped {n_skip} observations below 1"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedDiscreteLinearFailureRateHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.15),
+                shape,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.15 + 0.06 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedDiscreteLinearFailureRateHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let bj: f64 = shape[j];
+                let mut aj = scale[j];
+                for _ in 0..5 {
+                    let mut sc = 0.0_f64;
+                    let mut hp = 0.0_f64;
+                    for t in 0..t_len {
+                        let y = x.get(t, 0);
+                        if !y.is_finite() || y < 1.0 {
+                            continue;
+                        }
+                        let z = y.round().max(1.0);
+                        if !z.is_finite() || z <= 0.0 {
+                            continue;
+                        }
+                        let d = aj + bj * z;
+                        if d > 1e-8 {
+                            let w = fb.gamma[t][j];
+                            sc += w * (1.0 / d - z);
+                            hp -= w / (d * d);
+                        }
+                    }
+                    if hp.abs() > 1e-12 {
+                        aj = (aj - sc / hp).clamp(0.08, 0.32);
+                    }
+                }
+                scale[j] = aj;
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedDiscreteLinearFailureRateHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedDiscreteLinearFailureRateHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            loglik,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99060,6 +100188,26 @@ mod tests {
             .expect("kic");
         assert_eq!(kic.value.labels.len(), 80);
         assert!(kic.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let ulf = UnitLinearFailureRateHmm::new(2)
+            .fit(&betx, &Session::new("ulf", "fit"))
+            .expect("ulf");
+        assert_eq!(ulf.value.labels.len(), 80);
+        assert!(ulf.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let blf = BetaLinearFailureRateHmm::new(2)
+            .fit(&xpos, &Session::new("blf", "fit"))
+            .expect("blf");
+        assert_eq!(blf.value.labels.len(), 80);
+        assert!(blf.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let elf = ExponentiatedLinearFailureRateHmm::new(2)
+            .fit(&xpos, &Session::new("elf", "fit"))
+            .expect("elf");
+        assert_eq!(elf.value.labels.len(), 80);
+        assert!(elf.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let klf = KumaraswamyLinearFailureRateHmm::new(2)
+            .fit(&xpos, &Session::new("klf", "fit"))
+            .expect("klf");
+        assert_eq!(klf.value.labels.len(), 80);
+        assert!(klf.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
@@ -99686,6 +100834,11 @@ mod tests {
             .expect("dpl");
         assert_eq!(dpl.value.labels.len(), 40);
         assert!(dpl.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let dlf = DiscreteLinearFailureRateHmm::new(2)
+            .fit(&x, &Session::new("dlf", "fit"))
+            .expect("dlf");
+        assert_eq!(dlf.value.labels.len(), 40);
+        assert!(dlf.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
     }
 
     #[test]

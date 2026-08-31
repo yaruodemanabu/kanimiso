@@ -8436,6 +8436,19 @@ const INVENTORY: &[Algorithm] = &[
         "timeseries",
     ),
     a("tslearn.cdist_minkowski28_l1", "tslearn.metrics.cdist", "timeseries"),
+    a("hmm.UnitLinearFailureRateHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaLinearFailureRateHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ExponentiatedLinearFailureRateHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.KumaraswamyLinearFailureRateHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.DiscreteLinearFailureRateHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.WindowLag14", "river.anomaly.GaussianScorer", "online"),
+    a("online.ItakuraSaitoAnomaly", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.minkowski23_l1_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a("tslearn.cdist_minkowski23_l1", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -9736,6 +9749,15 @@ mod tests {
             "online.JensenDifferenceAnomaly",
             "tslearn.minkowski28_l1_distance",
             "tslearn.cdist_minkowski28_l1",
+            "hmm.UnitLinearFailureRateHmm",
+            "hmm.BetaLinearFailureRateHmm",
+            "hmm.ExponentiatedLinearFailureRateHmm",
+            "hmm.KumaraswamyLinearFailureRateHmm",
+            "hmm.DiscreteLinearFailureRateHmm",
+            "online.WindowLag14",
+            "online.ItakuraSaitoAnomaly",
+            "tslearn.minkowski23_l1_distance",
+            "tslearn.cdist_minkowski23_l1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

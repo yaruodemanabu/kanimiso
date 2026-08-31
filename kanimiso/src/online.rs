@@ -66572,6 +66572,321 @@ impl Predict for JensenDifferenceAnomaly {
 }
 
 
+/// Score is \(|\Delta^{14} x|/\overline{|x|}\) on the trailing fourteen
+/// first-coordinates (binomial \(1,-14,91,-364,1001,-2002,3003,-3432,3003,-2002,1001,-364,91,-14,1\)).
+/// Distinct from [`WindowLag13`] (thirteenth difference) and [`WindowLag12`].
+#[derive(Clone, Debug)]
+pub struct WindowLag14 {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for WindowLag14 {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl WindowLag14 {
+    /// Empty windowed lag-14 detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        let y = x.get(i, 0);
+        if !y.is_finite() {
+            return 0.0;
+        }
+        let xs = reservoir_first_coords(&self.rows);
+        if xs.len() < 14 {
+            return 0.0;
+        }
+        let start = xs.len().saturating_sub(14);
+        let win = &xs[start..];
+        if win.len() < 14 {
+            return 0.0;
+        }
+        let mut mean_abs = 0.0_f64;
+        for v in win {
+            mean_abs += v.abs();
+        }
+        mean_abs /= win.len() as f64;
+        let n = win.len();
+        let p1 = win[n - 1];
+        let p2 = win[n - 2];
+        let p3 = win[n - 3];
+        let p4 = win[n - 4];
+        let p5 = win[n - 5];
+        let p6 = win[n - 6];
+        let p7 = win[n - 7];
+        let p8 = win[n - 8];
+        let p9 = win[n - 9];
+        let p10 = win[n - 10];
+        let p11 = win[n - 11];
+        let p12 = win[n - 12];
+        let p13 = win[n - 13];
+        let p14 = win[n - 14];
+        (y - 14.0 * p1 + 91.0 * p2 - 364.0 * p3 + 1001.0 * p4 - 2002.0 * p5 + 3003.0 * p6
+            - 3432.0 * p7 + 3003.0 * p8 - 2002.0 * p9 + 1001.0 * p10 - 364.0 * p11 + 91.0 * p12
+            - 14.0 * p13 + p14)
+            .abs()
+            / mean_abs.max(1e-12)
+    }
+}
+
+impl PartialFit for WindowLag14 {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 14;
+        q.warmup = self.rows.len() < 14;
+        q.explanation = format!("window-lag14 reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed fourteenth-difference anomaly",
+                "WindowLag14 uses last-14 fourteenth difference; not WindowLag13 or WindowLag12",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for WindowLag14 {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
+fn itakura_saito_rows(a: &[f64], b: &[f64]) -> f64 {
+    let p = a.len().min(b.len());
+    let mut s = 0.0_f64;
+    for j in 0..p {
+        let u = a[j].abs().max(1e-18);
+        let v = b[j].abs().max(1e-18);
+        let r = u / v;
+        s += r - r.ln() - 1.0;
+    }
+    s.max(0.0)
+}
+
+/// Itakura–Saito \(k\)-NN anomaly.
+///
+/// Score is the mean of the \(k\) smallest raw Itakura–Saito divergences
+/// \(\sum(x/y-\ln(x/y)-1)\) without \(\ell_1\) normalisation.
+/// Distinct from [`JeffreysAnomaly`] (symmetrised KL after \(\ell_1\)).
+#[derive(Clone, Debug)]
+pub struct ItakuraSaitoAnomaly {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for ItakuraSaitoAnomaly {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl ItakuraSaitoAnomaly {
+    /// Empty Itakura–Saito \(k\)-NN detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 3 || self.ncols == 0 {
+            return 0.0;
+        }
+        let p = self.ncols.min(x.ncols());
+        let mut qrow = Vec::with_capacity(p);
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return 0.0;
+            }
+            qrow.push(z);
+        }
+        let mut ds: Vec<f64> = self
+            .rows
+            .iter()
+            .map(|row| itakura_saito_rows(&qrow, row))
+            .filter(|d| d.is_finite() && *d > 1e-15)
+            .collect();
+        if ds.is_empty() {
+            return 0.0;
+        }
+        ds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let kk = 5.min(ds.len());
+        let mut s = 0.0_f64;
+        for t in 0..kk {
+            s += ds[t];
+        }
+        s / kk as f64
+    }
+}
+
+impl PartialFit for ItakuraSaitoAnomaly {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 3;
+        q.warmup = self.rows.len() < 3;
+        q.explanation = format!("itakura-saito-knn reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Itakura-Saito k-NN anomaly",
+                "ItakuraSaitoAnomaly is raw Itakura-Saito k-NN; not Jeffreys",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for ItakuraSaitoAnomaly {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67772,6 +68087,12 @@ mod tests {
         JensenDifferenceAnomaly::new()
             .partial_fit(&x, None, &session)
             .expect("jdf");
+        WindowLag14::new()
+            .partial_fit(&x, None, &session)
+            .expect("w14");
+        ItakuraSaitoAnomaly::new()
+            .partial_fit(&x, None, &session)
+            .expect("its");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
