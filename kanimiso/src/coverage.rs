@@ -8501,6 +8501,18 @@ const INVENTORY: &[Algorithm] = &[
         "timeseries",
     ),
     a("tslearn.cdist_minkowski30_l1", "tslearn.metrics.cdist", "timeseries"),
+    a("hmm.UnitMakehamHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaMakehamHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ExponentiatedMakehamHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.KumaraswamyMakehamHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.WindowLag19", "river.anomaly.GaussianScorer", "online"),
+    a("online.LogChebyshevAnomaly", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.minkowski31_l1_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a("tslearn.cdist_minkowski31_l1", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -9846,6 +9858,14 @@ mod tests {
             "online.BrayCurtisAnomaly",
             "tslearn.minkowski30_l1_distance",
             "tslearn.cdist_minkowski30_l1",
+            "hmm.UnitMakehamHmm",
+            "hmm.BetaMakehamHmm",
+            "hmm.ExponentiatedMakehamHmm",
+            "hmm.KumaraswamyMakehamHmm",
+            "online.WindowLag19",
+            "online.LogChebyshevAnomaly",
+            "tslearn.minkowski31_l1_distance",
+            "tslearn.cdist_minkowski31_l1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
