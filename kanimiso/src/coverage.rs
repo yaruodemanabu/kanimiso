@@ -9439,6 +9439,19 @@ const INVENTORY: &[Algorithm] = &[
         "timeseries",
     ),
     a("tslearn.cdist_minkowski102_l1", "tslearn.metrics.cdist", "timeseries"),
+    a("hmm.UnitCosine11Hmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaCosine11Hmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ExponentiatedCosine11Hmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.KumaraswamyCosine11Hmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.DiscreteCosine11Hmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a("online.WindowLag91", "river.anomaly.GaussianScorer", "online"),
+    a("online.LogMinkowski32Anomaly", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.minkowski103_l1_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a("tslearn.cdist_minkowski103_l1", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -11426,6 +11439,15 @@ mod tests {
             "online.LogMinkowski31Anomaly",
             "tslearn.minkowski102_l1_distance",
             "tslearn.cdist_minkowski102_l1",
+            "hmm.UnitCosine11Hmm",
+            "hmm.BetaCosine11Hmm",
+            "hmm.ExponentiatedCosine11Hmm",
+            "hmm.KumaraswamyCosine11Hmm",
+            "hmm.DiscreteCosine11Hmm",
+            "online.WindowLag91",
+            "online.LogMinkowski32Anomaly",
+            "tslearn.minkowski103_l1_distance",
+            "tslearn.cdist_minkowski103_l1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
