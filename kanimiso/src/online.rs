@@ -41796,6 +41796,270 @@ impl Predict for Loda {
     }
 }
 
+/// Online Soft-L1 regressor \(\rho=\ln(1+|r|)\).
+///
+/// Influence \(\psi(r)=\mathrm{sign}(r)/(1+|r|)\) is strictly between L1 and
+/// L2. Distinct from [`OnlineLaplaceRegressor`] (\(\rho=|r|\)) and
+/// [`OnlineCharbonnierRegressor`] (\(\sqrt{r^2+c^2}-c\)).
+#[derive(Clone, Debug)]
+pub struct OnlineSoftL1Regressor {
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineSoftL1Regressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineSoftL1Regressor {
+    /// Soft-L1 SGD regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for OnlineSoftL1Regressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineSoftL1Regressor",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected Soft-L1 update"),
+            );
+        };
+        self.initialized = true;
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let r = y[i] - eta;
+            let ar = r.abs();
+            let rho = (1.0 + ar).ln();
+            let g = if ar < 1e-15 {
+                0.0
+            } else {
+                -r.signum() / (1.0 + ar)
+            };
+            loss_before += rho;
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            loss_after += (1.0 + (y[i] - ea).abs()).ln();
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online Soft-L1 regressor",
+            "SGD on ln(1+|r|); distinct from Laplace and Charbonnier",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineSoftL1Regressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
+/// Online squared-hinge linear classifier.
+///
+/// \(\ell=\max(0,1-y\eta)^2\) on labels mapped to \(\{\pm 1\}\). Distinct from
+/// [`LogisticRegression`] (log-loss) and [`OnlineSvm`] (hinge / Pegasos).
+#[derive(Clone, Debug)]
+pub struct OnlineSquaredHingeClassifier {
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineSquaredHingeClassifier {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineSquaredHingeClassifier {
+    /// Squared-hinge SGD classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for OnlineSquaredHingeClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineSquaredHingeClassifier",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "rejected squared-hinge update",
+                ),
+            );
+        };
+        self.initialized = true;
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let ys = if y[i] >= 0.5 { 1.0 } else { -1.0 };
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let m = 1.0 - ys * eta;
+            let (rho, g) = if m > 0.0 {
+                (m * m, -2.0 * ys * m)
+            } else {
+                (0.0, 0.0)
+            };
+            loss_before += rho;
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            let ma = 1.0 - ys * ea;
+            loss_after += if ma > 0.0 { ma * ma } else { 0.0 };
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online squared-hinge classifier",
+            "SGD on max(0,1-yη)²; distinct from log-loss and linear hinge",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineSquaredHingeClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42534,6 +42798,12 @@ mod tests {
         Loda::new(4)
             .partial_fit(&x, None, &session)
             .expect("loda");
+        OnlineSoftL1Regressor::new()
+            .partial_fit(&x, Some(&y), &session)
+            .expect("osl1");
+        OnlineSquaredHingeClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("oshg");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

@@ -6769,6 +6769,20 @@ const INVENTORY: &[Algorithm] = &[
     a("tslearn.Mpstump", "stumpy.mpstump", "timeseries"),
     a("tslearn.snippet_area", "stumpy.snippets", "function"),
     a("tslearn.SnippetArea", "stumpy.snippets", "timeseries"),
+    a("hmm.DagumHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.HalfCauchyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.LogarithmicHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a("hmm.YuleSimonHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a(
+        "online.OnlineSoftL1Regressor",
+        "river.optim.losses.SoftL1",
+        "online",
+    ),
+    a(
+        "online.OnlineSquaredHingeClassifier",
+        "river.optim.losses.SquaredHinge",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7363,6 +7377,10 @@ mod tests {
             "online.Loda",
             "tslearn.Mpstump",
             "tslearn.snippet_area",
+            "hmm.DagumHmm",
+            "hmm.YuleSimonHmm",
+            "online.OnlineSoftL1Regressor",
+            "online.OnlineSquaredHingeClassifier",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
