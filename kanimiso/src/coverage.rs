@@ -8679,6 +8679,17 @@ const INVENTORY: &[Algorithm] = &[
         "timeseries",
     ),
     a("tslearn.cdist_minkowski44_l1", "tslearn.metrics.cdist", "timeseries"),
+    a("hmm.UnitParetoHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaParetoHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.KumaraswamyParetoHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.WindowLag33", "river.anomaly.GaussianScorer", "online"),
+    a("online.LogHellingerAnomaly", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.minkowski45_l1_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a("tslearn.cdist_minkowski45_l1", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -10146,6 +10157,13 @@ mod tests {
             "online.LogMotykaAnomaly",
             "tslearn.minkowski44_l1_distance",
             "tslearn.cdist_minkowski44_l1",
+            "hmm.UnitParetoHmm",
+            "hmm.BetaParetoHmm",
+            "hmm.KumaraswamyParetoHmm",
+            "online.WindowLag33",
+            "online.LogHellingerAnomaly",
+            "tslearn.minkowski45_l1_distance",
+            "tslearn.cdist_minkowski45_l1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
