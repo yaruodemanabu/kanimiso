@@ -6982,6 +6982,15 @@ const INVENTORY: &[Algorithm] = &[
     a("hmm.ZeroTruncatedPoissonHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
     a("online.Wrmf", "river.reco.BiasedMF", "online"),
     a("tslearn.cdist_mpdist", "tslearn.metrics.cdist", "timeseries"),
+    a("hmm.ErlangHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.FoldedCauchyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.FoldedTHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ShiftedLogLogisticHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.InverseRayleighHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.LambdaRank", "river.reco.BPR", "online"),
+    a("online.Rrcf", "river.anomaly.HalfSpaceTrees", "online"),
+    a("tslearn.kdtw", "tslearn.metrics.softdtw", "timeseries"),
+    a("tslearn.cdist_kdtw", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7688,6 +7697,15 @@ mod tests {
             "hmm.ZeroTruncatedPoissonHmm",
             "online.Wrmf",
             "tslearn.cdist_mpdist",
+            "hmm.ErlangHmm",
+            "hmm.FoldedCauchyHmm",
+            "hmm.FoldedTHmm",
+            "hmm.ShiftedLogLogisticHmm",
+            "hmm.InverseRayleighHmm",
+            "online.LambdaRank",
+            "online.Rrcf",
+            "tslearn.kdtw",
+            "tslearn.cdist_kdtw",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

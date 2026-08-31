@@ -913,6 +913,98 @@ pub fn cdist_mpdist(
     ctx.finish(out)
 }
 
+fn kdtw_kernel(a: &[f64], b: &[f64], nu: f64) -> f64 {
+    let n = a.len();
+    let m = b.len();
+    if n == 0 || m == 0 {
+        return 0.0;
+    }
+    let mut prev = vec![0.0_f64; m + 1];
+    let mut cur = vec![0.0_f64; m + 1];
+    for i in 1..=n {
+        for j in 1..=m {
+            let d = a[i - 1] - b[j - 1];
+            let hij = (-nu * d * d).exp();
+            let rec = if i == 1 && j == 1 {
+                1.0
+            } else {
+                prev[j] + cur[j - 1] + prev[j - 1]
+            };
+            cur[j] = hij * rec;
+        }
+        std::mem::swap(&mut prev, &mut cur);
+        for v in cur.iter_mut() {
+            *v = 0.0;
+        }
+    }
+    prev[m]
+}
+
+fn kdtw_raw(a: &[f64], b: &[f64], nu: f64) -> f64 {
+    let kab = kdtw_kernel(a, b, nu);
+    let kaa = kdtw_kernel(a, a, nu);
+    let kbb = kdtw_kernel(b, b, nu);
+    let den = (kaa * kbb).sqrt().max(1e-300);
+    let c = (kab / den).clamp(0.0, 1.0);
+    (1.0 - c).max(0.0)
+}
+
+/// Kernel DTW (Marteau): local Gaussian kernel with a three-path recursion,
+/// returned as a cosine distance in kernel space.
+///
+/// Distinct from [`softdtw`] (softmin cost) and [`gak`] (`exp(-soft-DTW/σ)`
+/// in this crate). \(\nu\) is not identification `p`.
+pub fn kdtw(a: &Vector, b: &Vector, nu: f64, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("kdtw.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("kdtw.b") {
+        ctx.push(issue);
+    }
+    let nu = if nu.is_finite() && nu > 0.0 {
+        nu
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("kdtw ν={nu} is not positive; using 1"))
+                .build(),
+        );
+        1.0
+    };
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("kdtw on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(kdtw_raw(a.as_slice(), b.as_slice(), nu))
+}
+
+/// Pairwise kernel DTW (tslearn-style `cdist` with [`kdtw`]).
+///
+/// \(\nu\) is not identification `p`. Distinct from [`cdist_softdtw`].
+pub fn cdist_kdtw(
+    a: &Matrix,
+    b: &Matrix,
+    nu: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let nu = if nu.is_finite() && nu > 0.0 { nu } else { 1.0 };
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        kdtw_raw(ai.as_slice(), bj.as_slice(), nu)
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -19505,6 +19597,8 @@ mod tests {
         assert!(lbi.abs() < 1e-12, "lb_improved={lbi}");
         let cd = cid(&a, &a, &Session::new("ts", "cid")).unwrap().value;
         assert!(cd.abs() < 1e-12, "cid={cd}");
+        let kdw = kdtw(&a, &a, 1.0, &Session::new("ts", "kdw")).unwrap().value;
+        assert!(kdw.abs() < 1e-12, "kdtw={kdw}");
     }
 
     #[test]
@@ -20502,6 +20596,11 @@ mod tests {
             .value;
         assert_eq!(cmd.shape(), (8, 8));
         assert!(cmd.get(0, 0).abs() < 1e-12);
+        let ckd = cdist_kdtw(&x, &x, 1.0, &Session::new("ts", "ckd"))
+            .unwrap()
+            .value;
+        assert_eq!(ckd.shape(), (8, 8));
+        assert!(ckd.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

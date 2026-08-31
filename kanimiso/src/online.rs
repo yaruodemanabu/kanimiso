@@ -46785,6 +46785,422 @@ impl Predict for Wrmf {
     }
 }
 
+fn lambdarank_pair_weight(rel_a: f64, rel_b: f64, rank_a: f64, rank_b: f64, idcg: f64) -> f64 {
+    if idcg <= 1e-12 {
+        return 1.0;
+    }
+    let ga = 2.0_f64.powf(rel_a.max(0.0).min(20.0)) - 1.0;
+    let gb = 2.0_f64.powf(rel_b.max(0.0).min(20.0)) - 1.0;
+    let da = 1.0 / (rank_a + 1.0).log2().max(1e-6);
+    let db = 1.0 / (rank_b + 1.0).log2().max(1e-6);
+    ((ga - gb).abs() * (da - db).abs() / idcg).max(1e-6)
+}
+
+/// LambdaRank: RankNet logistic pairs weighted by \(|\Delta\mathrm{NDCG}|\).
+///
+/// Distinct from [`RankNet`] (unit pair weight) and [`ListNet`] (listwise
+/// softmax). Rank is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct LambdaRank {
+    /// Latent rank.
+    pub n_factors: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    /// \(\ell_2\) on factors.
+    pub l2: f64,
+    pu: Vec<Vec<f64>>,
+    qi: Vec<Vec<f64>>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for LambdaRank {
+    fn default() -> Self {
+        Self {
+            n_factors: 4,
+            learning_rate: 0.05,
+            l2: 0.01,
+            pu: Vec::new(),
+            qi: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl LambdaRank {
+    /// LambdaRank with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn grow(&mut self, u: usize, i: usize) {
+        let k = self.n_factors.max(1);
+        while self.pu.len() <= u {
+            self.pu.push(vec![0.01; k]);
+        }
+        while self.qi.len() <= i {
+            self.qi.push(vec![0.01; k]);
+        }
+    }
+
+    fn score(&self, u: usize, i: usize) -> f64 {
+        let mut s = 0.0_f64;
+        if u < self.pu.len() && i < self.qi.len() {
+            for f in 0..self.n_factors.min(self.pu[u].len()).min(self.qi[i].len()) {
+                s += self.pu[u][f] * self.qi[i][f];
+            }
+        }
+        s
+    }
+}
+
+impl PartialFit for LambdaRank {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("LambdaRank needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let lr = self.learning_rate.max(1e-6);
+        let l2 = self.l2.max(0.0);
+        let mut by_user: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+        for r in 0..x.nrows().min(y.len()) {
+            if !y[r].is_finite() {
+                continue;
+            }
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.grow(u, i);
+            by_user.entry(u).or_default().push((i, y[r]));
+        }
+        let mut dsum = 0.0_f64;
+        let mut pairs = 0u64;
+        for (u, items) in by_user {
+            if items.len() < 2 {
+                continue;
+            }
+            let scores: Vec<f64> = items.iter().map(|&(i, _)| self.score(u, i)).collect();
+            let mut order: Vec<usize> = (0..items.len()).collect();
+            order.sort_by(|&a, &b| {
+                scores[b]
+                    .partial_cmp(&scores[a])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let mut rank = vec![1.0_f64; items.len()];
+            for (r, &t) in order.iter().enumerate() {
+                rank[t] = (r + 1) as f64;
+            }
+            let mut rels: Vec<f64> = items.iter().map(|&(_, rel)| rel.max(0.0)).collect();
+            rels.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+            let mut idcg = 0.0_f64;
+            for (r, &g) in rels.iter().enumerate() {
+                idcg += (2.0_f64.powf(g.min(20.0)) - 1.0) / ((r + 2) as f64).log2();
+            }
+            for a in 0..items.len() {
+                for b in 0..items.len() {
+                    if items[a].1 <= items[b].1 {
+                        continue;
+                    }
+                    let ia = items[a].0;
+                    let ib = items[b].0;
+                    let w = lambdarank_pair_weight(
+                        items[a].1,
+                        items[b].1,
+                        rank[a],
+                        rank[b],
+                        idcg,
+                    );
+                    let p = sigmoid(self.score(u, ia) - self.score(u, ib));
+                    let err = (p - 1.0) * w;
+                    for f in 0..self.n_factors {
+                        let pua = self.pu[u][f];
+                        let qia = self.qi[ia][f];
+                        let qib = self.qi[ib][f];
+                        self.pu[u][f] -= lr * (err * (qia - qib) + l2 * pua);
+                        self.qi[ia][f] -= lr * (err * pua + l2 * qia);
+                        self.qi[ib][f] -= lr * (-err * pua + l2 * qib);
+                        dsum += (self.pu[u][f] - pua).abs()
+                            + (self.qi[ia][f] - qia).abs()
+                            + (self.qi[ib][f] - qib).abs();
+                    }
+                    pairs += 1;
+                }
+            }
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        if pairs == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message("LambdaRank needs a comparable pair in the batch")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(pairs as f64);
+        q.still_identified = pairs > 0;
+        q.warmup = pairs == 0;
+        q.explanation = format!(
+            "LambdaRank pairs={pairs} ||Δ||₁={dsum:.4e} users={} items={}",
+            self.pu.len(),
+            self.qi.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "LambdaRank |ΔNDCG|-weighted pairwise step",
+                "RankNet logistic times NDCG swap weight; distinct from RankNet and ListNet",
+                "pre-batch factors",
+                format!("pairs={pairs} dsum={dsum:.4e}"),
+            ),
+        )
+    }
+}
+
+impl Predict for LambdaRank {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("LambdaRank predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.score(u, i)
+        })))
+    }
+}
+
+fn rrcf_codisp(points: &[Vec<f64>], q: &[f64], rng: &mut Rng, max_depth: usize) -> f64 {
+    let p = q.len();
+    if p == 0 {
+        return 0.0;
+    }
+    let mut pts: Vec<Vec<f64>> = points.to_vec();
+    let mut depth = 0usize;
+    loop {
+        if pts.is_empty() || depth >= max_depth {
+            return pts.len() as f64 + 1.0;
+        }
+        let mut los = vec![0.0_f64; p];
+        let mut his = vec![0.0_f64; p];
+        let mut ranges = vec![0.0_f64; p];
+        for j in 0..p {
+            let qj: f64 = q[j];
+            let mut lo = qj;
+            let mut hi = qj;
+            for pt in &pts {
+                lo = lo.min(pt[j]);
+                hi = hi.max(pt[j]);
+            }
+            los[j] = lo;
+            his[j] = hi;
+            ranges[j] = (hi - lo).max(0.0);
+        }
+        let tot: f64 = ranges.iter().sum();
+        if tot < 1e-15 {
+            return pts.len() as f64 + 1.0;
+        }
+        let u = rng.uniform() * tot;
+        let mut acc = 0.0_f64;
+        let mut dim = 0usize;
+        for j in 0..p {
+            acc += ranges[j];
+            if u <= acc {
+                dim = j;
+                break;
+            }
+        }
+        let cut = rng.uniform_range(los[dim], his[dim]);
+        let qleft = q[dim] < cut;
+        let mut next = Vec::new();
+        let mut sibling = 0usize;
+        for pt in pts {
+            if pt[dim] < cut {
+                if qleft {
+                    next.push(pt);
+                } else {
+                    sibling += 1;
+                }
+            } else if qleft {
+                sibling += 1;
+            } else {
+                next.push(pt);
+            }
+        }
+        if sibling == next.len() + sibling && next.is_empty() {
+            return (sibling as f64) / (depth as f64 + 1.0);
+        }
+        if sibling > 0 && next.len() < sibling {
+            return (sibling as f64) / (depth as f64 + 1.0);
+        }
+        pts = next;
+        depth += 1;
+    }
+}
+
+/// Robust Random Cut Forest (Guha et al.): dimension sampled \(\propto\)
+/// range, score is collusive displacement.
+///
+/// Distinct from [`HalfSpaceTrees`] (uniform axis) and [`IForestAsd`]
+/// (isolation + ADWIN). Tree count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Rrcf {
+    /// Trees in the forest.
+    pub n_trees: usize,
+    /// Reservoir cap per tree.
+    pub max_size: usize,
+    /// Cut depth cap.
+    pub max_depth: usize,
+    reservoirs: Vec<Vec<Vec<f64>>>,
+    rng: Rng,
+    warmed: bool,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for Rrcf {
+    fn default() -> Self {
+        Self {
+            n_trees: 8,
+            max_size: 32,
+            max_depth: 8,
+            reservoirs: Vec::new(),
+            rng: Rng::new(17),
+            warmed: false,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl Rrcf {
+    /// RRCF with `n_trees` random-cut trees.
+    pub fn new(n_trees: usize) -> Self {
+        Self {
+            n_trees: n_trees.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for Rrcf {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 || x.nrows() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "empty"),
+            );
+        }
+        if self.reservoirs.len() != self.n_trees.max(1) {
+            self.reservoirs = vec![Vec::new(); self.n_trees.max(1)];
+        }
+        let cap = self.max_size.max(4);
+        let mut dsum = 0.0_f64;
+        for i in 0..x.nrows() {
+            let row: Vec<f64> = (0..x.ncols()).map(|j| x.get(i, j)).collect();
+            for res in &mut self.reservoirs {
+                if res.len() < cap {
+                    res.push(row.clone());
+                    dsum += 1.0;
+                } else {
+                    let k = self.rng.below(res.len());
+                    res[k] = row.clone();
+                    dsum += 1.0;
+                }
+            }
+        }
+        self.warmed = true;
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 4;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "Rrcf range-weighted cuts on {} rows; trees={}",
+            x.nrows(),
+            self.reservoirs.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "robust random cut forest step",
+                "dimension ∝ range; CoDisp; distinct from HalfSpaceTrees",
+                "previous reservoirs",
+                "updated reservoirs",
+            ),
+        )
+    }
+}
+
+impl Predict for Rrcf {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.warmed {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let mut rng = self.rng.clone();
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let row: Vec<f64> = (0..x.ncols()).map(|j| x.get(i, j)).collect();
+            let mut s = 0.0_f64;
+            let n = self.reservoirs.len().max(1) as f64;
+            for res in &self.reservoirs {
+                s += rrcf_codisp(res, &row, &mut rng, self.max_depth.max(1));
+            }
+            s / n
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47625,6 +48041,12 @@ mod tests {
         Wrmf::new(2)
             .partial_fit(&xui, Some(&y), &session)
             .expect("wrm");
+        LambdaRank::new(2)
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("lrank");
+        Rrcf::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("rrcf");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
