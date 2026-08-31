@@ -6875,6 +6875,18 @@ const INVENTORY: &[Algorithm] = &[
     a("hmm.KatoJonesHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
     a("hmm.NoncentralTHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
     a("hmm.HypoexponentialHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.SinhArcsinhHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BirnbaumSaundersHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.LindleyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.ExponentiatedExponentialHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.WrappedTHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.OnlineFa", "sklearn.decomposition.FactorAnalysis", "online"),
+    a("tslearn.cdist_edr", "tslearn.metrics.cdist", "timeseries"),
+    a("tslearn.cdist_adtw", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7510,6 +7522,14 @@ mod tests {
             "hmm.KatoJonesHmm",
             "hmm.NoncentralTHmm",
             "hmm.HypoexponentialHmm",
+            "hmm.SinhArcsinhHmm",
+            "hmm.BirnbaumSaundersHmm",
+            "hmm.LindleyHmm",
+            "hmm.ExponentiatedExponentialHmm",
+            "hmm.WrappedTHmm",
+            "online.OnlineFa",
+            "tslearn.cdist_edr",
+            "tslearn.cdist_adtw",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

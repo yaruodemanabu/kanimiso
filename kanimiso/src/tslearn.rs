@@ -462,6 +462,70 @@ pub fn cdist_hausdorff(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qual
     ctx.finish(out)
 }
 
+/// Pairwise edit distance on real sequences (tslearn `cdist` with EDR).
+///
+/// Series / pair counts are not identification `p`. `ε` is not identification
+/// `p`. Distinct from [`cdist_dtw`] (real cost) and [`cdist_lcss`] (similarity).
+pub fn cdist_edr(
+    a: &Matrix,
+    b: &Matrix,
+    eps: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let eps = if eps.is_finite() && eps >= 0.0 {
+        eps
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("cdist_edr ε={eps} is not a finite ≥0 match radius; using 0"))
+                .build(),
+        );
+        0.0
+    };
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        edr_raw(ai.as_slice(), bj.as_slice(), eps)
+    });
+    ctx.finish(out)
+}
+
+/// Pairwise Amerced DTW (tslearn `cdist` with ADTW).
+///
+/// Series / pair counts are not identification `p`. `ω` is not identification
+/// `p`. Distinct from [`cdist_dtw`] (`ω = 0`) and [`cdist_wdtw`].
+pub fn cdist_adtw(
+    a: &Matrix,
+    b: &Matrix,
+    omega: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let omega = if omega.is_finite() && omega >= 0.0 {
+        omega
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("cdist_adtw ω={omega} is not a finite ≥0 warp penalty; using 0"))
+                .build(),
+        );
+        0.0
+    };
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        adtw_raw(ai.as_slice(), bj.as_slice(), omega)
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -19819,6 +19883,16 @@ mod tests {
         let chd = cdist_hausdorff(&x, &x, &Session::new("ts", "chd")).unwrap().value;
         assert_eq!(chd.shape(), (8, 8));
         assert!(chd.get(0, 0).abs() < 1e-12);
+        let ced = cdist_edr(&x, &x, 0.1, &Session::new("ts", "cedr"))
+            .unwrap()
+            .value;
+        assert_eq!(ced.shape(), (8, 8));
+        assert!(ced.get(0, 0).abs() < 1e-12);
+        let cad = cdist_adtw(&x, &x, 0.1, &Session::new("ts", "cadtw"))
+            .unwrap()
+            .value;
+        assert_eq!(cad.shape(), (8, 8));
+        assert!(cad.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

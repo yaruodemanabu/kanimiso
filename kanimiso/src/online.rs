@@ -44215,6 +44215,191 @@ impl Transform for OnlineCca {
     }
 }
 
+/// Streaming one-pass factor analysis (Oja loadings + residual uniqueness).
+///
+/// Distinct from [`crate::decompose::FactorAnalysis`] (batch SVD / EM) and
+/// [`OnlinePca`] (no unique-variance \(\psi\)). Factor count is not
+/// identification `p` on a 1-row stream.
+#[derive(Clone, Debug)]
+pub struct OnlineFa {
+    /// Latent factors. Not identification `p` for a streaming update.
+    pub n_components: usize,
+    /// Base Oja step; effective rate is `lr / (n_seen + 1)`.
+    pub learning_rate: f64,
+    mean: Vector,
+    loadings: Vec<Vector>,
+    psi: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineFa {
+    fn default() -> Self {
+        Self {
+            n_components: 1,
+            learning_rate: 1.0,
+            mean: Vector::zeros(0),
+            loadings: Vec::new(),
+            psi: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineFa {
+    /// Track `n_components` factors with residual uniqueness.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components: n_components.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineFa {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        let k = self.n_components.max(1).min(p);
+        if !self.initialized {
+            self.mean = Vector::zeros(p);
+            self.psi = Vector::filled(p, 1.0);
+            self.loadings = (0..k)
+                .map(|c| {
+                    let mut w = Vector::zeros(p);
+                    w[c % p] = 1.0;
+                    w
+                })
+                .collect();
+            self.initialized = true;
+        } else if self.mean.len() != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self
+            .loadings
+            .as_slice()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Vector::zeros(p));
+        let lr0 = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            1.0
+        };
+        for i in 0..x.nrows() {
+            self.n_seen += 1;
+            let n = self.n_seen as f64;
+            for j in 0..p {
+                self.mean[j] += (x.get(i, j) - self.mean[j]) / n;
+            }
+            let mut residual = Vector::from_iter((0..p).map(|j| x.get(i, j) - self.mean[j]));
+            let lr = lr0 / n;
+            for c in 0..self.loadings.len() {
+                let y = self.loadings[c].dot(&residual);
+                for j in 0..p {
+                    self.loadings[c][j] += lr * y * residual[j];
+                }
+                for prev in 0..c {
+                    let proj = self.loadings[c].dot(&self.loadings[prev]);
+                    for j in 0..p {
+                        self.loadings[c][j] -= proj * self.loadings[prev][j];
+                    }
+                }
+                let nrm = self.loadings[c].norm();
+                if nrm > 1e-12 {
+                    for j in 0..p {
+                        self.loadings[c][j] /= nrm;
+                    }
+                }
+                let y2 = self.loadings[c].dot(&residual);
+                for j in 0..p {
+                    residual[j] -= y2 * self.loadings[c][j];
+                }
+            }
+            for j in 0..p {
+                self.psi[j] += (residual[j] * residual[j] - self.psi[j]) / n;
+                if self.psi[j] < 1e-6 {
+                    self.psi[j] = 1e-6;
+                }
+            }
+        }
+        self.updates += 1;
+        let after = self
+            .loadings
+            .as_slice()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Vector::zeros(p));
+        let delta = after.sub(&before);
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta.norm());
+        q.information_gain = Some(delta.norm().max(x.nrows() as f64));
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < (p as u64).saturating_add(2);
+        q.explanation = format!(
+            "OnlineFa residual-updated {k} factors on {} rows; ||Δλ0||={:.6e}",
+            x.nrows(),
+            delta.norm()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "streaming factor loadings",
+                "Oja Λ plus residual uniqueness; distinct from batch FA and OnlinePca",
+                "previous loadings",
+                "updated loadings",
+            ),
+        )
+    }
+}
+
+impl Transform for OnlineFa {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), self.n_components.max(1)));
+        }
+        let k = self.loadings.len();
+        let p = self.mean.len();
+        ctx.finish(Matrix::from_fn(x.nrows(), k, |i, c| {
+            let mut num = 0.0_f64;
+            let mut den = 1.0_f64;
+            for j in 0..x.ncols().min(p) {
+                let psi = self.psi[j].max(1e-6);
+                let z = x.get(i, j) - self.mean[j];
+                num += self.loadings[c][j] * z / psi;
+                den += self.loadings[c][j] * self.loadings[c][j] / psi;
+            }
+            num / den
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45004,6 +45189,9 @@ mod tests {
                 .partial_fit(&xcc, None, &session)
                 .expect("occa");
         }
+        OnlineFa::new(1)
+            .partial_fit(&x, None, &session)
+            .expect("ofa");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
