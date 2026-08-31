@@ -4855,6 +4855,74 @@ pub fn cdist_wave_hedges_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result
     ctx.finish(out)
 }
 
+
+
+fn kulczynski_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut num = 0.0_f64;
+    let mut den = 0.0_f64;
+    for i in 0..n {
+        let p = a[i].abs() / sa;
+        let q = b[i].abs() / sb;
+        num += (p - q).abs();
+        den += p.min(q);
+    }
+    if den < 1e-18 {
+        return 0.0;
+    }
+    num / den
+}
+
+/// Kulczynski distance after \(\ell_1\) normalisation.
+///
+/// Distinct from [`kulczynski_distance`] (raw coordinates, no renormalise).
+/// Identical series score 0.
+pub fn kulczynski_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("kulczynski_l1_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("kulczynski_l1_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("kulczynski_l1_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(kulczynski_l1_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise \(\ell_1\)-normalised Kulczynski distance.
+pub fn cdist_kulczynski_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        kulczynski_l1_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -23567,6 +23635,8 @@ mod tests {
         assert!(cl1.abs() < 1e-12, "clark_l1_distance={cl1}");
         let wh1 = wave_hedges_l1_distance(&a, &a, &Session::new("ts", "wh1")).unwrap().value;
         assert!(wh1.abs() < 1e-12, "wave_hedges_l1_distance={wh1}");
+        let kzl = kulczynski_l1_distance(&a, &a, &Session::new("ts", "kzl")).unwrap().value;
+        assert!(kzl.abs() < 1e-12, "kulczynski_l1_distance={kzl}");
     }
 
     #[test]
@@ -24864,6 +24934,11 @@ mod tests {
             .value;
         assert_eq!(cw1.shape(), (8, 8));
         assert!(cw1.get(0, 0).abs() < 1e-12);
+        let czl = cdist_kulczynski_l1(&x, &x, &Session::new("ts", "czl"))
+            .unwrap()
+            .value;
+        assert_eq!(czl.shape(), (8, 8));
+        assert!(czl.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

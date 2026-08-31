@@ -7982,6 +7982,19 @@ const INVENTORY: &[Algorithm] = &[
         "timeseries",
     ),
     a("tslearn.cdist_wave_hedges_l1", "tslearn.metrics.cdist", "timeseries"),
+    a("hmm.UnitLevyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaLevyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ExponentiatedLevyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.KumaraswamyLevyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.DiscreteLevyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.WindowRms", "river.anomaly.GaussianScorer", "online"),
+    a("online.HarmonicAnomaly", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.kulczynski_l1_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a("tslearn.cdist_kulczynski_l1", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -9036,6 +9049,15 @@ mod tests {
             "online.GeometricAnomaly",
             "tslearn.wave_hedges_l1_distance",
             "tslearn.cdist_wave_hedges_l1",
+            "hmm.UnitLevyHmm",
+            "hmm.BetaLevyHmm",
+            "hmm.ExponentiatedLevyHmm",
+            "hmm.KumaraswamyLevyHmm",
+            "hmm.DiscreteLevyHmm",
+            "online.WindowRms",
+            "online.HarmonicAnomaly",
+            "tslearn.kulczynski_l1_distance",
+            "tslearn.cdist_kulczynski_l1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
