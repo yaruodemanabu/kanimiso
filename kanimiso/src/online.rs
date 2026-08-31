@@ -47774,6 +47774,211 @@ impl Predict for AdaptiveXgboost {
     }
 }
 
+/// LambdaMART: MART stumps on user/item ids, gradients weighted by \(|\Delta\mathrm{NDCG}|\).
+///
+/// Distinct from [`LambdaRank`] (bilinear factors) and [`AdaptiveXgboost`]
+/// (squared residual, not ranking). Round count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct LambdaMart {
+    /// Boosting rounds.
+    pub n_rounds: usize,
+    /// Shrinkage.
+    pub learning_rate: f64,
+    trees: Vec<AxgbStump>,
+    rng: Rng,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for LambdaMart {
+    fn default() -> Self {
+        Self {
+            n_rounds: 4,
+            learning_rate: 0.1,
+            trees: Vec::new(),
+            rng: Rng::new(41),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl LambdaMart {
+    /// LambdaMART with `n_rounds` ranking stumps.
+    pub fn new(n_rounds: usize) -> Self {
+        Self {
+            n_rounds: n_rounds.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn score_ui(&self, u: f64, i: f64) -> f64 {
+        let row = [u, i];
+        let mut s = 0.0_f64;
+        for st in &self.trees {
+            s += axgb_stump_pred(st, &row);
+        }
+        s
+    }
+}
+
+impl PartialFit for LambdaMart {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("LambdaMart needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let lr = self.learning_rate.max(1e-6);
+        let mut by_user: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+        for r in 0..x.nrows().min(y.len()) {
+            if !y[r].is_finite() {
+                continue;
+            }
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            by_user.entry(u).or_default().push((i, y[r]));
+        }
+        let mut xs: Vec<Vec<f64>> = Vec::new();
+        let mut res: Vec<f64> = Vec::new();
+        let mut pairs = 0u64;
+        for (u, items) in &by_user {
+            if items.len() < 2 {
+                continue;
+            }
+            let scores: Vec<f64> = items
+                .iter()
+                .map(|&(i, _)| self.score_ui(*u as f64, i as f64))
+                .collect();
+            let mut order: Vec<usize> = (0..items.len()).collect();
+            order.sort_by(|&a, &b| {
+                scores[b]
+                    .partial_cmp(&scores[a])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let mut rank = vec![1.0_f64; items.len()];
+            for (r, &t) in order.iter().enumerate() {
+                rank[t] = (r + 1) as f64;
+            }
+            let mut rels: Vec<f64> = items.iter().map(|&(_, rel)| rel.max(0.0)).collect();
+            rels.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+            let mut idcg = 0.0_f64;
+            for (r, &g) in rels.iter().enumerate() {
+                idcg += (2.0_f64.powf(g.min(20.0)) - 1.0) / ((r + 2) as f64).log2();
+            }
+            let mut lam = vec![0.0_f64; items.len()];
+            for a in 0..items.len() {
+                for b in 0..items.len() {
+                    if items[a].1 <= items[b].1 {
+                        continue;
+                    }
+                    let w = lambdarank_pair_weight(
+                        items[a].1,
+                        items[b].1,
+                        rank[a],
+                        rank[b],
+                        idcg,
+                    );
+                    let pab = sigmoid(scores[a] - scores[b]);
+                    let g = (pab - 1.0) * w;
+                    lam[a] += g;
+                    lam[b] -= g;
+                    pairs += 1;
+                }
+            }
+            for (t, item) in items.iter().enumerate() {
+                xs.push(vec![*u as f64, item.0 as f64]);
+                res.push(-lam[t]);
+            }
+        }
+        let mut dsum = 0.0_f64;
+        if !xs.is_empty() {
+            let rounds = self.n_rounds.max(1);
+            for _ in 0..rounds {
+                let stump = axgb_fit_stump(&xs, &res, &mut self.rng);
+                for i in 0..xs.len() {
+                    let pred = axgb_stump_pred(&stump, &xs[i]);
+                    res[i] -= lr * pred;
+                    dsum += (lr * pred).abs();
+                }
+                self.trees.push(stump);
+            }
+            if self.trees.len() > 16 {
+                let drop = self.trees.len() - 16;
+                self.trees.drain(0..drop);
+            }
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        if pairs == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message("LambdaMart needs a comparable pair in the batch")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(pairs as f64);
+        q.still_identified = pairs > 0;
+        q.warmup = pairs == 0;
+        q.explanation = format!(
+            "LambdaMart pairs={pairs} trees={} ||Δ||₁={dsum:.4e}",
+            self.trees.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "LambdaMART |ΔNDCG| stump step",
+                "ranking MART on user/item ids; distinct from LambdaRank bilinear factors",
+                "pre-batch ensemble",
+                format!("pairs={pairs} dsum={dsum:.4e}"),
+            ),
+        )
+    }
+}
+
+impl Predict for LambdaMart {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("LambdaMart predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|r| {
+            self.score_ui(x.get(r, 0), x.get(r, 1))
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48629,6 +48834,9 @@ mod tests {
         AdaptiveXgboost::new(2)
             .partial_fit(&x, Some(&y), &session)
             .expect("axgb");
+        LambdaMart::new(2)
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("lmart");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

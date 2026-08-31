@@ -1267,6 +1267,128 @@ pub fn cdist_dtw_subsequence(
     ctx.finish(out)
 }
 
+fn lb_yi_raw(a: &[f64], b: &[f64]) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return f64::NAN;
+    }
+    let mut amin = a[0];
+    let mut amax = a[0];
+    for &v in a {
+        amin = amin.min(v);
+        amax = amax.max(v);
+    }
+    let mut bmin = b[0];
+    let mut bmax = b[0];
+    for &v in b {
+        bmin = bmin.min(v);
+        bmax = bmax.max(v);
+    }
+    (amax - bmax).abs() + (amin - bmin).abs()
+}
+
+/// LB_Yi (Yi–Jagadish–Faloutsos): \(|\max-\max|+|\min-\min|\).
+///
+/// Distinct from [`lb_kim`] (max of four endpoint/extrema terms).
+pub fn lb_yi(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("lb_yi.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("lb_yi.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("lb_yi on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(lb_yi_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise LB_Yi.
+pub fn cdist_lb_yi(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        lb_yi_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+fn itakura_ok(i: usize, j: usize, n: usize, m: usize) -> bool {
+    let ii = (i + 1) as f64;
+    let jj = (j + 1) as f64;
+    let nn = n.max(1) as f64;
+    let mm = m.max(1) as f64;
+    2.0 * ii * mm >= jj * nn && 2.0 * jj * nn >= ii * mm
+}
+
+fn itakura_dtw_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len();
+    let m = b.len();
+    if n == 0 || m == 0 {
+        return f64::NAN;
+    }
+    let inf = 1e300_f64;
+    let mut prev = vec![inf; m + 1];
+    let mut cur = vec![inf; m + 1];
+    prev[0] = 0.0;
+    for i in 1..=n {
+        cur[0] = inf;
+        for j in 1..=m {
+            if !itakura_ok(i - 1, j - 1, n, m) {
+                cur[j] = inf;
+                continue;
+            }
+            let cost = (a[i - 1] - b[j - 1]).abs();
+            cur[j] = cost + prev[j].min(cur[j - 1]).min(prev[j - 1]);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[m]
+}
+
+/// Itakura-parallelogram DTW (not a Sakoe–Chiba band).
+///
+/// Distinct from unconstrained [`dtw`] and multilevel [`fast_dtw`].
+pub fn itakura_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("itakura_dtw.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("itakura_dtw.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("itakura_dtw on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(itakura_dtw_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Itakura DTW.
+pub fn cdist_itakura_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        itakura_dtw_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -19865,6 +19987,10 @@ mod tests {
         assert!(fdw.abs() < 1e-12, "fast_dtw={fdw}");
         let dsub = dtw_subsequence(&a, &a, &Session::new("ts", "dsub")).unwrap().value;
         assert!(dsub.abs() < 1e-12, "dtw_subsequence={dsub}");
+        let lby = lb_yi(&a, &a, &Session::new("ts", "lby")).unwrap().value;
+        assert!(lby.abs() < 1e-12, "lb_yi={lby}");
+        let itk = itakura_dtw(&a, &a, &Session::new("ts", "itk")).unwrap().value;
+        assert!(itk.abs() < 1e-12, "itakura_dtw={itk}");
     }
 
     #[test]
@@ -20877,6 +21003,16 @@ mod tests {
             .value;
         assert_eq!(cds.shape(), (8, 8));
         assert!(cds.get(0, 0).abs() < 1e-12);
+        let cly = cdist_lb_yi(&x, &x, &Session::new("ts", "cly"))
+            .unwrap()
+            .value;
+        assert_eq!(cly.shape(), (8, 8));
+        assert!(cly.get(0, 0).abs() < 1e-12);
+        let cit = cdist_itakura_dtw(&x, &x, &Session::new("ts", "cit"))
+            .unwrap()
+            .value;
+        assert_eq!(cit.shape(), (8, 8));
+        assert!(cit.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

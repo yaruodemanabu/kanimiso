@@ -7019,6 +7019,20 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.ZeroInflatedGeometricHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a("hmm.HurdleGeometricHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a("hmm.HurdleNegBinHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a("hmm.InverseLindleyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BilateralWeibullHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.LambdaMart", "river.reco.BPR", "online"),
+    a("tslearn.lb_yi", "tslearn.metrics.lb_keogh", "timeseries"),
+    a("tslearn.cdist_lb_yi", "tslearn.metrics.cdist", "timeseries"),
+    a("tslearn.itakura_dtw", "tslearn.metrics.dtw", "timeseries"),
+    a(
+        "tslearn.cdist_itakura_dtw",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7746,6 +7760,16 @@ mod tests {
             "tslearn.cdist_fast_dtw",
             "tslearn.dtw_subsequence",
             "tslearn.cdist_dtw_subsequence",
+            "hmm.ZeroInflatedGeometricHmm",
+            "hmm.HurdleGeometricHmm",
+            "hmm.HurdleNegBinHmm",
+            "hmm.InverseLindleyHmm",
+            "hmm.BilateralWeibullHmm",
+            "online.LambdaMart",
+            "tslearn.lb_yi",
+            "tslearn.cdist_lb_yi",
+            "tslearn.itakura_dtw",
+            "tslearn.cdist_itakura_dtw",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
