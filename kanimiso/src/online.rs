@@ -46789,11 +46789,11 @@ fn lambdarank_pair_weight(rel_a: f64, rel_b: f64, rank_a: f64, rank_b: f64, idcg
     if idcg <= 1e-12 {
         return 1.0;
     }
-    let ga = 2.0_f64.powf(rel_a.max(0.0).min(20.0)) - 1.0;
-    let gb = 2.0_f64.powf(rel_b.max(0.0).min(20.0)) - 1.0;
+    let gain_a = 2.0_f64.powf(rel_a.max(0.0).min(20.0)) - 1.0;
+    let gain_b = 2.0_f64.powf(rel_b.max(0.0).min(20.0)) - 1.0;
     let da = 1.0 / (rank_a + 1.0).log2().max(1e-6);
     let db = 1.0 / (rank_b + 1.0).log2().max(1e-6);
-    ((ga - gb).abs() * (da - db).abs() / idcg).max(1e-6)
+    ((gain_a - gain_b).abs() * (da - db).abs() / idcg).max(1e-6)
 }
 
 /// LambdaRank: RankNet logistic pairs weighted by \(|\Delta\mathrm{NDCG}|\).
