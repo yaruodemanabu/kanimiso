@@ -106292,6 +106292,1176 @@ let mut n_skip = 0usize;
     }
 }
 
+
+fn mo_gompertz_cdf(y: f64, eta: f64, c: f64, tilt: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || eta <= 0.0 || c <= 0.0 || tilt <= 0.0 || tilt >= 1.0 {
+        return 0.0;
+    }
+    let ey = eta * y;
+    if !ey.is_finite() || ey > 20.0 {
+        return 1.0 - 1e-15;
+    }
+    let h = c * (ey.exp() - 1.0);
+    if !h.is_finite() || h > 40.0 {
+        return 1.0 - 1e-15;
+    }
+    let s0 = (-h).exp();
+    if !s0.is_finite() {
+        return 1.0 - 1e-15;
+    }
+    let den = 1.0 - (1.0 - tilt) * s0;
+    if den <= 1e-15 {
+        return 1.0 - 1e-15;
+    }
+    ((1.0 - s0) / den).clamp(0.0, 1.0 - 1e-15)
+}
+
+fn log_unit_mog(y: f64, eta: f64, c: f64, tilt: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || y >= 1.0 || eta <= 0.0 || c <= 0.0 || tilt <= 0.0 || tilt >= 1.0
+    {
+        return f64::NEG_INFINITY;
+    }
+    log_mo_gompertz(y / (1.0 - y), eta, c, tilt) - 2.0 * (1.0 - y).ln()
+}
+
+fn log_beta_mog(y: f64, eta: f64, c: f64, tilt: f64, alpha: f64, beta: f64) -> f64 {
+    if !y.is_finite()
+        || y <= 0.0
+        || eta <= 0.0
+        || c <= 0.0
+        || tilt <= 0.0
+        || tilt >= 1.0
+        || alpha <= 0.0
+        || beta <= 0.0
+    {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = mo_gompertz_cdf(y, eta, c, tilt);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let surv = (1.0 - cdf).max(1e-15);
+    log_mo_gompertz(y, eta, c, tilt) + (alpha - 1.0) * cdf.ln() + (beta - 1.0) * surv.ln()
+        - ln_beta(alpha, beta)
+}
+
+fn log_exp_mog(y: f64, eta: f64, c: f64, tilt: f64, power: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || eta <= 0.0 || c <= 0.0 || tilt <= 0.0 || tilt >= 1.0 || power <= 0.0
+    {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = mo_gompertz_cdf(y, eta, c, tilt);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    power.ln() + log_mo_gompertz(y, eta, c, tilt) + (power - 1.0) * cdf.ln()
+}
+
+fn log_kuma_mog(y: f64, eta: f64, c: f64, tilt: f64, alpha: f64, beta: f64) -> f64 {
+    if !y.is_finite()
+        || y <= 0.0
+        || eta <= 0.0
+        || c <= 0.0
+        || tilt <= 0.0
+        || tilt >= 1.0
+        || alpha <= 0.0
+        || beta <= 0.0
+    {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = mo_gompertz_cdf(y, eta, c, tilt);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let fa = cdf.powf(alpha);
+    let one_m = 1.0 - fa;
+    if one_m <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    alpha.ln()
+        + beta.ln()
+        + log_mo_gompertz(y, eta, c, tilt)
+        + (alpha - 1.0) * cdf.ln()
+        + (beta - 1.0) * one_m.ln()
+}
+
+fn log_disc_mog(y: f64, eta: f64, c: f64, tilt: f64) -> f64 {
+    if !y.is_finite() || y < 1.0 || eta <= 0.0 || c <= 0.0 || tilt <= 0.0 || tilt >= 1.0 {
+        return f64::NEG_INFINITY;
+    }
+    let k = y.round().max(1.0);
+    let p = (mo_gompertz_cdf(k + 1.0, eta, c, tilt) - mo_gompertz_cdf(k, eta, c, tilt)).max(0.0);
+    if p <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    p.ln()
+}
+
+/// Unit Marshall–Olkin Gompertz HMM on $(0,1)$ (MO-Gompertz on $u=x/(1-x)$).
+///
+/// Level $c$ is free from $\mathbb{E}[e^{\eta U}-1]$; growth $\eta$ and tilt $\alpha\in(0,1)$ are pinned, not identification `p`. Distinct from [`MarshallOlkinGompertzHmm`] (half-line) and [`UnitGompertzHmm`].
+#[derive(Clone, Debug)]
+pub struct UnitMarshallOlkinGompertzHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for UnitMarshallOlkinGompertzHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl UnitMarshallOlkinGompertzHmm {
+    /// `k`-state UnitMarshallOlkinGompertzHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitMarshallOlkinGompertzHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted UnitMarshallOlkinGompertzHmm.
+#[derive(Clone, Debug)]
+pub struct FittedUnitMarshallOlkinGompertzHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Gompertz levels \(c_j\).
+    pub scale: Vector,
+    /// Pinned growth rates \(\eta_j\).
+    pub shape: Vector,
+    /// Pinned Marshall–Olkin tilts \(\alpha_j\in(0,1)\).
+    pub tilt: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedUnitMarshallOlkinGompertzHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_unit_mog(y, self.shape[j], self.scale[j], self.tilt[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedUnitMarshallOlkinGompertzHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for UnitMarshallOlkinGompertzHmm {
+    type Fitted = FittedUnitMarshallOlkinGompertzHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitMarshallOlkinGompertzHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.18 + 0.08 * j as f64));
+        let tilt = Vector::from_iter((0..k).map(|j| 0.30 + 0.18 * j as f64));
+let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0 || y >= 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "UnitMarshallOlkinGompertzHmm skipped {n_skip} observations outside (0,1)"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedUnitMarshallOlkinGompertzHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.60),
+                shape,
+                tilt,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.60 + 0.18 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedUnitMarshallOlkinGompertzHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                tilt: tilt.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wex = 0.0_f64;
+                let ej: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 || y >= 1.0 {
+                        continue;
+                    }
+                    let z = y / (1.0 - y);
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    let ez = ej * z;
+                    if !ez.is_finite() || ez > 20.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wex += fb.gamma[t][j] * (ez.exp() - 1.0).max(1e-8);
+                }
+                if wsum > 1e-12 && wex > 1e-12 {
+                    scale[j] = (wsum / wex).clamp(0.35, 1.10);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedUnitMarshallOlkinGompertzHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            tilt: tilt.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedUnitMarshallOlkinGompertzHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            tilt,
+            loglik,
+        })
+    }
+}
+
+/// Beta–Marshall–Olkin Gompertz HMM ($f F^{a-1}(1-F)^{b-1}/B(a,b)$, $a,b\neq 1$).
+///
+/// Extra shapes, growth $\eta$, and tilt $\alpha\in(0,1)$ are hyperparameters, not identification `p`. Distinct from [`KumaraswamyMarshallOlkinGompertzHmm`] and [`BetaGompertzHmm`].
+#[derive(Clone, Debug)]
+pub struct BetaMarshallOlkinGompertzHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for BetaMarshallOlkinGompertzHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl BetaMarshallOlkinGompertzHmm {
+    /// `k`-state BetaMarshallOlkinGompertzHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaMarshallOlkinGompertzHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted BetaMarshallOlkinGompertzHmm.
+#[derive(Clone, Debug)]
+pub struct FittedBetaMarshallOlkinGompertzHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Gompertz levels \(c_j\).
+    pub scale: Vector,
+    /// Pinned growth rates \(\eta_j\).
+    pub shape: Vector,
+    /// Pinned Marshall–Olkin tilts \(\alpha_j\in(0,1)\).
+    pub tilt: Vector,
+    /// First extra shapes \(a_j\neq 1\).
+    pub a: Vector,
+    /// Second extra shapes \(b_j\neq 1\).
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedBetaMarshallOlkinGompertzHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_beta_mog(y, self.shape[j], self.scale[j], self.tilt[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedBetaMarshallOlkinGompertzHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for BetaMarshallOlkinGompertzHmm {
+    type Fitted = FittedBetaMarshallOlkinGompertzHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaMarshallOlkinGompertzHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.08 + 0.04 * j as f64));
+        let tilt = Vector::from_iter((0..k).map(|j| 0.32 + 0.18 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.5 + 0.3 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 2.2 + 0.4 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "BetaMarshallOlkinGompertzHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedBetaMarshallOlkinGompertzHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.40),
+                shape,
+                tilt,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.40 + 0.15 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedBetaMarshallOlkinGompertzHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                tilt: tilt.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wex = 0.0_f64;
+                let ej: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    let ez = ej * z;
+                    if !ez.is_finite() || ez > 20.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wex += fb.gamma[t][j] * (ez.exp() - 1.0).max(1e-8);
+                }
+                if wsum > 1e-12 && wex > 1e-12 {
+                    scale[j] = (wsum / wex).clamp(0.15, 0.85);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedBetaMarshallOlkinGompertzHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            tilt: tilt.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedBetaMarshallOlkinGompertzHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            tilt,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Exponentiated Marshall–Olkin Gompertz HMM ($F^\alpha$, $\alpha\neq 1$).
+///
+/// Extra CDF power, growth $\eta$, and tilt are hyperparameters, not identification `p`. Distinct from [`KumaraswamyMarshallOlkinGompertzHmm`] and [`ExponentiatedGompertzHmm`].
+#[derive(Clone, Debug)]
+pub struct ExponentiatedMarshallOlkinGompertzHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for ExponentiatedMarshallOlkinGompertzHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl ExponentiatedMarshallOlkinGompertzHmm {
+    /// `k`-state ExponentiatedMarshallOlkinGompertzHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedMarshallOlkinGompertzHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted ExponentiatedMarshallOlkinGompertzHmm.
+#[derive(Clone, Debug)]
+pub struct FittedExponentiatedMarshallOlkinGompertzHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Gompertz levels \(c_j\).
+    pub scale: Vector,
+    /// Pinned growth rates \(\eta_j\).
+    pub shape: Vector,
+    /// Pinned Marshall–Olkin tilts \(\alpha_j\in(0,1)\).
+    pub tilt: Vector,
+    /// Extra CDF powers \(\alpha_j\neq 1\).
+    pub alpha: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedExponentiatedMarshallOlkinGompertzHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_exp_mog(y, self.shape[j], self.scale[j], self.tilt[j], self.alpha[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedExponentiatedMarshallOlkinGompertzHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for ExponentiatedMarshallOlkinGompertzHmm {
+    type Fitted = FittedExponentiatedMarshallOlkinGompertzHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedMarshallOlkinGompertzHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.08 + 0.04 * j as f64));
+        let tilt = Vector::from_iter((0..k).map(|j| 0.32 + 0.18 * j as f64));
+        let alpha = Vector::from_iter((0..k).map(|j| 1.6 + 0.3 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "ExponentiatedMarshallOlkinGompertzHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedExponentiatedMarshallOlkinGompertzHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.40),
+                shape,
+                tilt,
+                alpha,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.40 + 0.15 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedExponentiatedMarshallOlkinGompertzHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                tilt: tilt.clone(),
+                alpha: alpha.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wex = 0.0_f64;
+                let ej: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    let ez = ej * z;
+                    if !ez.is_finite() || ez > 20.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wex += fb.gamma[t][j] * (ez.exp() - 1.0).max(1e-8);
+                }
+                if wsum > 1e-12 && wex > 1e-12 {
+                    scale[j] = (wsum / wex).clamp(0.15, 0.85);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedExponentiatedMarshallOlkinGompertzHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            tilt: tilt.clone(),
+                alpha: alpha.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedExponentiatedMarshallOlkinGompertzHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            tilt,
+            alpha,
+            loglik,
+        })
+    }
+}
+
+/// Kumaraswamy–Marshall–Olkin Gompertz HMM ($ab f F^{a-1}(1-F^a)^{b-1}$, $a,b\neq 1$).
+///
+/// Extra shapes, growth $\eta$, and tilt are hyperparameters, not identification `p`. Distinct from [`BetaMarshallOlkinGompertzHmm`] and [`KumaraswamyGompertzHmm`].
+#[derive(Clone, Debug)]
+pub struct KumaraswamyMarshallOlkinGompertzHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for KumaraswamyMarshallOlkinGompertzHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl KumaraswamyMarshallOlkinGompertzHmm {
+    /// `k`-state KumaraswamyMarshallOlkinGompertzHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyMarshallOlkinGompertzHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted KumaraswamyMarshallOlkinGompertzHmm.
+#[derive(Clone, Debug)]
+pub struct FittedKumaraswamyMarshallOlkinGompertzHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Gompertz levels \(c_j\).
+    pub scale: Vector,
+    /// Pinned growth rates \(\eta_j\).
+    pub shape: Vector,
+    /// Pinned Marshall–Olkin tilts \(\alpha_j\in(0,1)\).
+    pub tilt: Vector,
+    /// First extra shapes \(a_j\neq 1\).
+    pub a: Vector,
+    /// Second extra shapes \(b_j\neq 1\).
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedKumaraswamyMarshallOlkinGompertzHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_kuma_mog(y, self.shape[j], self.scale[j], self.tilt[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedKumaraswamyMarshallOlkinGompertzHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for KumaraswamyMarshallOlkinGompertzHmm {
+    type Fitted = FittedKumaraswamyMarshallOlkinGompertzHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyMarshallOlkinGompertzHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.08 + 0.04 * j as f64));
+        let tilt = Vector::from_iter((0..k).map(|j| 0.32 + 0.18 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.4 + 0.25 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 1.8 + 0.3 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "KumaraswamyMarshallOlkinGompertzHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedKumaraswamyMarshallOlkinGompertzHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.40),
+                shape,
+                tilt,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.40 + 0.15 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedKumaraswamyMarshallOlkinGompertzHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                tilt: tilt.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wex = 0.0_f64;
+                let ej: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    let ez = ej * z;
+                    if !ez.is_finite() || ez > 20.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wex += fb.gamma[t][j] * (ez.exp() - 1.0).max(1e-8);
+                }
+                if wsum > 1e-12 && wex > 1e-12 {
+                    scale[j] = (wsum / wex).clamp(0.15, 0.85);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedKumaraswamyMarshallOlkinGompertzHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            tilt: tilt.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedKumaraswamyMarshallOlkinGompertzHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            tilt,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Discrete Marshall–Olkin Gompertz HMM ($P(K=k)=F(k+1)-F(k)$ on $\{1,2,\ldots\}$).
+///
+/// Level $c$ is free from $\mathbb{E}[e^{\eta K}-1]$; growth $\eta$ and tilt $\alpha\in(0,1)$ are pinned, not identification `p`. Distinct from [`MarshallOlkinGompertzHmm`] (continuous) and [`DiscreteGompertzHmm`].
+#[derive(Clone, Debug)]
+pub struct DiscreteMarshallOlkinGompertzHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for DiscreteMarshallOlkinGompertzHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl DiscreteMarshallOlkinGompertzHmm {
+    /// `k`-state DiscreteMarshallOlkinGompertzHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteMarshallOlkinGompertzHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted DiscreteMarshallOlkinGompertzHmm.
+#[derive(Clone, Debug)]
+pub struct FittedDiscreteMarshallOlkinGompertzHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Gompertz levels \(c_j\).
+    pub scale: Vector,
+    /// Pinned growth rates \(\eta_j\).
+    pub shape: Vector,
+    /// Pinned Marshall–Olkin tilts \(\alpha_j\in(0,1)\).
+    pub tilt: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedDiscreteMarshallOlkinGompertzHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_disc_mog(y, self.shape[j], self.scale[j], self.tilt[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedDiscreteMarshallOlkinGompertzHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for DiscreteMarshallOlkinGompertzHmm {
+    type Fitted = FittedDiscreteMarshallOlkinGompertzHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteMarshallOlkinGompertzHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.10 + 0.05 * j as f64));
+        let tilt = Vector::from_iter((0..k).map(|j| 0.32 + 0.18 * j as f64));
+let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y < 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "DiscreteMarshallOlkinGompertzHmm skipped {n_skip} observations below 1"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedDiscreteMarshallOlkinGompertzHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.45),
+                shape,
+                tilt,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.45 + 0.15 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedDiscreteMarshallOlkinGompertzHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                tilt: tilt.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wex = 0.0_f64;
+                let ej: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y < 1.0 {
+                        continue;
+                    }
+                    let z = y.round().max(1.0);
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    let ez = ej * z;
+                    if !ez.is_finite() || ez > 20.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wex += fb.gamma[t][j] * (ez.exp() - 1.0).max(1e-8);
+                }
+                if wsum > 1e-12 && wex > 1e-12 {
+                    scale[j] = (wsum / wex).clamp(0.20, 0.90);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedDiscreteMarshallOlkinGompertzHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            tilt: tilt.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedDiscreteMarshallOlkinGompertzHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            tilt,
+            loglik,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108276,6 +109446,26 @@ mod tests {
             .expect("kml");
         assert_eq!(kml.value.labels.len(), 80);
         assert!(kml.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let umg = UnitMarshallOlkinGompertzHmm::new(2)
+            .fit(&betx, &Session::new("umg", "fit"))
+            .expect("umg");
+        assert_eq!(umg.value.labels.len(), 80);
+        assert!(umg.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let bmg = BetaMarshallOlkinGompertzHmm::new(2)
+            .fit(&xpos, &Session::new("bmg", "fit"))
+            .expect("bmg");
+        assert_eq!(bmg.value.labels.len(), 80);
+        assert!(bmg.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let emg = ExponentiatedMarshallOlkinGompertzHmm::new(2)
+            .fit(&xpos, &Session::new("emg", "fit"))
+            .expect("emg");
+        assert_eq!(emg.value.labels.len(), 80);
+        assert!(emg.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let kmg = KumaraswamyMarshallOlkinGompertzHmm::new(2)
+            .fit(&xpos, &Session::new("kmg", "fit"))
+            .expect("kmg");
+        assert_eq!(kmg.value.labels.len(), 80);
+        assert!(kmg.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
@@ -108937,6 +110127,11 @@ mod tests {
             .expect("dol");
         assert_eq!(dol.value.labels.len(), 40);
         assert!(dol.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let dmg = DiscreteMarshallOlkinGompertzHmm::new(2)
+            .fit(&x, &Session::new("dmg", "fit"))
+            .expect("dmg");
+        assert_eq!(dmg.value.labels.len(), 40);
+        assert!(dmg.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
     }
 
     #[test]
