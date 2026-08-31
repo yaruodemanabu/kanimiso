@@ -2909,6 +2909,124 @@ pub fn cdist_jensen_shannon(a: &Matrix, b: &Matrix, session: &Session) -> Result
     ctx.finish(out)
 }
 
+fn bhattacharyya_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut bc = 0.0_f64;
+    for i in 0..n {
+        bc += ((a[i].abs() / sa) * (b[i].abs() / sb)).sqrt();
+    }
+    if bc >= 1.0 {
+        0.0
+    } else if bc <= 1e-18 {
+        20.0
+    } else {
+        -bc.ln()
+    }
+}
+
+fn hassanat_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let lo = a[i].abs().min(b[i].abs());
+        let hi = a[i].abs().max(b[i].abs());
+        if hi < 1e-18 {
+            continue;
+        }
+        s += 1.0 - (1.0 + lo) / (1.0 + hi);
+    }
+    s
+}
+
+/// Bhattacharyya distance \(-\log\sum\sqrt{p_i q_i}\) after \(\ell_1\) norm.
+///
+/// Distinct from [`hellinger_distance`] (\(\sqrt{1-\mathrm{BC}}\)) and
+/// [`jensen_shannon_distance`]. Identical series score 0.
+pub fn bhattacharyya_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("bhattacharyya_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("bhattacharyya_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("bhattacharyya_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(bhattacharyya_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Bhattacharyya distance.
+pub fn cdist_bhattacharyya(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        bhattacharyya_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+/// Hassanat distance \(\sum(1-(1+\min|a_i|,|b_i|)/(1+\max|a_i|,|b_i|))\).
+///
+/// Distinct from [`ruzicka_distance`] and [`wave_hedges_distance`]. Identical
+/// series score 0.
+pub fn hassanat_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("hassanat_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("hassanat_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("hassanat_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(hassanat_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Hassanat distance.
+pub fn cdist_hassanat(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        hassanat_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -21563,6 +21681,10 @@ mod tests {
         assert!(hel.abs() < 1e-12, "hellinger_distance={hel}");
         let jsd = jensen_shannon_distance(&a, &a, &Session::new("ts", "jsd")).unwrap().value;
         assert!(jsd.abs() < 1e-12, "jensen_shannon_distance={jsd}");
+        let bha = bhattacharyya_distance(&a, &a, &Session::new("ts", "bha")).unwrap().value;
+        assert!(bha.abs() < 1e-12, "bhattacharyya_distance={bha}");
+        let has = hassanat_distance(&a, &a, &Session::new("ts", "has")).unwrap().value;
+        assert!(has.abs() < 1e-12, "hassanat_distance={has}");
     }
 
     #[test]
@@ -22715,6 +22837,16 @@ mod tests {
             .value;
         assert_eq!(cjs.shape(), (8, 8));
         assert!(cjs.get(0, 0).abs() < 1e-12);
+        let cbh = cdist_bhattacharyya(&x, &x, &Session::new("ts", "cbh"))
+            .unwrap()
+            .value;
+        assert_eq!(cbh.shape(), (8, 8));
+        assert!(cbh.get(0, 0).abs() < 1e-12);
+        let csa = cdist_hassanat(&x, &x, &Session::new("ts", "csa"))
+            .unwrap()
+            .value;
+        assert_eq!(csa.shape(), (8, 8));
+        assert!(csa.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

@@ -7405,6 +7405,45 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.UnitWeibullHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaChenHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.KumaraswamyLindleyHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.DiscreteInverseRayleighHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.DiscreteInverseExponentialHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("online.RankBoost", "river.reco.FM", "online"),
+    a("online.Loci", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.bhattacharyya_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_bhattacharyya",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.hassanat_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_hassanat",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8282,6 +8321,17 @@ mod tests {
             "tslearn.cdist_hellinger",
             "tslearn.jensen_shannon_distance",
             "tslearn.cdist_jensen_shannon",
+            "hmm.UnitWeibullHmm",
+            "hmm.BetaChenHmm",
+            "hmm.KumaraswamyLindleyHmm",
+            "hmm.DiscreteInverseRayleighHmm",
+            "hmm.DiscreteInverseExponentialHmm",
+            "online.RankBoost",
+            "online.Loci",
+            "tslearn.bhattacharyya_distance",
+            "tslearn.cdist_bhattacharyya",
+            "tslearn.hassanat_distance",
+            "tslearn.cdist_hassanat",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

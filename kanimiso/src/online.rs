@@ -47634,6 +47634,196 @@ impl Predict for CoordinateAscent {
     }
 }
 
+/// RankBoost (Freund et al.): pair-weighted exponential ranking.
+///
+/// Distinct from [`AdaRank`] (query-level weights) and [`RankSvm`] (hinge).
+/// Rank is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RankBoost {
+    /// Latent rank.
+    pub n_factors: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    /// \(\ell_2\) on factors.
+    pub l2: f64,
+    pu: Vec<Vec<f64>>,
+    qi: Vec<Vec<f64>>,
+    pair_w: HashMap<(usize, usize, usize), f64>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RankBoost {
+    fn default() -> Self {
+        Self {
+            n_factors: 4,
+            learning_rate: 0.05,
+            l2: 0.01,
+            pu: Vec::new(),
+            qi: Vec::new(),
+            pair_w: HashMap::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RankBoost {
+    /// RankBoost with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn grow(&mut self, u: usize, i: usize) {
+        let k = self.n_factors.max(1);
+        while self.pu.len() <= u {
+            self.pu.push(vec![0.01; k]);
+        }
+        while self.qi.len() <= i {
+            self.qi.push(vec![0.01; k]);
+        }
+    }
+
+    fn score(&self, u: usize, i: usize) -> f64 {
+        let mut s = 0.0_f64;
+        if u < self.pu.len() && i < self.qi.len() {
+            for f in 0..self.n_factors.min(self.pu[u].len()).min(self.qi[i].len()) {
+                s += self.pu[u][f] * self.qi[i][f];
+            }
+        }
+        s
+    }
+}
+
+impl PartialFit for RankBoost {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("RankBoost needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let lr = self.learning_rate.max(1e-6);
+        let l2 = self.l2.max(0.0);
+        let mut by_user: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+        for r in 0..x.nrows().min(y.len()) {
+            if !y[r].is_finite() {
+                continue;
+            }
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.grow(u, i);
+            by_user.entry(u).or_default().push((i, y[r]));
+        }
+        let mut dsum = 0.0_f64;
+        let mut pairs = 0u64;
+        for (u, items) in by_user {
+            if items.len() < 2 {
+                continue;
+            }
+            for a in 0..items.len() {
+                for b in 0..items.len() {
+                    if items[a].1 <= items[b].1 {
+                        continue;
+                    }
+                    let ia = items[a].0;
+                    let ib = items[b].0;
+                    let key = (u, ia, ib);
+                    let margin = self.score(u, ia) - self.score(u, ib);
+                    let w = self.pair_w.entry(key).or_insert(1.0);
+                    *w = (*w * (-margin).exp().min(8.0)).clamp(1e-3, 40.0);
+                    let pw = *w;
+                    let errg = -pw * (-margin).exp().min(8.0);
+                    for f in 0..self.n_factors {
+                        let pua = self.pu[u][f];
+                        let qia = self.qi[ia][f];
+                        let qib = self.qi[ib][f];
+                        self.pu[u][f] -= lr * (errg * (qia - qib) + l2 * pua);
+                        self.qi[ia][f] -= lr * (errg * pua + l2 * qia);
+                        self.qi[ib][f] -= lr * (-errg * pua + l2 * qib);
+                        dsum += (self.pu[u][f] - pua).abs()
+                            + (self.qi[ia][f] - qia).abs()
+                            + (self.qi[ib][f] - qib).abs();
+                    }
+                    pairs += 1;
+                }
+            }
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        if pairs == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message("RankBoost needs a comparable pair in the batch")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(pairs as f64);
+        q.still_identified = pairs > 0;
+        q.warmup = pairs == 0;
+        q.explanation = format!(
+            "RankBoost pairs={pairs} ||Δ||₁={dsum:.4e} weights={}",
+            self.pair_w.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "RankBoost pair-weighted step",
+                "exponential pair weights; not AdaRank query weights or RankSvm hinge",
+                "pre-batch factors",
+                format!("pairs={pairs} dsum={dsum:.4e}"),
+            ),
+        )
+    }
+}
+
+impl Predict for RankBoost {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("RankBoost predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.score(u, i)
+        })))
+    }
+}
+
 /// RankNet pairwise ranking (logistic loss on \(s_i-s_j\) for \(y_i>y_j\)).
 ///
 /// Distinct from [`ListNet`] (listwise softmax CE), [`Bpr`] (one unweighted
@@ -52111,6 +52301,201 @@ impl Predict for Sod {
     }
 }
 
+/// LOCI multi-granularity deviation factor (Papadimitriou et al.).
+///
+/// Score is \(1-n_r(x)/\overline{n_r}(\mathcal N_r(x))\). Distinct from
+/// [`Sod`] (subspace 1-NN), [`Inne`], and [`Abod`].
+#[derive(Clone, Debug)]
+pub struct Loci {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for Loci {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl Loci {
+    /// Empty LOCI detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn dist_row(&self, x: &Matrix, i: usize, row: &[f64]) -> f64 {
+        let p = self.ncols.min(x.ncols()).min(row.len());
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return f64::INFINITY;
+            }
+            let d = z - row[j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn dist_stored(&self, a: usize, b: usize) -> f64 {
+        let p = self.ncols;
+        if a >= self.rows.len() || b >= self.rows.len() {
+            return f64::INFINITY;
+        }
+        if self.rows[a].len() < p || self.rows[b].len() < p {
+            return f64::INFINITY;
+        }
+        let mut s = 0.0_f64;
+        for j in 0..p {
+            let d = self.rows[a][j] - self.rows[b][j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+
+    fn count_ball(&self, idx: usize, r: f64) -> f64 {
+        let mut n = 0.0_f64;
+        for t in 0..self.rows.len() {
+            if self.dist_stored(idx, t) <= r {
+                n += 1.0;
+            }
+        }
+        n
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 3 || self.ncols == 0 {
+            return 0.0;
+        }
+        let mut ds: Vec<f64> = self
+            .rows
+            .iter()
+            .map(|row| self.dist_row(x, i, row))
+            .filter(|d| d.is_finite())
+            .collect();
+        if ds.len() < 2 {
+            return 0.0;
+        }
+        ds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mid = ds.len() / 2;
+        let r = ds[mid].max(1e-6);
+        let mut nq = 0.0_f64;
+        let mut neigh: Vec<usize> = Vec::new();
+        for (t, row) in self.rows.iter().enumerate() {
+            let d = self.dist_row(x, i, row);
+            if d <= r {
+                nq += 1.0;
+                neigh.push(t);
+            }
+        }
+        if neigh.is_empty() {
+            return 0.0;
+        }
+        let mut mean_n = 0.0_f64;
+        for &t in &neigh {
+            mean_n += self.count_ball(t, r);
+        }
+        mean_n /= neigh.len() as f64;
+        if mean_n < 1e-8 {
+            0.0
+        } else {
+            (1.0 - nq / mean_n).max(0.0)
+        }
+    }
+}
+
+impl PartialFit for Loci {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 3;
+        q.warmup = self.rows.len() < 3;
+        q.explanation = format!("LOCI reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "MDEF scores",
+                "LOCI is 1-n_r/mean n_r of neighbours; not SOD/INNE/ABOD",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for Loci {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52963,6 +53348,9 @@ mod tests {
         CoordinateAscent::new(2)
             .partial_fit(&xui, Some(&y), &session)
             .expect("cas");
+        RankBoost::new(2)
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("rkb");
         RankNet::new(2)
             .partial_fit(&xui, Some(&y), &session)
             .expect("rnet");
@@ -53041,6 +53429,9 @@ mod tests {
         Sod::new()
             .partial_fit(&x, None, &session)
             .expect("sod");
+        Loci::new()
+            .partial_fit(&x, None, &session)
+            .expect("lci");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
