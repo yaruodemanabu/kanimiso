@@ -2787,6 +2787,128 @@ pub fn cdist_ruzicka(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualif
     ctx.finish(out)
 }
 
+fn hellinger_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let da = a[i].abs().sqrt();
+        let db = b[i].abs().sqrt();
+        let d = da - db;
+        s += d * d;
+    }
+    (0.5 * s).sqrt()
+}
+
+fn jensen_shannon_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut js = 0.0_f64;
+    for i in 0..n {
+        let p = a[i].abs() / sa;
+        let q = b[i].abs() / sb;
+        let m = 0.5 * (p + q);
+        if p > 1e-18 && m > 1e-18 {
+            js += 0.5 * p * (p / m).ln();
+        }
+        if q > 1e-18 && m > 1e-18 {
+            js += 0.5 * q * (q / m).ln();
+        }
+    }
+    js.max(0.0).sqrt()
+}
+
+/// Hellinger distance \(\sqrt{\tfrac12\sum(\sqrt{|a_i|}-\sqrt{|b_i|})^2}\).
+///
+/// Distinct from [`cosine_distance`] and [`squared_euclidean_distance`].
+/// Identical series score 0.
+pub fn hellinger_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("hellinger_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("hellinger_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("hellinger_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(hellinger_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Hellinger distance.
+pub fn cdist_hellinger(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        hellinger_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+/// Jensen–Shannon distance \(\sqrt{\mathrm{JS}(|a|,|b|)}\) after \(\ell_1\) normalisation.
+///
+/// Distinct from [`hellinger_distance`] and [`cosine_distance`]. Identical
+/// series score 0.
+pub fn jensen_shannon_distance(
+    a: &Vector,
+    b: &Vector,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("jensen_shannon_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("jensen_shannon_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("jensen_shannon_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(jensen_shannon_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Jensen–Shannon distance.
+pub fn cdist_jensen_shannon(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        jensen_shannon_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -21437,6 +21559,10 @@ mod tests {
         assert!(kul.abs() < 1e-12, "kulczynski_distance={kul}");
         let ruz = ruzicka_distance(&a, &a, &Session::new("ts", "ruz")).unwrap().value;
         assert!(ruz.abs() < 1e-12, "ruzicka_distance={ruz}");
+        let hel = hellinger_distance(&a, &a, &Session::new("ts", "hel")).unwrap().value;
+        assert!(hel.abs() < 1e-12, "hellinger_distance={hel}");
+        let jsd = jensen_shannon_distance(&a, &a, &Session::new("ts", "jsd")).unwrap().value;
+        assert!(jsd.abs() < 1e-12, "jensen_shannon_distance={jsd}");
     }
 
     #[test]
@@ -22579,6 +22705,16 @@ mod tests {
             .value;
         assert_eq!(cru.shape(), (8, 8));
         assert!(cru.get(0, 0).abs() < 1e-12);
+        let chl = cdist_hellinger(&x, &x, &Session::new("ts", "chl"))
+            .unwrap()
+            .value;
+        assert_eq!(chl.shape(), (8, 8));
+        assert!(chl.get(0, 0).abs() < 1e-12);
+        let cjs = cdist_jensen_shannon(&x, &x, &Session::new("ts", "cjs"))
+            .unwrap()
+            .value;
+        assert_eq!(cjs.shape(), (8, 8));
+        assert!(cjs.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

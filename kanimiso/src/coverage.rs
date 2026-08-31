@@ -7374,6 +7374,37 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.ToppLeoneHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.UnitGompertzHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.KumaraswamyChenHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.DiscreteMakehamHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.DiscreteInverseLindleyHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("online.CoordinateAscent", "river.reco.FM", "online"),
+    a("online.Sod", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.hellinger_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_hellinger",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.jensen_shannon_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_jensen_shannon",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8240,6 +8271,17 @@ mod tests {
             "tslearn.cdist_kulczynski",
             "tslearn.ruzicka_distance",
             "tslearn.cdist_ruzicka",
+            "hmm.ToppLeoneHmm",
+            "hmm.UnitGompertzHmm",
+            "hmm.KumaraswamyChenHmm",
+            "hmm.DiscreteMakehamHmm",
+            "hmm.DiscreteInverseLindleyHmm",
+            "online.CoordinateAscent",
+            "online.Sod",
+            "tslearn.hellinger_distance",
+            "tslearn.cdist_hellinger",
+            "tslearn.jensen_shannon_distance",
+            "tslearn.cdist_jensen_shannon",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
