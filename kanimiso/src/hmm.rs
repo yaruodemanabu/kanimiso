@@ -16901,6 +16901,1158 @@ impl FitUnsupervised for YuleSimonHmm {
     }
 }
 
+fn riemann_zeta(s: f64) -> f64 {
+    let s = s.max(1.05);
+    let mut acc = 0.0_f64;
+    for k in 1..=192 {
+        acc += (k as f64).powf(-s);
+    }
+    acc.max(1e-300)
+}
+
+fn log_zeta_emit(y: f64, s: f64, ln_zeta: f64) -> f64 {
+    if !y.is_finite() || y < 1.0 - 1e-9 || s <= 1.0 || !ln_zeta.is_finite() {
+        return f64::NEG_INFINITY;
+    }
+    let y = y.round().max(1.0);
+    -s * y.ln() - ln_zeta
+}
+
+fn log_lomax(y: f64, scale: f64, shape: f64) -> f64 {
+    if !y.is_finite() || y < 0.0 || scale <= 0.0 || shape <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    shape.ln() - scale.ln() - (shape + 1.0) * (1.0 + y / scale).ln()
+}
+
+fn log_half_normal(y: f64, sigma: f64) -> f64 {
+    if !y.is_finite() || y < 0.0 || sigma <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    0.5 * (2.0 / std::f64::consts::PI).ln() - sigma.ln() - (y * y) / (2.0 * sigma * sigma)
+}
+
+fn log_maxwell(y: f64, a: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || a <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    0.5 * (2.0 / std::f64::consts::PI).ln() + 2.0 * y.ln() - 3.0 * a.ln() - (y * y) / (2.0 * a * a)
+}
+
+fn log_beta_prime(y: f64, alpha: f64, beta: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || alpha <= 0.0 || beta <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    (alpha - 1.0) * y.ln() - (alpha + beta) * (1.0 + y).ln()
+        - crate::special::ln_gamma(alpha)
+        - crate::special::ln_gamma(beta)
+        + crate::special::ln_gamma(alpha + beta)
+}
+
+fn log_gompertz(y: f64, eta: f64, c: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || eta <= 0.0 || c <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let ey = (eta * y).exp();
+    if !ey.is_finite() {
+        return f64::NEG_INFINITY;
+    }
+    c.ln() + eta.ln() + eta * y - c * (ey - 1.0)
+}
+
+/// Zipf / zeta HMM on \(\{1,2,\ldots\}\).
+///
+/// Shape \(s>1\) is not identification `p`. Distinct from [`YuleSimonHmm`]
+/// (Beta tail) and [`LogarithmicHmm`] (log-series).
+#[derive(Clone, Debug)]
+pub struct ZetaHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for ZetaHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl ZetaHmm {
+    /// `k`-state zeta HMM.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedZetaHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted zeta / Zipf HMM.
+#[derive(Clone, Debug)]
+pub struct FittedZetaHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Exponents \(s_j>1\).
+    pub s: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedZetaHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.s.len();
+        let ln_z: Vec<f64> = (0..ns).map(|j| riemann_zeta(self.s[j]).ln()).collect();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_zeta_emit(y, self.s[j], ln_z[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedZetaHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for ZetaHmm {
+    type Fitted = FittedZetaHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedZetaHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        if t_len == 0 {
+            return ctx.finish(FittedZetaHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                s: Vector::filled(k, 2.0),
+                loglik: f64::NAN,
+            });
+        }
+        let mut s = Vector::from_iter((0..k).map(|j| 1.6 + 0.4 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedZetaHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                s: s.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wy = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y < 1.0 - 1e-9 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wy += fb.gamma[t][j] * y;
+                }
+                if wsum > 1e-12 {
+                    let m = (wy / wsum).max(1.02);
+                    s[j] = (1.0 + 1.0 / (m - 1.0)).clamp(1.15, 12.0);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedZetaHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            s: s.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedZetaHmm {
+            labels,
+            start,
+            trans,
+            s,
+            loglik,
+        })
+    }
+}
+
+/// Lomax HMM (Pareto Type II on the non-negative line).
+///
+/// Shapes are not identification `p`. Distinct from [`ParetoHmm`] (Type I,
+/// hard \(x_m\)) and [`DagumHmm`] (two-shape inverse Burr).
+#[derive(Clone, Debug)]
+pub struct LomaxHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for LomaxHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl LomaxHmm {
+    /// `k`-state Lomax HMM.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedLomaxHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted Lomax HMM.
+#[derive(Clone, Debug)]
+pub struct FittedLomaxHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Scales \(\theta_j\).
+    pub scale: Vector,
+    /// Shapes \(\alpha_j\).
+    pub shape: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedLomaxHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_lomax(y, self.scale[j], self.shape[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedLomaxHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for LomaxHmm {
+    type Fitted = FittedLomaxHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedLomaxHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        if t_len == 0 {
+            return ctx.finish(FittedLomaxHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 1.0),
+                shape: Vector::filled(k, 2.0),
+                loglik: f64::NAN,
+            });
+        }
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            if x.get(i, 0).is_finite() && x.get(i, 0) < 0.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!("LomaxHmm skipped {n_skip} negative observations"))
+                    .build(),
+            );
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 1.0 + 0.5 * j as f64));
+        let mut shape = Vector::from_iter((0..k).map(|j| 2.0 + 0.5 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedLomaxHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wy = 0.0_f64;
+                let mut wy2 = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y < 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wy += fb.gamma[t][j] * y;
+                    wy2 += fb.gamma[t][j] * y * y;
+                }
+                if wsum > 1e-12 {
+                    let m = (wy / wsum).max(1e-4);
+                    let m2 = (wy2 / wsum).max(m * m);
+                    let var = (m2 - m * m).max(1e-8);
+                    let cv2 = var / (m * m).max(1e-8);
+                    let alph = if cv2 > 1.05 {
+                        (2.0 * cv2 / (cv2 - 1.0)).clamp(1.2, 40.0)
+                    } else {
+                        3.0
+                    };
+                    shape[j] = alph;
+                    scale[j] = (m * (alph - 1.0)).max(1e-4);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedLomaxHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedLomaxHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            loglik,
+        })
+    }
+}
+
+/// Half-normal HMM on the non-negative line.
+///
+/// State count is not identification `p`. Distinct from [`HalfCauchyHmm`]
+/// (Cauchy tails) and [`RayleighHmm`] (Weibull / \(y\)-weighted Gaussian).
+#[derive(Clone, Debug)]
+pub struct HalfNormalHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for HalfNormalHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl HalfNormalHmm {
+    /// `k`-state half-normal HMM.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedHalfNormalHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted half-normal HMM.
+#[derive(Clone, Debug)]
+pub struct FittedHalfNormalHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Scales \(\sigma_j\).
+    pub scale: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedHalfNormalHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_half_normal(y, self.scale[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedHalfNormalHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for HalfNormalHmm {
+    type Fitted = FittedHalfNormalHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedHalfNormalHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        if t_len == 0 {
+            return ctx.finish(FittedHalfNormalHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 1.0),
+                loglik: f64::NAN,
+            });
+        }
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            if x.get(i, 0).is_finite() && x.get(i, 0) < 0.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!("HalfNormalHmm skipped {n_skip} negative observations"))
+                    .build(),
+            );
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 1.0 + j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedHalfNormalHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wy2 = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y < 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wy2 += fb.gamma[t][j] * y * y;
+                }
+                if wsum > 1e-12 {
+                    scale[j] = (wy2 / wsum).max(COV_FLOOR).sqrt();
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedHalfNormalHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedHalfNormalHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            loglik,
+        })
+    }
+}
+
+/// Maxwell–Boltzmann HMM on the positive line.
+///
+/// Scale is not identification `p`. Distinct from [`RayleighHmm`] (\(y\) vs
+/// \(y^2\) weight) and [`HalfNormalHmm`] (no \(y^2\) prefactor).
+#[derive(Clone, Debug)]
+pub struct MaxwellHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for MaxwellHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl MaxwellHmm {
+    /// `k`-state Maxwell HMM.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedMaxwellHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted Maxwell–Boltzmann HMM.
+#[derive(Clone, Debug)]
+pub struct FittedMaxwellHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Scales \(a_j\).
+    pub scale: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedMaxwellHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_maxwell(y, self.scale[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedMaxwellHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for MaxwellHmm {
+    type Fitted = FittedMaxwellHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedMaxwellHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        if t_len == 0 {
+            return ctx.finish(FittedMaxwellHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 1.0),
+                loglik: f64::NAN,
+            });
+        }
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            if x.get(i, 0).is_finite() && x.get(i, 0) <= 0.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!("MaxwellHmm skipped {n_skip} non-positive observations"))
+                    .build(),
+            );
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 1.0 + 0.4 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedMaxwellHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wy2 = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wy2 += fb.gamma[t][j] * y * y;
+                }
+                if wsum > 1e-12 {
+                    scale[j] = (wy2 / (3.0 * wsum)).max(COV_FLOOR).sqrt();
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedMaxwellHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedMaxwellHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            loglik,
+        })
+    }
+}
+
+/// Beta-prime (inverted-beta) HMM on the positive line.
+///
+/// Shapes are not identification `p`. Distinct from [`BetaHmm`] (unit
+/// interval) and [`InverseGammaHmm`] (one shape).
+#[derive(Clone, Debug)]
+pub struct BetaPrimeHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for BetaPrimeHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl BetaPrimeHmm {
+    /// `k`-state beta-prime HMM.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedBetaPrimeHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted beta-prime HMM.
+#[derive(Clone, Debug)]
+pub struct FittedBetaPrimeHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// First shapes \(\alpha_j\).
+    pub alpha: Vector,
+    /// Second shapes \(\beta_j\).
+    pub beta: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedBetaPrimeHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.alpha.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_beta_prime(y, self.alpha[j], self.beta[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedBetaPrimeHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for BetaPrimeHmm {
+    type Fitted = FittedBetaPrimeHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaPrimeHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        if t_len == 0 {
+            return ctx.finish(FittedBetaPrimeHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                alpha: Vector::filled(k, 2.0),
+                beta: Vector::filled(k, 3.0),
+                loglik: f64::NAN,
+            });
+        }
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            if x.get(i, 0).is_finite() && x.get(i, 0) <= 0.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!("BetaPrimeHmm skipped {n_skip} non-positive observations"))
+                    .build(),
+            );
+        }
+        let mut alpha = Vector::from_iter((0..k).map(|j| 2.0 + j as f64));
+        let mut beta = Vector::filled(k, 3.0);
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedBetaPrimeHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                alpha: alpha.clone(),
+                beta: beta.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wy = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wy += fb.gamma[t][j] * y;
+                }
+                if wsum > 1e-12 {
+                    let m = (wy / wsum).max(1e-3);
+                    beta[j] = 3.0;
+                    alpha[j] = (m * (beta[j] - 1.0)).clamp(0.2, 40.0);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedBetaPrimeHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            alpha: alpha.clone(),
+            beta: beta.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedBetaPrimeHmm {
+            labels,
+            start,
+            trans,
+            alpha,
+            beta,
+            loglik,
+        })
+    }
+}
+
+/// Gompertz lifetime HMM on the positive line.
+///
+/// Growth \(\eta\) is not identification `p`. Distinct from [`GumbelHmm`]
+/// (unrestricted support) and [`WeibullHmm`] (power hazard).
+#[derive(Clone, Debug)]
+pub struct GompertzHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Growth rate. Not identification `p`.
+    pub eta: f64,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for GompertzHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            eta: 0.2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl GompertzHmm {
+    /// `k`-state Gompertz HMM.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGompertzHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted Gompertz HMM.
+#[derive(Clone, Debug)]
+pub struct FittedGompertzHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Growth rates \(\eta_j\).
+    pub eta: Vector,
+    /// Shapes \(c_j\).
+    pub c: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedGompertzHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.c.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_gompertz(y, self.eta[j], self.c[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedGompertzHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for GompertzHmm {
+    type Fitted = FittedGompertzHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedGompertzHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let eta0 = if self.eta.is_finite() && self.eta > 0.0 {
+            self.eta.clamp(0.01, 1.0)
+        } else {
+            0.2
+        };
+        if t_len == 0 {
+            return ctx.finish(FittedGompertzHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                eta: Vector::filled(k, eta0),
+                c: Vector::filled(k, 1.0),
+                loglik: f64::NAN,
+            });
+        }
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            if x.get(i, 0).is_finite() && x.get(i, 0) <= 0.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!("GompertzHmm skipped {n_skip} non-positive observations"))
+                    .build(),
+            );
+        }
+        let mut eta = Vector::filled(k, eta0);
+        let mut c = Vector::from_iter((0..k).map(|j| 0.8 + 0.3 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedGompertzHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                eta: eta.clone(),
+                c: c.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wex = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wex += fb.gamma[t][j] * ((eta[j] * y).exp() - 1.0).max(1e-8);
+                }
+                if wsum > 1e-12 && wex > 1e-12 {
+                    c[j] = (wsum / wex).clamp(0.05, 40.0);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedGompertzHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            eta: eta.clone(),
+            c: c.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedGompertzHmm {
+            labels,
+            start,
+            trans,
+            eta,
+            c,
+            loglik,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -17190,6 +18342,31 @@ mod tests {
             .expect("hch");
         assert_eq!(hch.value.labels.len(), 80);
         assert!(hch.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let lmh = LomaxHmm::new(2)
+            .fit(&xpos, &Session::new("lmh", "fit"))
+            .expect("lmh");
+        assert_eq!(lmh.value.labels.len(), 80);
+        assert!(lmh.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let hnh = HalfNormalHmm::new(2)
+            .fit(&xpos, &Session::new("hnh", "fit"))
+            .expect("hnh");
+        assert_eq!(hnh.value.labels.len(), 80);
+        assert!(hnh.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let mxh = MaxwellHmm::new(2)
+            .fit(&xpos, &Session::new("mxh", "fit"))
+            .expect("mxh");
+        assert_eq!(mxh.value.labels.len(), 80);
+        assert!(mxh.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let bph = BetaPrimeHmm::new(2)
+            .fit(&xpos, &Session::new("bph", "fit"))
+            .expect("bph");
+        assert_eq!(bph.value.labels.len(), 80);
+        assert!(bph.value.alpha.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let gzh = GompertzHmm::new(2)
+            .fit(&xpos, &Session::new("gzh", "fit"))
+            .expect("gzh");
+        assert_eq!(gzh.value.labels.len(), 80);
+        assert!(gzh.value.c.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
@@ -17426,6 +18603,11 @@ mod tests {
             .expect("ysh");
         assert_eq!(ysh.value.labels.len(), 40);
         assert!(ysh.value.rho.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let zth = ZetaHmm::new(2)
+            .fit(&x, &Session::new("zth", "fit"))
+            .expect("zth");
+        assert_eq!(zth.value.labels.len(), 40);
+        assert!(zth.value.s.as_slice().iter().all(|v| v.is_finite() && *v > 1.0));
     }
 
     #[test]

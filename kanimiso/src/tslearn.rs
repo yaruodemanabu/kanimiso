@@ -18590,6 +18590,117 @@ impl SnippetArea {
     }
 }
 
+/// Longest unimodal nearest-neighbour chain (stumpy `allc`).
+///
+/// Window length is not identification `p`. Distinct from [`Motif`] (argmin
+/// pair) and [`Merlin`] (discord).
+#[derive(Clone, Debug)]
+pub struct AllChains {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+}
+
+impl Default for AllChains {
+    fn default() -> Self {
+        Self { window: 3 }
+    }
+}
+
+impl AllChains {
+    /// Time-series chains with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+        }
+    }
+
+    /// Longest right-nearest-neighbour chain of `y`.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedAllChains>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_vector(y),
+            Some(y),
+            &ctx.policy,
+        );
+        let n = y.len();
+        let m = self.window.max(2);
+        if m >= n {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .severity(Severity::Warning)
+                    .message(format!("AllChains window={m} is unusable for n={n}"))
+                    .build(),
+            );
+            return ctx.finish(FittedAllChains {
+                indices: Vector::zeros(0),
+                length: 0.0,
+            });
+        }
+        let n_sub = n + 1 - m;
+        let excl = (m / 4).max(1);
+        let mut right = vec![usize::MAX; n_sub];
+        let mut rdist = vec![f64::INFINITY; n_sub];
+        for i in 0..n_sub {
+            for j in (i + excl)..n_sub {
+                let d = subsequence_dist(y, i, y, j, m);
+                if d < rdist[i] {
+                    rdist[i] = d;
+                    right[i] = j;
+                }
+            }
+        }
+        let mut best: Vec<usize> = Vec::new();
+        for start in 0..n_sub {
+            let mut chain = vec![start];
+            let mut cur = start;
+            let mut seen = vec![false; n_sub];
+            seen[cur] = true;
+            loop {
+                let nxt = right[cur];
+                if nxt >= n_sub || seen[nxt] {
+                    break;
+                }
+                seen[nxt] = true;
+                chain.push(nxt);
+                cur = nxt;
+            }
+            if chain.len() > best.len() {
+                best = chain;
+            }
+        }
+        if best.is_empty() {
+            best.push(0);
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("AllChains follows right nearest neighbours, not published allc")
+                .compromise(NumericalCompromise::new(
+                    "stumpy allc",
+                    "longest unimodal chain of right nearest-neighbour links",
+                    "the published bidirectional IL/IR and unimodality filter are omitted",
+                    "read the indices as a time-series-chain sketch",
+                ))
+                .build(),
+        );
+        let length = best.len() as f64;
+        ctx.finish(FittedAllChains {
+            indices: Vector::from_iter(best.iter().map(|&i| i as f64)),
+            length,
+        })
+    }
+}
+
+/// Fitted time-series chain.
+#[derive(Clone, Debug)]
+pub struct FittedAllChains {
+    /// Subsequence start indices of the longest right-NN chain.
+    pub indices: Vector,
+    /// Chain length.
+    pub length: f64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -19293,6 +19404,11 @@ mod tests {
             .fit(&yr, &Session::new("ts", "sna"))
             .unwrap();
         assert!(sna.value.as_slice().iter().all(|v| v.is_finite()) || sna.value.is_empty());
+        let ach = AllChains::new(3)
+            .fit(&yr, &Session::new("ts", "ach"))
+            .unwrap();
+        assert!(!ach.value.indices.is_empty());
+        assert!(ach.value.length.is_finite() && ach.value.length >= 1.0);
         let igs = InformationGainSegmentation::new()
             .fit(&yr, &Session::new("ts", "igs"))
             .unwrap();

@@ -42060,6 +42060,290 @@ impl Predict for OnlineSquaredHingeClassifier {
     }
 }
 
+/// Online binary focal-loss classifier (Lin et al.).
+///
+/// Focusing \(\gamma\) is not identification `p`. Distinct from
+/// [`LogisticRegression`] (\(\gamma=0\)) and [`OnlineSquaredHingeClassifier`].
+#[derive(Clone, Debug)]
+pub struct OnlineFocalClassifier {
+    /// Focusing parameter. Not identification `p`.
+    pub gamma: f64,
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineFocalClassifier {
+    fn default() -> Self {
+        Self {
+            gamma: 2.0,
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineFocalClassifier {
+    /// Focal classifier with focusing `gamma`.
+    pub fn new(gamma: f64) -> Self {
+        Self {
+            gamma,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineFocalClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineFocalClassifier",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected focal update"),
+            );
+        };
+        self.initialized = true;
+        let gamma = if self.gamma.is_finite() && self.gamma >= 0.0 {
+            self.gamma
+        } else {
+            2.0
+        };
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let ys = if y[i] >= 0.5 { 1.0 } else { -1.0 };
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let z = ys * eta;
+            let p = (1.0 / (1.0 + (-z).exp())).clamp(1e-12, 1.0 - 1e-12);
+            let om = 1.0 - p;
+            let rho = -(om.powf(gamma)) * p.ln();
+            let dldz = gamma * p * om.powf(gamma) * p.ln() - om.powf(gamma + 1.0);
+            let g = dldz * ys;
+            loss_before += rho;
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            let pa = (1.0 / (1.0 + (-ys * ea).exp())).clamp(1e-12, 1.0 - 1e-12);
+            loss_after += -((1.0 - pa).powf(gamma)) * pa.ln();
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online focal classifier",
+            "SGD on −(1−p)^γ log p; γ is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineFocalClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
+/// Online modified-Huber classifier (Zhang / sklearn `modified_huber`).
+///
+/// Distinct from [`OnlineSquaredHingeClassifier`] (no linear far-tail) and
+/// [`OnlineHuberRegressor`] (regression residual).
+#[derive(Clone, Debug)]
+pub struct OnlineModifiedHuberClassifier {
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineModifiedHuberClassifier {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineModifiedHuberClassifier {
+    /// Modified-Huber SGD classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for OnlineModifiedHuberClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineModifiedHuberClassifier",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(
+                    self.updates,
+                    x.nrows(),
+                    self.n_seen,
+                    "rejected modified-Huber update",
+                ),
+            );
+        };
+        self.initialized = true;
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let ys = if y[i] >= 0.5 { 1.0 } else { -1.0 };
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let z = ys * eta;
+            let (rho, g) = if z >= 1.0 {
+                (0.0, 0.0)
+            } else if z >= -1.0 {
+                let m = 1.0 - z;
+                (m * m, -2.0 * m * ys)
+            } else {
+                (-4.0 * z, -4.0 * ys)
+            };
+            loss_before += rho;
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            let za = ys * ea;
+            loss_after += if za >= 1.0 {
+                0.0
+            } else if za >= -1.0 {
+                let m = 1.0 - za;
+                m * m
+            } else {
+                -4.0 * za
+            };
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online modified-Huber classifier",
+            "SGD on Zhang modified Huber; linear far-tail, quadratic near-margin",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineModifiedHuberClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42804,6 +43088,12 @@ mod tests {
         OnlineSquaredHingeClassifier::new()
             .partial_fit(&x, Some(&yb), &session)
             .expect("oshg");
+        OnlineFocalClassifier::new(2.0)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("ofcl");
+        OnlineModifiedHuberClassifier::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("omhb");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

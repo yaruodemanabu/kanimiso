@@ -6783,6 +6783,23 @@ const INVENTORY: &[Algorithm] = &[
         "river.optim.losses.SquaredHinge",
         "online",
     ),
+    a("hmm.ZetaHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a("hmm.LomaxHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.HalfNormalHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.MaxwellHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaPrimeHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.GompertzHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "online.OnlineFocalClassifier",
+        "river.optim.losses.BinaryFocalLoss",
+        "online",
+    ),
+    a(
+        "online.OnlineModifiedHuberClassifier",
+        "river.optim.losses.ModifiedHuber",
+        "online",
+    ),
+    a("tslearn.AllChains", "stumpy.allc", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7381,6 +7398,10 @@ mod tests {
             "hmm.YuleSimonHmm",
             "online.OnlineSoftL1Regressor",
             "online.OnlineSquaredHingeClassifier",
+            "hmm.ZetaHmm",
+            "hmm.LomaxHmm",
+            "online.OnlineFocalClassifier",
+            "tslearn.AllChains",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
