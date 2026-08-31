@@ -6934,6 +6934,27 @@ const INVENTORY: &[Algorithm] = &[
     ),
     a("tslearn.lb_improved", "tslearn.metrics.lb_keogh", "timeseries"),
     a("tslearn.cdist_shape_dtw", "tslearn.metrics.cdist", "timeseries"),
+    a("hmm.HyperexponentialHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.ReciprocalInverseGaussianHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.HoskingKappaHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.FoldedNormalHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.ConwayMaxwellPoissonHmm",
+        "hmmlearn.hmm.PoissonHMM",
+        "hmm",
+    ),
+    a("online.EaseReco", "river.reco.EASE", "online"),
+    a(
+        "online.OnlineKernelPca",
+        "sklearn.decomposition.KernelPCA",
+        "online",
+    ),
+    a("tslearn.cid", "tslearn.metrics.cdist", "timeseries"),
+    a("tslearn.cdist_cid", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7608,6 +7629,15 @@ mod tests {
             "online.OnlineSvd",
             "tslearn.lb_improved",
             "tslearn.cdist_shape_dtw",
+            "hmm.HyperexponentialHmm",
+            "hmm.ReciprocalInverseGaussianHmm",
+            "hmm.HoskingKappaHmm",
+            "hmm.FoldedNormalHmm",
+            "hmm.ConwayMaxwellPoissonHmm",
+            "online.EaseReco",
+            "online.OnlineKernelPca",
+            "tslearn.cid",
+            "tslearn.cdist_cid",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

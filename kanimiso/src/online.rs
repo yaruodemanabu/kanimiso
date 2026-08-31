@@ -45444,6 +45444,468 @@ impl Transform for OnlineSvd {
     }
 }
 
+fn invert_ridge_gram(g: &[Vec<f64>], lam: f64) -> Option<Vec<Vec<f64>>> {
+    let n = g.len();
+    if n == 0 {
+        return Some(Vec::new());
+    }
+    let mut a = vec![vec![0.0_f64; 2 * n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            a[i][j] = g[i][j];
+        }
+        a[i][i] += lam;
+        a[i][n + i] = 1.0;
+    }
+    for col in 0..n {
+        let mut piv = col;
+        for r in (col + 1)..n {
+            if a[r][col].abs() > a[piv][col].abs() {
+                piv = r;
+            }
+        }
+        if a[piv][col].abs() < 1e-14 {
+            return None;
+        }
+        if piv != col {
+            a.swap(piv, col);
+        }
+        let den = a[col][col];
+        for j in 0..(2 * n) {
+            a[col][j] /= den;
+        }
+        for r in 0..n {
+            if r == col {
+                continue;
+            }
+            let f = a[r][col];
+            for j in 0..(2 * n) {
+                a[r][j] -= f * a[col][j];
+            }
+        }
+    }
+    Some((0..n).map(|i| a[i][n..].to_vec()).collect())
+}
+
+/// EASE^R item-item recommender (Steck): \(B_{ij}=-P^{-1}_{ij}/P^{-1}_{ii}\)
+/// with \(P=G+\lambda I\) and a zero diagonal.
+///
+/// Distinct from [`SlimReco`] (L1 sequential weights) and [`ItemKnn`]
+/// (cosine neighbourhood). Item count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct EaseReco {
+    /// Ridge on the item Gram.
+    pub l2: f64,
+    ratings: HashMap<(u64, usize), f64>,
+    gram: Vec<Vec<f64>>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for EaseReco {
+    fn default() -> Self {
+        Self {
+            l2: 0.5,
+            ratings: HashMap::new(),
+            gram: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl EaseReco {
+    /// Empty EASE recommender.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn grow(&mut self, i: usize) {
+        while self.gram.len() <= i {
+            let n = self.gram.len();
+            for row in self.gram.iter_mut() {
+                row.push(0.0);
+            }
+            self.gram.push(vec![0.0; n + 1]);
+        }
+    }
+
+    fn score(&self, user: u64, item: usize) -> f64 {
+        let lam = if self.l2.is_finite() && self.l2 >= 0.0 {
+            self.l2
+        } else {
+            0.5
+        };
+        let Some(inv) = invert_ridge_gram(&self.gram, lam.max(1e-6)) else {
+            return 0.0;
+        };
+        if item >= inv.len() {
+            return 0.0;
+        }
+        let dii = inv[item][item];
+        if dii.abs() < 1e-14 {
+            return 0.0;
+        }
+        let mut s = 0.0_f64;
+        for (&(u, j), &rj) in &self.ratings {
+            if u != user || j == item || j >= inv[item].len() {
+                continue;
+            }
+            s += rj * (-inv[item][j] / dii);
+        }
+        s
+    }
+}
+
+impl PartialFit for EaseReco {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("EaseReco needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let mut dsum = 0.0_f64;
+        for r in 0..x.nrows().min(y.len()) {
+            if !y[r].is_finite() {
+                continue;
+            }
+            let user = x.get(r, 0).max(0.0).round() as u64;
+            let item = x.get(r, 1).max(0.0).round() as usize;
+            self.grow(item);
+            let old = self.ratings.get(&(user, item)).copied();
+            if let Some(old) = old {
+                self.gram[item][item] -= old * old;
+                let others: Vec<(usize, f64)> = self
+                    .ratings
+                    .iter()
+                    .filter_map(|(&(u, j), &rj)| {
+                        if u == user && j != item {
+                            Some((j, rj))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                for (j, rj) in others {
+                    self.grow(j);
+                    self.gram[item][j] -= old * rj;
+                    self.gram[j][item] -= old * rj;
+                }
+            }
+            self.ratings.insert((user, item), y[r]);
+            self.gram[item][item] += y[r] * y[r];
+            let others: Vec<(usize, f64)> = self
+                .ratings
+                .iter()
+                .filter_map(|(&(u, j), &rj)| {
+                    if u == user && j != item {
+                        Some((j, rj))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for (j, rj) in others {
+                self.grow(j);
+                self.gram[item][j] += y[r] * rj;
+                self.gram[j][item] += y[r] * rj;
+            }
+            dsum += y[r].abs();
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        let warmup = self.n_seen < 4;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(dsum.max(x.nrows() as f64));
+        q.still_identified = !warmup;
+        q.warmup = warmup;
+        q.explanation = format!(
+            "EaseReco updated item Gram on {} ratings; items={}",
+            x.nrows(),
+            self.gram.len()
+        );
+        if warmup {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .incremental(q.clone())
+                    .message("EaseReco is still warming up")
+                    .build(),
+            );
+        }
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "EASE item-item Gram",
+                "Steck closed-form ridge inverse; distinct from SLIM and ItemKNN",
+                "previous G",
+                "updated G",
+            ),
+        )
+    }
+}
+
+impl Predict for EaseReco {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("EaseReco predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as u64;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.score(u, i)
+        })))
+    }
+}
+
+fn rbf_landmarks(x: &Vector, landmarks: &[Vector], bw: f64) -> Vector {
+    Vector::from_iter(landmarks.iter().map(|lm| {
+        let n = x.len().min(lm.len());
+        let mut s = 0.0_f64;
+        for j in 0..n {
+            let d = x[j] - lm[j];
+            s += d * d;
+        }
+        (-s / (2.0 * bw * bw).max(1e-8)).exp()
+    }))
+}
+
+/// Streaming kernel PCA (RBF landmarks + Oja in feature space).
+///
+/// Distinct from [`OnlinePca`] (linear) and [`crate::kernel_pca::KernelPca`]
+/// (batch eigendecomposition). Landmark count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct OnlineKernelPca {
+    /// Kernel-space axes / landmarks. Not identification `p` on a stream.
+    pub n_components: usize,
+    /// RBF bandwidth.
+    pub bandwidth: f64,
+    /// Base Oja step.
+    pub learning_rate: f64,
+    landmarks: Vec<Vector>,
+    components: Vec<Vector>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineKernelPca {
+    fn default() -> Self {
+        Self {
+            n_components: 1,
+            bandwidth: 1.0,
+            learning_rate: 1.0,
+            landmarks: Vec::new(),
+            components: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineKernelPca {
+    /// Track `n_components` kernel axes.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components: n_components.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineKernelPca {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if self.initialized {
+            if self.landmarks.as_slice().first().map(|c| c.len()) != Some(p) {
+                ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+                return finish_explain(
+                    ctx,
+                    reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+                );
+            }
+        }
+        let k = self.n_components.max(1);
+        let bw = if self.bandwidth.is_finite() && self.bandwidth > 0.0 {
+            self.bandwidth
+        } else {
+            1.0
+        };
+        let lr0 = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            1.0
+        };
+        let before = self
+            .components
+            .as_slice()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Vector::zeros(k));
+        for i in 0..x.nrows() {
+            let xi = Vector::from_iter((0..p).map(|j| x.get(i, j)));
+            if self.landmarks.len() < k {
+                self.landmarks.push(xi.clone());
+                self.components = (0..self.landmarks.len())
+                    .map(|c| {
+                        let mut w = Vector::zeros(self.landmarks.len());
+                        w[c] = 1.0;
+                        w
+                    })
+                    .collect();
+                self.initialized = true;
+            }
+            if self.landmarks.is_empty() {
+                continue;
+            }
+            let phi = rbf_landmarks(&xi, &self.landmarks, bw);
+            if self.components.as_slice().first().map(|c| c.len()) != Some(phi.len()) {
+                self.components = (0..self.landmarks.len().min(k))
+                    .map(|c| {
+                        let mut w = Vector::zeros(phi.len());
+                        w[c % phi.len()] = 1.0;
+                        w
+                    })
+                    .collect();
+            }
+            self.n_seen += 1;
+            let n = self.n_seen as f64;
+            let lr = lr0 / n;
+            let mut residual = phi;
+            for c in 0..self.components.len() {
+                let y = self.components[c].dot(&residual);
+                for j in 0..residual.len() {
+                    self.components[c][j] += lr * y * residual[j];
+                }
+                for prev in 0..c {
+                    let proj = self.components[c].dot(&self.components[prev]);
+                    for j in 0..self.components[c].len() {
+                        self.components[c][j] -= proj * self.components[prev][j];
+                    }
+                }
+                let nrm = self.components[c].norm();
+                if nrm > 1e-12 {
+                    for j in 0..self.components[c].len() {
+                        self.components[c][j] /= nrm;
+                    }
+                }
+                let y2 = self.components[c].dot(&residual);
+                for j in 0..residual.len() {
+                    residual[j] -= y2 * self.components[c][j];
+                }
+            }
+        }
+        self.updates += 1;
+        let after = self
+            .components
+            .as_slice()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Vector::zeros(k));
+        let alen = after.len().min(before.len());
+        let mut dn = 0.0_f64;
+        for j in 0..alen {
+            let d = after[j] - before[j];
+            dn += d * d;
+        }
+        let dn = dn.sqrt();
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dn);
+        q.information_gain = Some(dn.max(x.nrows() as f64));
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "OnlineKernelPca Oja-updated {} RBF landmarks on {} rows; ||Δw0||={:.6e}",
+            self.landmarks.len(),
+            x.nrows(),
+            dn
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "RBF-landmark kernel axes",
+                "streaming kernel Oja; distinct from linear OnlinePca and batch KernelPca",
+                "previous axes",
+                "updated axes",
+            ),
+        )
+    }
+}
+
+impl Transform for OnlineKernelPca {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized || self.landmarks.is_empty() {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), self.n_components.max(1)));
+        }
+        let k = self.components.len();
+        let bw = if self.bandwidth.is_finite() && self.bandwidth > 0.0 {
+            self.bandwidth
+        } else {
+            1.0
+        };
+        ctx.finish(Matrix::from_fn(x.nrows(), k, |i, c| {
+            let xi = Vector::from_iter((0..x.ncols()).map(|j| x.get(i, j)));
+            let phi = rbf_landmarks(&xi, &self.landmarks, bw);
+            let mut s = 0.0_f64;
+            for j in 0..phi.len().min(self.components[c].len()) {
+                s += self.components[c][j] * phi[j];
+            }
+            s
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -46263,6 +46725,12 @@ mod tests {
         OnlineSvd::new(1)
             .partial_fit(&x, None, &session)
             .expect("osvd");
+        EaseReco::new()
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("ease");
+        OnlineKernelPca::new(1)
+            .partial_fit(&x, None, &session)
+            .expect("okp");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
