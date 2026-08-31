@@ -118844,7 +118844,19 @@ fn bp_g_cdf(y: f64, scale: f64, alpha: f64, beta: f64) -> f64 {
     if !z.is_finite() {
         return if y > scale { 1.0 - 1e-15 } else { 0.0 };
     }
-    crate::special::betainc_reg(alpha, beta, z.clamp(0.0, 1.0)).clamp(0.0, 1.0 - 1e-15)
+    let z = z.clamp(0.0, 1.0);
+    // `betainc_reg` complement branch is unstable; always evaluate the
+    // small-argument series side and reflect.
+    let thresh = (alpha + 1.0) / (alpha + beta + 2.0);
+    let raw = if z < thresh {
+        crate::special::betainc_reg(alpha, beta, z)
+    } else {
+        1.0 - crate::special::betainc_reg(beta, alpha, 1.0 - z)
+    };
+    if !raw.is_finite() {
+        return if z > 0.5 { 1.0 - 1e-15 } else { 1e-15 };
+    }
+    raw.clamp(1e-15, 1.0 - 1e-15)
 }
 
 fn log_scaled_bp(y: f64, scale: f64, alpha: f64, beta: f64) -> f64 {
