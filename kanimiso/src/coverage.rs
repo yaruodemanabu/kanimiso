@@ -7184,6 +7184,41 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.DevyaHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.RamAwadhHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.ExponentiatedLindleyHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.WrappedStableHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.FisherNoncentralHypergeometricHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("online.Hbos", "river.anomaly.HalfSpaceTrees", "online"),
+    a("online.SoftRank", "river.reco.FM", "online"),
+    a(
+        "tslearn.lorentzian_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_lorentzian",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.angular_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_angular",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7996,6 +8031,17 @@ mod tests {
             "tslearn.cdist_canberra",
             "tslearn.braycurtis_distance",
             "tslearn.cdist_braycurtis",
+            "hmm.DevyaHmm",
+            "hmm.RamAwadhHmm",
+            "hmm.ExponentiatedLindleyHmm",
+            "hmm.WrappedStableHmm",
+            "hmm.FisherNoncentralHypergeometricHmm",
+            "online.Hbos",
+            "online.SoftRank",
+            "tslearn.lorentzian_distance",
+            "tslearn.cdist_lorentzian",
+            "tslearn.angular_distance",
+            "tslearn.cdist_angular",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

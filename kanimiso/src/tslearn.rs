@@ -2255,6 +2255,109 @@ pub fn cdist_braycurtis(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qua
     ctx.finish(out)
 }
 
+fn lorentzian_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        s += (1.0 + (a[i] - b[i]).abs()).ln();
+    }
+    s
+}
+
+fn angular_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut num = 0.0_f64;
+    let mut na = 0.0_f64;
+    let mut nb = 0.0_f64;
+    for i in 0..n {
+        num += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    let den = na.sqrt() * nb.sqrt();
+    if den < 1e-18 {
+        return if na < 1e-18 && nb < 1e-18 { 0.0 } else { 0.5 };
+    }
+    (num / den).clamp(-1.0, 1.0).acos() / std::f64::consts::PI
+}
+
+/// Lorentzian distance \(\sum\log(1+|a_i-b_i|)\) on aligned prefixes.
+///
+/// Distinct from [`manhattan_distance`] (no log) and [`canberra_distance`].
+/// Identical series score 0.
+pub fn lorentzian_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("lorentzian_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("lorentzian_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("lorentzian_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(lorentzian_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Lorentzian distance.
+pub fn cdist_lorentzian(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        lorentzian_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+/// Angular distance \(\arccos(\mathrm{clamp}(\cos,-1,1))/\pi\) on aligned prefixes.
+///
+/// Distinct from [`cosine_distance`] (\(1-\cos\)). Identical series score 0.
+pub fn angular_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("angular_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("angular_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("angular_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(angular_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise angular distance.
+pub fn cdist_angular(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        angular_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -20885,6 +20988,10 @@ mod tests {
         assert!(can.abs() < 1e-12, "canberra_distance={can}");
         let brc = braycurtis_distance(&a, &a, &Session::new("ts", "brc")).unwrap().value;
         assert!(brc.abs() < 1e-12, "braycurtis_distance={brc}");
+        let lor = lorentzian_distance(&a, &a, &Session::new("ts", "lor")).unwrap().value;
+        assert!(lor.abs() < 1e-12, "lorentzian_distance={lor}");
+        let ang = angular_distance(&a, &a, &Session::new("ts", "ang")).unwrap().value;
+        assert!(ang.abs() < 1e-12, "angular_distance={ang}");
     }
 
     #[test]
@@ -21977,6 +22084,16 @@ mod tests {
             .value;
         assert_eq!(cbr.shape(), (8, 8));
         assert!(cbr.get(0, 0).abs() < 1e-12);
+        let clo = cdist_lorentzian(&x, &x, &Session::new("ts", "clo"))
+            .unwrap()
+            .value;
+        assert_eq!(clo.shape(), (8, 8));
+        assert!(clo.get(0, 0).abs() < 1e-12);
+        let cag = cdist_angular(&x, &x, &Session::new("ts", "cag"))
+            .unwrap()
+            .value;
+        assert_eq!(cag.shape(), (8, 8));
+        assert!(cag.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;
