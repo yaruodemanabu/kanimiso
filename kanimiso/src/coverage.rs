@@ -6800,6 +6800,17 @@ const INVENTORY: &[Algorithm] = &[
         "online",
     ),
     a("tslearn.AllChains", "stumpy.allc", "timeseries"),
+    a("hmm.HyperbolicSecantHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.MoyalHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.FDistHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ZipfMandelbrotHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a("hmm.HurdleGammaHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.HermiteHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a(
+        "online.OnlineArowClassifier",
+        "river.linear_model.PAClassifier",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7402,6 +7413,9 @@ mod tests {
             "hmm.LomaxHmm",
             "online.OnlineFocalClassifier",
             "tslearn.AllChains",
+            "hmm.HyperbolicSecantHmm",
+            "hmm.HermiteHmm",
+            "online.OnlineArowClassifier",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
