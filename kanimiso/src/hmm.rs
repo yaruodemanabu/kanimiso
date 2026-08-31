@@ -118835,6 +118835,1156 @@ impl FitUnsupervised for KumaraswamyParetoHmm {
 }
 
 
+
+fn bp_g_cdf(y: f64, scale: f64, alpha: f64, beta: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || alpha <= 0.0 || beta <= 0.0 {
+        return 0.0;
+    }
+    let z = y / (y + scale);
+    if !z.is_finite() {
+        return if y > scale { 1.0 - 1e-15 } else { 0.0 };
+    }
+    crate::special::betainc_reg(alpha, beta, z.clamp(0.0, 1.0)).clamp(0.0, 1.0 - 1e-15)
+}
+
+fn log_scaled_bp(y: f64, scale: f64, alpha: f64, beta: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || alpha <= 0.0 || beta <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    log_beta_prime(y / scale, alpha, beta) - scale.ln()
+}
+
+fn log_unit_bp(y: f64, scale: f64, alpha: f64, beta: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || y >= 1.0 || scale <= 0.0 || alpha <= 0.0 || beta <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let u = y / (1.0 - y);
+    if !u.is_finite() || u <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    log_scaled_bp(u, scale, alpha, beta) - 2.0 * (1.0 - y).ln()
+}
+
+fn log_beta_bp(y: f64, scale: f64, alpha: f64, beta: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || alpha <= 0.0 || beta <= 0.0 || a <= 0.0 || b <= 0.0
+    {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = bp_g_cdf(y, scale, alpha, beta);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let surv = (1.0 - cdf).max(1e-15);
+    log_scaled_bp(y, scale, alpha, beta) + (a - 1.0) * cdf.ln() + (b - 1.0) * surv.ln() - ln_beta(a, b)
+}
+
+fn log_exp_bp(y: f64, scale: f64, alpha: f64, beta: f64, power: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || alpha <= 0.0 || beta <= 0.0 || power <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = bp_g_cdf(y, scale, alpha, beta);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    power.ln() + log_scaled_bp(y, scale, alpha, beta) + (power - 1.0) * cdf.ln()
+}
+
+fn log_kuma_bp(y: f64, scale: f64, alpha: f64, beta: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || alpha <= 0.0 || beta <= 0.0 || a <= 0.0 || b <= 0.0
+    {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = bp_g_cdf(y, scale, alpha, beta);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let fa = cdf.powf(a);
+    let one_m = 1.0 - fa;
+    if one_m <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    a.ln()
+        + b.ln()
+        + log_scaled_bp(y, scale, alpha, beta)
+        + (a - 1.0) * cdf.ln()
+        + (b - 1.0) * one_m.ln()
+}
+
+fn log_disc_bp(y: f64, scale: f64, alpha: f64, beta: f64) -> f64 {
+    if !y.is_finite() || y < 1.0 || scale <= 0.0 || alpha <= 0.0 || beta <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let kk = y.round().max(1.0);
+    let lo = bp_g_cdf(kk, scale, alpha, beta);
+    let hi = bp_g_cdf(kk + 1.0, scale, alpha, beta);
+    let p = (hi - lo).max(0.0);
+    if p <= 1e-18 {
+        f64::NEG_INFINITY
+    } else {
+        p.ln()
+    }
+}
+
+
+/// Unit beta-prime HMM (scaled beta-prime on the odds $y/(1-y)$).
+///
+/// Scale is free from $\mathbb{E}[Y](\beta-1)/\alpha$; beta-prime shapes $\alpha,\beta\neq 1$ are pinned, not identification `p`. Distinct from [`BetaPrimeHmm`] and [`DiscreteBetaPrimeHmm`].
+#[derive(Clone, Debug)]
+pub struct UnitBetaPrimeHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for UnitBetaPrimeHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl UnitBetaPrimeHmm {
+    /// `k`-state UnitBetaPrimeHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitBetaPrimeHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted UnitBetaPrimeHmm.
+#[derive(Clone, Debug)]
+pub struct FittedUnitBetaPrimeHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free beta-prime scales on the odds $y/(1-y)$.
+    pub scale: Vector,
+    /// Pinned first shapes $\alpha_j\neq 1$.
+    pub alpha: Vector,
+    /// Pinned second shapes $\beta_j\neq 1$.
+    pub beta: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedUnitBetaPrimeHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_unit_bp(y, self.scale[j], self.alpha[j], self.beta[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedUnitBetaPrimeHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for UnitBetaPrimeHmm {
+    type Fitted = FittedUnitBetaPrimeHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitBetaPrimeHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let alpha = Vector::from_iter((0..k).map(|j| 2.15 + 0.30 * j as f64));
+        let beta = Vector::from_iter((0..k).map(|j| 2.40 + 0.25 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0 || y >= 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "UnitBetaPrimeHmm skipped {n_skip} observations outside (0,1)"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedUnitBetaPrimeHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 1.10),
+                alpha,
+                beta,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 1.10 + 0.25 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedUnitBetaPrimeHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                alpha: alpha.clone(),
+                beta: beta.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wy = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 || y >= 1.0 {
+                        continue;
+                    }
+                    let z = y / (1.0 - y);
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wy += fb.gamma[t][j] * z;
+                }
+                if wsum > 1e-12 {
+                    let mean = wy / wsum;
+                    if mean.is_finite() && mean > 0.0 && alpha[j] > 0.0 && beta[j] > 1.0 {
+                        let hat = mean * (beta[j] - 1.0) / alpha[j];
+                        if hat.is_finite() && hat > 0.0 {
+                            scale[j] = hat.clamp(0.55, 2.20);
+                        }
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedUnitBetaPrimeHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+                alpha: alpha.clone(),
+                beta: beta.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedUnitBetaPrimeHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            alpha,
+            beta,
+            loglik,
+        })
+    }
+}
+
+
+/// Beta–beta-prime HMM ($f F^{a-1}(1-F)^{b-1}/B(a,b)$, $a,b\neq 1$).
+///
+/// Scale is free from $\mathbb{E}[Y](\beta-1)/\alpha$; beta-prime shapes $\alpha,\beta\neq 1$ are pinned, not identification `p`. Distinct from [`KumaraswamyBetaPrimeHmm`] and [`UnitBetaPrimeHmm`].
+#[derive(Clone, Debug)]
+pub struct BetaBetaPrimeHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for BetaBetaPrimeHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl BetaBetaPrimeHmm {
+    /// `k`-state BetaBetaPrimeHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaBetaPrimeHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted BetaBetaPrimeHmm.
+#[derive(Clone, Debug)]
+pub struct FittedBetaBetaPrimeHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free beta-prime scales from $\mathbb{E}[Y](\beta-1)/\alpha$.
+    pub scale: Vector,
+    /// Pinned first shapes $\alpha_j\neq 1$.
+    pub alpha: Vector,
+    /// Pinned second shapes $\beta_j\neq 1$.
+    pub beta: Vector,
+    /// First extra shapes $a_j\neq 1$.
+    pub a: Vector,
+    /// Second extra shapes $b_j\neq 1$.
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedBetaBetaPrimeHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_beta_bp(y, self.scale[j], self.alpha[j], self.beta[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedBetaBetaPrimeHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for BetaBetaPrimeHmm {
+    type Fitted = FittedBetaBetaPrimeHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaBetaPrimeHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let alpha = Vector::from_iter((0..k).map(|j| 2.15 + 0.30 * j as f64));
+        let beta = Vector::from_iter((0..k).map(|j| 2.40 + 0.25 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.35 + 0.25 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 1.55 + 0.20 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && y <= 0.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "BetaBetaPrimeHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedBetaBetaPrimeHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 4.00),
+                alpha,
+                beta,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 4.00 + 1.00 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedBetaBetaPrimeHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                alpha: alpha.clone(),
+                beta: beta.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wy = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wy += fb.gamma[t][j] * y;
+                }
+                if wsum > 1e-12 {
+                    let mean = wy / wsum;
+                    if mean.is_finite() && mean > 0.0 && alpha[j] > 0.0 && beta[j] > 1.0 {
+                        let hat = mean * (beta[j] - 1.0) / alpha[j];
+                        if hat.is_finite() && hat > 0.0 {
+                            scale[j] = hat.clamp(2.20, 8.50);
+                        }
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedBetaBetaPrimeHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+                alpha: alpha.clone(),
+                beta: beta.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedBetaBetaPrimeHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            alpha,
+            beta,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+
+/// Exponentiated beta-prime HMM ($a f F^{a-1}$, $a\neq 1$).
+///
+/// Scale is free from $\mathbb{E}[Y](\beta-1)/\alpha$; beta-prime shapes $\alpha,\beta\neq 1$ are pinned, not identification `p`. Distinct from [`KumaraswamyBetaPrimeHmm`] and [`DiscreteBetaPrimeHmm`].
+#[derive(Clone, Debug)]
+pub struct ExponentiatedBetaPrimeHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for ExponentiatedBetaPrimeHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl ExponentiatedBetaPrimeHmm {
+    /// `k`-state ExponentiatedBetaPrimeHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedBetaPrimeHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted ExponentiatedBetaPrimeHmm.
+#[derive(Clone, Debug)]
+pub struct FittedExponentiatedBetaPrimeHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free beta-prime scales from $\mathbb{E}[Y](\beta-1)/\alpha$.
+    pub scale: Vector,
+    /// Pinned first shapes $\alpha_j\neq 1$.
+    pub alpha: Vector,
+    /// Pinned second shapes $\beta_j\neq 1$.
+    pub beta: Vector,
+    /// Extra CDF powers $a_j\neq 1$.
+    pub power: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedExponentiatedBetaPrimeHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_exp_bp(y, self.scale[j], self.alpha[j], self.beta[j], self.power[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedExponentiatedBetaPrimeHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for ExponentiatedBetaPrimeHmm {
+    type Fitted = FittedExponentiatedBetaPrimeHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedBetaPrimeHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let alpha = Vector::from_iter((0..k).map(|j| 2.15 + 0.30 * j as f64));
+        let beta = Vector::from_iter((0..k).map(|j| 2.40 + 0.25 * j as f64));
+        let power = Vector::from_iter((0..k).map(|j| 1.45 + 0.30 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && y <= 0.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "ExponentiatedBetaPrimeHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedExponentiatedBetaPrimeHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 4.00),
+                alpha,
+                beta,
+                power,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 4.00 + 1.00 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedExponentiatedBetaPrimeHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                alpha: alpha.clone(),
+                beta: beta.clone(),
+                power: power.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wy = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wy += fb.gamma[t][j] * y;
+                }
+                if wsum > 1e-12 {
+                    let mean = wy / wsum;
+                    if mean.is_finite() && mean > 0.0 && alpha[j] > 0.0 && beta[j] > 1.0 {
+                        let hat = mean * (beta[j] - 1.0) / alpha[j];
+                        if hat.is_finite() && hat > 0.0 {
+                            scale[j] = hat.clamp(2.20, 8.50);
+                        }
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedExponentiatedBetaPrimeHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+                alpha: alpha.clone(),
+                beta: beta.clone(),
+                power: power.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedExponentiatedBetaPrimeHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            alpha,
+            beta,
+            power,
+            loglik,
+        })
+    }
+}
+
+
+/// Kumaraswamy–beta-prime HMM ($ab f F^{a-1}(1-F^a)^{b-1}$, $a,b\neq 1$).
+///
+/// Scale is free from $\mathbb{E}[Y](\beta-1)/\alpha$; beta-prime shapes $\alpha,\beta\neq 1$ are pinned, not identification `p`. Distinct from [`BetaBetaPrimeHmm`] and [`UnitBetaPrimeHmm`].
+#[derive(Clone, Debug)]
+pub struct KumaraswamyBetaPrimeHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for KumaraswamyBetaPrimeHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl KumaraswamyBetaPrimeHmm {
+    /// `k`-state KumaraswamyBetaPrimeHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyBetaPrimeHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted KumaraswamyBetaPrimeHmm.
+#[derive(Clone, Debug)]
+pub struct FittedKumaraswamyBetaPrimeHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free beta-prime scales from $\mathbb{E}[Y](\beta-1)/\alpha$.
+    pub scale: Vector,
+    /// Pinned first shapes $\alpha_j\neq 1$.
+    pub alpha: Vector,
+    /// Pinned second shapes $\beta_j\neq 1$.
+    pub beta: Vector,
+    /// First extra shapes $a_j\neq 1$.
+    pub a: Vector,
+    /// Second extra shapes $b_j\neq 1$.
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedKumaraswamyBetaPrimeHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_kuma_bp(y, self.scale[j], self.alpha[j], self.beta[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedKumaraswamyBetaPrimeHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for KumaraswamyBetaPrimeHmm {
+    type Fitted = FittedKumaraswamyBetaPrimeHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyBetaPrimeHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let alpha = Vector::from_iter((0..k).map(|j| 2.15 + 0.30 * j as f64));
+        let beta = Vector::from_iter((0..k).map(|j| 2.40 + 0.25 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.55 + 0.20 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 2.10 + 0.25 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && y <= 0.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "KumaraswamyBetaPrimeHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedKumaraswamyBetaPrimeHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 4.00),
+                alpha,
+                beta,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 4.00 + 1.00 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedKumaraswamyBetaPrimeHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                alpha: alpha.clone(),
+                beta: beta.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wy = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wy += fb.gamma[t][j] * y;
+                }
+                if wsum > 1e-12 {
+                    let mean = wy / wsum;
+                    if mean.is_finite() && mean > 0.0 && alpha[j] > 0.0 && beta[j] > 1.0 {
+                        let hat = mean * (beta[j] - 1.0) / alpha[j];
+                        if hat.is_finite() && hat > 0.0 {
+                            scale[j] = hat.clamp(2.20, 8.50);
+                        }
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedKumaraswamyBetaPrimeHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+                alpha: alpha.clone(),
+                beta: beta.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedKumaraswamyBetaPrimeHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            alpha,
+            beta,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+
+/// Discrete beta-prime HMM ($P=F(k+1)-F(k)$ on $\{1,2,\ldots\}$).
+///
+/// Scale is free from $\mathbb{E}[Y](\beta-1)/\alpha$; beta-prime shapes $\alpha,\beta\neq 1$ are pinned, not identification `p`. Distinct from [`BetaPrimeHmm`] and [`UnitBetaPrimeHmm`].
+#[derive(Clone, Debug)]
+pub struct DiscreteBetaPrimeHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for DiscreteBetaPrimeHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl DiscreteBetaPrimeHmm {
+    /// `k`-state DiscreteBetaPrimeHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteBetaPrimeHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted DiscreteBetaPrimeHmm.
+#[derive(Clone, Debug)]
+pub struct FittedDiscreteBetaPrimeHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free beta-prime scales on the counting lattice.
+    pub scale: Vector,
+    /// Pinned first shapes $\alpha_j\neq 1$.
+    pub alpha: Vector,
+    /// Pinned second shapes $\beta_j\neq 1$.
+    pub beta: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedDiscreteBetaPrimeHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_disc_bp(y, self.scale[j], self.alpha[j], self.beta[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedDiscreteBetaPrimeHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for DiscreteBetaPrimeHmm {
+    type Fitted = FittedDiscreteBetaPrimeHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteBetaPrimeHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let alpha = Vector::from_iter((0..k).map(|j| 2.15 + 0.30 * j as f64));
+        let beta = Vector::from_iter((0..k).map(|j| 2.40 + 0.25 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && y < 1.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "DiscreteBetaPrimeHmm skipped {n_skip} observations below 1"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedDiscreteBetaPrimeHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 3.50),
+                alpha,
+                beta,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 3.50 + 1.00 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedDiscreteBetaPrimeHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                alpha: alpha.clone(),
+                beta: beta.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wy = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y < 1.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wy += fb.gamma[t][j] * y;
+                }
+                if wsum > 1e-12 {
+                    let mean = wy / wsum;
+                    if mean.is_finite() && mean > 0.0 && alpha[j] > 0.0 && beta[j] > 1.0 {
+                        let hat = mean * (beta[j] - 1.0) / alpha[j];
+                        if hat.is_finite() && hat > 0.0 {
+                            scale[j] = hat.clamp(1.50, 7.00);
+                        }
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedDiscreteBetaPrimeHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+                alpha: alpha.clone(),
+                beta: beta.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedDiscreteBetaPrimeHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            alpha,
+            beta,
+            loglik,
+        })
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121054,6 +122204,26 @@ mod tests {
             .expect("kpa");
         assert_eq!(kpa.value.labels.len(), 80);
         assert!(kpa.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let ubp = UnitBetaPrimeHmm::new(2)
+            .fit(&betx, &Session::new("ubp", "fit"))
+            .expect("ubp");
+        assert_eq!(ubp.value.labels.len(), 80);
+        assert!(ubp.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let bbp = BetaBetaPrimeHmm::new(2)
+            .fit(&xpos, &Session::new("bbp", "fit"))
+            .expect("bbp");
+        assert_eq!(bbp.value.labels.len(), 80);
+        assert!(bbp.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let ebp = ExponentiatedBetaPrimeHmm::new(2)
+            .fit(&xpos, &Session::new("ebp", "fit"))
+            .expect("ebp");
+        assert_eq!(ebp.value.labels.len(), 80);
+        assert!(ebp.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let kbp = KumaraswamyBetaPrimeHmm::new(2)
+            .fit(&xpos, &Session::new("kbp", "fit"))
+            .expect("kbp");
+        assert_eq!(kbp.value.labels.len(), 80);
+        assert!(kbp.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
@@ -121755,6 +122925,11 @@ mod tests {
             .expect("dgn");
         assert_eq!(dgn.value.labels.len(), 40);
         assert!(dgn.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let dbp = DiscreteBetaPrimeHmm::new(2)
+            .fit(&x, &Session::new("dbp", "fit"))
+            .expect("dbp");
+        assert_eq!(dbp.value.labels.len(), 40);
+        assert!(dbp.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
     }
 
     #[test]
