@@ -563,6 +563,40 @@ pub fn cdist_adtw(
     ctx.finish(out)
 }
 
+/// Pairwise weighted derivative DTW (tslearn-style `cdist` with WDDTW).
+///
+/// Series / pair counts are not identification `p`. Distinct from
+/// [`cdist_ddtw`] and [`cdist_wdtw`].
+pub fn cdist_wddtw(
+    a: &Matrix,
+    b: &Matrix,
+    g: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let g = if g.is_finite() && g >= 0.0 {
+        g
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("cdist_wddtw g={g} is not a finite ≥0 slope; using 0.1"))
+                .build(),
+        );
+        0.1
+    };
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        let da = ddtw_deriv(ai.as_slice());
+        let db = ddtw_deriv(bj.as_slice());
+        wdtw_raw(&da, &db, g)
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -19932,6 +19966,11 @@ mod tests {
             .value;
         assert_eq!(cad.shape(), (8, 8));
         assert!(cad.get(0, 0).abs() < 1e-12);
+        let cwd2 = cdist_wddtw(&x, &x, 0.1, &Session::new("ts", "cwddtw"))
+            .unwrap()
+            .value;
+        assert_eq!(cwd2.shape(), (8, 8));
+        assert!(cwd2.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

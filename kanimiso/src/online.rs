@@ -44580,6 +44580,170 @@ impl Transform for OnlinePls {
     }
 }
 
+/// Streaming diagonal Fisher LDA (two-class).
+///
+/// Distinct from [`crate::discriminant::LinearDiscriminantAnalysis`] (batch
+/// pooled covariance) and [`OnlineGaussianNb`] (class-conditional diagonals
+/// without a shared scatter). The direction is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct OnlineFda {
+    mean0: Vector,
+    mean1: Vector,
+    var: Vector,
+    n0: u64,
+    n1: u64,
+    w: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineFda {
+    fn default() -> Self {
+        Self {
+            mean0: Vector::zeros(0),
+            mean1: Vector::zeros(0),
+            var: Vector::zeros(0),
+            n0: 0,
+            n1: 0,
+            w: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineFda {
+    /// Streaming two-class Fisher discriminant.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PartialFit for OnlineFda {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no labels"),
+            );
+        };
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.mean0 = Vector::zeros(p);
+            self.mean1 = Vector::zeros(p);
+            self.var = Vector::filled(p, 1.0);
+            self.w = Vector::zeros(p);
+            self.initialized = true;
+        } else if self.mean0.len() != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self.w.clone();
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let pos = y[i] > 0.5;
+            if pos {
+                self.n1 += 1;
+                let n = self.n1 as f64;
+                for j in 0..p {
+                    self.mean1[j] += (x.get(i, j) - self.mean1[j]) / n;
+                }
+            } else {
+                self.n0 += 1;
+                let n = self.n0 as f64;
+                for j in 0..p {
+                    self.mean0[j] += (x.get(i, j) - self.mean0[j]) / n;
+                }
+            }
+            self.n_seen += 1;
+            let n = self.n_seen as f64;
+            let mu = if pos { &self.mean1 } else { &self.mean0 };
+            for j in 0..p {
+                let e = x.get(i, j) - mu[j];
+                self.var[j] += (e * e - self.var[j]) / n;
+                if self.var[j] < 1e-6 {
+                    self.var[j] = 1e-6;
+                }
+            }
+        }
+        for j in 0..p {
+            self.w[j] = (self.mean1[j] - self.mean0[j]) / self.var[j].max(1e-6);
+        }
+        self.updates += 1;
+        let delta = self.w.sub(&before);
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta.norm());
+        q.information_gain = Some(delta.norm().max(x.nrows() as f64));
+        q.still_identified = self.n0 >= 1 && self.n1 >= 1;
+        q.warmup = self.n_seen < (p as u64).saturating_add(2);
+        q.explanation = format!(
+            "OnlineFda updated a diagonal Fisher direction on {} rows; ||Δw||={:.6e}",
+            x.nrows(),
+            delta.norm()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Fisher direction",
+                "streaming diagonal LDA; distinct from batch pooled-covariance LDA",
+                "previous w",
+                "updated w",
+            ),
+        )
+    }
+}
+
+impl Predict for OnlineFda {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let p = self.w.len();
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = 0.0_f64;
+            for j in 0..x.ncols().min(p) {
+                let mid = 0.5 * (self.mean0[j] + self.mean1[j]);
+                s += self.w[j] * (x.get(i, j) - mid);
+            }
+            if s >= 0.0 {
+                1.0
+            } else {
+                0.0
+            }
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45384,6 +45548,9 @@ mod tests {
                 .partial_fit(&xcc, None, &session)
                 .expect("opls");
         }
+        OnlineFda::new()
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("ofda");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
