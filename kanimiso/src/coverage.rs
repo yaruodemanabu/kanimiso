@@ -8285,6 +8285,19 @@ const INVENTORY: &[Algorithm] = &[
         "timeseries",
     ),
     a("tslearn.cdist_minkowski11_l1", "tslearn.metrics.cdist", "timeseries"),
+    a("hmm.UnitHypoexponentialHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaHypoexponentialHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ExponentiatedHypoexponentialHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.KumaraswamyHypoexponentialHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.DiscreteHypoexponentialHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.WindowLag4", "river.anomaly.GaussianScorer", "online"),
+    a("online.JeffreysAnomaly", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.minkowski12_l1_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a("tslearn.cdist_minkowski12_l1", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -9482,6 +9495,15 @@ mod tests {
             "online.TopsoeAnomaly",
             "tslearn.minkowski11_l1_distance",
             "tslearn.cdist_minkowski11_l1",
+            "hmm.UnitHypoexponentialHmm",
+            "hmm.BetaHypoexponentialHmm",
+            "hmm.ExponentiatedHypoexponentialHmm",
+            "hmm.KumaraswamyHypoexponentialHmm",
+            "hmm.DiscreteHypoexponentialHmm",
+            "online.WindowLag4",
+            "online.JeffreysAnomaly",
+            "tslearn.minkowski12_l1_distance",
+            "tslearn.cdist_minkowski12_l1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
