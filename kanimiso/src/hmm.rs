@@ -67317,6 +67317,1081 @@ impl FitUnsupervised for DiscreteInverseHalfLogisticHmm {
     }
 }
 
+
+fn log_inv_half_t(y: f64, scale: f64, nu: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || nu <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    log_half_t(1.0 / y, scale, nu) - 2.0 * y.ln()
+}
+
+fn inv_half_t_cdf(y: f64, scale: f64, nu: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || nu <= 0.0 {
+        return 0.0;
+    }
+    (1.0 - half_t_cdf(1.0 / y, scale, nu)).clamp(0.0, 1.0 - 1e-15)
+}
+
+fn half_t_unit_median(nu: f64) -> f64 {
+    if !nu.is_finite() || nu <= 0.0 {
+        return 1.0;
+    }
+    let mut lo = 1e-8_f64;
+    let mut hi = 64.0_f64;
+    for _ in 0..64 {
+        let mid = 0.5 * (lo + hi);
+        if half_t_cdf(mid, 1.0, nu) < 0.5 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+fn inv_half_t_scale(med: f64, nu: f64, lo: f64, hi: f64) -> f64 {
+    let q = half_t_unit_median(nu).max(1e-8);
+    (1.0 / (med.max(1e-12) * q)).clamp(lo, hi)
+}
+
+fn log_unit_inv_half_t(y: f64, scale: f64, nu: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || y >= 1.0 || scale <= 0.0 || nu <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    log_inv_half_t(y / (1.0 - y), scale, nu) - 2.0 * (1.0 - y).ln()
+}
+
+fn log_beta_inv_half_t(y: f64, scale: f64, nu: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || nu <= 0.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = inv_half_t_cdf(y, scale, nu);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let surv = (1.0 - cdf).max(1e-15);
+    log_inv_half_t(y, scale, nu) + (a - 1.0) * cdf.ln() + (b - 1.0) * surv.ln() - ln_beta(a, b)
+}
+
+fn log_exp_inv_half_t(y: f64, scale: f64, nu: f64, alpha: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || nu <= 0.0 || alpha <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = inv_half_t_cdf(y, scale, nu);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    alpha.ln() + log_inv_half_t(y, scale, nu) + (alpha - 1.0) * cdf.ln()
+}
+
+fn log_kuma_inv_half_t(y: f64, scale: f64, nu: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || nu <= 0.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = inv_half_t_cdf(y, scale, nu);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let fa = cdf.powf(a);
+    let one_m = 1.0 - fa;
+    if one_m <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    a.ln() + b.ln() + log_inv_half_t(y, scale, nu) + (a - 1.0) * cdf.ln() + (b - 1.0) * one_m.ln()
+}
+
+fn log_disc_inv_half_t(y: f64, scale: f64, nu: f64) -> f64 {
+    if !y.is_finite() || y < 1.0 || scale <= 0.0 || nu <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let kk = y.round().max(1.0);
+    let p = (inv_half_t_cdf(kk + 1.0, scale, nu) - inv_half_t_cdf(kk, scale, nu)).max(0.0);
+    if p <= 1e-18 {
+        f64::NEG_INFINITY
+    } else {
+        p.ln()
+    }
+}
+
+/// Unit inverse-half-\(t\) HMM on \((0,1)\) (inverse-half-\(t\) on \(u=x/(1-x)\)).
+///
+/// Scale \(\sigma=1/(\mathrm{median}(U)\,q_\nu)\) because inverse-half-\(t\)
+/// moments diverge (\(f_Y\sim C/y^2\)). \(\nu=4+4j\) is pinned, not identification
+/// `p`. Distinct from [`UnitHalfTHmm`] (forward) and
+/// [`UnitInverseHalfLogisticHmm`].
+#[derive(Clone, Debug)]
+pub struct UnitInverseHalfTHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for UnitInverseHalfTHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl UnitInverseHalfTHmm {
+    /// `k`-state UnitInverseHalfTHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitInverseHalfTHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted UnitInverseHalfTHmm.
+#[derive(Clone, Debug)]
+pub struct FittedUnitInverseHalfTHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Scales \(\sigma_j=1/(\mathrm{median}\,q_\nu)\).
+    pub scale: Vector,
+    /// Degrees of freedom \(\nu_j=4+4j\) (pinned).
+    pub nu: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedUnitInverseHalfTHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_unit_inv_half_t(y, self.scale[j], self.nu[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedUnitInverseHalfTHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for UnitInverseHalfTHmm {
+    type Fitted = FittedUnitInverseHalfTHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitInverseHalfTHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let nu = Vector::from_iter((0..k).map(|j| 4.0 + 4.0 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0 || y >= 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "UnitInverseHalfTHmm skipped {n_skip} observations outside (0,1)"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedUnitInverseHalfTHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.4),
+                nu,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.3 + 0.2 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedUnitInverseHalfTHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                nu: nu.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut pairs = Vec::with_capacity(t_len);
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 || y >= 1.0 {
+                        continue;
+                    }
+                    pairs.push((y / (1.0 - y), fb.gamma[t][j]));
+                }
+                if let Some(med) = weighted_pos_median(&pairs) {
+                    scale[j] = inv_half_t_scale(med, nu[j], 0.02, 2.0);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedUnitInverseHalfTHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            nu: nu.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedUnitInverseHalfTHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            nu,
+            loglik,
+        })
+    }
+}
+
+/// Beta–inverse-half-\(t\) HMM (\(f F^{a-1}(1-F)^{b-1}/B(a,b)\), \(\nu=4+4j\), \(a,b\neq 1\)).
+///
+/// Shapes and \(\nu\) are hyperparameters, not identification `p`. Scale is
+/// \(1/(\mathrm{median}\,q_\nu)\). Distinct from [`KumaraswamyInverseHalfTHmm`]
+/// and [`HalfTHmm`].
+#[derive(Clone, Debug)]
+pub struct BetaInverseHalfTHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for BetaInverseHalfTHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl BetaInverseHalfTHmm {
+    /// `k`-state BetaInverseHalfTHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaInverseHalfTHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted BetaInverseHalfTHmm.
+#[derive(Clone, Debug)]
+pub struct FittedBetaInverseHalfTHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Scales \(\sigma_j=1/(\mathrm{median}\,q_\nu)\).
+    pub scale: Vector,
+    /// Degrees of freedom \(\nu_j=4+4j\) (pinned).
+    pub nu: Vector,
+    /// First extra shapes \(a_j\neq 1\).
+    pub a: Vector,
+    /// Second extra shapes \(b_j\neq 1\).
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedBetaInverseHalfTHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_beta_inv_half_t(y, self.scale[j], self.nu[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedBetaInverseHalfTHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for BetaInverseHalfTHmm {
+    type Fitted = FittedBetaInverseHalfTHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaInverseHalfTHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let nu = Vector::from_iter((0..k).map(|j| 4.0 + 4.0 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.5 + 0.3 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 2.2 + 0.4 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            if x.get(i, 0).is_finite() && x.get(i, 0) <= 0.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "BetaInverseHalfTHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedBetaInverseHalfTHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.2),
+                nu,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.15 + 0.08 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedBetaInverseHalfTHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                nu: nu.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut pairs = Vec::with_capacity(t_len);
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    pairs.push((y, fb.gamma[t][j]));
+                }
+                if let Some(med) = weighted_pos_median(&pairs) {
+                    scale[j] = inv_half_t_scale(med, nu[j], 0.05, 0.8);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedBetaInverseHalfTHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            nu: nu.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedBetaInverseHalfTHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            nu,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Exponentiated inverse-half-\(t\) HMM (\(F^\alpha\), \(\nu=4+4j\), \(\alpha\neq 1\)).
+///
+/// Power and \(\nu\) are hyperparameters, not identification `p`. Distinct from
+/// [`KumaraswamyInverseHalfTHmm`] and [`HalfTHmm`].
+#[derive(Clone, Debug)]
+pub struct ExponentiatedInverseHalfTHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for ExponentiatedInverseHalfTHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl ExponentiatedInverseHalfTHmm {
+    /// `k`-state ExponentiatedInverseHalfTHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedInverseHalfTHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted ExponentiatedInverseHalfTHmm.
+#[derive(Clone, Debug)]
+pub struct FittedExponentiatedInverseHalfTHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Scales \(\sigma_j=1/(\mathrm{median}\,q_\nu)\).
+    pub scale: Vector,
+    /// Degrees of freedom \(\nu_j=4+4j\) (pinned).
+    pub nu: Vector,
+    /// Powers \(\alpha_j\neq 1\).
+    pub alpha: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedExponentiatedInverseHalfTHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_exp_inv_half_t(y, self.scale[j], self.nu[j], self.alpha[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedExponentiatedInverseHalfTHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for ExponentiatedInverseHalfTHmm {
+    type Fitted = FittedExponentiatedInverseHalfTHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedInverseHalfTHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let nu = Vector::from_iter((0..k).map(|j| 4.0 + 4.0 * j as f64));
+        let alpha = Vector::from_iter((0..k).map(|j| 1.6 + 0.5 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            if x.get(i, 0).is_finite() && x.get(i, 0) <= 0.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "ExponentiatedInverseHalfTHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedExponentiatedInverseHalfTHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.2),
+                nu,
+                alpha,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.15 + 0.08 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedExponentiatedInverseHalfTHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                nu: nu.clone(),
+                alpha: alpha.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut pairs = Vec::with_capacity(t_len);
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    pairs.push((y, fb.gamma[t][j]));
+                }
+                if let Some(med) = weighted_pos_median(&pairs) {
+                    scale[j] = inv_half_t_scale(med, nu[j], 0.05, 0.8);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedExponentiatedInverseHalfTHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            nu: nu.clone(),
+                alpha: alpha.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedExponentiatedInverseHalfTHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            nu,
+            alpha,
+            loglik,
+        })
+    }
+}
+
+/// Kumaraswamy–inverse-half-\(t\) HMM (\(ab\,f F^{a-1}(1-F^a)^{b-1}\), \(\nu=4+4j\), \(a,b\neq 1\)).
+///
+/// Shapes and \(\nu\) are hyperparameters, not identification `p`. Distinct from
+/// [`BetaInverseHalfTHmm`] and [`HalfTHmm`].
+#[derive(Clone, Debug)]
+pub struct KumaraswamyInverseHalfTHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for KumaraswamyInverseHalfTHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl KumaraswamyInverseHalfTHmm {
+    /// `k`-state KumaraswamyInverseHalfTHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyInverseHalfTHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted KumaraswamyInverseHalfTHmm.
+#[derive(Clone, Debug)]
+pub struct FittedKumaraswamyInverseHalfTHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Scales \(\sigma_j=1/(\mathrm{median}\,q_\nu)\).
+    pub scale: Vector,
+    /// Degrees of freedom \(\nu_j=4+4j\) (pinned).
+    pub nu: Vector,
+    /// First extra shapes \(a_j\neq 1\).
+    pub a: Vector,
+    /// Second extra shapes \(b_j\neq 1\).
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedKumaraswamyInverseHalfTHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_kuma_inv_half_t(y, self.scale[j], self.nu[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedKumaraswamyInverseHalfTHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for KumaraswamyInverseHalfTHmm {
+    type Fitted = FittedKumaraswamyInverseHalfTHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyInverseHalfTHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let nu = Vector::from_iter((0..k).map(|j| 4.0 + 4.0 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.5 + 0.3 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 2.2 + 0.4 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            if x.get(i, 0).is_finite() && x.get(i, 0) <= 0.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "KumaraswamyInverseHalfTHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedKumaraswamyInverseHalfTHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.2),
+                nu,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.15 + 0.08 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedKumaraswamyInverseHalfTHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                nu: nu.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut pairs = Vec::with_capacity(t_len);
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    pairs.push((y, fb.gamma[t][j]));
+                }
+                if let Some(med) = weighted_pos_median(&pairs) {
+                    scale[j] = inv_half_t_scale(med, nu[j], 0.05, 0.8);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedKumaraswamyInverseHalfTHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            nu: nu.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedKumaraswamyInverseHalfTHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            nu,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Discrete inverse-half-\(t\) HMM (\(P=F(k+1)-F(k)\), \(\nu=4+4j\)).
+///
+/// Scale is \(1/(\mathrm{median}\,q_\nu)\). Distinct from [`DiscreteHalfTHmm`]
+/// (forward CDF) and [`DiscreteInverseHalfLogisticHmm`].
+#[derive(Clone, Debug)]
+pub struct DiscreteInverseHalfTHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for DiscreteInverseHalfTHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl DiscreteInverseHalfTHmm {
+    /// `k`-state DiscreteInverseHalfTHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteInverseHalfTHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted DiscreteInverseHalfTHmm.
+#[derive(Clone, Debug)]
+pub struct FittedDiscreteInverseHalfTHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Scales \(\sigma_j=1/(\mathrm{median}\,q_\nu)\).
+    pub scale: Vector,
+    /// Degrees of freedom \(\nu_j=4+4j\) (pinned).
+    pub nu: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedDiscreteInverseHalfTHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_disc_inv_half_t(y, self.scale[j], self.nu[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedDiscreteInverseHalfTHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for DiscreteInverseHalfTHmm {
+    type Fitted = FittedDiscreteInverseHalfTHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteInverseHalfTHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let nu = Vector::from_iter((0..k).map(|j| 4.0 + 4.0 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            if x.get(i, 0).is_finite() && x.get(i, 0) < 1.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "DiscreteInverseHalfTHmm skipped {n_skip} observations below 1"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedDiscreteInverseHalfTHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.3),
+                nu,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.25 + 0.3 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedDiscreteInverseHalfTHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                nu: nu.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut pairs = Vec::with_capacity(t_len);
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y < 1.0 {
+                        continue;
+                    }
+                    pairs.push((y, fb.gamma[t][j]));
+                }
+                if let Some(med) = weighted_pos_median(&pairs) {
+                    scale[j] = inv_half_t_scale(med, nu[j], 0.08, 2.0);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedDiscreteInverseHalfTHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            nu: nu.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedDiscreteInverseHalfTHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            nu,
+            loglik,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68561,6 +69636,26 @@ mod tests {
             .expect("kil");
         assert_eq!(kil.value.labels.len(), 80);
         assert!(kil.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let uit = UnitInverseHalfTHmm::new(2)
+            .fit(&betx, &Session::new("uit", "fit"))
+            .expect("uit");
+        assert_eq!(uit.value.labels.len(), 80);
+        assert!(uit.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let bit = BetaInverseHalfTHmm::new(2)
+            .fit(&xpos, &Session::new("bit", "fit"))
+            .expect("bit");
+        assert_eq!(bit.value.labels.len(), 80);
+        assert!(bit.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let eit = ExponentiatedInverseHalfTHmm::new(2)
+            .fit(&xpos, &Session::new("eit", "fit"))
+            .expect("eit");
+        assert_eq!(eit.value.labels.len(), 80);
+        assert!(eit.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let kit = KumaraswamyInverseHalfTHmm::new(2)
+            .fit(&xpos, &Session::new("kit", "fit"))
+            .expect("kit");
+        assert_eq!(kit.value.labels.len(), 80);
+        assert!(kit.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
@@ -69072,6 +70167,11 @@ mod tests {
             .expect("dxl");
         assert_eq!(dxl.value.labels.len(), 40);
         assert!(dxl.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let dxt = DiscreteInverseHalfTHmm::new(2)
+            .fit(&x, &Session::new("dxt", "fit"))
+            .expect("dxt");
+        assert_eq!(dxt.value.labels.len(), 40);
+        assert!(dxt.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
     }
 
     #[test]

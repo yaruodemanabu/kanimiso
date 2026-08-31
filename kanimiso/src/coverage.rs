@@ -7949,6 +7949,39 @@ const INVENTORY: &[Algorithm] = &[
     a("online.MinkowskiAnomaly", "river.anomaly.HalfSpaceTrees", "online"),
     a("tslearn.clark_l1_distance", "tslearn.metrics.dtw", "timeseries"),
     a("tslearn.cdist_clark_l1", "tslearn.metrics.cdist", "timeseries"),
+    a(
+        "hmm.UnitInverseHalfTHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.BetaInverseHalfTHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.ExponentiatedInverseHalfTHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.KumaraswamyInverseHalfTHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.DiscreteInverseHalfTHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("online.WindowCv", "river.anomaly.GaussianScorer", "online"),
+    a("online.GeometricAnomaly", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.wave_hedges_l1_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a("tslearn.cdist_wave_hedges_l1", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8994,6 +9027,15 @@ mod tests {
             "online.MinkowskiAnomaly",
             "tslearn.clark_l1_distance",
             "tslearn.cdist_clark_l1",
+            "hmm.UnitInverseHalfTHmm",
+            "hmm.BetaInverseHalfTHmm",
+            "hmm.ExponentiatedInverseHalfTHmm",
+            "hmm.KumaraswamyInverseHalfTHmm",
+            "hmm.DiscreteInverseHalfTHmm",
+            "online.WindowCv",
+            "online.GeometricAnomaly",
+            "tslearn.wave_hedges_l1_distance",
+            "tslearn.cdist_wave_hedges_l1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
