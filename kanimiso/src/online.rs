@@ -58602,6 +58602,309 @@ impl Predict for CanberraAnomaly {
     }
 }
 
+
+/// Last-8 cubed z-score anomaly.
+///
+/// Score is \(|(x-\bar x_w)/s_w|^3\) on the trailing eight first-coordinates.
+/// Distinct from [`WindowZscore`] (unsquared) and [`WindowTrimmed`]
+/// (trimmed location).
+#[derive(Clone, Debug)]
+pub struct WindowSkew {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for WindowSkew {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl WindowSkew {
+    /// Empty windowed cubed-z detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        let y = x.get(i, 0);
+        if !y.is_finite() {
+            return 0.0;
+        }
+        let xs = reservoir_first_coords(&self.rows);
+        if xs.len() < 3 {
+            return 0.0;
+        }
+        let start = xs.len().saturating_sub(8);
+        let win = &xs[start..];
+        let mut s = 0.0_f64;
+        let mut n = 0.0_f64;
+        for v in win {
+            s += *v;
+            n += 1.0;
+        }
+        if n < 1.0 {
+            return 0.0;
+        }
+        let mean = s / n;
+        let mut ss = 0.0_f64;
+        for v in win {
+            let d = *v - mean;
+            ss += d * d;
+        }
+        let sd = (ss / n).sqrt().max(1e-12);
+        let z = (y - mean) / sd;
+        z.abs().powi(3)
+    }
+}
+
+impl PartialFit for WindowSkew {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 3;
+        q.warmup = self.rows.len() < 3;
+        q.explanation = format!("window-skew reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed cubed-z anomaly",
+                "WindowSkew uses last-8 |z|^3; not WindowZscore or WindowTrimmed",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for WindowSkew {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
+fn lorentzian_rows(a: &[f64], b: &[f64]) -> f64 {
+    let p = a.len().min(b.len());
+    let mut s = 0.0_f64;
+    for j in 0..p {
+        s += (1.0 + (a[j] - b[j]).abs()).ln();
+    }
+    s
+}
+
+/// Lorentzian \(k\)-NN anomaly.
+///
+/// Score is the mean of the \(k\) smallest \(\sum_j\ln(1+|x_j-y_j|)\)
+/// distances. Distinct from [`ManhattanAnomaly`] and [`CanberraAnomaly`].
+#[derive(Clone, Debug)]
+pub struct LorentzianAnomaly {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for LorentzianAnomaly {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl LorentzianAnomaly {
+    /// Empty Lorentzian \(k\)-NN detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 3 || self.ncols == 0 {
+            return 0.0;
+        }
+        let p = self.ncols.min(x.ncols());
+        let mut qrow = Vec::with_capacity(p);
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return 0.0;
+            }
+            qrow.push(z);
+        }
+        let mut ds: Vec<f64> = self
+            .rows
+            .iter()
+            .map(|row| lorentzian_rows(&qrow, row))
+            .filter(|d| d.is_finite() && *d > 1e-15)
+            .collect();
+        if ds.is_empty() {
+            return 0.0;
+        }
+        ds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let kk = 5.min(ds.len());
+        let mut s = 0.0_f64;
+        for t in 0..kk {
+            s += ds[t];
+        }
+        s / kk as f64
+    }
+}
+
+impl PartialFit for LorentzianAnomaly {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 3;
+        q.warmup = self.rows.len() < 3;
+        q.explanation = format!("lorentzian-knn reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Lorentzian k-NN anomaly",
+                "LorentzianAnomaly is mean log1p-L1 k-NN; not Manhattan or Canberra",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for LorentzianAnomaly {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59646,6 +59949,12 @@ mod tests {
         CanberraAnomaly::new()
             .partial_fit(&x, None, &session)
             .expect("cbn");
+        WindowSkew::new()
+            .partial_fit(&x, None, &session)
+            .expect("wsk");
+        LorentzianAnomaly::new()
+            .partial_fit(&x, None, &session)
+            .expect("lrz");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
