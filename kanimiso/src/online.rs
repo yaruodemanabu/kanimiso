@@ -39637,6 +39637,280 @@ impl Predict for OnlineLaplaceRegressor {
     }
 }
 
+/// Online Student-\(t\) regressor (river robust loss).
+///
+/// SGD on \(\frac{\nu+1}{2}\log(1+r^2/\nu)\). Degrees of freedom \(\nu\) are
+/// not identification `p`. Distinct from [`OnlineCauchyRegressor`]
+/// (\(\nu=1\) scale form) and [`OnlineHuberRegressor`] (piecewise).
+#[derive(Clone, Debug)]
+pub struct OnlineStudentTRegressor {
+    /// Degrees of freedom \(\nu>0\). Not identification `p`.
+    pub df: f64,
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineStudentTRegressor {
+    fn default() -> Self {
+        Self {
+            df: 4.0,
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineStudentTRegressor {
+    /// Student-\(t\) regressor with `df` degrees of freedom.
+    pub fn new(df: f64) -> Self {
+        Self {
+            df,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineStudentTRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineStudentTRegressor",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected Student-t update"),
+            );
+        };
+        self.initialized = true;
+        let nu = if self.df.is_finite() && self.df > 0.0 {
+            self.df
+        } else {
+            4.0
+        };
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let r = (y[i] - eta).clamp(-1.0e6, 1.0e6);
+            loss_before += 0.5 * (nu + 1.0) * (1.0 + r * r / nu).ln();
+            let g = -(nu + 1.0) * r / (nu + r * r);
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            let ra = (y[i] - ea).clamp(-1.0e6, 1.0e6);
+            loss_after += 0.5 * (nu + 1.0) * (1.0 + ra * ra / nu).ln();
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online Student-t regressor",
+            "SGD on the Student-t loss; ν is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineStudentTRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
+/// Online Fair regressor (river Fair loss).
+///
+/// SGD on \(c|r|-c^2\log(1+|r|/c)\). Scale \(c\) is not identification `p`.
+/// Distinct from [`OnlineHuberRegressor`] (hard \(L_1\) tail) and
+/// [`OnlineTukeyRegressor`] (hard zero).
+#[derive(Clone, Debug)]
+pub struct OnlineFairRegressor {
+    /// Fair scale \(c>0\). Not identification `p`.
+    pub scale: f64,
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineFairRegressor {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineFairRegressor {
+    /// Fair regressor with scale `scale`.
+    pub fn new(scale: f64) -> Self {
+        Self {
+            scale,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineFairRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineFairRegressor",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected Fair update"),
+            );
+        };
+        self.initialized = true;
+        let c = if self.scale.is_finite() && self.scale > 0.0 {
+            self.scale
+        } else {
+            1.0
+        };
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let r = y[i] - eta;
+            let ar = r.abs();
+            loss_before += c * ar - c * c * (1.0 + ar / c).ln();
+            let g = -r / (1.0 + ar / c);
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            let ra = y[i] - ea;
+            let ara = ra.abs();
+            loss_after += c * ara - c * c * (1.0 + ara / c).ln();
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online Fair regressor",
+            "SGD on the Fair loss; the scale is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineFairRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40330,6 +40604,12 @@ mod tests {
         OnlineLaplaceRegressor::new(0.05)
             .partial_fit(&x, Some(&y), &session)
             .expect("olap");
+        OnlineStudentTRegressor::new(4.0)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("ostu");
+        OnlineFairRegressor::new(1.0)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("ofair");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

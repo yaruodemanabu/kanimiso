@@ -17260,6 +17260,224 @@ pub fn mass(query: &Vector, series: &Vector, session: &Session) -> Result<Qualif
     ctx.finish(out)
 }
 
+/// Top-\(k\) matrix-profile motifs (stumpy `motifs`).
+///
+/// Motif count is not identification `p`. Distinct from [`Stamp`] (single
+/// argmin) and [`Merlin`] (discord / argmax).
+#[derive(Clone, Debug)]
+pub struct Motif {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+    /// Number of motifs. Not identification `p`.
+    pub n_motifs: usize,
+}
+
+impl Default for Motif {
+    fn default() -> Self {
+        Self {
+            window: 3,
+            n_motifs: 2,
+        }
+    }
+}
+
+impl Motif {
+    /// Motif search with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Lowest-distance subsequences on the self matrix profile.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedMotif>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_vector(y),
+            Some(y),
+            &ctx.policy,
+        );
+        let k = self.n_motifs.max(1);
+        let mp = match matrix_profile(y, self.window.max(2), &session.child("mp")) {
+            Ok(q) => q.value,
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                        | IssueCode::MeaninglessFit
+                ) {
+                    ctx.push(e.primary);
+                }
+                Vector::zeros(0)
+            }
+        };
+        let excl = (self.window.max(2) / 4).max(1);
+        let mut taken = vec![false; mp.len()];
+        let mut indices = Vector::filled(k, 0.0);
+        let mut scores = Vector::filled(k, f64::NAN);
+        for m in 0..k {
+            let mut best_i = 0usize;
+            let mut best = f64::INFINITY;
+            for (i, &v) in mp.as_slice().iter().enumerate() {
+                if taken[i] || !v.is_finite() {
+                    continue;
+                }
+                if v < best {
+                    best = v;
+                    best_i = i;
+                }
+            }
+            if best.is_finite() {
+                indices[m] = best_i as f64;
+                scores[m] = best;
+                let lo = best_i.saturating_sub(excl);
+                let hi = (best_i + excl + 1).min(taken.len());
+                for t in taken.iter_mut().take(hi).skip(lo) {
+                    *t = true;
+                }
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Motif is a greedy exclusion of the self matrix profile")
+                .compromise(NumericalCompromise::new(
+                    "stumpy motifs",
+                    "top-k argmin of the Euclidean matrix profile with an exclusion zone",
+                    "the published radius search and z-normalized pair distance are omitted",
+                    "read the indices as a matrix-profile motif sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedMotif {
+            indices,
+            scores,
+            profile: mp,
+        })
+    }
+}
+
+/// Fitted motif set.
+#[derive(Clone, Debug)]
+pub struct FittedMotif {
+    /// Motif subsequence starts.
+    pub indices: Vector,
+    /// Motif distances.
+    pub scores: Vector,
+    /// Self matrix profile.
+    pub profile: Vector,
+}
+
+/// Z-normalized matrix profile (stumpy `mpx` lite).
+///
+/// Window length is not identification `p`. Distinct from [`Stomp`] and
+/// [`matrix_profile`] (raw Euclidean).
+#[derive(Clone, Debug)]
+pub struct Mpx {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+}
+
+impl Default for Mpx {
+    fn default() -> Self {
+        Self { window: 3 }
+    }
+}
+
+impl Mpx {
+    /// MPX with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+        }
+    }
+
+    /// Z-normalized self nearest-neighbour profile.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_vector(y),
+            Some(y),
+            &ctx.policy,
+        );
+        let n = y.len();
+        let m = self.window.max(2);
+        if m >= n {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .severity(Severity::Warning)
+                    .message(format!("MPX window={m} is unusable for n={n}"))
+                    .build(),
+            );
+            return ctx.finish(StompResult {
+                profile: Vector::zeros(0),
+                nn_index: Vector::zeros(0),
+            });
+        }
+        let n_sub = n + 1 - m;
+        let excl = (m / 4).max(1);
+        let mut means = Vector::zeros(n_sub);
+        let mut stds = Vector::zeros(n_sub);
+        for i in 0..n_sub {
+            let mut s = 0.0_f64;
+            let mut ss = 0.0_f64;
+            for t in 0..m {
+                let v = y[i + t];
+                s += v;
+                ss += v * v;
+            }
+            let mean = s / m as f64;
+            means[i] = mean;
+            stds[i] = ((ss / m as f64 - mean * mean).max(0.0).sqrt()).max(1e-12);
+        }
+        let mut profile = Vector::filled(n_sub, f64::INFINITY);
+        let mut nn_index = Vector::zeros(n_sub);
+        for i in 0..n_sub {
+            for j in 0..n_sub {
+                if i.abs_diff(j) < excl {
+                    continue;
+                }
+                let mut d = 0.0_f64;
+                for t in 0..m {
+                    let zi = (y[i + t] - means[i]) / stds[i];
+                    let zj = (y[j + t] - means[j]) / stds[j];
+                    let e = zi - zj;
+                    d += e * e;
+                }
+                let d = d.max(0.0).sqrt();
+                if d < profile[i] {
+                    profile[i] = d;
+                    nn_index[i] = j as f64;
+                }
+            }
+        }
+        for i in 0..n_sub {
+            if !profile[i].is_finite() {
+                profile[i] = 0.0;
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("MPX is a direct z-normalized self profile, not published MPX")
+                .compromise(NumericalCompromise::new(
+                    "stumpy mpx",
+                    "z-normalized Euclidean nearest neighbour of every subsequence",
+                    "the published Pearson-correlation / FFT kernel is omitted",
+                    "read the profile as a z-normalized matrix-profile sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(StompResult { profile, nn_index })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -17891,6 +18109,17 @@ mod tests {
         let qy = Vector::from_iter(yr.as_slice().iter().take(3).copied());
         let mas = mass(&qy, &yr, &Session::new("ts", "mass")).unwrap();
         assert!(mas.value.as_slice().iter().all(|v| v.is_finite()) || mas.value.is_empty());
+        let mtf = Motif::new(3)
+            .fit(&yr, &Session::new("ts", "motif"))
+            .unwrap();
+        assert_eq!(mtf.value.indices.len(), 2);
+        let mpx = Mpx::new(3)
+            .fit(&yr, &Session::new("ts", "mpx"))
+            .unwrap();
+        assert!(
+            mpx.value.profile.as_slice().iter().all(|v| v.is_finite())
+                || mpx.value.profile.is_empty()
+        );
         let igs = InformationGainSegmentation::new()
             .fit(&yr, &Session::new("ts", "igs"))
             .unwrap();

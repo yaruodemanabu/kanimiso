@@ -6635,6 +6635,25 @@ const INVENTORY: &[Algorithm] = &[
     a("tslearn.mpdist", "stumpy.mpdist", "function"),
     a("tslearn.Scrimp", "stumpy.scrimp", "timeseries"),
     a("tslearn.mass", "stumpy.mass", "function"),
+    a("hmm.LaplaceHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ParetoHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.LogitNormalHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.HypergeometricHmm", "hmmlearn.hmm.MultinomialHMM", "hmm"),
+    a("hmm.ZeroInflatedNegBinHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a("stats.LinearDml", "econml.dml.LinearDML", "estimator"),
+    a(
+        "online.OnlineStudentTRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
+    a(
+        "online.OnlineFairRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
+    a("tsa.GarchM", "arch.univariate.GARCH", "forecast"),
+    a("tslearn.Motif", "stumpy.motifs", "timeseries"),
+    a("tslearn.Mpx", "stumpy.mpx", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7204,6 +7223,9 @@ mod tests {
             "decompose.GrowthCurve",
             "tsa.Apgarch",
             "tslearn.mpdist",
+            "hmm.LaplaceHmm",
+            "stats.LinearDml",
+            "tsa.GarchM",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

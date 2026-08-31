@@ -7813,152 +7813,138 @@ impl FitSeries for Tarch {
     }
 }
 
-/// Asymmetric power GARCH (arch `APARCH`):
-/// \(\sigma_t^\delta=\omega+\alpha(|\varepsilon_{t-1}|-\gamma\varepsilon_{t-1})^\delta+\beta\sigma_{t-1}^\delta\).
+/// Alias of [`Aparch`] (Ding–Granger–Engle APARCH / APGARCH).
+pub type Apgarch = Aparch;
+/// Fitted alias of [`FittedAparch`].
+pub type FittedApgarch = FittedAparch;
+
+/// GARCH-in-mean (arch `GARCH` with a variance-in-mean term):
+/// \(y_t=\mu+\lambda\sigma_t+\varepsilon_t\), \(\sigma_t^2=\omega+\alpha\varepsilon_{t-1}^2+\beta\sigma_{t-1}^2\).
 ///
-/// Power \(\delta\) is not identification `p`. Distinct from [`Tarch`]
-/// (absolute scale, no power) and [`GjrGarch`] (indicator on \(\varepsilon^2\)).
+/// Risk-premium \(\lambda\) is not identification `p`. Distinct from
+/// [`Garch11`] (constant mean only).
 #[derive(Clone, Debug)]
-pub struct Apgarch {
+pub struct GarchM {
     /// Coordinate-search iterations.
     pub max_iter: usize,
 }
 
-impl Default for Apgarch {
+impl Default for GarchM {
     fn default() -> Self {
         Self { max_iter: 24 }
     }
 }
 
-impl Apgarch {
-    /// Default APARCH settings.
+impl GarchM {
+    /// Default GARCH-in-mean settings.
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-/// Fitted APARCH scales.
+/// Fitted GARCH-in-mean state.
 #[derive(Clone, Debug)]
-pub struct FittedApgarch {
+pub struct FittedGarchM {
+    /// Mean intercept \(\mu\).
+    pub mu: f64,
+    /// Risk premium \(\lambda\).
+    pub lambda: f64,
     /// \(\omega\).
     pub omega: f64,
     /// ARCH coefficient.
     pub alpha: f64,
-    /// Asymmetry.
-    pub gamma: f64,
-    /// Persistence of \(\sigma^\delta\).
+    /// GARCH coefficient.
     pub beta: f64,
-    /// Power \(\delta\).
-    pub delta: f64,
-    /// Conditional variances \(\sigma_t^2\).
+    /// Conditional variances.
     pub sigma2: Vector,
-    /// Demeaned residuals.
+    /// Mean-adjusted residuals \(y_t-\mu-\lambda\sigma_t\).
     pub resid: Vector,
 }
 
-fn apgarch_sigma(
-    e: &[f64],
+fn garch_m_path(
+    y: &[f64],
+    mu: f64,
+    lambda: f64,
     omega: f64,
     alpha: f64,
-    gamma: f64,
     beta: f64,
-    delta: f64,
-) -> Vec<f64> {
-    let var0 = e.iter().map(|v| v * v).sum::<f64>() / e.len().max(1) as f64;
-    let mut s = vec![var0.max(1e-12).sqrt(); e.len()];
-    let dlt = delta.clamp(0.5, 3.0);
-    for t in 1..e.len() {
-        let shock = (e[t - 1].abs() - gamma * e[t - 1]).max(0.0);
-        let sd = omega + alpha * shock.powf(dlt) + beta * s[t - 1].powf(dlt);
-        let sd = if sd.is_finite() && sd > 0.0 {
-            sd
-        } else {
-            omega.max(1e-8)
-        };
-        s[t] = sd.powf(1.0 / dlt);
-        if !s[t].is_finite() || s[t] <= 0.0 {
-            s[t] = omega.max(1e-8).powf(1.0 / dlt);
+) -> (Vec<f64>, Vec<f64>, f64) {
+    if omega <= 0.0 || alpha < 0.0 || beta < 0.0 || alpha + beta >= 0.999 {
+        return (vec![f64::NAN; y.len()], vec![f64::NAN; y.len()], f64::INFINITY);
+    }
+    let n = y.len();
+    let var0 = y.iter().map(|v| {
+        let e = v - mu;
+        e * e
+    }).sum::<f64>()
+        / n.max(1) as f64;
+    let mut s2 = vec![var0.max(omega).max(1e-12); n];
+    let mut e = vec![0.0_f64; n];
+    let mut nll = 0.0_f64;
+    for t in 0..n {
+        if t > 0 {
+            s2[t] = omega + alpha * e[t - 1] * e[t - 1] + beta * s2[t - 1];
+            if !s2[t].is_finite() || s2[t] <= 0.0 {
+                s2[t] = omega.max(1e-12);
+            }
         }
+        let sig = s2[t].max(1e-12).sqrt();
+        e[t] = y[t] - mu - lambda * sig;
+        nll += 0.5 * (s2[t].max(1e-12).ln() + e[t] * e[t] / s2[t].max(1e-12));
     }
-    s
+    (s2, e, nll)
 }
 
-fn apgarch_nll(
-    e: &[f64],
-    omega: f64,
-    alpha: f64,
-    gamma: f64,
-    beta: f64,
-    delta: f64,
-) -> f64 {
-    if omega <= 0.0 || alpha < 0.0 || beta < 0.0 || gamma.abs() >= 1.0 || delta <= 0.0 {
-        return f64::INFINITY;
-    }
-    let s = apgarch_sigma(e, omega, alpha, gamma, beta, delta);
-    let mut nll = 0.0;
-    for t in 0..e.len() {
-        let v = (s[t] * s[t]).max(1e-12);
-        nll += 0.5 * (v.ln() + e[t] * e[t] / v);
-    }
-    nll
-}
-
-impl FitSeries for Apgarch {
-    type Fitted = FittedApgarch;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedApgarch>> {
+impl FitSeries for GarchM {
+    type Fitted = FittedGarchM;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedGarchM>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 8 {
             ctx.push(
                 Issue::builder(IssueCode::InsufficientSample)
                     .severity(Severity::Warning)
-                    .message("APARCH QMLE needs a longer series")
+                    .message("GARCH-in-mean QMLE needs a longer series")
                     .build(),
             );
         }
-        let mean = y.mean();
-        let e = Vector::from_iter(y.as_slice().iter().map(|v| v - mean));
-        let sd = e
+        let mut mu = y.mean();
+        let mut lambda = 0.0_f64;
+        let var = y
             .as_slice()
             .iter()
-            .map(|v| v * v)
+            .map(|v| {
+                let e = v - mu;
+                e * e
+            })
             .sum::<f64>()
             / y.len().max(1) as f64;
-        let mut omega = 0.05 * sd.max(1e-8).sqrt();
+        let mut omega = 0.05 * var.max(1e-8);
         let mut alpha = 0.05;
-        let mut gamma = 0.10;
         let mut beta = 0.80;
-        let mut delta = 1.50;
-        let mut best = apgarch_nll(e.as_slice(), omega, alpha, gamma, beta, delta);
+        let mut best = garch_m_path(y.as_slice(), mu, lambda, omega, alpha, beta).2;
         let mut step = 0.04;
         for it in 0..self.max_iter {
             let mut improved = false;
-            for (i, cur) in [omega, alpha, gamma, beta, delta].into_iter().enumerate() {
+            for (i, cur) in [mu, lambda, omega, alpha, beta].into_iter().enumerate() {
                 for dir in [-step, step] {
-                    let mut cand = [omega, alpha, gamma, beta, delta];
-                    cand[i] = cur + dir;
-                    if i == 2 {
-                        cand[i] = cand[i].clamp(-0.99, 0.99);
-                    } else if i == 4 {
-                        cand[i] = cand[i].clamp(0.5, 3.0);
+                    let mut cand = [mu, lambda, omega, alpha, beta];
+                    cand[i] = if i >= 2 {
+                        (cur + dir).max(1e-8)
                     } else {
-                        cand[i] = cand[i].max(1e-8);
+                        cur + dir
+                    };
+                    if cand[3] + cand[4] >= 0.999 {
+                        continue;
                     }
-                    let nll = apgarch_nll(
-                        e.as_slice(),
-                        cand[0],
-                        cand[1],
-                        cand[2],
-                        cand[3],
-                        cand[4],
-                    );
+                    let nll = garch_m_path(y.as_slice(), cand[0], cand[1], cand[2], cand[3], cand[4]).2;
                     if nll < best {
                         best = nll;
-                        omega = cand[0];
-                        alpha = cand[1];
-                        gamma = cand[2];
-                        beta = cand[3];
-                        delta = cand[4];
+                        mu = cand[0];
+                        lambda = cand[1];
+                        omega = cand[2];
+                        alpha = cand[3];
+                        beta = cand[4];
                         improved = true;
                     }
                 }
@@ -7967,7 +7953,7 @@ impl FitSeries for Apgarch {
             if !improved {
                 step *= 0.5;
                 if step < 1e-5 {
-                    ctx.session.converged("APARCH coordinate search", it as u64);
+                    ctx.session.converged("GARCH-in-mean coordinate search", it as u64);
                     break;
                 }
             }
@@ -7976,19 +7962,19 @@ impl FitSeries for Apgarch {
             ctx.push(
                 Issue::builder(IssueCode::DidNotConverge)
                     .severity(Severity::Warning)
-                    .message("APARCH QMLE likelihood is non-finite")
+                    .message("GARCH-in-mean QMLE likelihood is non-finite")
                     .build(),
             );
         }
-        let sig = apgarch_sigma(e.as_slice(), omega, alpha, gamma, beta, delta);
-        ctx.finish(FittedApgarch {
+        let (s2, e, _) = garch_m_path(y.as_slice(), mu, lambda, omega, alpha, beta);
+        ctx.finish(FittedGarchM {
+            mu,
+            lambda,
             omega,
             alpha,
-            gamma,
             beta,
-            delta,
-            sigma2: Vector::from_iter(sig.iter().map(|s| s * s)),
-            resid: e,
+            sigma2: Vector::from_iter(s2),
+            resid: Vector::from_iter(e),
         })
     }
 }
@@ -20786,6 +20772,15 @@ impl FittedMiddleOutReconciler {
             .fit_series(&y, &Session::new("apg", "fit"))
             .expect("apg");
         assert!(apg
+            .value
+            .sigma2
+            .as_slice()
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0));
+        let gim = GarchM::new()
+            .fit_series(&y, &Session::new("gim", "fit"))
+            .expect("gim");
+        assert!(gim
             .value
             .sigma2
             .as_slice()

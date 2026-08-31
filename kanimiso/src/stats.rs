@@ -30965,6 +30965,109 @@ impl FittedKernelDml {
     }
 }
 
+/// Linear DML (econml `LinearDML` lite).
+///
+/// Residualize \(Y\) and \(D\) by OLS, then OLS of \(\tilde Y\) on
+/// \(\tilde D[1,X]\). Distinct from [`RLearner`] (logistic propensity) and
+/// [`SparseLinearDml`] (ISTA \(L_1\)).
+#[derive(Clone, Debug, Default)]
+pub struct LinearDml;
+
+impl LinearDml {
+    /// Default linear DML.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Residual-on-residual OLS CATE.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLinearDml>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let q = 1 + x.ncols();
+        let idx: Vec<usize> = (0..n).collect();
+        if !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("LinearDml needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "linear DML",
+                        "D̃ is unidentified with a single arm",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedLinearDml {
+                coef: Vector::zeros(q),
+            });
+        }
+        let (by, ay) = ols_arm(x, y, &idx, &ctx.policy);
+        let (bd, ad) = ols_arm(x, treat, &idx, &ctx.policy);
+        let yres = Vector::from_iter((0..n).map(|i| y[i] - mu_lin(x, i, ay, &by)));
+        let design = Matrix::from_fn(n, q, |i, j| {
+            let d = treat[i] - mu_lin(x, i, ad, &bd);
+            if j == 0 {
+                d
+            } else {
+                d * x.get(i, j - 1)
+            }
+        });
+        let mut scratch = Report::new("linear-dml", "ols");
+        let coef = least_squares(&mut scratch, &design, &yres, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(q));
+        for issue in scratch.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("LinearDml is OLS residual-on-residual, not published LinearDML")
+                .compromise(NumericalCompromise::new(
+                    "econml LinearDML",
+                    "OLS residualize Y and D, then OLS of Ỹ on D̃[1,X]",
+                    "cross-fitting and a published influence SE are omitted",
+                    "read CATE as a linear residual-ratio sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedLinearDml { coef })
+    }
+}
+
+/// Fitted linear DML.
+#[derive(Clone, Debug)]
+pub struct FittedLinearDml {
+    /// Slopes on \([1,X]\).
+    pub coef: Vector,
+}
+
+impl FittedLinearDml {
+    /// Linear CATE.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.coef.as_slice().first().copied().unwrap_or(0.0);
+            for j in 0..x.ncols() {
+                if 1 + j < self.coef.len() {
+                    s += x.get(i, j) * self.coef[1 + j];
+                }
+            }
+            s
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -32438,6 +32541,17 @@ mod tests {
             kdm.value
                 .predict_cate(&xate, &Session::new("kdmp", "t"))
                 .expect("kdmp")
+                .value
+                .len(),
+            20
+        );
+        let ldm = LinearDml::new()
+            .fit(&xate, &dur, &grp, &Session::new("ldm", "t"))
+            .expect("ldm");
+        assert_eq!(
+            ldm.value
+                .predict_cate(&xate, &Session::new("ldmp", "t"))
+                .expect("ldmp")
                 .value
                 .len(),
             20
