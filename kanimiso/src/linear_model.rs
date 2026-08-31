@@ -4092,6 +4092,145 @@ impl Fit for Glsar {
     }
 }
 
+/// Sparse PLS regression (sklearn `SparsePLS` / sparse NIPALS).
+///
+/// Soft-thresholds the NIPALS weights. \(\alpha\) is not identification `p`.
+/// Distinct from [`PlsRegression`] (dense NIPALS) and
+/// [`crate::decompose::SparsePca`] (unsupervised).
+#[derive(Clone, Debug)]
+pub struct SparsePls {
+    /// Latent directions. Not identification `p`.
+    pub n_components: usize,
+    /// Soft-threshold on the weights.
+    pub alpha: f64,
+}
+
+impl Default for SparsePls {
+    fn default() -> Self {
+        Self {
+            n_components: 2,
+            alpha: 0.1,
+        }
+    }
+}
+
+impl SparsePls {
+    /// Sparse PLS with `k` components.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components,
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted sparse PLS.
+#[derive(Clone, Debug)]
+pub struct FittedSparsePls {
+    /// X mean.
+    pub x_mean: Vector,
+    /// y mean.
+    pub y_mean: f64,
+    /// Sparse collapsed coefficients.
+    pub coef: Vector,
+}
+
+impl Fit for SparsePls {
+    type Fitted = FittedSparsePls;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSparsePls>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let (mut xs, xmean) = x.centered();
+        let ymean = y.mean();
+        let mut ys = Vector::from_iter(y.as_slice().iter().map(|v| v - ymean));
+        let k = self
+            .n_components
+            .min(x.ncols())
+            .min(x.nrows().saturating_sub(1));
+        if k < self.n_components {
+            ctx.push(
+                Issue::builder(IssueCode::ComponentsExceedRank)
+                    .message(format!(
+                        "requested {} sparse PLS components, using {k}",
+                        self.n_components
+                    ))
+                    .compromise(NumericalCompromise::new(
+                        format!("{} latent directions", self.n_components),
+                        format!("{k} sparse NIPALS directions"),
+                        "n or p cannot support more",
+                        "later components are not estimated",
+                    ))
+                    .build(),
+            );
+        }
+        let alpha = if self.alpha.is_finite() && self.alpha >= 0.0 {
+            self.alpha
+        } else {
+            0.1
+        };
+        let mut coef = Vector::zeros(x.ncols());
+        for _ in 0..k {
+            let mut w = xs.matvec_t(&ys);
+            for j in 0..w.len() {
+                w[j] = soft_threshold(w[j], alpha);
+            }
+            let wn = w.norm();
+            if wn <= ctx.policy.near_zero_variance {
+                ctx.push(
+                    Issue::builder(IssueCode::UpdateWithZeroInformation)
+                        .message("sparse NIPALS weight vanished; remaining components are unidentified")
+                        .build(),
+                );
+                break;
+            }
+            let w = w.scale(1.0 / wn);
+            let t = xs.matvec(&w);
+            let tt = t.dot(&t);
+            if tt <= ctx.policy.near_zero_variance {
+                break;
+            }
+            let q = t.dot(&ys) / tt;
+            let pvec = xs.matvec_t(&t).scale(1.0 / tt);
+            for i in 0..xs.nrows() {
+                for j in 0..xs.ncols() {
+                    xs.set(i, j, xs.get(i, j) - t[i] * pvec[j]);
+                }
+                ys[i] -= t[i] * q;
+            }
+            for j in 0..coef.len() {
+                coef[j] += w[j] * q;
+            }
+        }
+        ctx.finish(FittedSparsePls {
+            x_mean: xmean,
+            y_mean: ymean,
+            coef,
+        })
+    }
+}
+
+impl Predict for FittedSparsePls {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let mut out = Vector::zeros(x.nrows());
+        for i in 0..x.nrows() {
+            let mut s = self.y_mean;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += (x.get(i, j) - self.x_mean[j]) * self.coef[j];
+            }
+            out[i] = s;
+        }
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4286,6 +4425,16 @@ mod tests {
             .expect("rls");
         assert!(rls.value.coef[0].is_finite());
         assert!(!rls.value.resid.is_empty());
+        let spls = SparsePls::new(1)
+            .fit(&x, &y, &Session::new("spls", "fit"))
+            .expect("spls");
+        let splsp = spls
+            .value
+            .predict(&x, &Session::new("spls", "p"))
+            .unwrap()
+            .value;
+        assert_eq!(splsp.len(), y.len());
+        assert!(splsp.as_slice().iter().all(|v| v.is_finite()));
     }
 
     #[test]

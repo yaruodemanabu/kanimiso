@@ -38190,6 +38190,617 @@ impl Predict for OnlineQuantileRegressor {
     }
 }
 
+fn online_glm_prepare<'a>(
+    ctx: &mut FitCtx,
+    x: &'a Matrix,
+    y: Option<&'a Vector>,
+    initialized: bool,
+    n_seen: u64,
+    coef: &mut Vector,
+    learning_rate: f64,
+    name: &str,
+) -> Option<(&'a Vector, f64)> {
+    inspect_online_xy(ctx, x, y);
+    let Some(y) = y else {
+        ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+        if n_seen == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+        }
+        return None;
+    };
+    if !initialized {
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return None;
+        }
+        *coef = Vector::zeros(x.ncols());
+    } else if coef.len() != x.ncols() {
+        ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+        return None;
+    }
+    let lr = if learning_rate.is_finite() && learning_rate > 0.0 {
+        learning_rate
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("{name} learning_rate is not a positive finite; using 0.05"))
+                .build(),
+        );
+        0.05
+    };
+    Some((y, lr))
+}
+
+/// Online Poisson GLM regressor (river `linear_model` + Poisson).
+///
+/// Log-link SGD on \(\exp(\eta)-y\eta\). Distinct from [`OnlinePoisson`]
+/// (univariate count tracker, no \(X\)).
+#[derive(Clone, Debug)]
+pub struct OnlinePoissonRegressor {
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlinePoissonRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlinePoissonRegressor {
+    /// Poisson GLM with step `learning_rate`.
+    pub fn new(learning_rate: f64) -> Self {
+        Self {
+            learning_rate,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlinePoissonRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlinePoissonRegressor",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected Poisson GLM update"),
+            );
+        };
+        self.initialized = true;
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() || y[i] < 0.0 {
+                if y[i].is_finite() && y[i] < 0.0 {
+                    ctx.push(
+                        Issue::builder(IssueCode::NonPositiveSeries)
+                            .severity(Severity::Warning)
+                            .message("OnlinePoissonRegressor skipped a negative count")
+                            .build(),
+                    );
+                }
+                continue;
+            }
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let eta = eta.clamp(-20.0, 20.0);
+            let mu = eta.exp();
+            loss_before += mu - y[i] * eta;
+            let g = mu - y[i];
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            let ea = ea.clamp(-20.0, 20.0);
+            loss_after += ea.exp() - y[i] * ea;
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online Poisson GLM",
+            "SGD on exp(η) − yη; count mean, not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlinePoissonRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut eta = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            eta.clamp(-20.0, 20.0).exp()
+        })))
+    }
+}
+
+/// Online Gamma GLM regressor (river Gamma + log link).
+///
+/// SGD on \(y e^{-\eta}+\eta\). Distinct from [`OnlineGamma`] (univariate
+/// tracker) and [`OnlinePoissonRegressor`] (count mean).
+#[derive(Clone, Debug)]
+pub struct OnlineGammaRegressor {
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineGammaRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineGammaRegressor {
+    /// Gamma GLM with step `learning_rate`.
+    pub fn new(learning_rate: f64) -> Self {
+        Self {
+            learning_rate,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineGammaRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineGammaRegressor",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected Gamma GLM update"),
+            );
+        };
+        self.initialized = true;
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() || y[i] <= 0.0 {
+                if y[i].is_finite() && y[i] <= 0.0 {
+                    ctx.push(
+                        Issue::builder(IssueCode::NonPositiveSeries)
+                            .severity(Severity::Warning)
+                            .message("OnlineGammaRegressor skipped a non-positive response")
+                            .build(),
+                    );
+                }
+                continue;
+            }
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let eta = eta.clamp(-20.0, 20.0);
+            let mu = eta.exp();
+            loss_before += y[i] / mu + eta;
+            let g = 1.0 - y[i] / mu;
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            let ea = ea.clamp(-20.0, 20.0);
+            loss_after += y[i] / ea.exp() + ea;
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online Gamma GLM",
+            "SGD on y exp(−η) + η; mean is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineGammaRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut eta = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            eta.clamp(-20.0, 20.0).exp()
+        })))
+    }
+}
+
+/// Online Tweedie GLM regressor (compound Poisson–Gamma, log link).
+///
+/// Power \(p\) is not identification `p`. Distinct from
+/// [`OnlineTweedieDeviance`] (metric) and [`OnlinePoissonRegressor`] (\(p=1\)).
+#[derive(Clone, Debug)]
+pub struct OnlineTweedieRegressor {
+    /// Tweedie power in \((1,2)\). Not identification `p`.
+    pub power: f64,
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineTweedieRegressor {
+    fn default() -> Self {
+        Self {
+            power: 1.5,
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineTweedieRegressor {
+    /// Tweedie GLM with variance power `power`.
+    pub fn new(power: f64) -> Self {
+        Self {
+            power,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineTweedieRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineTweedieRegressor",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected Tweedie GLM update"),
+            );
+        };
+        self.initialized = true;
+        let pwr = if self.power.is_finite() && self.power > 1.0 && self.power < 2.0 {
+            self.power
+        } else {
+            1.5
+        };
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() || y[i] < 0.0 {
+                if y[i].is_finite() && y[i] < 0.0 {
+                    ctx.push(
+                        Issue::builder(IssueCode::NonPositiveSeries)
+                            .severity(Severity::Warning)
+                            .message("OnlineTweedieRegressor skipped a negative response")
+                            .build(),
+                    );
+                }
+                continue;
+            }
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let eta = eta.clamp(-20.0, 20.0);
+            let mu = eta.exp();
+            let inv = 1.0 - pwr;
+            loss_before += mu.powf(inv) / inv - y[i] * mu.powf(-pwr) / (-pwr);
+            let g = (mu - y[i]) * mu.powf(1.0 - pwr);
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            let ea = ea.clamp(-20.0, 20.0);
+            let mua = ea.exp();
+            loss_after += mua.powf(inv) / inv - y[i] * mua.powf(-pwr) / (-pwr);
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online Tweedie GLM",
+            "SGD on the Tweedie unit deviance; power is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineTweedieRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut eta = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            eta.clamp(-20.0, 20.0).exp()
+        })))
+    }
+}
+
+/// Online Huber regressor (river `optim` + Huber).
+///
+/// SGD on the Huber piecewise loss. Distinct from [`OnlineHuber`] (rolling
+/// metric) and [`PaRegressor`] (ε-insensitive).
+#[derive(Clone, Debug)]
+pub struct OnlineHuberRegressor {
+    /// Huber threshold \(\delta>0\). Not identification `p`.
+    pub delta: f64,
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineHuberRegressor {
+    fn default() -> Self {
+        Self {
+            delta: 1.0,
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineHuberRegressor {
+    /// Huber regressor with threshold `delta`.
+    pub fn new(delta: f64) -> Self {
+        Self {
+            delta,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineHuberRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineHuberRegressor",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected Huber update"),
+            );
+        };
+        self.initialized = true;
+        let delta = if self.delta.is_finite() && self.delta > 0.0 {
+            self.delta
+        } else {
+            1.0
+        };
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let r = y[i] - eta;
+            let ar = r.abs();
+            loss_before += if ar <= delta {
+                0.5 * r * r
+            } else {
+                delta * (ar - 0.5 * delta)
+            };
+            let g = if ar <= delta {
+                -r
+            } else if r >= 0.0 {
+                -delta
+            } else {
+                delta
+            };
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            let ra = y[i] - ea;
+            let ara = ra.abs();
+            loss_after += if ara <= delta {
+                0.5 * ra * ra
+            } else {
+                delta * (ara - 0.5 * delta)
+            };
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta_c = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta_c,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online Huber regressor",
+            "SGD on the Huber piecewise loss; δ is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineHuberRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38853,6 +39464,18 @@ mod tests {
         OnlineQuantileRegressor::new(0.5)
             .partial_fit(&x, Some(&y), &session)
             .expect("oqr");
+        OnlinePoissonRegressor::new(0.05)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("opoisr");
+        OnlineGammaRegressor::new(0.05)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("ogamr");
+        OnlineTweedieRegressor::new(1.5)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("otwdr");
+        OnlineHuberRegressor::new(1.0)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("ohubr");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

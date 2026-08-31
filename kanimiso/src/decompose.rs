@@ -15,7 +15,8 @@ use crate::validate::{inspect_identification, inspect_xy};
 use faer::Mat;
 use ojizou_san::{IncrementalExplain, Session};
 use signlred::{
-    IncrementalQuality, Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result,
+    IncrementalQuality, Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Report,
+    Result, Severity,
 };
 
 fn matmul(a: &Matrix, b: &Matrix) -> Matrix {
@@ -2293,6 +2294,397 @@ impl Transform for SparseCoder {
     }
 }
 
+/// Kernel CCA (sklearn `KernelCCA` / Bach–Jordan regularized KCCA).
+///
+/// Dual size is not identification `p`. Distinct from [`Cca`] (linear
+/// whitened cross-covariance).
+#[derive(Clone, Debug)]
+pub struct KernelCca {
+    /// RBF \(\gamma\). Not identification `p`.
+    pub gamma: f64,
+    /// Dual ridge. Not identification `p`.
+    pub ridge: f64,
+}
+
+impl Default for KernelCca {
+    fn default() -> Self {
+        Self {
+            gamma: 0.1,
+            ridge: 0.1,
+        }
+    }
+}
+
+impl KernelCca {
+    /// Kernel CCA with RBF `gamma`.
+    pub fn new(gamma: f64) -> Self {
+        Self {
+            gamma,
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted kernel CCA.
+#[derive(Clone, Debug)]
+pub struct FittedKernelCca {
+    /// Dual coefficients on the centered training kernel.
+    pub alpha: Vector,
+    /// Canonical correlation.
+    pub correlation: f64,
+    /// Training rows (for out-of-sample kernels).
+    train: Matrix,
+    /// Kernel centering mean \(1^\top K / n\).
+    k_mean: Vector,
+    /// Grand mean of \(K\).
+    k_grand: f64,
+    gamma: f64,
+    /// Training \(y\) mean.
+    pub y_mean: f64,
+    /// Training \(y\) scale.
+    pub y_std: f64,
+}
+
+impl Transform for FittedKernelCca {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let n = x.nrows();
+        let m = self.train.nrows();
+        let out = Matrix::from_fn(n, 1, |i, _| {
+            let mut s = 0.0_f64;
+            for j in 0..m.min(self.alpha.len()) {
+                let kij = rbf_rows(x, i, &self.train, j, self.gamma);
+                let kc = kij - self.k_mean.as_slice().get(j).copied().unwrap_or(0.0) - self.row_mean(x, i)
+                    + self.k_grand;
+                s += kc * self.alpha[j];
+            }
+            s
+        });
+        ctx.finish(out)
+    }
+}
+
+impl FittedKernelCca {
+    fn row_mean(&self, x: &Matrix, i: usize) -> f64 {
+        let m = self.train.nrows();
+        if m == 0 {
+            return 0.0;
+        }
+        let mut s = 0.0_f64;
+        for j in 0..m {
+            s += rbf_rows(x, i, &self.train, j, self.gamma);
+        }
+        s / m as f64
+    }
+}
+
+fn rbf_rows(x: &Matrix, i: usize, other: &Matrix, j: usize, gamma: f64) -> f64 {
+    let g = if gamma.is_finite() && gamma > 0.0 {
+        gamma
+    } else {
+        1.0
+    };
+    let mut s = 0.0_f64;
+    let p = x.ncols().min(other.ncols());
+    for c in 0..p {
+        let d = x.get(i, c) - other.get(j, c);
+        s += d * d;
+    }
+    (-g * s).exp()
+}
+
+impl Fit for KernelCca {
+    type Fitted = FittedKernelCca;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedKernelCca>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len());
+        if n == 0 || x.ncols() == 0 {
+            return ctx.finish(FittedKernelCca {
+                alpha: Vector::zeros(0),
+                correlation: 0.0,
+                train: x.clone(),
+                k_mean: Vector::zeros(0),
+                k_grand: 0.0,
+                gamma: self.gamma,
+                y_mean: 0.0,
+                y_std: 1.0,
+            });
+        }
+        let y_mean = y.mean();
+        let yc = Vector::from_iter((0..n).map(|i| y[i] - y_mean));
+        let y_std = yc.std().max(1e-15);
+        if yc.std() <= ctx.policy.near_zero_variance {
+            ctx.push(
+                Issue::builder(IssueCode::ConstantTarget)
+                    .message("Kernel CCA second view has zero variance")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "kernel canonical correlation",
+                        "a constant y has no correlation with any kernel combination of X",
+                        "do not interpret the dual weights",
+                    ))
+                    .build(),
+            );
+        }
+        let gamma = if self.gamma.is_finite() && self.gamma > 0.0 {
+            self.gamma
+        } else {
+            0.1
+        };
+        let ridge = if self.ridge.is_finite() && self.ridge >= 0.0 {
+            self.ridge
+        } else {
+            0.1
+        };
+        let mut kraw = Matrix::zeros(n, n);
+        for i in 0..n {
+            for j in 0..n {
+                kraw.set(i, j, rbf_rows(x, i, x, j, gamma));
+            }
+        }
+        let k_mean = Vector::from_iter((0..n).map(|j| {
+            let mut s = 0.0_f64;
+            for i in 0..n {
+                s += kraw.get(i, j);
+            }
+            s / n as f64
+        }));
+        let mut k_grand = 0.0_f64;
+        for i in 0..n {
+            k_grand += k_mean[i];
+        }
+        k_grand /= n as f64;
+        let mut gram = Mat::<f64>::zeros(n, n);
+        for i in 0..n {
+            let row_mean = {
+                let mut s = 0.0_f64;
+                for j in 0..n {
+                    s += kraw.get(i, j);
+                }
+                s / n as f64
+            };
+            for j in 0..n {
+                gram[(i, j)] = kraw.get(i, j) - row_mean - k_mean[j] + k_grand;
+            }
+            gram[(i, i)] += ridge;
+        }
+        let mut scratch = Report::new("kcca", "chol");
+        let alpha = match chol_solve(&mut scratch, &gram, &yc, &ctx.policy) {
+            Some(a) => a,
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::CholeskyFailed)
+                        .severity(Severity::Warning)
+                        .message("KernelCca dual Cholesky failed; using a zero dual")
+                        .build(),
+                );
+                Vector::zeros(n)
+            }
+        };
+        let mut pred = Vector::zeros(n);
+        for i in 0..n {
+            let mut s = 0.0_f64;
+            for j in 0..n {
+                let kc = kraw.get(i, j)
+                    - {
+                        let mut rm = 0.0_f64;
+                        for t in 0..n {
+                            rm += kraw.get(i, t);
+                        }
+                        rm / n as f64
+                    }
+                    - k_mean[j]
+                    + k_grand;
+                s += kc * alpha[j];
+            }
+            pred[i] = s;
+        }
+        let mut num = 0.0_f64;
+        let mut den = 0.0_f64;
+        for i in 0..n {
+            num += pred[i] * yc[i];
+            den += pred[i] * pred[i];
+        }
+        let corr = if den > 1e-15 && y_std > 0.0 {
+            (num / (den.sqrt() * y_std * (n as f64).sqrt())).clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        ctx.finish(FittedKernelCca {
+            alpha,
+            correlation: corr,
+            train: Matrix::from_fn(n, x.ncols(), |i, j| x.get(i, j)),
+            k_mean,
+            k_grand,
+            gamma,
+            y_mean,
+            y_std,
+        })
+    }
+}
+
+/// One-factor confirmatory factor analysis (statsmodels `Factor` / LISREL-lite).
+///
+/// MINRES communalities on the correlation matrix. Factor count is fixed at
+/// one and is not identification `p`. Distinct from [`FactorAnalysis`]
+/// (exploratory multi-factor SVD/EM).
+#[derive(Clone, Debug)]
+pub struct ConfirmatoryFactor {
+    /// Communality iterations.
+    pub max_iter: usize,
+}
+
+impl Default for ConfirmatoryFactor {
+    fn default() -> Self {
+        Self { max_iter: 25 }
+    }
+}
+
+impl ConfirmatoryFactor {
+    /// Default one-factor CFA.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedConfirmatoryFactor>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted one-factor CFA.
+#[derive(Clone, Debug)]
+pub struct FittedConfirmatoryFactor {
+    /// Loadings \(\lambda\) (`p`).
+    pub loadings: Vector,
+    /// Uniqueness \(\psi_j=1-\lambda_j^2\).
+    pub uniqueness: Vector,
+    /// Column means.
+    pub mean: Vector,
+    /// Column scales used to form correlations.
+    pub scale: Vector,
+    /// Residual sum of squares of off-diagonal correlations.
+    pub residual_ss: f64,
+}
+
+impl Transform for FittedConfirmatoryFactor {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (n, p) = x.shape();
+        let pc = self.mean.len().min(p).min(self.loadings.len());
+        let mut denom = 0.0_f64;
+        for j in 0..pc {
+            let psi = self.uniqueness.as_slice().get(j).copied().unwrap_or(1.0).max(1e-8);
+            denom += self.loadings[j] * self.loadings[j] / psi;
+        }
+        let den = denom.max(1e-8);
+        let out = Matrix::from_fn(n, 1, |i, _| {
+            let mut s = 0.0_f64;
+            for j in 0..pc {
+                let psi = self.uniqueness.as_slice().get(j).copied().unwrap_or(1.0).max(1e-8);
+                let z = (x.get(i, j) - self.mean[j]) / self.scale.as_slice().get(j).copied().unwrap_or(1.0).max(1e-8);
+                s += self.loadings[j] * z / psi;
+            }
+            s / den
+        });
+        ctx.finish(out)
+    }
+}
+
+impl FitUnsupervised for ConfirmatoryFactor {
+    type Fitted = FittedConfirmatoryFactor;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedConfirmatoryFactor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let (n, p) = x.shape();
+        if n == 0 || p == 0 {
+            return ctx.finish(FittedConfirmatoryFactor {
+                loadings: Vector::zeros(p),
+                uniqueness: Vector::filled(p.max(1), 1.0),
+                mean: Vector::zeros(p),
+                scale: Vector::filled(p.max(1), 1.0),
+                residual_ss: f64::NAN,
+            });
+        }
+        let mean = Vector::from_iter((0..p).map(|j| x.column(j).mean()));
+        let scale = Vector::from_iter((0..p).map(|j| x.column(j).std().max(1e-8)));
+        let z = Matrix::from_fn(n, p, |i, j| (x.get(i, j) - mean[j]) / scale[j]);
+        let df = (n.saturating_sub(1)).max(1) as f64;
+        let corr = Matrix::from_fn(p, p, |i, j| {
+            let mut s = 0.0_f64;
+            for r in 0..n {
+                s += z.get(r, i) * z.get(r, j);
+            }
+            s / df
+        });
+        let mut lam = Vector::from_iter((0..p).map(|j| (corr.get(j, j).abs().sqrt() * 0.5).clamp(0.1, 0.9)));
+        for _ in 0..self.max_iter.max(1) {
+            let mut nxt = Vector::zeros(p);
+            for j in 0..p {
+                let mut num = 0.0_f64;
+                let mut den = 0.0_f64;
+                for k in 0..p {
+                    if k == j {
+                        continue;
+                    }
+                    num += corr.get(j, k) * lam[k];
+                    den += lam[k] * lam[k];
+                }
+                nxt[j] = if den > 1e-12 {
+                    (num / den).clamp(-0.99, 0.99)
+                } else {
+                    lam[j]
+                };
+            }
+            lam = nxt;
+        }
+        let uniqueness = Vector::from_iter((0..p).map(|j| (1.0 - lam[j] * lam[j]).clamp(1e-4, 1.0)));
+        let mut rss = 0.0_f64;
+        for i in 0..p {
+            for j in (i + 1)..p {
+                let e = corr.get(i, j) - lam[i] * lam[j];
+                rss += e * e;
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("ConfirmatoryFactor is one-factor MINRES, not a published LISREL CFA")
+                .compromise(NumericalCompromise::new(
+                    "statsmodels Factor / LISREL CFA",
+                    "iterated MINRES on the correlation matrix with a single common factor",
+                    "a user loading pattern, ML standard errors, and multi-factor identification are omitted",
+                    "read loadings as a 1-factor communality sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedConfirmatoryFactor {
+            loadings: lam,
+            uniqueness,
+            mean,
+            scale,
+            residual_ss: rss,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2383,5 +2775,29 @@ mod tests {
             .value;
         assert_eq!(sc.nrows(), x.nrows());
         assert!(sc.get(0, 0).is_finite());
+        let ycca = Vector::from_iter((0..x.nrows()).map(|i| x.get(i, 0) + 0.1 * (i as f64)));
+        let kcca = KernelCca::new(0.05)
+            .fit(&x, &ycca, &Session::new("kcca", "fit"))
+            .expect("kcca");
+        assert!(kcca.value.correlation.is_finite());
+        let zk = kcca
+            .value
+            .transform(&x, &Session::new("kcca", "t"))
+            .expect("kccat")
+            .value;
+        assert_eq!(zk.ncols(), 1);
+        assert!(zk.get(0, 0).is_finite());
+        let cfa = ConfirmatoryFactor::new()
+            .fit(&x, &Session::new("cfa", "fit"))
+            .expect("cfa");
+        assert_eq!(cfa.value.loadings.len(), x.ncols());
+        assert!(cfa.value.residual_ss.is_finite());
+        let zf = cfa
+            .value
+            .transform(&x, &Session::new("cfa", "t"))
+            .expect("cfat")
+            .value;
+        assert_eq!(zf.ncols(), 1);
+        assert!(zf.get(0, 0).is_finite());
     }
 }

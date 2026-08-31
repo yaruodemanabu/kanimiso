@@ -21,6 +21,7 @@ pub use crate::filters::{
 use crate::stats::{HypothesisTest, KpssResult};
 use crate::traits::{Fit, FitSeries, PartialFit};
 use crate::validate::{inspect_identification, inspect_xy};
+use faer::Mat;
 use ojizou_san::{IncrementalExplain, Session};
 use signlred::{
     scan_finite, slice_stats, IncrementalQuality, Issue, IssueCode, Meaninglessness,
@@ -19054,6 +19055,259 @@ impl FittedWlsReconciler {
     }
 }
 
+/// MinT-style reconciliation with a supplied node covariance.
+///
+/// Distinct from [`reconcile_mint`] (column-sum weights) and
+/// [`reconcile_wls`] (diagonal variances). Node count is not identification `p`.
+pub fn reconcile_mint_cov(
+    yhat: &Matrix,
+    summing: &Matrix,
+    cov: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, yhat, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, summing, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, cov, None, &ctx.policy);
+    if yhat.ncols() != summing.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "reconcile_mint_cov yhat.ncols()={} summing.nrows()={}",
+                    yhat.ncols(),
+                    summing.nrows()
+                ))
+                .build(),
+        );
+        return ctx.finish(yhat.clone());
+    }
+    let m = summing.nrows();
+    let b = summing.ncols();
+    if m == 0 || b == 0 {
+        return ctx.finish(yhat.clone());
+    }
+    if cov.nrows() != m || cov.ncols() != m {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message("reconcile_mint_cov covariance is not m×m; leaving the base forecast")
+                .build(),
+        );
+        return ctx.finish(yhat.clone());
+    }
+    let mut wmat = Mat::<f64>::zeros(m, m);
+    for i in 0..m {
+        for j in 0..m {
+            wmat[(i, j)] = cov.get(i, j);
+        }
+        wmat[(i, i)] += 1e-8;
+    }
+    let mut winv_s = Matrix::zeros(m, b);
+    let mut failed = false;
+    for j in 0..b {
+        let col = Vector::from_iter((0..m).map(|i| summing.get(i, j)));
+        let mut scratch = Report::new("mint-cov", "wcol");
+        match chol_solve(&mut scratch, &wmat, &col, &ctx.policy) {
+            Some(v) => {
+                for i in 0..m {
+                    winv_s.set(i, j, v[i]);
+                }
+            }
+            None => {
+                failed = true;
+                break;
+            }
+        }
+    }
+    if failed {
+        ctx.push(
+            Issue::builder(IssueCode::CholeskyFailed)
+                .severity(Severity::Warning)
+                .message("MinT covariance Cholesky failed; leaving the base forecast")
+                .build(),
+        );
+        return ctx.finish(yhat.clone());
+    }
+    let mut gram = summing.gram();
+    for i in 0..b {
+        for j in 0..b {
+            let mut g = 0.0_f64;
+            for k in 0..m {
+                g += summing.get(k, i) * winv_s.get(k, j);
+            }
+            gram[(i, j)] = g;
+        }
+        gram[(i, i)] += 1e-10;
+    }
+    let mut out = Matrix::zeros(yhat.nrows(), m);
+    for h in 0..yhat.nrows() {
+        let yh = Vector::from_iter((0..m).map(|i| yhat.get(h, i)));
+        let mut scratch = Report::new("mint-cov", "wy");
+        let wy = match chol_solve(&mut scratch, &wmat, &yh, &ctx.policy) {
+            Some(v) => v,
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::CholeskyFailed)
+                        .severity(Severity::Warning)
+                        .message("MinT covariance Cholesky failed on a horizon; leaving the base")
+                        .build(),
+                );
+                for i in 0..m {
+                    out.set(h, i, yhat.get(h, i));
+                }
+                continue;
+            }
+        };
+        let mut z = Vector::zeros(b);
+        for j in 0..b {
+            let mut s = 0.0_f64;
+            for i in 0..m {
+                s += summing.get(i, j) * wy[i];
+            }
+            z[j] = s;
+        }
+        let mut sc2 = Report::new("mint-cov", "beta");
+        let beta = match chol_solve(&mut sc2, &gram, &z, &ctx.policy) {
+            Some(v) => v,
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::CholeskyFailed)
+                        .severity(Severity::Warning)
+                        .message("MinT Gram Cholesky failed; leaving the base forecast")
+                        .build(),
+                );
+                for i in 0..m {
+                    out.set(h, i, yhat.get(h, i));
+                }
+                continue;
+            }
+        };
+        for i in 0..m {
+            let mut s = 0.0_f64;
+            for j in 0..b.min(beta.len()) {
+                s += summing.get(i, j) * beta[j];
+            }
+            out.set(h, i, s);
+        }
+    }
+    ctx.finish(out)
+}
+
+/// Last-value hierarchy plus covariance MinT (sktime `MinTReconciler`).
+///
+/// Series count is not identification `p`. Distinct from
+/// [`WlsReconcilerForecaster`] (diagonal column variance).
+#[derive(Clone, Debug, Default)]
+pub struct MinTReconcilerForecaster;
+
+/// Fitted covariance MinT hierarchy.
+#[derive(Clone, Debug)]
+pub struct FittedMinTReconciler {
+    last: Vector,
+    cov: Matrix,
+}
+
+impl MinTReconcilerForecaster {
+    /// Empty MinT reconciler.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Store last values and the sample covariance of the training columns.
+    pub fn fit(
+        &self,
+        y: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedMinTReconciler>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let last = Vector::from_iter((0..y.ncols()).map(|j| {
+            y.column(j)
+                .as_slice()
+                .last()
+                .copied()
+                .unwrap_or(0.0)
+        }));
+        let p = y.ncols();
+        let t = y.nrows();
+        let mean = Vector::from_iter((0..p).map(|j| y.column(j).mean()));
+        let df = (t.saturating_sub(1)).max(1) as f64;
+        let cov = Matrix::from_fn(p, p, |i, j| {
+            let mut s = 0.0_f64;
+            for r in 0..t {
+                s += (y.get(r, i) - mean[i]) * (y.get(r, j) - mean[j]);
+            }
+            let v = s / df;
+            if i == j {
+                if v.is_finite() && v > 0.0 {
+                    v
+                } else {
+                    1.0
+                }
+            } else if v.is_finite() {
+                v
+            } else {
+                0.0
+            }
+        });
+        ctx.finish(FittedMinTReconciler { last, cov })
+    }
+}
+
+impl FittedMinTReconciler {
+    /// Repeat last values, expand through `S` if needed, then covariance MinT.
+    pub fn forecast(
+        &self,
+        h: usize,
+        summing: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<Matrix>> {
+        let n_nodes = summing.nrows();
+        let n_bot = summing.ncols();
+        let yhat = if self.last.len() == n_nodes {
+            Matrix::from_fn(h, n_nodes, |_, j| self.last[j])
+        } else if self.last.len() == n_bot {
+            Matrix::from_fn(h, n_nodes, |_, i| {
+                let mut s = 0.0;
+                for j in 0..n_bot {
+                    s += summing.get(i, j) * self.last[j];
+                }
+                s
+            })
+        } else {
+            Matrix::from_fn(h, n_nodes.max(1), |_, j| {
+                self.last.as_slice().get(j).copied().unwrap_or(0.0)
+            })
+        };
+        let w = if self.cov.nrows() == n_nodes && self.cov.ncols() == n_nodes {
+            self.cov.clone()
+        } else if self.cov.nrows() == n_bot && self.cov.ncols() == n_bot {
+            Matrix::from_fn(n_nodes, n_nodes, |i, j| {
+                let mut s = 0.0_f64;
+                for a in 0..n_bot {
+                    for b in 0..n_bot {
+                        s += summing.get(i, a) * self.cov.get(a, b) * summing.get(j, b);
+                    }
+                }
+                if i == j && s.abs() < 1e-12 {
+                    1.0
+                } else {
+                    s
+                }
+            })
+        } else {
+            Matrix::from_fn(n_nodes.max(1), n_nodes.max(1), |i, j| {
+                if i == j {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+        };
+        reconcile_mint_cov(&yhat, summing, &w, session)
+    }
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -19915,6 +20169,16 @@ impl FittedWlsReconciler {
             .value;
         assert_eq!(wlsff.shape(), (2, 3));
         assert!((wlsff.get(0, 0) + wlsff.get(0, 1) - wlsff.get(0, 2)).abs() < 1e-6);
+        let mintf = MinTReconcilerForecaster::new()
+            .fit(&y2, &Session::new("mintf", "fit"))
+            .expect("mintf");
+        let mintff = mintf
+            .value
+            .forecast(2, &s, &Session::new("mintf", "fc"))
+            .expect("mintff")
+            .value;
+        assert_eq!(mintff.shape(), (2, 3));
+        assert!((mintff.get(0, 0) + mintff.get(0, 1) - mintff.get(0, 2)).abs() < 1e-5);
         let dtab = DirectTabularForecaster::new(3, 3)
             .fit_series(&y, &Session::new("dtab", "fit"))
             .expect("dtab");

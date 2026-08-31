@@ -16461,6 +16461,146 @@ impl Predict for FittedTstClassifier {
     }
 }
 
+/// FLOSS corrected arc-curve change point (sktime `FLOSS` / STUMPY).
+///
+/// Window length is not identification `p`. Distinct from [`ClaSPSegmentation`]
+/// (two-mean F score) and [`Stamp`] (matrix-profile distances).
+pub fn floss_change_point(
+    y: &Vector,
+    window: usize,
+    session: &Session,
+) -> Result<Qualified<FlossResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y),
+        Some(y),
+        &ctx.policy,
+    );
+    let n = y.len();
+    let m = window.max(2);
+    if m >= n || n < 6 {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .severity(Severity::Warning)
+                .message(format!("FLOSS window={m} is unusable for n={n}"))
+                .build(),
+        );
+        return ctx.finish(FlossResult {
+            index: f64::NAN,
+            cac: Vector::zeros(0),
+        });
+    }
+    let n_sub = n + 1 - m;
+    let excl = (m / 4).max(1);
+    let mut nn = vec![0usize; n_sub];
+    for i in 0..n_sub {
+        let mut best = f64::INFINITY;
+        let mut arg = i;
+        for j in 0..n_sub {
+            if i.abs_diff(j) < excl {
+                continue;
+            }
+            let mut d = 0.0_f64;
+            for t in 0..m {
+                let e = y[i + t] - y[j + t];
+                d += e * e;
+            }
+            if d < best {
+                best = d;
+                arg = j;
+            }
+        }
+        nn[i] = arg;
+    }
+    let mut arc = vec![0.0_f64; n];
+    for i in 0..n_sub {
+        let j = nn[i];
+        let lo = i.min(j);
+        let hi = i.max(j);
+        if hi > lo + 1 {
+            for k in (lo + 1)..hi {
+                if k < n {
+                    arc[k] += 1.0;
+                }
+            }
+        }
+    }
+    let mut cac = Vector::zeros(n);
+    let mut best_i = n / 2;
+    let mut best_v = f64::INFINITY;
+    let ns = n_sub.max(1) as f64;
+    for k in 1..n.saturating_sub(1) {
+        let x = k as f64 / n.max(1) as f64;
+        let iac = (2.0 * ns * x * (1.0 - x)).max(1e-8);
+        let v = (arc[k] / iac).clamp(0.0, 1.0);
+        cac[k] = v;
+        if k >= m && k + m < n && v < best_v {
+            best_v = v;
+            best_i = k;
+        }
+    }
+    if !best_v.is_finite() {
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .message("FLOSS CAC was non-finite")
+                .build(),
+        );
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("FLOSS is a z-unnormalized arc curve, not the published online FLOSS")
+            .compromise(NumericalCompromise::new(
+                "sktime / STUMPY FLOSS",
+                "nearest-neighbour arcs over Euclidean windows, IAC-corrected",
+                "z-normalized distance, the online incremental profile, and L arc constraints are omitted",
+                "read the index as an arc-curve sketch",
+            ))
+            .build(),
+    );
+    ctx.finish(FlossResult {
+        index: best_i as f64,
+        cac,
+    })
+}
+
+/// FLOSS change-point payload.
+#[derive(Clone, Debug)]
+pub struct FlossResult {
+    /// Argmin of the corrected arc curve.
+    pub index: f64,
+    /// Corrected arc curve (`n`).
+    pub cac: Vector,
+}
+
+/// Named FLOSS annotator (sktime `FLOSS`).
+#[derive(Clone, Debug)]
+pub struct Floss {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+}
+
+impl Default for Floss {
+    fn default() -> Self {
+        Self { window: 3 }
+    }
+}
+
+impl Floss {
+    /// FLOSS with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+        }
+    }
+
+    /// Corrected arc-curve change point.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FlossResult>> {
+        floss_change_point(y, self.window, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -17056,6 +17196,10 @@ mod tests {
                 .len(),
             8
         );
+        let fls = Floss::new(3)
+            .fit(&yr, &Session::new("ts", "floss"))
+            .unwrap();
+        assert!(fls.value.index.is_finite() || fls.value.index.is_nan());
         let igs = InformationGainSegmentation::new()
             .fit(&yr, &Session::new("ts", "igs"))
             .unwrap();

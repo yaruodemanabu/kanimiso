@@ -28948,6 +28948,822 @@ impl Driv {
     }
 }
 
+fn rbf_pair(a: f64, b: f64, bw: f64) -> f64 {
+    let h = if bw.is_finite() && bw > 0.0 { bw } else { 1.0 };
+    let d = a - b;
+    (-0.5 * (d / h) * (d / h)).exp()
+}
+
+/// Kernel IV / NPIV first stage (econml `KernelIV` lite).
+///
+/// RBF kernel ridge of \(D\) on \(Z\), then OLS of \(Y\) on \((\hat D, X)\).
+/// Dual size is not identification `p`. Distinct from [`DmlIv`] (linear
+/// residual Wald) and [`SieveIv`] (polynomial first stage).
+#[derive(Clone, Debug)]
+pub struct KernelIv {
+    /// RBF length-scale. Not identification `p`.
+    pub bandwidth: f64,
+    /// Dual ridge. Not identification `p`.
+    pub ridge: f64,
+}
+
+impl Default for KernelIv {
+    fn default() -> Self {
+        Self {
+            bandwidth: 2.0,
+            ridge: 0.1,
+        }
+    }
+}
+
+impl KernelIv {
+    /// Kernel IV with bandwidth `h`.
+    pub fn new(bandwidth: f64) -> Self {
+        Self {
+            bandwidth,
+            ..Self::default()
+        }
+    }
+
+    /// Fit kernel-ridge first stage then 2SLS second stage.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        instrument: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedKernelIv>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x
+            .nrows()
+            .min(y.len())
+            .min(treat.len())
+            .min(instrument.len());
+        let idx: Vec<usize> = (0..n).collect();
+        if !instrument_varies(instrument, &idx) || !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("KernelIv needs treatment and instrument variation")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "kernel IV",
+                        "a constant Z or single arm leaves the first stage unidentified",
+                        "collect a non-degenerate instrument and both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedKernelIv {
+                intercept: 0.0,
+                ate: 0.0,
+                coef_x: Vector::zeros(x.ncols()),
+                dual_alpha: Vector::zeros(n),
+                z_train: instrument.clone(),
+                bandwidth: self.bandwidth,
+                ridge: self.ridge,
+            });
+        }
+        let bw = if self.bandwidth.is_finite() && self.bandwidth > 0.0 {
+            self.bandwidth
+        } else {
+            2.0
+        };
+        let ridge = if self.ridge.is_finite() && self.ridge >= 0.0 {
+            self.ridge
+        } else {
+            0.1
+        };
+        let mut gram = Mat::<f64>::zeros(n, n);
+        for i in 0..n {
+            for j in 0..n {
+                gram[(i, j)] = rbf_pair(instrument[i], instrument[j], bw);
+            }
+            gram[(i, i)] += ridge;
+        }
+        let d = Vector::from_iter((0..n).map(|i| treat[i]));
+        let mut scratch = Report::new("kernel-iv", "krr");
+        let alpha = chol_solve(&mut scratch, &gram, &d, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(n));
+        for issue in scratch.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let dhat = Vector::from_iter((0..n).map(|i| {
+            let mut s = 0.0_f64;
+            for j in 0..n {
+                s += alpha[j] * rbf_pair(instrument[i], instrument[j], bw);
+            }
+            s
+        }));
+        let q = 2 + x.ncols();
+        let design = Matrix::from_fn(n, q, |i, j| {
+            if j == 0 {
+                1.0
+            } else if j == 1 {
+                dhat[i]
+            } else {
+                x.get(i, j - 2)
+            }
+        });
+        let mut sc2 = Report::new("kernel-iv", "ols");
+        let coef = least_squares(&mut sc2, &design, y, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(q));
+        for issue in sc2.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("KernelIv is RBF ridge 2SLS, not a published NPIV")
+                .compromise(NumericalCompromise::new(
+                    "econml KernelIV / NPIV",
+                    "kernel ridge of D on Z, then OLS of Y on (D̂, X)",
+                    "cross-fitting, a jointly optimal bandwidth, and Tikhonov in RKHS norm are omitted",
+                    "read ATE as a kernel first-stage 2SLS sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedKernelIv {
+            intercept: coef.as_slice().first().copied().unwrap_or(0.0),
+            ate: coef.as_slice().get(1).copied().unwrap_or(0.0),
+            coef_x: Vector::from_iter((0..x.ncols()).map(|j| {
+                coef.as_slice().get(2 + j).copied().unwrap_or(0.0)
+            })),
+            dual_alpha: alpha,
+            z_train: Vector::from_iter((0..n).map(|i| instrument[i])),
+            bandwidth: bw,
+            ridge,
+        })
+    }
+}
+
+/// Fitted kernel IV.
+#[derive(Clone, Debug)]
+pub struct FittedKernelIv {
+    /// Intercept.
+    pub intercept: f64,
+    /// Second-stage treatment slope.
+    pub ate: f64,
+    /// Covariate slopes.
+    pub coef_x: Vector,
+    dual_alpha: Vector,
+    z_train: Vector,
+    bandwidth: f64,
+    /// Dual ridge used at fit.
+    pub ridge: f64,
+}
+
+impl FittedKernelIv {
+    /// Structural prediction using the stored kernel first stage.
+    pub fn predict(
+        &self,
+        x: &Matrix,
+        instrument: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let z = instrument.as_slice().get(i).copied().unwrap_or(0.0);
+            let mut dhat = 0.0_f64;
+            for j in 0..self.z_train.len().min(self.dual_alpha.len()) {
+                dhat += self.dual_alpha[j] * rbf_pair(z, self.z_train[j], self.bandwidth);
+            }
+            let mut s = self.intercept + self.ate * dhat;
+            for j in 0..x.ncols().min(self.coef_x.len()) {
+                s += x.get(i, j) * self.coef_x[j];
+            }
+            s
+        })))
+    }
+}
+
+/// Polynomial sieve 2SLS (econml `SieveIV` lite).
+///
+/// First stage \(D\sim[1,\varphi(Z),X]\); second stage \(Y\sim(\hat D,X)\).
+/// Degree is not identification `p`. Distinct from [`KernelIv`] (RBF dual)
+/// and [`WaldLate`] (raw means).
+#[derive(Clone, Debug)]
+pub struct SieveIv {
+    /// Polynomial degree of \(Z\). Not identification `p`.
+    pub degree: usize,
+}
+
+impl Default for SieveIv {
+    fn default() -> Self {
+        Self { degree: 2 }
+    }
+}
+
+impl SieveIv {
+    /// Sieve IV of degree `degree`.
+    pub fn new(degree: usize) -> Self {
+        Self {
+            degree: degree.max(1),
+        }
+    }
+
+    /// Fit polynomial first stage then 2SLS.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        instrument: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSieveIv>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x
+            .nrows()
+            .min(y.len())
+            .min(treat.len())
+            .min(instrument.len());
+        let deg = self.degree.max(1);
+        let idx: Vec<usize> = (0..n).collect();
+        if !instrument_varies(instrument, &idx) || !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("SieveIv needs treatment and instrument variation")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "sieve IV",
+                        "φ(Z) is unidentified with a constant instrument",
+                        "collect a non-degenerate instrument and both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedSieveIv {
+                intercept: 0.0,
+                ate: 0.0,
+                coef_x: Vector::zeros(x.ncols()),
+                degree: deg,
+            });
+        }
+        let q1 = 1 + deg + x.ncols();
+        let fs = Matrix::from_fn(n, q1, |i, j| {
+            if j == 0 {
+                1.0
+            } else if j <= deg {
+                let mut p = instrument[i];
+                for _ in 1..j {
+                    p *= instrument[i];
+                }
+                p
+            } else {
+                x.get(i, j - 1 - deg)
+            }
+        });
+        let mut scratch = Report::new("sieve-iv", "fs");
+        let b1 = least_squares(&mut scratch, &fs, treat, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(q1));
+        for issue in scratch.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let dhat = fs.matvec(&b1);
+        let q2 = 2 + x.ncols();
+        let design = Matrix::from_fn(n, q2, |i, j| {
+            if j == 0 {
+                1.0
+            } else if j == 1 {
+                dhat[i]
+            } else {
+                x.get(i, j - 2)
+            }
+        });
+        let mut sc2 = Report::new("sieve-iv", "ss");
+        let coef = least_squares(&mut sc2, &design, y, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(q2));
+        for issue in sc2.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SieveIv is polynomial 2SLS, not a published sieve NPIV")
+                .compromise(NumericalCompromise::new(
+                    "econml SieveIV",
+                    "OLS of D on [1, Z, Z², …, X], then OLS of Y on (D̂, X)",
+                    "a data-driven degree, penalized sieve, and weak-IV diagnostics are omitted",
+                    "read ATE as a polynomial first-stage 2SLS sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedSieveIv {
+            intercept: coef.as_slice().first().copied().unwrap_or(0.0),
+            ate: coef.as_slice().get(1).copied().unwrap_or(0.0),
+            coef_x: Vector::from_iter((0..x.ncols()).map(|j| {
+                coef.as_slice().get(2 + j).copied().unwrap_or(0.0)
+            })),
+            degree: deg,
+        })
+    }
+}
+
+/// Fitted sieve IV.
+#[derive(Clone, Debug)]
+pub struct FittedSieveIv {
+    /// Intercept.
+    pub intercept: f64,
+    /// Second-stage treatment slope.
+    pub ate: f64,
+    /// Covariate slopes.
+    pub coef_x: Vector,
+    /// Polynomial degree.
+    pub degree: usize,
+}
+
+/// Nadaraya–Watson nonparametric IV (econml `NonparametricIV` lite).
+///
+/// First stage \(\hat D(z)=\sum_j k(z,z_j)D_j/\sum_j k(z,z_j)\), then OLS of
+/// \(Y\) on \((\hat D,X)\). Bandwidth is not identification `p`. Distinct
+/// from [`KernelIv`] (dual ridge) and [`WaldLate`] (unconditional means).
+#[derive(Clone, Debug)]
+pub struct NonparametricIv {
+    /// RBF length-scale. Not identification `p`.
+    pub bandwidth: f64,
+}
+
+impl Default for NonparametricIv {
+    fn default() -> Self {
+        Self { bandwidth: 2.0 }
+    }
+}
+
+impl NonparametricIv {
+    /// NW-IV with bandwidth `h`.
+    pub fn new(bandwidth: f64) -> Self {
+        Self { bandwidth }
+    }
+
+    /// Fit Nadaraya–Watson first stage then 2SLS.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        instrument: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedNonparametricIv>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x
+            .nrows()
+            .min(y.len())
+            .min(treat.len())
+            .min(instrument.len());
+        let idx: Vec<usize> = (0..n).collect();
+        let bw = if self.bandwidth.is_finite() && self.bandwidth > 0.0 {
+            self.bandwidth
+        } else {
+            2.0
+        };
+        if !instrument_varies(instrument, &idx) || !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("NonparametricIv needs treatment and instrument variation")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "nonparametric IV",
+                        "a constant Z leaves the NW first stage unidentified",
+                        "collect a non-degenerate instrument and both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedNonparametricIv {
+                intercept: 0.0,
+                ate: 0.0,
+                coef_x: Vector::zeros(x.ncols()),
+                z_train: Vector::from_iter((0..n).map(|i| instrument[i])),
+                d_train: Vector::from_iter((0..n).map(|i| treat[i])),
+                bandwidth: bw,
+            });
+        }
+        let dhat = Vector::from_iter((0..n).map(|i| {
+            let mut num = 0.0_f64;
+            let mut den = 0.0_f64;
+            for j in 0..n {
+                let k = rbf_pair(instrument[i], instrument[j], bw);
+                num += k * treat[j];
+                den += k;
+            }
+            if den > 1e-12 {
+                num / den
+            } else {
+                treat[i]
+            }
+        }));
+        let q = 2 + x.ncols();
+        let design = Matrix::from_fn(n, q, |i, j| {
+            if j == 0 {
+                1.0
+            } else if j == 1 {
+                dhat[i]
+            } else {
+                x.get(i, j - 2)
+            }
+        });
+        let mut scratch = Report::new("npiv", "ols");
+        let coef = least_squares(&mut scratch, &design, y, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(q));
+        for issue in scratch.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("NonparametricIv is Nadaraya–Watson 2SLS, not a published NPIV")
+                .compromise(NumericalCompromise::new(
+                    "econml NonparametricIV",
+                    "NW E[D|Z] then OLS of Y on (D̂, X)",
+                    "cross-fitting, a jointly optimal bandwidth, and a second-stage kernel are omitted",
+                    "read ATE as a kernel first-stage 2SLS sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedNonparametricIv {
+            intercept: coef.as_slice().first().copied().unwrap_or(0.0),
+            ate: coef.as_slice().get(1).copied().unwrap_or(0.0),
+            coef_x: Vector::from_iter((0..x.ncols()).map(|j| {
+                coef.as_slice().get(2 + j).copied().unwrap_or(0.0)
+            })),
+            z_train: Vector::from_iter((0..n).map(|i| instrument[i])),
+            d_train: Vector::from_iter((0..n).map(|i| treat[i])),
+            bandwidth: bw,
+        })
+    }
+}
+
+/// Fitted nonparametric IV.
+#[derive(Clone, Debug)]
+pub struct FittedNonparametricIv {
+    /// Intercept.
+    pub intercept: f64,
+    /// Second-stage treatment slope.
+    pub ate: f64,
+    /// Covariate slopes.
+    pub coef_x: Vector,
+    z_train: Vector,
+    d_train: Vector,
+    bandwidth: f64,
+}
+
+impl FittedNonparametricIv {
+    /// Structural prediction using the stored NW first stage.
+    pub fn predict(
+        &self,
+        x: &Matrix,
+        instrument: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let z = instrument.as_slice().get(i).copied().unwrap_or(0.0);
+            let mut num = 0.0_f64;
+            let mut den = 0.0_f64;
+            for j in 0..self.z_train.len().min(self.d_train.len()) {
+                let k = rbf_pair(z, self.z_train[j], self.bandwidth);
+                num += k * self.d_train[j];
+                den += k;
+            }
+            let dhat = if den > 1e-12 { num / den } else { 0.0 };
+            let mut s = self.intercept + self.ate * dhat;
+            for j in 0..x.ncols().min(self.coef_x.len()) {
+                s += x.get(i, j) * self.coef_x[j];
+            }
+            s
+        })))
+    }
+}
+
+/// Projected residual DML (econml `ProjectedDML` / LinearDML projection).
+///
+/// Partial out \(e(X)\) only, then Robinson OLS of \(\tilde Y\) on
+/// \(\tilde D\,[1,X]\). Distinct from [`RLearner`] (full-\(X\) residualize)
+/// and [`DoubleMl`] (scalar ATE).
+#[derive(Clone, Debug, Default)]
+pub struct ProjectedDml;
+
+impl ProjectedDml {
+    /// Default projected DML.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit propensity-partialled Robinson CATE.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedProjectedDml>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let q = 1 + x.ncols();
+        let idx: Vec<usize> = (0..n).collect();
+        if !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("ProjectedDml needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "projected DML",
+                        "D−e is unidentified with a single arm",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedProjectedDml {
+                coef: Vector::zeros(q),
+            });
+        }
+        let (pe, pb) = ista_logit(x, treat, 40);
+        let e = Vector::from_iter((0..n).map(|i| propensity_row(x, i, &pe, pb)));
+        let xe = Matrix::from_fn(n, 2, |i, j| if j == 0 { 1.0 } else { e[i] });
+        let mut scratch = Report::new("proj-dml", "partial");
+        let by = least_squares(&mut scratch, &xe, y, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(2));
+        for issue in scratch.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let yres = Vector::from_iter((0..n).map(|i| {
+            y[i] - by.as_slice().first().copied().unwrap_or(0.0)
+                - by.as_slice().get(1).copied().unwrap_or(0.0) * e[i]
+        }));
+        let dres = Vector::from_iter((0..n).map(|i| {
+            let d = if treat[i] >= 0.5 { 1.0 } else { 0.0 };
+            d - e[i]
+        }));
+        let design = Matrix::from_fn(n, q, |i, j| {
+            if j == 0 {
+                dres[i]
+            } else {
+                dres[i] * x.get(i, j - 1)
+            }
+        });
+        let mut sc2 = Report::new("proj-dml", "robinson");
+        let coef = least_squares(&mut sc2, &design, &yres, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(q));
+        for issue in sc2.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("ProjectedDml partials out e(X) only, not a published projected DML")
+                .compromise(NumericalCompromise::new(
+                    "econml ProjectedDML",
+                    "ISTA propensity, residualize Y on [1,e], Robinson OLS on (D−e)[1,X]",
+                    "cross-fitting and a general final-stage projector are omitted",
+                    "read CATE as a propensity-partialled linear sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedProjectedDml { coef })
+    }
+}
+
+/// Fitted projected DML.
+#[derive(Clone, Debug)]
+pub struct FittedProjectedDml {
+    /// Slopes on \([1,X]\).
+    pub coef: Vector,
+}
+
+impl FittedProjectedDml {
+    /// Linear CATE.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.coef.as_slice().first().copied().unwrap_or(0.0);
+            for j in 0..x.ncols() {
+                if 1 + j < self.coef.len() {
+                    s += x.get(i, j) * self.coef[1 + j];
+                }
+            }
+            s
+        })))
+    }
+}
+
+fn grow_ortho_forest_tree(
+    x: &Matrix,
+    yres: &Vector,
+    dres: &Vector,
+    idx: &[usize],
+    depth: usize,
+    max_depth: usize,
+    min_leaf: usize,
+    rng: &mut Rng,
+) -> CateNode {
+    let tau = residual_leaf(yres, dres, idx);
+    if depth >= max_depth || idx.len() < min_leaf.saturating_mul(2) || !residual_varies(dres, idx)
+    {
+        return CateNode::Leaf { cate: tau };
+    }
+    let p = x.ncols();
+    if p == 0 || idx.is_empty() {
+        return CateNode::Leaf { cate: tau };
+    }
+    let mut best_gain = 0.0_f64;
+    let mut best: Option<(usize, f64, Vec<usize>, Vec<usize>)> = None;
+    for _ in 0..8 {
+        let feat = rng.below(p);
+        let a = idx[rng.below(idx.len())];
+        let b = idx[rng.below(idx.len())];
+        let thresh = 0.5 * (x.get(a, feat) + x.get(b, feat));
+        if !thresh.is_finite() {
+            continue;
+        }
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for &i in idx {
+            if x.get(i, feat) <= thresh {
+                left.push(i);
+            } else {
+                right.push(i);
+            }
+        }
+        if left.len() < min_leaf || right.len() < min_leaf {
+            continue;
+        }
+        if !residual_varies(dres, &left) || !residual_varies(dres, &right) {
+            continue;
+        }
+        let ml = leaf_mean(yres, &left);
+        let mr = leaf_mean(yres, &right);
+        let gain = (ml - mr).abs() * ((left.len() * right.len()) as f64).sqrt();
+        if gain > best_gain {
+            best_gain = gain;
+            best = Some((feat, thresh, left, right));
+        }
+    }
+    match best {
+        Some((feat, thresh, left, right)) => CateNode::Split {
+            feat,
+            thresh,
+            left: Box::new(grow_ortho_forest_tree(
+                x, yres, dres, &left, depth + 1, max_depth, min_leaf, rng,
+            )),
+            right: Box::new(grow_ortho_forest_tree(
+                x, yres, dres, &right, depth + 1, max_depth, min_leaf, rng,
+            )),
+        },
+        None => CateNode::Leaf { cate: tau },
+    }
+}
+
+/// Orthogonal random forest (econml `OrthoForest`).
+///
+/// Residualize \(Y,D\) on \(X\), then extra-trees that split on residual
+/// \(Y\) SSE; leaves store \(\sum\tilde D\tilde Y/\sum\tilde D^2\). Distinct
+/// from [`CausalForestDml`] (splits on \(|\tau_L-\tau_R|\)).
+#[derive(Clone, Debug)]
+pub struct OrthoForest {
+    /// Trees. Not identification `p`.
+    pub n_estimators: usize,
+    /// Depth cap.
+    pub max_depth: usize,
+    /// Seed.
+    pub seed: u64,
+}
+
+impl Default for OrthoForest {
+    fn default() -> Self {
+        Self {
+            n_estimators: 8,
+            max_depth: 3,
+            seed: 61,
+        }
+    }
+}
+
+impl OrthoForest {
+    /// Default orthogonal forest.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Residualize then grow residual-SSE trees with residual-ratio leaves.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedOrthoForest>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let idx: Vec<usize> = (0..n).collect();
+        if !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("OrthoForest needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "orthogonal forest CATE",
+                        "D̃ is unidentified with a single arm",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedOrthoForest { trees: Vec::new() });
+        }
+        let (by, ay) = ols_arm(x, y, &idx, &ctx.policy);
+        let (bd, ad) = ols_arm(x, treat, &idx, &ctx.policy);
+        let yres = Vector::from_iter((0..n).map(|i| y[i] - mu_lin(x, i, ay, &by)));
+        let dres = Vector::from_iter((0..n).map(|i| treat[i] - mu_lin(x, i, ad, &bd)));
+        if !residual_varies(&dres, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("OrthoForest residual treatment has no variance")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "orthogonal forest CATE",
+                        "D̃≈0 leaves leaf τ unidentified",
+                        "need overlap after residualizing X",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedOrthoForest { trees: Vec::new() });
+        }
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        for _ in 0..self.n_estimators.max(1) {
+            trees.push(grow_ortho_forest_tree(
+                x,
+                &yres,
+                &dres,
+                &idx,
+                0,
+                self.max_depth.max(1),
+                2,
+                &mut rng,
+            ));
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("OrthoForest is residual-SSE extra-trees, not honest OrthoForest")
+                .compromise(NumericalCompromise::new(
+                    "econml OrthoForest",
+                    "OLS residualize Y and D, split on residual Y means, leaf Σ D̃Ỹ / Σ D̃²",
+                    "honesty, residual kernels, and the published forest weights are omitted",
+                    "read CATE as an ensemble residual-ratio leaf",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedOrthoForest { trees })
+    }
+}
+
+/// Fitted orthogonal forest.
+#[derive(Clone, Debug)]
+pub struct FittedOrthoForest {
+    trees: Vec<CateNode>,
+}
+
+impl FittedOrthoForest {
+    /// Ensemble-mean residual-ratio leaf.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let m = self.trees.len().max(1) as f64;
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            if self.trees.is_empty() {
+                0.0
+            } else {
+                self.trees.iter().map(|t| walk_cate(t, x, i)).sum::<f64>() / m
+            }
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -30296,5 +31112,53 @@ mod tests {
             .fit(&xate, &dur, &grp, &ivz, &Session::new("drv", "t"))
             .expect("drv");
         assert!(drv.value.late.is_finite() || drv.value.late.is_nan());
+        let kiv = KernelIv::new(2.0)
+            .fit(&xate, &dur, &grp, &ivz, &Session::new("kiv", "t"))
+            .expect("kiv");
+        assert_eq!(
+            kiv.value
+                .predict(&xate, &ivz, &Session::new("kivp", "t"))
+                .expect("kivp")
+                .value
+                .len(),
+            20
+        );
+        let siv = SieveIv::new(2)
+            .fit(&xate, &dur, &grp, &ivz, &Session::new("siv", "t"))
+            .expect("siv");
+        assert!(siv.value.ate.is_finite() || siv.value.ate.is_nan());
+        let npiv = NonparametricIv::new(2.0)
+            .fit(&xate, &dur, &grp, &ivz, &Session::new("npiv", "t"))
+            .expect("npiv");
+        assert_eq!(
+            npiv.value
+                .predict(&xate, &ivz, &Session::new("npivp", "t"))
+                .expect("npivp")
+                .value
+                .len(),
+            20
+        );
+        let pdm = ProjectedDml::new()
+            .fit(&xate, &dur, &grp, &Session::new("pdm", "t"))
+            .expect("pdm");
+        assert_eq!(
+            pdm.value
+                .predict_cate(&xate, &Session::new("pdmp", "t"))
+                .expect("pdmp")
+                .value
+                .len(),
+            20
+        );
+        let orf = OrthoForest::new()
+            .fit(&xate, &dur, &grp, &Session::new("orf", "t"))
+            .expect("orf");
+        assert_eq!(
+            orf.value
+                .predict_cate(&xate, &Session::new("orfp", "t"))
+                .expect("orfp")
+                .value
+                .len(),
+            20
+        );
     }
 }

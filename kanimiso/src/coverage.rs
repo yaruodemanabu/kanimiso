@@ -6446,6 +6446,68 @@ const INVENTORY: &[Algorithm] = &[
         "river.linear_model.LinearRegression",
         "online",
     ),
+    a("stats.KernelIv", "econml.iv.nnet.KernelIV", "estimator"),
+    a("stats.SieveIv", "econml.iv.sieve.SieveIV", "estimator"),
+    a(
+        "stats.NonparametricIv",
+        "econml.iv.nnet.NonparametricIV",
+        "estimator",
+    ),
+    a("stats.ProjectedDml", "econml.dml.ProjectedDML", "estimator"),
+    a("stats.OrthoForest", "econml.orf.DMLOrthoForest", "estimator"),
+    a("hmm.StudentTHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ExponentialHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a(
+        "hmm.InverseGaussianHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.CircularHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.StickyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.Hsmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "online.OnlinePoissonRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
+    a(
+        "online.OnlineGammaRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
+    a(
+        "online.OnlineTweedieRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
+    a(
+        "online.OnlineHuberRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
+    a(
+        "tsa.MinTReconcilerForecaster",
+        "sktime.forecasting.reconcile.Reconciler",
+        "forecast",
+    ),
+    a(
+        "tsa.reconcile_mint_cov",
+        "sktime.forecasting.reconcile.mint",
+        "function",
+    ),
+    a("tslearn.Floss", "sktime.annotation.clasp.FLOSS", "timeseries"),
+    a("tslearn.floss_change_point", "sktime.annotation.clasp.FLOSS", "function"),
+    a("decompose.KernelCca", "sklearn.cross_decomposition.CCA", "estimator"),
+    a(
+        "decompose.ConfirmatoryFactor",
+        "statsmodels.multivariate.factor.Factor",
+        "estimator",
+    ),
+    a(
+        "linear_model.SparsePls",
+        "sklearn.cross_decomposition.PLSRegression",
+        "estimator",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -6985,6 +7047,12 @@ mod tests {
             "hmm.GammaHmm",
             "hmm.AutoregressiveHmm",
             "online.OnlineQuantileRegressor",
+            "stats.KernelIv",
+            "hmm.StudentTHmm",
+            "online.OnlinePoissonRegressor",
+            "tslearn.Floss",
+            "decompose.KernelCca",
+            "linear_model.SparsePls",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
