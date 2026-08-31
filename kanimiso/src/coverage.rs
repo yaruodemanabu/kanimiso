@@ -6865,6 +6865,13 @@ const INVENTORY: &[Algorithm] = &[
         "river.ensemble.AdditiveExpertEnsemble",
         "online",
     ),
+    a("hmm.GeneralizedParetoHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.TukeyLambdaHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ExpWeibullHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.PoissonBinomialHmm", "hmmlearn.hmm.MultinomialHMM", "hmm"),
+    a("hmm.ProjectedNormalHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.OnlineNmf", "sklearn.decomposition.MiniBatchNMF", "online"),
+    a("online.OnlineCca", "sklearn.cross_decomposition.CCA", "online"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7492,6 +7499,11 @@ mod tests {
             "hmm.HyperbolicHmm",
             "hmm.SineSkewedVonMisesHmm",
             "online.AdditiveExpertClassifier",
+            "hmm.GeneralizedParetoHmm",
+            "hmm.TukeyLambdaHmm",
+            "hmm.PoissonBinomialHmm",
+            "online.OnlineNmf",
+            "online.OnlineCca",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

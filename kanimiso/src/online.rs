@@ -43845,6 +43845,376 @@ impl Predict for AdditiveExpertClassifier {
     }
 }
 
+/// Streaming multiplicative NMF (Lee–Seung rank-1 residual updates).
+///
+/// Distinct from [`crate::decompose::MiniBatchNmf`] (batched MU on stacked
+/// blocks). Component count is not identification `p` on a 1-row stream.
+#[derive(Clone, Debug)]
+pub struct OnlineNmf {
+    /// Nonnegative components. Not identification `p` for a streaming update.
+    pub n_components: usize,
+    /// Additive step on the residual outer product.
+    pub learning_rate: f64,
+    w: Vec<Vector>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineNmf {
+    fn default() -> Self {
+        Self {
+            n_components: 1,
+            learning_rate: 0.1,
+            w: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineNmf {
+    /// Track `n_components` nonnegative basis vectors.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components: n_components.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineNmf {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        let k = self.n_components.max(1).min(p);
+        let mut n_neg = 0usize;
+        for i in 0..x.nrows() {
+            for j in 0..p {
+                if x.get(i, j).is_finite() && x.get(i, j) < 0.0 {
+                    n_neg += 1;
+                }
+            }
+        }
+        if n_neg > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message(format!("OnlineNmf clipped {n_neg} negative entries"))
+                    .build(),
+            );
+        }
+        if !self.initialized {
+            self.w = (0..k)
+                .map(|c| {
+                    let mut col = Vector::filled(p, 0.1);
+                    col[c % p] = 1.0;
+                    col
+                })
+                .collect();
+            self.initialized = true;
+        } else if self.w.as_slice().first().map(|c| c.len()) != Some(p) {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self
+            .w
+            .as_slice()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Vector::zeros(p));
+        let lr = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.1
+        };
+        for i in 0..x.nrows() {
+            let xi = Vector::from_iter((0..p).map(|j| x.get(i, j).max(0.0)));
+            let h = Vector::from_iter(self.w.iter().map(|wc| {
+                let den = wc.dot(wc).max(1e-8);
+                (wc.dot(&xi) / den).max(0.0)
+            }));
+            let recon = Vector::from_iter((0..p).map(|j| {
+                let mut s = 0.0_f64;
+                for c in 0..self.w.len() {
+                    s += self.w[c][j] * h[c];
+                }
+                s
+            }));
+            for c in 0..self.w.len() {
+                for j in 0..p {
+                    self.w[c][j] = (self.w[c][j] + lr * (xi[j] - recon[j]) * h[c]).max(0.0);
+                }
+                let nrm = self.w[c].norm();
+                if nrm > 1e-12 {
+                    for j in 0..p {
+                        self.w[c][j] /= nrm;
+                    }
+                }
+            }
+            self.n_seen += 1;
+        }
+        self.updates += 1;
+        let after = self
+            .w
+            .as_slice()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Vector::zeros(p));
+        let delta = after.sub(&before);
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta.norm());
+        q.information_gain = Some(delta.norm().max(x.nrows() as f64));
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "OnlineNmf residual-updated {k} nonnegative axes on {} rows; ||Δw0||={:.6e}",
+            x.nrows(),
+            delta.norm()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "nonnegative basis",
+                "streaming NMF; distinct from mini-batch MU IncrementalNMF",
+                "previous W",
+                "updated W",
+            ),
+        )
+    }
+}
+
+impl Transform for OnlineNmf {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), self.n_components.max(1)));
+        }
+        let k = self.w.len();
+        ctx.finish(Matrix::from_fn(x.nrows(), k, |i, c| {
+            let mut num = 0.0_f64;
+            let mut den = 0.0_f64;
+            for j in 0..x.ncols().min(self.w[c].len()) {
+                let xj = x.get(i, j).max(0.0);
+                num += self.w[c][j] * xj;
+                den += self.w[c][j] * self.w[c][j];
+            }
+            num / den.max(1e-8)
+        }))
+    }
+}
+
+/// Streaming Oja CCA on a column-split two-view stream.
+///
+/// The first `⌈p/2⌉` columns are view X, the rest view Y. Distinct from
+/// [`crate::decompose::Cca`] (batch SVD of the whitened cross-covariance).
+/// The single canonical pair is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct OnlineCca {
+    /// Oja step.
+    pub learning_rate: f64,
+    mean_x: Vector,
+    mean_y: Vector,
+    u: Vector,
+    v: Vector,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineCca {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            mean_x: Vector::zeros(0),
+            mean_y: Vector::zeros(0),
+            u: Vector::zeros(0),
+            v: Vector::zeros(0),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineCca {
+    /// Streaming CCA with Oja step `learning_rate`.
+    pub fn new(learning_rate: f64) -> Self {
+        Self {
+            learning_rate,
+            ..Self::default()
+        }
+    }
+}
+
+fn split_views(p: usize) -> (usize, usize) {
+    let px = (p + 1) / 2;
+    let py = p - px;
+    if py == 0 {
+        (p, p)
+    } else {
+        (px, py)
+    }
+}
+
+impl PartialFit for OnlineCca {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        let (px, py) = split_views(p);
+        if !self.initialized {
+            self.mean_x = Vector::zeros(px);
+            self.mean_y = Vector::zeros(py);
+            self.u = Vector::filled(px, 0.0);
+            self.u[0] = 1.0;
+            self.v = Vector::filled(py, 0.0);
+            self.v[0] = 1.0;
+            self.initialized = true;
+        } else if self.u.len() != px || self.v.len() != py {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self.u.clone();
+        let lr0 = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        let same = py == p && px == p;
+        for i in 0..x.nrows() {
+            self.n_seen += 1;
+            let n = self.n_seen as f64;
+            for j in 0..px {
+                self.mean_x[j] += (x.get(i, j) - self.mean_x[j]) / n;
+            }
+            for j in 0..py {
+                let src = if same { j } else { px + j };
+                self.mean_y[j] += (x.get(i, src) - self.mean_y[j]) / n;
+            }
+            let xc = Vector::from_iter((0..px).map(|j| x.get(i, j) - self.mean_x[j]));
+            let yc = Vector::from_iter((0..py).map(|j| {
+                let src = if same { j } else { px + j };
+                x.get(i, src) - self.mean_y[j]
+            }));
+            let yu = self.u.dot(&xc);
+            let yv = self.v.dot(&yc);
+            let lr = lr0 / n.sqrt();
+            for j in 0..px {
+                self.u[j] += lr * (yv * xc[j] - yu * self.u[j]);
+            }
+            for j in 0..py {
+                self.v[j] += lr * (yu * yc[j] - yv * self.v[j]);
+            }
+            let nu = self.u.norm();
+            if nu > 1e-12 {
+                for j in 0..px {
+                    self.u[j] /= nu;
+                }
+            }
+            let nv = self.v.norm();
+            if nv > 1e-12 {
+                for j in 0..py {
+                    self.v[j] /= nv;
+                }
+            }
+        }
+        self.updates += 1;
+        let delta = self.u.sub(&before);
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta.norm());
+        q.information_gain = Some(delta.norm().max(x.nrows() as f64));
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "OnlineCca Oja-updated a canonical pair on {} rows; ||Δu||={:.6e}",
+            x.nrows(),
+            delta.norm()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "canonical directions",
+                "streaming two-view Oja CCA; distinct from batch SVD CCA",
+                "previous u",
+                "updated u",
+            ),
+        )
+    }
+}
+
+impl Transform for OnlineCca {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), 2));
+        }
+        let px = self.u.len();
+        let py = self.v.len();
+        let same = px == x.ncols() && py == x.ncols();
+        ctx.finish(Matrix::from_fn(x.nrows(), 2, |i, c| {
+            if c == 0 {
+                let mut s = 0.0_f64;
+                for j in 0..px.min(x.ncols()) {
+                    s += self.u[j] * (x.get(i, j) - self.mean_x[j]);
+                }
+                s
+            } else {
+                let mut s = 0.0_f64;
+                for j in 0..py {
+                    let src = if same { j } else { px + j };
+                    if src < x.ncols() {
+                        s += self.v[j] * (x.get(i, src) - self.mean_y[j]);
+                    }
+                }
+                s
+            }
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44619,6 +44989,21 @@ mod tests {
         AdditiveExpertClassifier::new(0.5)
             .partial_fit(&x, Some(&yb), &session)
             .expect("aex");
+        OnlineNmf::new(1)
+            .partial_fit(&x, None, &session)
+            .expect("onmf");
+        {
+            let xcc = Matrix::from_fn(12, 2, |i, c| {
+                if c == 0 {
+                    i as f64
+                } else {
+                    2.0 * i as f64
+                }
+            });
+            OnlineCca::new(0.05)
+                .partial_fit(&xcc, None, &session)
+                .expect("occa");
+        }
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
