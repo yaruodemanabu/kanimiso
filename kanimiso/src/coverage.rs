@@ -6991,6 +6991,34 @@ const INVENTORY: &[Algorithm] = &[
     a("online.Rrcf", "river.anomaly.HalfSpaceTrees", "online"),
     a("tslearn.kdtw", "tslearn.metrics.softdtw", "timeseries"),
     a("tslearn.cdist_kdtw", "tslearn.metrics.cdist", "timeseries"),
+    a("hmm.JohnsonSlHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ParetoTypeIvHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.ZeroTruncatedNegBinHmm",
+        "hmmlearn.hmm.PoissonHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.WrappedAsymmetricLaplaceHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.GeneralizedVonMisesHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.XStream", "river.anomaly.HalfSpaceTrees", "online"),
+    a("online.KitNet", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "online.AdaptiveXgboost",
+        "river.ensemble.AdaptiveXGBoost",
+        "online",
+    ),
+    a("tslearn.fast_dtw", "tslearn.metrics.dtw", "timeseries"),
+    a("tslearn.cdist_fast_dtw", "tslearn.metrics.cdist", "timeseries"),
+    a("tslearn.dtw_subsequence", "tslearn.metrics.dtw", "timeseries"),
+    a(
+        "tslearn.cdist_dtw_subsequence",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7706,6 +7734,18 @@ mod tests {
             "online.Rrcf",
             "tslearn.kdtw",
             "tslearn.cdist_kdtw",
+            "hmm.JohnsonSlHmm",
+            "hmm.ParetoTypeIvHmm",
+            "hmm.ZeroTruncatedNegBinHmm",
+            "hmm.WrappedAsymmetricLaplaceHmm",
+            "hmm.GeneralizedVonMisesHmm",
+            "online.XStream",
+            "online.KitNet",
+            "online.AdaptiveXgboost",
+            "tslearn.fast_dtw",
+            "tslearn.cdist_fast_dtw",
+            "tslearn.dtw_subsequence",
+            "tslearn.cdist_dtw_subsequence",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

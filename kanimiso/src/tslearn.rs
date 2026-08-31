@@ -1005,6 +1005,268 @@ pub fn cdist_kdtw(
     ctx.finish(out)
 }
 
+fn coarsen_series(s: &[f64]) -> Vec<f64> {
+    let mut out = Vec::with_capacity(s.len().div_ceil(2));
+    let mut i = 0usize;
+    while i + 1 < s.len() {
+        out.push(0.5 * (s[i] + s[i + 1]));
+        i += 2;
+    }
+    if i < s.len() {
+        out.push(s[i]);
+    }
+    out
+}
+
+fn dtw_path_cells(a: &[f64], b: &[f64]) -> (f64, Vec<(usize, usize)>) {
+    let n = a.len();
+    let m = b.len();
+    if n == 0 || m == 0 {
+        return (f64::NAN, Vec::new());
+    }
+    let inf = 1e300_f64;
+    let mut dp = vec![inf; (n + 1) * (m + 1)];
+    let at = |i: usize, j: usize| i * (m + 1) + j;
+    dp[at(0, 0)] = 0.0;
+    for i in 1..=n {
+        for j in 1..=m {
+            let cost = (a[i - 1] - b[j - 1]).abs();
+            dp[at(i, j)] = cost + dp[at(i - 1, j)].min(dp[at(i, j - 1)]).min(dp[at(i - 1, j - 1)]);
+        }
+    }
+    let mut path = Vec::new();
+    let mut i = n;
+    let mut j = m;
+    while i > 0 && j > 0 {
+        path.push((i - 1, j - 1));
+        let up = dp[at(i - 1, j)];
+        let left = dp[at(i, j - 1)];
+        let diag = dp[at(i - 1, j - 1)];
+        if diag <= up && diag <= left {
+            i -= 1;
+            j -= 1;
+        } else if up <= left {
+            i -= 1;
+        } else {
+            j -= 1;
+        }
+    }
+    path.reverse();
+    (dp[at(n, m)], path)
+}
+
+fn expand_fastdtw_window(
+    coarse: &[(usize, usize)],
+    n: usize,
+    m: usize,
+    radius: usize,
+) -> Vec<bool> {
+    let mut win = vec![false; n * m];
+    let mark = |win: &mut [bool], i: usize, j: usize| {
+        if i < n && j < m {
+            win[i * m + j] = true;
+        }
+    };
+    for &(ci, cj) in coarse {
+        for di in 0..=1 {
+            for dj in 0..=1 {
+                let fi = 2 * ci + di;
+                let fj = 2 * cj + dj;
+                let lo_i = fi.saturating_sub(radius);
+                let hi_i = (fi + radius).min(n.saturating_sub(1));
+                let lo_j = fj.saturating_sub(radius);
+                let hi_j = (fj + radius).min(m.saturating_sub(1));
+                for i in lo_i..=hi_i {
+                    for j in lo_j..=hi_j {
+                        mark(&mut win, i, j);
+                    }
+                }
+            }
+        }
+    }
+    if n > 0 && m > 0 {
+        win[0] = true;
+        win[(n - 1) * m + (m - 1)] = true;
+    }
+    win
+}
+
+fn dtw_in_window(a: &[f64], b: &[f64], win: &[bool]) -> f64 {
+    let n = a.len();
+    let m = b.len();
+    if n == 0 || m == 0 {
+        return f64::NAN;
+    }
+    let inf = 1e300_f64;
+    let mut prev = vec![inf; m + 1];
+    let mut cur = vec![inf; m + 1];
+    prev[0] = 0.0;
+    for i in 1..=n {
+        cur[0] = inf;
+        for j in 1..=m {
+            if !win[(i - 1) * m + (j - 1)] {
+                cur[j] = inf;
+                continue;
+            }
+            let cost = (a[i - 1] - b[j - 1]).abs();
+            cur[j] = cost + prev[j].min(cur[j - 1]).min(prev[j - 1]);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[m]
+}
+
+fn fastdtw_raw(a: &[f64], b: &[f64], radius: usize) -> f64 {
+    let n = a.len();
+    let m = b.len();
+    if n == 0 || m == 0 {
+        return f64::NAN;
+    }
+    if n.min(m) <= (2 * radius + 2).max(4) {
+        return dtw_raw(a, b);
+    }
+    let ac = coarsen_series(a);
+    let bc = coarsen_series(b);
+    let (_, coarse) = {
+        let cost = fastdtw_raw(&ac, &bc, radius);
+        if !cost.is_finite() {
+            return cost;
+        }
+        dtw_path_cells(&ac, &bc)
+    };
+    let win = expand_fastdtw_window(&coarse, n, m, radius.max(1));
+    dtw_in_window(a, b, &win)
+}
+
+/// FastDTW (Salvador–Chan): multilevel coarsen, project, refine.
+///
+/// Distinct from exact [`dtw`]. Radius is not identification `p`.
+pub fn fast_dtw(
+    a: &Vector,
+    b: &Vector,
+    radius: usize,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("fast_dtw.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("fast_dtw.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("fast_dtw on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(fastdtw_raw(a.as_slice(), b.as_slice(), radius.max(1)))
+}
+
+/// Pairwise FastDTW (tslearn-style `cdist` with [`fast_dtw`]).
+///
+/// Radius is not identification `p`. Distinct from [`cdist_dtw`].
+pub fn cdist_fast_dtw(
+    a: &Matrix,
+    b: &Matrix,
+    radius: usize,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let r = radius.max(1);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        fastdtw_raw(ai.as_slice(), bj.as_slice(), r)
+    });
+    ctx.finish(out)
+}
+
+fn dtw_subsequence_raw(query: &[f64], series: &[f64]) -> f64 {
+    let n = query.len();
+    let m = series.len();
+    if n == 0 || m == 0 {
+        return f64::NAN;
+    }
+    let inf = 1e300_f64;
+    let mut prev = vec![inf; m];
+    let mut cur = vec![inf; m];
+    for j in 0..m {
+        prev[j] = (query[0] - series[j]).abs();
+    }
+    for i in 1..n {
+        for j in 0..m {
+            let cost = (query[i] - series[j]).abs();
+            let mut best = prev[j];
+            if j > 0 {
+                best = best.min(cur[j - 1]).min(prev[j - 1]);
+            }
+            cur[j] = cost + best;
+        }
+        std::mem::swap(&mut prev, &mut cur);
+        for v in cur.iter_mut() {
+            *v = inf;
+        }
+    }
+    prev.iter().copied().fold(inf, f64::min)
+}
+
+/// Subsequence DTW (open begin/end on the longer series).
+///
+/// Distinct from closed-end [`dtw`] and [`mpdist`]. Query length is not
+/// identification `p`.
+pub fn dtw_subsequence(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("dtw_subsequence.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("dtw_subsequence.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("dtw_subsequence on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let (q, s) = if a.len() <= b.len() {
+        (a.as_slice(), b.as_slice())
+    } else {
+        (b.as_slice(), a.as_slice())
+    };
+    ctx.finish(dtw_subsequence_raw(q, s))
+}
+
+/// Pairwise subsequence DTW (tslearn-style `cdist`).
+///
+/// Distinct from [`cdist_dtw`].
+pub fn cdist_dtw_subsequence(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        let (q, s) = if ai.len() <= bj.len() {
+            (ai.as_slice(), bj.as_slice())
+        } else {
+            (bj.as_slice(), ai.as_slice())
+        };
+        dtw_subsequence_raw(q, s)
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -19599,6 +19861,10 @@ mod tests {
         assert!(cd.abs() < 1e-12, "cid={cd}");
         let kdw = kdtw(&a, &a, 1.0, &Session::new("ts", "kdw")).unwrap().value;
         assert!(kdw.abs() < 1e-12, "kdtw={kdw}");
+        let fdw = fast_dtw(&a, &a, 1, &Session::new("ts", "fdw")).unwrap().value;
+        assert!(fdw.abs() < 1e-12, "fast_dtw={fdw}");
+        let dsub = dtw_subsequence(&a, &a, &Session::new("ts", "dsub")).unwrap().value;
+        assert!(dsub.abs() < 1e-12, "dtw_subsequence={dsub}");
     }
 
     #[test]
@@ -20601,6 +20867,16 @@ mod tests {
             .value;
         assert_eq!(ckd.shape(), (8, 8));
         assert!(ckd.get(0, 0).abs() < 1e-12);
+        let cfd = cdist_fast_dtw(&x, &x, 1, &Session::new("ts", "cfd"))
+            .unwrap()
+            .value;
+        assert_eq!(cfd.shape(), (8, 8));
+        assert!(cfd.get(0, 0).abs() < 1e-12);
+        let cds = cdist_dtw_subsequence(&x, &x, &Session::new("ts", "cds"))
+            .unwrap()
+            .value;
+        assert_eq!(cds.shape(), (8, 8));
+        assert!(cds.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

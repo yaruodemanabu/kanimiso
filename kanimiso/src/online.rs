@@ -47201,6 +47201,579 @@ impl Predict for Rrcf {
     }
 }
 
+fn xstream_dot(row: &[f64], dir: &[f64]) -> f64 {
+    let mut s = 0.0_f64;
+    let n = row.len().min(dir.len());
+    for i in 0..n {
+        s += row[i] * dir[i];
+    }
+    s
+}
+
+/// xStream (Manzoor–Lamba–Akoglu): half-space chains, not axis-aligned isolation.
+///
+/// Chain count is not identification `p`. Distinct from [`HalfSpaceTrees`]
+/// (uniform axis) and [`Loda`] (projection histograms without chaining).
+#[derive(Clone, Debug)]
+pub struct XStream {
+    /// Number of half-space chains.
+    pub n_chains: usize,
+    /// Cuts per chain.
+    pub depth: usize,
+    dirs: Vec<Vec<Vec<f64>>>,
+    cuts: Vec<Vec<f64>>,
+    counts: Vec<HashMap<u32, u64>>,
+    n_tot: Vec<u64>,
+    warmed: bool,
+    n_seen: u64,
+    updates: u64,
+    rng: Rng,
+}
+
+impl Default for XStream {
+    fn default() -> Self {
+        Self {
+            n_chains: 8,
+            depth: 8,
+            dirs: Vec::new(),
+            cuts: Vec::new(),
+            counts: Vec::new(),
+            n_tot: Vec::new(),
+            warmed: false,
+            n_seen: 0,
+            updates: 0,
+            rng: Rng::new(23),
+        }
+    }
+}
+
+impl XStream {
+    /// xStream with `n_chains` half-space chains.
+    pub fn new(n_chains: usize) -> Self {
+        Self {
+            n_chains: n_chains.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn ensure(&mut self, p: usize) {
+        let c = self.n_chains.max(1);
+        let d = self.depth.max(1).min(16);
+        if self.dirs.len() == c && self.dirs.first().map(|ch| ch.len()) == Some(d) {
+            if self.dirs.first().and_then(|ch| ch.first()).map(|v| v.len()) == Some(p) {
+                return;
+            }
+        }
+        self.dirs = Vec::with_capacity(c);
+        self.cuts = Vec::with_capacity(c);
+        self.counts = vec![HashMap::new(); c];
+        self.n_tot = vec![0; c];
+        for _ in 0..c {
+            let mut chain = Vec::with_capacity(d);
+            let mut cuts = Vec::with_capacity(d);
+            for _ in 0..d {
+                let mut dir: Vec<f64> = (0..p).map(|_| self.rng.standard_normal()).collect();
+                let nrm: f64 = dir.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-12);
+                for v in &mut dir {
+                    *v /= nrm;
+                }
+                chain.push(dir);
+                cuts.push(self.rng.uniform_range(-1.0, 1.0));
+            }
+            self.dirs.push(chain);
+            self.cuts.push(cuts);
+        }
+    }
+
+    fn path_of(&self, chain: usize, row: &[f64]) -> u32 {
+        let mut path = 0u32;
+        if chain >= self.dirs.len() {
+            return path;
+        }
+        for (l, dir) in self.dirs[chain].iter().enumerate() {
+            let cut = self.cuts[chain].get(l).copied().unwrap_or(0.0);
+            if xstream_dot(row, dir) > cut {
+                path |= 1u32 << l;
+            }
+        }
+        path
+    }
+}
+
+impl PartialFit for XStream {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 || x.nrows() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "empty"),
+            );
+        }
+        self.ensure(x.ncols());
+        let mut dsum = 0.0_f64;
+        for i in 0..x.nrows() {
+            let row: Vec<f64> = (0..x.ncols()).map(|j| x.get(i, j)).collect();
+            for c in 0..self.dirs.len() {
+                let path = self.path_of(c, &row);
+                *self.counts[c].entry(path).or_insert(0) += 1;
+                self.n_tot[c] += 1;
+                dsum += 1.0;
+            }
+        }
+        self.warmed = true;
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!(
+            "XStream half-space chains on {} rows; chains={}",
+            x.nrows(),
+            self.dirs.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "xStream half-space chain step",
+                "random projections chained into bins; distinct from HalfSpaceTrees and Loda",
+                "previous bin counts",
+                "updated bin counts",
+            ),
+        )
+    }
+}
+
+impl Predict for XStream {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.warmed {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let nc = self.dirs.len().max(1) as f64;
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let row: Vec<f64> = (0..x.ncols()).map(|j| x.get(i, j)).collect();
+            let mut s = 0.0_f64;
+            for c in 0..self.dirs.len() {
+                let path = self.path_of(c, &row);
+                let cnt = self.counts[c].get(&path).copied().unwrap_or(0) as f64;
+                let n = self.n_tot.get(c).copied().unwrap_or(0) as f64;
+                s += -((cnt + 1.0) / (n + 2.0)).ln();
+            }
+            s / nc
+        })))
+    }
+}
+
+fn kitnet_recon(w: &[f64], x: &[f64]) -> (f64, f64) {
+    let p = w.len().min(x.len());
+    let mut dot = 0.0_f64;
+    for j in 0..p {
+        dot += w[j] * x[j];
+    }
+    let h = dot.tanh();
+    let mut sse = 0.0_f64;
+    for j in 0..p {
+        let e = h * w[j] - x[j];
+        sse += e * e;
+    }
+    (h, sse.sqrt())
+}
+
+fn kitnet_sgd(w: &mut [f64], x: &[f64], lr: f64) -> f64 {
+    let p = w.len().min(x.len());
+    let (h, rmse) = kitnet_recon(w, x);
+    let dh = 1.0 - h * h;
+    let mut werr = 0.0_f64;
+    for j in 0..p {
+        werr += w[j] * (h * w[j] - x[j]);
+    }
+    for j in 0..p {
+        let e = h * w[j] - x[j];
+        w[j] -= lr * (e * h + werr * dh * x[j]);
+    }
+    rmse
+}
+
+/// KitNET (Mirsky et al.): ensemble of tiny autoencoders plus an output AE.
+///
+/// Ensemble size is not identification `p`. Distinct from [`Loda`] (histograms)
+/// and [`OnlineIsolationForest`].
+#[derive(Clone, Debug)]
+pub struct KitNet {
+    /// Number of ensemble autoencoders.
+    pub n_ae: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    ensemble: Vec<Vec<f64>>,
+    output: Vec<f64>,
+    p: usize,
+    warmed: bool,
+    n_seen: u64,
+    updates: u64,
+    rng: Rng,
+}
+
+impl Default for KitNet {
+    fn default() -> Self {
+        Self {
+            n_ae: 4,
+            learning_rate: 0.05,
+            ensemble: Vec::new(),
+            output: Vec::new(),
+            p: 0,
+            warmed: false,
+            n_seen: 0,
+            updates: 0,
+            rng: Rng::new(29),
+        }
+    }
+}
+
+impl KitNet {
+    /// KitNET with `n_ae` ensemble autoencoders.
+    pub fn new(n_ae: usize) -> Self {
+        Self {
+            n_ae: n_ae.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn ensure(&mut self, p: usize) {
+        if self.p == p && self.ensemble.len() == self.n_ae.max(1) {
+            return;
+        }
+        self.p = p;
+        let k = self.n_ae.max(1);
+        self.ensemble = (0..k)
+            .map(|_| (0..p).map(|_| 0.05 * self.rng.standard_normal()).collect())
+            .collect();
+        self.output = (0..k).map(|_| 0.05 * self.rng.standard_normal()).collect();
+    }
+}
+
+impl PartialFit for KitNet {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 || x.nrows() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "empty"),
+            );
+        }
+        if self.p != 0 && self.p != x.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::FeatureSpaceChangedOnline)
+                    .severity(Severity::Warning)
+                    .message(format!("KitNet saw {} columns; model has {}", x.ncols(), self.p))
+                    .build(),
+            );
+        }
+        self.ensure(x.ncols());
+        let lr = self.learning_rate.max(1e-6);
+        let mut dsum = 0.0_f64;
+        for i in 0..x.nrows() {
+            let row: Vec<f64> = (0..x.ncols()).map(|j| x.get(i, j)).collect();
+            let mut rmses = vec![0.0_f64; self.ensemble.len()];
+            for (a, w) in self.ensemble.iter_mut().enumerate() {
+                let before = w.iter().map(|v| v.abs()).sum::<f64>();
+                rmses[a] = kitnet_sgd(w, &row, lr);
+                dsum += (w.iter().map(|v| v.abs()).sum::<f64>() - before).abs();
+            }
+            kitnet_sgd(&mut self.output, &rmses, lr);
+        }
+        self.warmed = true;
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 2;
+        q.explanation = format!(
+            "KitNet ensemble AEs on {} rows; n_ae={}",
+            x.nrows(),
+            self.ensemble.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "KitNET autoencoder ensemble step",
+                "tiny tied AEs plus output AE; distinct from Loda and isolation forests",
+                "previous AE weights",
+                "updated AE weights",
+            ),
+        )
+    }
+}
+
+impl Predict for KitNet {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if !self.warmed {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let row: Vec<f64> = (0..x.ncols()).map(|j| x.get(i, j)).collect();
+            let rmses: Vec<f64> = self
+                .ensemble
+                .iter()
+                .map(|w| kitnet_recon(w, &row).1)
+                .collect();
+            kitnet_recon(&self.output, &rmses).1
+        })))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AxgbStump {
+    feat: usize,
+    thr: f64,
+    left: f64,
+    right: f64,
+}
+
+fn axgb_stump_pred(st: &AxgbStump, row: &[f64]) -> f64 {
+    let v = if st.feat < row.len() { row[st.feat] } else { 0.0 };
+    if v < st.thr {
+        st.left
+    } else {
+        st.right
+    }
+}
+
+fn axgb_fit_stump(xs: &[Vec<f64>], res: &[f64], rng: &mut Rng) -> AxgbStump {
+    let n = xs.len();
+    let p = xs.get(0).map(|r| r.len()).unwrap_or(1).max(1);
+    let mut best = AxgbStump {
+        feat: 0,
+        thr: 0.0,
+        left: 0.0,
+        right: 0.0,
+    };
+    let mut best_sse = f64::INFINITY;
+    if n == 0 {
+        return best;
+    }
+    for _ in 0..8 {
+        let feat = rng.below(p);
+        let i0 = rng.below(n);
+        let thr = xs
+            .get(i0)
+            .and_then(|r| r.get(feat))
+            .copied()
+            .unwrap_or(0.0);
+        let mut sl = 0.0_f64;
+        let mut sr = 0.0_f64;
+        let mut nl = 0.0_f64;
+        let mut nr = 0.0_f64;
+        for i in 0..n {
+            let v = xs[i].get(feat).copied().unwrap_or(0.0);
+            if v < thr {
+                sl += res[i];
+                nl += 1.0;
+            } else {
+                sr += res[i];
+                nr += 1.0;
+            }
+        }
+        let left = if nl > 0.0 { sl / nl } else { 0.0 };
+        let right = if nr > 0.0 { sr / nr } else { 0.0 };
+        let mut sse = 0.0_f64;
+        for i in 0..n {
+            let v = xs[i].get(feat).copied().unwrap_or(0.0);
+            let pred = if v < thr { left } else { right };
+            let e = res[i] - pred;
+            sse += e * e;
+        }
+        if sse < best_sse {
+            best_sse = sse;
+            best = AxgbStump {
+                feat,
+                thr,
+                left,
+                right,
+            };
+        }
+    }
+    best
+}
+
+/// Adaptive XGBoost (Gomes–Read–Bifet / river `AdaptiveXGBoost`): sliding-window
+/// residual stumps, not Hoeffding or Mondrian trees.
+///
+/// Round count is not identification `p`. Distinct from
+/// [`AdaptiveRandomForest`] and [`AmfClassifier`].
+#[derive(Clone, Debug)]
+pub struct AdaptiveXgboost {
+    /// Boosting rounds kept in the windowed ensemble.
+    pub n_rounds: usize,
+    /// Sliding window cap.
+    pub window: usize,
+    xs: Vec<Vec<f64>>,
+    ys: Vec<f64>,
+    trees: Vec<AxgbStump>,
+    rng: Rng,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for AdaptiveXgboost {
+    fn default() -> Self {
+        Self {
+            n_rounds: 4,
+            window: 64,
+            xs: Vec::new(),
+            ys: Vec::new(),
+            trees: Vec::new(),
+            rng: Rng::new(31),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl AdaptiveXgboost {
+    /// Adaptive XGBoost with `n_rounds` residual stumps.
+    pub fn new(n_rounds: usize) -> Self {
+        Self {
+            n_rounds: n_rounds.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn predict_row(&self, row: &[f64]) -> f64 {
+        let mut s = 0.0_f64;
+        for st in &self.trees {
+            s += axgb_stump_pred(st, row);
+        }
+        s
+    }
+}
+
+impl PartialFit for AdaptiveXgboost {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() == 0 || x.nrows() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "empty"),
+            );
+        }
+        let cap = self.window.max(8);
+        for i in 0..x.nrows().min(y.len()) {
+            if !y[i].is_finite() {
+                continue;
+            }
+            self.xs
+                .push((0..x.ncols()).map(|j| x.get(i, j)).collect());
+            self.ys.push(y[i]);
+            if self.xs.len() > cap {
+                self.xs.remove(0);
+                self.ys.remove(0);
+            }
+        }
+        let n = self.xs.len();
+        let mut pred = vec![0.0_f64; n];
+        let mean = if n == 0 {
+            0.0
+        } else {
+            self.ys.iter().sum::<f64>() / n as f64
+        };
+        for p in &mut pred {
+            *p = mean;
+        }
+        self.trees.clear();
+        let rounds = self.n_rounds.max(1);
+        for _ in 0..rounds {
+            let res: Vec<f64> = self.ys.iter().zip(pred.iter()).map(|(yy, pp)| yy - pp).collect();
+            let stump = axgb_fit_stump(&self.xs, &res, &mut self.rng);
+            for i in 0..n {
+                pred[i] += axgb_stump_pred(&stump, &self.xs[i]);
+            }
+            self.trees.push(stump);
+        }
+        let mut sse = 0.0_f64;
+        for i in 0..n {
+            let e = self.ys[i] - pred[i];
+            sse += e * e;
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(sse.sqrt());
+        q.information_gain = Some(n as f64);
+        q.still_identified = n >= 2;
+        q.warmup = n < 2;
+        q.explanation = format!(
+            "AdaptiveXgboost window={n} rounds={} sse={sse:.4e}",
+            self.trees.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "AdaptiveXGBoost windowed residual-stump step",
+                "sliding-window GBDT stumps; distinct from ARF and AMF",
+                "previous ensemble",
+                format!("rounds={} sse={sse:.4e}", self.trees.len()),
+            ),
+        )
+    }
+}
+
+impl Predict for AdaptiveXgboost {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("predict"));
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let row: Vec<f64> = (0..x.ncols()).map(|j| x.get(i, j)).collect();
+            self.predict_row(&row)
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48047,6 +48620,15 @@ mod tests {
         Rrcf::new(4)
             .partial_fit(&x, None, &session)
             .expect("rrcf");
+        XStream::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("xst");
+        KitNet::new(3)
+            .partial_fit(&x, None, &session)
+            .expect("kit");
+        AdaptiveXgboost::new(2)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("axgb");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
