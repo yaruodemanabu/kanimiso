@@ -125698,6 +125698,1146 @@ impl FitUnsupervised for DiscreteGeneralizedLogisticHmm {
     }
 }
 
+
+fn jsl_g_cdf(y: f64, xi: f64, mu: f64, sigma: f64) -> f64 {
+    if !y.is_finite() || y <= xi || sigma <= 0.0 {
+        return 0.0;
+    }
+    let z = ((y - xi).ln() - mu) / sigma;
+    if !z.is_finite() {
+        return if y > xi + mu.exp() { 1.0 - 1e-15 } else { 0.0 };
+    }
+    crate::special::norm_cdf(z).clamp(0.0, 1.0 - 1e-15)
+}
+
+fn log_unit_jsl(y: f64, xi: f64, mu: f64, var: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || y >= 1.0 || var <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let u = y / (1.0 - y);
+    if !u.is_finite() || u <= xi {
+        return f64::NEG_INFINITY;
+    }
+    log_johnson_sl(u, xi, mu, var) - 2.0 * (1.0 - y).ln()
+}
+
+fn log_beta_jsl(y: f64, xi: f64, mu: f64, var: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y <= xi || var <= 0.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let sigma = var.sqrt();
+    let cdf = jsl_g_cdf(y, xi, mu, sigma);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let surv = (1.0 - cdf).max(1e-15);
+    log_johnson_sl(y, xi, mu, var) + (a - 1.0) * cdf.ln() + (b - 1.0) * surv.ln() - ln_beta(a, b)
+}
+
+fn log_exp_jsl(y: f64, xi: f64, mu: f64, var: f64, power: f64) -> f64 {
+    if !y.is_finite() || y <= xi || var <= 0.0 || power <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let sigma = var.sqrt();
+    let cdf = jsl_g_cdf(y, xi, mu, sigma);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    power.ln() + log_johnson_sl(y, xi, mu, var) + (power - 1.0) * cdf.ln()
+}
+
+fn log_kuma_jsl(y: f64, xi: f64, mu: f64, var: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y <= xi || var <= 0.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let sigma = var.sqrt();
+    let cdf = jsl_g_cdf(y, xi, mu, sigma);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let fa = cdf.powf(a);
+    let one_m = 1.0 - fa;
+    if one_m <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    a.ln() + b.ln() + log_johnson_sl(y, xi, mu, var) + (a - 1.0) * cdf.ln() + (b - 1.0) * one_m.ln()
+}
+
+fn log_disc_jsl(y: f64, xi: f64, mu: f64, var: f64) -> f64 {
+    if !y.is_finite() || y < 1.0 || var <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let sigma = var.sqrt();
+    let kk = y.round().max(1.0);
+    let lo = jsl_g_cdf(kk, xi, mu, sigma);
+    let hi = jsl_g_cdf(kk + 1.0, xi, mu, sigma);
+    let p = (hi - lo).max(0.0);
+    if p <= 1e-18 {
+        f64::NEG_INFINITY
+    } else {
+        p.ln()
+    }
+}
+
+/// Unit Johnson $S_L$ HMM (shifted log-normal on the odds $y/(1-y)$).
+///
+/// Scale is free from $\exp(\mathbb{E}[\ln(U-\xi)])$; shift $\xi$ sits below every observation and log-spread $\sigma\neq 1$ is pinned, not identification `p`. Distinct from [`JohnsonSlHmm`] and [`UnitShiftedLogLogisticHmm`].
+#[derive(Clone, Debug)]
+pub struct UnitJohnsonSlHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for UnitJohnsonSlHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl UnitJohnsonSlHmm {
+    /// `k`-state UnitJohnsonSlHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitJohnsonSlHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted UnitJohnsonSlHmm.
+#[derive(Clone, Debug)]
+pub struct FittedUnitJohnsonSlHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free log-location scales $\sigma=e^{\mu}$ from $\exp(\mathbb{E}[\ln(Y-\xi)])$.
+    pub scale: Vector,
+    /// Pinned shifts $\xi_j$ below the sample support.
+    pub xi: Vector,
+    /// Pinned log-spreads $\sigma_j\neq 1$.
+    pub sigma: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedUnitJohnsonSlHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_unit_jsl(y, self.xi[j], self.scale[j].ln(), self.sigma[j] * self.sigma[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedUnitJohnsonSlHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for UnitJohnsonSlHmm {
+    type Fitted = FittedUnitJohnsonSlHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitJohnsonSlHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let xi = Vector::from_iter((0..k).map(|j| 0.08 + 0.02 * j as f64));
+        let sigma = Vector::from_iter((0..k).map(|j| 0.70 + 0.18 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0 || y >= 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "UnitJohnsonSlHmm skipped {n_skip} observations outside (0,1)"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedUnitJohnsonSlHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.85),
+                xi,
+                sigma,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.85 + 0.20 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedUnitJohnsonSlHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                xi: xi.clone(),
+                sigma: sigma.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wln = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 || y >= 1.0 {
+                        continue;
+                    }
+                    let z = y / (1.0 - y);
+                    if !z.is_finite() || z <= xi[j] {
+                        continue;
+                    }
+                    let e = z - xi[j];
+                    if !e.is_finite() || e <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wln += fb.gamma[t][j] * e.ln();
+                }
+                if wsum > 1e-12 {
+                    let hat = (wln / wsum).exp();
+                    if hat.is_finite() && hat > 0.0 {
+                        scale[j] = hat.clamp(0.45, 1.80);
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedUnitJohnsonSlHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                xi: xi.clone(),
+                sigma: sigma.clone(),
+                loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedUnitJohnsonSlHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            xi,
+            sigma,
+            loglik,
+        })
+    }
+}
+
+/// Beta–Johnson $S_L$ HMM ($f F^{a-1}(1-F)^{b-1}/B(a,b)$, $a,b\neq 1$).
+///
+/// Scale is free from $\exp(\mathbb{E}[\ln(Y-\xi)])$; shift $\xi$ sits below every observation and log-spread $\sigma\neq 1$ is pinned, not identification `p`. Distinct from [`KumaraswamyJohnsonSlHmm`] and [`UnitJohnsonSlHmm`].
+#[derive(Clone, Debug)]
+pub struct BetaJohnsonSlHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for BetaJohnsonSlHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl BetaJohnsonSlHmm {
+    /// `k`-state BetaJohnsonSlHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaJohnsonSlHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted BetaJohnsonSlHmm.
+#[derive(Clone, Debug)]
+pub struct FittedBetaJohnsonSlHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free log-location scales $\sigma=e^{\mu}$ from $\exp(\mathbb{E}[\ln(Y-\xi)])$.
+    pub scale: Vector,
+    /// Pinned shifts $\xi_j$ below the sample support.
+    pub xi: Vector,
+    /// Pinned log-spreads $\sigma_j\neq 1$.
+    pub sigma: Vector,
+    /// First extra shapes $a_j\neq 1$.
+    pub a: Vector,
+    /// Second extra shapes $b_j\neq 1$.
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedBetaJohnsonSlHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_beta_jsl(y, self.xi[j], self.scale[j].ln(), self.sigma[j] * self.sigma[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedBetaJohnsonSlHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for BetaJohnsonSlHmm {
+    type Fitted = FittedBetaJohnsonSlHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaJohnsonSlHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let xi = Vector::from_iter((0..k).map(|j| 1.40 + 0.15 * j as f64));
+        let sigma = Vector::from_iter((0..k).map(|j| 0.70 + 0.18 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.35 + 0.25 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 1.55 + 0.20 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "BetaJohnsonSlHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedBetaJohnsonSlHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 3.50),
+                xi,
+                sigma,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 3.50 + 0.80 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedBetaJohnsonSlHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                xi: xi.clone(),
+                sigma: sigma.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wln = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= xi[j] {
+                        continue;
+                    }
+                    let e = y - xi[j];
+                    if !e.is_finite() || e <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wln += fb.gamma[t][j] * e.ln();
+                }
+                if wsum > 1e-12 {
+                    let hat = (wln / wsum).exp();
+                    if hat.is_finite() && hat > 0.0 {
+                        scale[j] = hat.clamp(2.00, 6.50);
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedBetaJohnsonSlHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                xi: xi.clone(),
+                sigma: sigma.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedBetaJohnsonSlHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            xi,
+            sigma,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Exponentiated Johnson $S_L$ HMM ($a f F^{a-1}$, $a\neq 1$).
+///
+/// Scale is free from $\exp(\mathbb{E}[\ln(Y-\xi)])$; shift $\xi$ sits below every observation and log-spread $\sigma\neq 1$ is pinned, not identification `p`. Distinct from [`KumaraswamyJohnsonSlHmm`] and [`DiscreteJohnsonSlHmm`].
+#[derive(Clone, Debug)]
+pub struct ExponentiatedJohnsonSlHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for ExponentiatedJohnsonSlHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl ExponentiatedJohnsonSlHmm {
+    /// `k`-state ExponentiatedJohnsonSlHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedJohnsonSlHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted ExponentiatedJohnsonSlHmm.
+#[derive(Clone, Debug)]
+pub struct FittedExponentiatedJohnsonSlHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free log-location scales $\sigma=e^{\mu}$ from $\exp(\mathbb{E}[\ln(Y-\xi)])$.
+    pub scale: Vector,
+    /// Pinned shifts $\xi_j$ below the sample support.
+    pub xi: Vector,
+    /// Pinned log-spreads $\sigma_j\neq 1$.
+    pub sigma: Vector,
+    /// Extra CDF powers $a_j\neq 1$.
+    pub power: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedExponentiatedJohnsonSlHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_exp_jsl(y, self.xi[j], self.scale[j].ln(), self.sigma[j] * self.sigma[j], self.power[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedExponentiatedJohnsonSlHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for ExponentiatedJohnsonSlHmm {
+    type Fitted = FittedExponentiatedJohnsonSlHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedJohnsonSlHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let xi = Vector::from_iter((0..k).map(|j| 1.40 + 0.15 * j as f64));
+        let sigma = Vector::from_iter((0..k).map(|j| 0.70 + 0.18 * j as f64));
+        let power = Vector::from_iter((0..k).map(|j| 1.45 + 0.30 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "ExponentiatedJohnsonSlHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedExponentiatedJohnsonSlHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 3.50),
+                xi,
+                sigma,
+                power,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 3.50 + 0.80 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedExponentiatedJohnsonSlHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                xi: xi.clone(),
+                sigma: sigma.clone(),
+                power: power.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wln = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= xi[j] {
+                        continue;
+                    }
+                    let e = y - xi[j];
+                    if !e.is_finite() || e <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wln += fb.gamma[t][j] * e.ln();
+                }
+                if wsum > 1e-12 {
+                    let hat = (wln / wsum).exp();
+                    if hat.is_finite() && hat > 0.0 {
+                        scale[j] = hat.clamp(2.00, 6.50);
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedExponentiatedJohnsonSlHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                xi: xi.clone(),
+                sigma: sigma.clone(),
+                power: power.clone(),
+                loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedExponentiatedJohnsonSlHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            xi,
+            sigma,
+            power,
+            loglik,
+        })
+    }
+}
+
+/// Kumaraswamy–Johnson $S_L$ HMM ($ab f F^{a-1}(1-F^a)^{b-1}$, $a,b\neq 1$).
+///
+/// Scale is free from $\exp(\mathbb{E}[\ln(Y-\xi)])$; shift $\xi$ sits below every observation and log-spread $\sigma\neq 1$ is pinned, not identification `p`. Distinct from [`BetaJohnsonSlHmm`] and [`UnitJohnsonSlHmm`].
+#[derive(Clone, Debug)]
+pub struct KumaraswamyJohnsonSlHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for KumaraswamyJohnsonSlHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl KumaraswamyJohnsonSlHmm {
+    /// `k`-state KumaraswamyJohnsonSlHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyJohnsonSlHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted KumaraswamyJohnsonSlHmm.
+#[derive(Clone, Debug)]
+pub struct FittedKumaraswamyJohnsonSlHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free log-location scales $\sigma=e^{\mu}$ from $\exp(\mathbb{E}[\ln(Y-\xi)])$.
+    pub scale: Vector,
+    /// Pinned shifts $\xi_j$ below the sample support.
+    pub xi: Vector,
+    /// Pinned log-spreads $\sigma_j\neq 1$.
+    pub sigma: Vector,
+    /// First extra shapes $a_j\neq 1$.
+    pub a: Vector,
+    /// Second extra shapes $b_j\neq 1$.
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedKumaraswamyJohnsonSlHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_kuma_jsl(y, self.xi[j], self.scale[j].ln(), self.sigma[j] * self.sigma[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedKumaraswamyJohnsonSlHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for KumaraswamyJohnsonSlHmm {
+    type Fitted = FittedKumaraswamyJohnsonSlHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyJohnsonSlHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let xi = Vector::from_iter((0..k).map(|j| 1.40 + 0.15 * j as f64));
+        let sigma = Vector::from_iter((0..k).map(|j| 0.70 + 0.18 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.35 + 0.25 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 1.55 + 0.20 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "KumaraswamyJohnsonSlHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedKumaraswamyJohnsonSlHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 3.50),
+                xi,
+                sigma,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 3.50 + 0.80 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedKumaraswamyJohnsonSlHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                xi: xi.clone(),
+                sigma: sigma.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wln = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= xi[j] {
+                        continue;
+                    }
+                    let e = y - xi[j];
+                    if !e.is_finite() || e <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wln += fb.gamma[t][j] * e.ln();
+                }
+                if wsum > 1e-12 {
+                    let hat = (wln / wsum).exp();
+                    if hat.is_finite() && hat > 0.0 {
+                        scale[j] = hat.clamp(2.00, 6.50);
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedKumaraswamyJohnsonSlHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                xi: xi.clone(),
+                sigma: sigma.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedKumaraswamyJohnsonSlHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            xi,
+            sigma,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Discrete Johnson $S_L$ HMM ($P=F(k+1)-F(k)$ on $\{1,2,\ldots\}$).
+///
+/// Scale is free from $\exp(\mathbb{E}[\ln(Y-\xi)])$; shift $\xi$ sits below every observation and log-spread $\sigma\neq 1$ is pinned, not identification `p`. Distinct from [`JohnsonSlHmm`] and [`DiscreteShiftedLogLogisticHmm`].
+#[derive(Clone, Debug)]
+pub struct DiscreteJohnsonSlHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for DiscreteJohnsonSlHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl DiscreteJohnsonSlHmm {
+    /// `k`-state DiscreteJohnsonSlHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteJohnsonSlHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted DiscreteJohnsonSlHmm.
+#[derive(Clone, Debug)]
+pub struct FittedDiscreteJohnsonSlHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free log-location scales $\sigma=e^{\mu}$ from $\exp(\mathbb{E}[\ln(Y-\xi)])$.
+    pub scale: Vector,
+    /// Pinned shifts $\xi_j$ below the sample support.
+    pub xi: Vector,
+    /// Pinned log-spreads $\sigma_j\neq 1$.
+    pub sigma: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedDiscreteJohnsonSlHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_disc_jsl(y, self.xi[j], self.scale[j].ln(), self.sigma[j] * self.sigma[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedDiscreteJohnsonSlHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for DiscreteJohnsonSlHmm {
+    type Fitted = FittedDiscreteJohnsonSlHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteJohnsonSlHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let xi = Vector::from_iter((0..k).map(|j| 0.15 + 0.05 * j as f64));
+        let sigma = Vector::from_iter((0..k).map(|j| 0.70 + 0.18 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y < 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "DiscreteJohnsonSlHmm skipped {n_skip} observations below 1"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedDiscreteJohnsonSlHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 2.20),
+                xi,
+                sigma,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 2.20 + 0.60 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedDiscreteJohnsonSlHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                xi: xi.clone(),
+                sigma: sigma.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wln = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y < 1.0 || y <= xi[j] {
+                        continue;
+                    }
+                    let e = y - xi[j];
+                    if !e.is_finite() || e <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wln += fb.gamma[t][j] * e.ln();
+                }
+                if wsum > 1e-12 {
+                    let hat = (wln / wsum).exp();
+                    if hat.is_finite() && hat > 0.0 {
+                        scale[j] = hat.clamp(1.20, 5.50);
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedDiscreteJohnsonSlHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                xi: xi.clone(),
+                sigma: sigma.clone(),
+                loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedDiscreteJohnsonSlHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            xi,
+            sigma,
+            loglik,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128037,6 +129177,26 @@ mod tests {
             .expect("kgl");
         assert_eq!(kgl.value.labels.len(), 80);
         assert!(kgl.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let ujl = UnitJohnsonSlHmm::new(2)
+            .fit(&betx, &Session::new("ujl", "fit"))
+            .expect("ujl");
+        assert_eq!(ujl.value.labels.len(), 80);
+        assert!(ujl.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let bjl = BetaJohnsonSlHmm::new(2)
+            .fit(&xpos, &Session::new("bjl", "fit"))
+            .expect("bjl");
+        assert_eq!(bjl.value.labels.len(), 80);
+        assert!(bjl.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let ejl = ExponentiatedJohnsonSlHmm::new(2)
+            .fit(&xpos, &Session::new("ejl", "fit"))
+            .expect("ejl");
+        assert_eq!(ejl.value.labels.len(), 80);
+        assert!(ejl.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let kjl = KumaraswamyJohnsonSlHmm::new(2)
+            .fit(&xpos, &Session::new("kjl", "fit"))
+            .expect("kjl");
+        assert_eq!(kjl.value.labels.len(), 80);
+        assert!(kjl.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
@@ -128768,6 +129928,11 @@ mod tests {
             .expect("dgl");
         assert_eq!(dgl.value.labels.len(), 40);
         assert!(dgl.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let djl = DiscreteJohnsonSlHmm::new(2)
+            .fit(&x, &Session::new("djl", "fit"))
+            .expect("djl");
+        assert_eq!(djl.value.labels.len(), 40);
+        assert!(djl.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
     }
 
     #[test]
