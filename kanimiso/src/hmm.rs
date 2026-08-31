@@ -110833,6 +110833,1402 @@ let mut n_skip = 0usize;
     }
 }
 
+
+fn log_mo_frechet(y: f64, scale: f64, shape: f64, tilt: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || shape <= 0.0 || tilt <= 0.0 || tilt >= 1.0 {
+        return f64::NEG_INFINITY;
+    }
+    let z = scale / y;
+    if !z.is_finite() || z <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let za = z.powf(shape);
+    if !za.is_finite() || za > 40.0 {
+        return f64::NEG_INFINITY;
+    }
+    let baseline = (-za).exp();
+    let surv = 1.0 - baseline;
+    let den = 1.0 - (1.0 - tilt) * surv;
+    if den <= 1e-12 {
+        return f64::NEG_INFINITY;
+    }
+    tilt.ln() + log_frechet(y, shape, scale) - 2.0 * den.ln()
+}
+
+fn mo_frechet_cdf(y: f64, scale: f64, shape: f64, tilt: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || shape <= 0.0 || tilt <= 0.0 || tilt >= 1.0 {
+        return 0.0;
+    }
+    let z = scale / y;
+    if !z.is_finite() || z <= 0.0 {
+        return 0.0;
+    }
+    let za = z.powf(shape);
+    if !za.is_finite() || za > 40.0 {
+        return 0.0;
+    }
+    let baseline = (-za).exp();
+    if !baseline.is_finite() {
+        return 0.0;
+    }
+    let den = tilt + (1.0 - tilt) * baseline;
+    if den <= 1e-15 {
+        return 1.0 - 1e-15;
+    }
+    (baseline / den).clamp(0.0, 1.0 - 1e-15)
+}
+
+fn log_unit_mof(y: f64, scale: f64, shape: f64, tilt: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || y >= 1.0 || scale <= 0.0 || shape <= 0.0 || tilt <= 0.0 || tilt >= 1.0
+    {
+        return f64::NEG_INFINITY;
+    }
+    log_mo_frechet(y / (1.0 - y), scale, shape, tilt) - 2.0 * (1.0 - y).ln()
+}
+
+fn log_beta_mof(y: f64, scale: f64, shape: f64, tilt: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite()
+        || y <= 0.0
+        || scale <= 0.0
+        || shape <= 0.0
+        || tilt <= 0.0
+        || tilt >= 1.0
+        || a <= 0.0
+        || b <= 0.0
+    {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = mo_frechet_cdf(y, scale, shape, tilt);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let surv = (1.0 - cdf).max(1e-15);
+    log_mo_frechet(y, scale, shape, tilt) + (a - 1.0) * cdf.ln() + (b - 1.0) * surv.ln() - ln_beta(a, b)
+}
+
+fn log_exp_mof(y: f64, scale: f64, shape: f64, tilt: f64, power: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || shape <= 0.0 || tilt <= 0.0 || tilt >= 1.0 || power <= 0.0
+    {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = mo_frechet_cdf(y, scale, shape, tilt);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    power.ln() + log_mo_frechet(y, scale, shape, tilt) + (power - 1.0) * cdf.ln()
+}
+
+fn log_kuma_mof(y: f64, scale: f64, shape: f64, tilt: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite()
+        || y <= 0.0
+        || scale <= 0.0
+        || shape <= 0.0
+        || tilt <= 0.0
+        || tilt >= 1.0
+        || a <= 0.0
+        || b <= 0.0
+    {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = mo_frechet_cdf(y, scale, shape, tilt);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let fa = cdf.powf(a);
+    let one_m = 1.0 - fa;
+    if one_m <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    a.ln()
+        + b.ln()
+        + log_mo_frechet(y, scale, shape, tilt)
+        + (a - 1.0) * cdf.ln()
+        + (b - 1.0) * one_m.ln()
+}
+
+fn log_disc_mof(y: f64, scale: f64, shape: f64, tilt: f64) -> f64 {
+    if !y.is_finite() || y < 1.0 || scale <= 0.0 || shape <= 0.0 || tilt <= 0.0 || tilt >= 1.0 {
+        return f64::NEG_INFINITY;
+    }
+    let k = y.round().max(1.0);
+    let p = (mo_frechet_cdf(k + 1.0, scale, shape, tilt) - mo_frechet_cdf(k, scale, shape, tilt)).max(0.0);
+    if p <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    p.ln()
+}
+
+/// Marshall–Olkin Fréchet HMM on $(0,\infty)$ ($F=G/(\alpha+(1-\alpha)G)$).
+///
+/// Scale $s$ is free from $\mathbb{E}[Y^{-\alpha}]^{-1/\alpha}$; shape $\alpha\neq 1$ and tilt $\alpha\in(0,1)$ are pinned, not identification `p`. Distinct from [`FrechetHmm`] and [`MarshallOlkinChenHmm`].
+#[derive(Clone, Debug)]
+pub struct MarshallOlkinFrechetHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for MarshallOlkinFrechetHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl MarshallOlkinFrechetHmm {
+    /// `k`-state MarshallOlkinFrechetHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedMarshallOlkinFrechetHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted MarshallOlkinFrechetHmm.
+#[derive(Clone, Debug)]
+pub struct FittedMarshallOlkinFrechetHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Fréchet scales \(s_j\).
+    pub scale: Vector,
+    /// Pinned Fréchet shapes \(\alpha_j\neq 1\).
+    pub shape: Vector,
+    /// Pinned Marshall–Olkin tilts \(\alpha_j\in(0,1)\).
+    pub tilt: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedMarshallOlkinFrechetHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_mo_frechet(y, self.scale[j], self.shape[j], self.tilt[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedMarshallOlkinFrechetHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for MarshallOlkinFrechetHmm {
+    type Fitted = FittedMarshallOlkinFrechetHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedMarshallOlkinFrechetHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 1.50 + 0.30 * j as f64));
+        let tilt = Vector::from_iter((0..k).map(|j| 0.32 + 0.18 * j as f64));
+let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "MarshallOlkinFrechetHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedMarshallOlkinFrechetHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 4.20),
+                shape,
+                tilt,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 4.20 + 0.80 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedMarshallOlkinFrechetHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                tilt: tilt.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut winv = 0.0_f64;
+                let al: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    let inv = z.powf(-al);
+                    if !inv.is_finite() || inv <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    winv += fb.gamma[t][j] * inv;
+                }
+                if wsum > 1e-12 && winv > 1e-18 {
+                    scale[j] = (winv / wsum).powf(-1.0 / al).clamp(2.20, 6.20);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedMarshallOlkinFrechetHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            tilt: tilt.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedMarshallOlkinFrechetHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            tilt,
+            loglik,
+        })
+    }
+}
+
+/// Unit Marshall–Olkin Fréchet HMM on $(0,1)$ (MO-Fréchet on $u=x/(1-x)$).
+///
+/// Scale $s$ is free from $\mathbb{E}[U^{-\alpha}]^{-1/\alpha}$; shape $\alpha\neq 1$ and tilt are pinned, not identification `p`. Distinct from [`MarshallOlkinFrechetHmm`] (half-line) and [`UnitFrechetHmm`].
+#[derive(Clone, Debug)]
+pub struct UnitMarshallOlkinFrechetHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for UnitMarshallOlkinFrechetHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl UnitMarshallOlkinFrechetHmm {
+    /// `k`-state UnitMarshallOlkinFrechetHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitMarshallOlkinFrechetHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted UnitMarshallOlkinFrechetHmm.
+#[derive(Clone, Debug)]
+pub struct FittedUnitMarshallOlkinFrechetHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Fréchet scales \(s_j\).
+    pub scale: Vector,
+    /// Pinned Fréchet shapes \(\alpha_j\neq 1\).
+    pub shape: Vector,
+    /// Pinned Marshall–Olkin tilts \(\alpha_j\in(0,1)\).
+    pub tilt: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedUnitMarshallOlkinFrechetHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_unit_mof(y, self.scale[j], self.shape[j], self.tilt[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedUnitMarshallOlkinFrechetHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for UnitMarshallOlkinFrechetHmm {
+    type Fitted = FittedUnitMarshallOlkinFrechetHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitMarshallOlkinFrechetHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.58 + 0.18 * j as f64));
+        let tilt = Vector::from_iter((0..k).map(|j| 0.30 + 0.18 * j as f64));
+let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0 || y >= 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "UnitMarshallOlkinFrechetHmm skipped {n_skip} observations outside (0,1)"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedUnitMarshallOlkinFrechetHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.70),
+                shape,
+                tilt,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.70 + 0.15 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedUnitMarshallOlkinFrechetHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                tilt: tilt.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut winv = 0.0_f64;
+                let al: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 || y >= 1.0 {
+                        continue;
+                    }
+                    let z = y / (1.0 - y);
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    let inv = z.powf(-al);
+                    if !inv.is_finite() || inv <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    winv += fb.gamma[t][j] * inv;
+                }
+                if wsum > 1e-12 && winv > 1e-18 {
+                    scale[j] = (winv / wsum).powf(-1.0 / al).clamp(0.35, 1.20);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedUnitMarshallOlkinFrechetHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            tilt: tilt.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedUnitMarshallOlkinFrechetHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            tilt,
+            loglik,
+        })
+    }
+}
+
+/// Beta–Marshall–Olkin Fréchet HMM ($f F^{a-1}(1-F)^{b-1}/B(a,b)$, $a,b\neq 1$).
+///
+/// Extra shapes, Fréchet $\alpha\neq 1$, and tilt $\alpha\in(0,1)$ are hyperparameters, not identification `p`. Distinct from [`KumaraswamyMarshallOlkinFrechetHmm`] and [`BetaFrechetHmm`].
+#[derive(Clone, Debug)]
+pub struct BetaMarshallOlkinFrechetHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for BetaMarshallOlkinFrechetHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl BetaMarshallOlkinFrechetHmm {
+    /// `k`-state BetaMarshallOlkinFrechetHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaMarshallOlkinFrechetHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted BetaMarshallOlkinFrechetHmm.
+#[derive(Clone, Debug)]
+pub struct FittedBetaMarshallOlkinFrechetHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Fréchet scales \(s_j\).
+    pub scale: Vector,
+    /// Pinned Fréchet shapes \(\alpha_j\neq 1\).
+    pub shape: Vector,
+    /// Pinned Marshall–Olkin tilts \(\alpha_j\in(0,1)\).
+    pub tilt: Vector,
+    /// First extra shapes \(a_j\neq 1\).
+    pub a: Vector,
+    /// Second extra shapes \(b_j\neq 1\).
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedBetaMarshallOlkinFrechetHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_beta_mof(y, self.scale[j], self.shape[j], self.tilt[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedBetaMarshallOlkinFrechetHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for BetaMarshallOlkinFrechetHmm {
+    type Fitted = FittedBetaMarshallOlkinFrechetHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaMarshallOlkinFrechetHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 1.50 + 0.30 * j as f64));
+        let tilt = Vector::from_iter((0..k).map(|j| 0.32 + 0.18 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.5 + 0.3 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 2.2 + 0.4 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "BetaMarshallOlkinFrechetHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedBetaMarshallOlkinFrechetHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 4.20),
+                shape,
+                tilt,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 4.20 + 0.80 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedBetaMarshallOlkinFrechetHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                tilt: tilt.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut winv = 0.0_f64;
+                let al: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    let inv = z.powf(-al);
+                    if !inv.is_finite() || inv <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    winv += fb.gamma[t][j] * inv;
+                }
+                if wsum > 1e-12 && winv > 1e-18 {
+                    scale[j] = (winv / wsum).powf(-1.0 / al).clamp(2.20, 6.20);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedBetaMarshallOlkinFrechetHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            tilt: tilt.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedBetaMarshallOlkinFrechetHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            tilt,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Exponentiated Marshall–Olkin Fréchet HMM ($F^\alpha$, $\alpha\neq 1$).
+///
+/// Extra CDF power, Fréchet shape, and tilt are hyperparameters, not identification `p`. Distinct from [`KumaraswamyMarshallOlkinFrechetHmm`] and [`ExponentiatedFrechetHmm`].
+#[derive(Clone, Debug)]
+pub struct ExponentiatedMarshallOlkinFrechetHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for ExponentiatedMarshallOlkinFrechetHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl ExponentiatedMarshallOlkinFrechetHmm {
+    /// `k`-state ExponentiatedMarshallOlkinFrechetHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedMarshallOlkinFrechetHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted ExponentiatedMarshallOlkinFrechetHmm.
+#[derive(Clone, Debug)]
+pub struct FittedExponentiatedMarshallOlkinFrechetHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Fréchet scales \(s_j\).
+    pub scale: Vector,
+    /// Pinned Fréchet shapes \(\alpha_j\neq 1\).
+    pub shape: Vector,
+    /// Pinned Marshall–Olkin tilts \(\alpha_j\in(0,1)\).
+    pub tilt: Vector,
+    /// Extra CDF powers \(\alpha_j\neq 1\).
+    pub alpha: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedExponentiatedMarshallOlkinFrechetHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_exp_mof(y, self.scale[j], self.shape[j], self.tilt[j], self.alpha[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedExponentiatedMarshallOlkinFrechetHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for ExponentiatedMarshallOlkinFrechetHmm {
+    type Fitted = FittedExponentiatedMarshallOlkinFrechetHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedMarshallOlkinFrechetHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 1.50 + 0.30 * j as f64));
+        let tilt = Vector::from_iter((0..k).map(|j| 0.32 + 0.18 * j as f64));
+        let alpha = Vector::from_iter((0..k).map(|j| 1.6 + 0.3 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "ExponentiatedMarshallOlkinFrechetHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedExponentiatedMarshallOlkinFrechetHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 4.20),
+                shape,
+                tilt,
+                alpha,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 4.20 + 0.80 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedExponentiatedMarshallOlkinFrechetHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                tilt: tilt.clone(),
+                alpha: alpha.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut winv = 0.0_f64;
+                let al: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    let inv = z.powf(-al);
+                    if !inv.is_finite() || inv <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    winv += fb.gamma[t][j] * inv;
+                }
+                if wsum > 1e-12 && winv > 1e-18 {
+                    scale[j] = (winv / wsum).powf(-1.0 / al).clamp(2.20, 6.20);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedExponentiatedMarshallOlkinFrechetHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            tilt: tilt.clone(),
+                alpha: alpha.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedExponentiatedMarshallOlkinFrechetHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            tilt,
+            alpha,
+            loglik,
+        })
+    }
+}
+
+/// Kumaraswamy–Marshall–Olkin Fréchet HMM ($ab f F^{a-1}(1-F^a)^{b-1}$, $a,b\neq 1$).
+///
+/// Extra shapes, Fréchet $\alpha\neq 1$, and tilt are hyperparameters, not identification `p`. Distinct from [`BetaMarshallOlkinFrechetHmm`] and [`KumaraswamyFrechetHmm`].
+#[derive(Clone, Debug)]
+pub struct KumaraswamyMarshallOlkinFrechetHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for KumaraswamyMarshallOlkinFrechetHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl KumaraswamyMarshallOlkinFrechetHmm {
+    /// `k`-state KumaraswamyMarshallOlkinFrechetHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyMarshallOlkinFrechetHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted KumaraswamyMarshallOlkinFrechetHmm.
+#[derive(Clone, Debug)]
+pub struct FittedKumaraswamyMarshallOlkinFrechetHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Fréchet scales \(s_j\).
+    pub scale: Vector,
+    /// Pinned Fréchet shapes \(\alpha_j\neq 1\).
+    pub shape: Vector,
+    /// Pinned Marshall–Olkin tilts \(\alpha_j\in(0,1)\).
+    pub tilt: Vector,
+    /// First extra shapes \(a_j\neq 1\).
+    pub a: Vector,
+    /// Second extra shapes \(b_j\neq 1\).
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedKumaraswamyMarshallOlkinFrechetHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_kuma_mof(y, self.scale[j], self.shape[j], self.tilt[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedKumaraswamyMarshallOlkinFrechetHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for KumaraswamyMarshallOlkinFrechetHmm {
+    type Fitted = FittedKumaraswamyMarshallOlkinFrechetHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyMarshallOlkinFrechetHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 1.50 + 0.30 * j as f64));
+        let tilt = Vector::from_iter((0..k).map(|j| 0.32 + 0.18 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.4 + 0.25 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 1.8 + 0.3 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "KumaraswamyMarshallOlkinFrechetHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedKumaraswamyMarshallOlkinFrechetHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 4.20),
+                shape,
+                tilt,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 4.20 + 0.80 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedKumaraswamyMarshallOlkinFrechetHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                tilt: tilt.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut winv = 0.0_f64;
+                let al: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    let inv = z.powf(-al);
+                    if !inv.is_finite() || inv <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    winv += fb.gamma[t][j] * inv;
+                }
+                if wsum > 1e-12 && winv > 1e-18 {
+                    scale[j] = (winv / wsum).powf(-1.0 / al).clamp(2.20, 6.20);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedKumaraswamyMarshallOlkinFrechetHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            tilt: tilt.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedKumaraswamyMarshallOlkinFrechetHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            tilt,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Discrete Marshall–Olkin Fréchet HMM ($P(K=k)=F(k+1)-F(k)$ on $\{1,2,\ldots\}$).
+///
+/// Scale $s$ is free from $\mathbb{E}[K^{-\alpha}]^{-1/\alpha}$; shape $\alpha\neq 1$ and tilt are pinned, not identification `p`. Distinct from [`MarshallOlkinFrechetHmm`] (continuous) and [`DiscreteFrechetHmm`].
+#[derive(Clone, Debug)]
+pub struct DiscreteMarshallOlkinFrechetHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for DiscreteMarshallOlkinFrechetHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl DiscreteMarshallOlkinFrechetHmm {
+    /// `k`-state DiscreteMarshallOlkinFrechetHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteMarshallOlkinFrechetHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted DiscreteMarshallOlkinFrechetHmm.
+#[derive(Clone, Debug)]
+pub struct FittedDiscreteMarshallOlkinFrechetHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Fréchet scales \(s_j\).
+    pub scale: Vector,
+    /// Pinned Fréchet shapes \(\alpha_j\neq 1\).
+    pub shape: Vector,
+    /// Pinned Marshall–Olkin tilts \(\alpha_j\in(0,1)\).
+    pub tilt: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedDiscreteMarshallOlkinFrechetHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_disc_mof(y, self.scale[j], self.shape[j], self.tilt[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedDiscreteMarshallOlkinFrechetHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for DiscreteMarshallOlkinFrechetHmm {
+    type Fitted = FittedDiscreteMarshallOlkinFrechetHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteMarshallOlkinFrechetHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 1.35 + 0.28 * j as f64));
+        let tilt = Vector::from_iter((0..k).map(|j| 0.32 + 0.18 * j as f64));
+let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y < 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "DiscreteMarshallOlkinFrechetHmm skipped {n_skip} observations below 1"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedDiscreteMarshallOlkinFrechetHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 1.50),
+                shape,
+                tilt,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 1.50 + 0.40 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedDiscreteMarshallOlkinFrechetHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                tilt: tilt.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut winv = 0.0_f64;
+                let al: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y < 1.0 {
+                        continue;
+                    }
+                    let z = y.round().max(1.0);
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    let inv = z.powf(-al);
+                    if !inv.is_finite() || inv <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    winv += fb.gamma[t][j] * inv;
+                }
+                if wsum > 1e-12 && winv > 1e-18 {
+                    scale[j] = (winv / wsum).powf(-1.0 / al).clamp(0.70, 3.20);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedDiscreteMarshallOlkinFrechetHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            tilt: tilt.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedDiscreteMarshallOlkinFrechetHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            tilt,
+            loglik,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112897,6 +114293,31 @@ mod tests {
             .expect("kfr");
         assert_eq!(kfr.value.labels.len(), 80);
         assert!(kfr.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let mof = MarshallOlkinFrechetHmm::new(2)
+            .fit(&xpos, &Session::new("mof", "fit"))
+            .expect("mof");
+        assert_eq!(mof.value.labels.len(), 80);
+        assert!(mof.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let umf = UnitMarshallOlkinFrechetHmm::new(2)
+            .fit(&betx, &Session::new("umf", "fit"))
+            .expect("umf");
+        assert_eq!(umf.value.labels.len(), 80);
+        assert!(umf.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let bmf = BetaMarshallOlkinFrechetHmm::new(2)
+            .fit(&xpos, &Session::new("bmf", "fit"))
+            .expect("bmf");
+        assert_eq!(bmf.value.labels.len(), 80);
+        assert!(bmf.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let emf = ExponentiatedMarshallOlkinFrechetHmm::new(2)
+            .fit(&xpos, &Session::new("emf", "fit"))
+            .expect("emf");
+        assert_eq!(emf.value.labels.len(), 80);
+        assert!(emf.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let kmr = KumaraswamyMarshallOlkinFrechetHmm::new(2)
+            .fit(&xpos, &Session::new("kmr", "fit"))
+            .expect("kmr");
+        assert_eq!(kmr.value.labels.len(), 80);
+        assert!(kmr.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
@@ -113578,6 +114999,11 @@ mod tests {
             .expect("dfe");
         assert_eq!(dfe.value.labels.len(), 40);
         assert!(dfe.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let dmf = DiscreteMarshallOlkinFrechetHmm::new(2)
+            .fit(&x, &Session::new("dmf", "fit"))
+            .expect("dmf");
+        assert_eq!(dmf.value.labels.len(), 40);
+        assert!(dmf.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
     }
 
     #[test]
