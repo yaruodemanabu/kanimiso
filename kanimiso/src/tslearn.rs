@@ -804,6 +804,43 @@ pub fn cdist_lb_improved(
     ctx.finish(out)
 }
 
+/// Pairwise SWALE (tslearn-style `cdist` with [`swale`]).
+///
+/// Match radius is not identification `p`. Distinct from [`cdist_lcss`]
+/// and [`cdist_edr`].
+pub fn cdist_swale(
+    a: &Matrix,
+    b: &Matrix,
+    eps: f64,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let eps = if eps.is_finite() && eps >= 0.0 { eps } else { 0.0 };
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        swale_raw(ai.as_slice(), bj.as_slice(), eps)
+    });
+    ctx.finish(out)
+}
+
+/// Pairwise LB_Kim (tslearn-style `cdist` with [`lb_kim`]).
+///
+/// Feature count is not identification `p`. Distinct from [`cdist_lb_keogh`].
+pub fn cdist_lb_kim(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        lb_kim_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -4058,30 +4095,34 @@ pub fn lb_kim(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64
         ctx.push(Issue::builder(IssueCode::EmptyMatrix).build());
         return ctx.finish(f64::NAN);
     }
-    let as_ = a.as_slice();
-    let bs = b.as_slice();
-    let af = as_[0];
-    let al = as_[as_.len() - 1];
-    let bf = bs[0];
-    let bl = bs[bs.len() - 1];
+    ctx.finish(lb_kim_raw(a.as_slice(), b.as_slice()))
+}
+
+fn lb_kim_raw(a: &[f64], b: &[f64]) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return f64::NAN;
+    }
+    let af = a[0];
+    let al = a[a.len() - 1];
+    let bf = b[0];
+    let bl = b[b.len() - 1];
     let mut amin = af;
     let mut amax = af;
-    for &v in as_ {
+    for &v in a {
         amin = amin.min(v);
         amax = amax.max(v);
     }
     let mut bmin = bf;
     let mut bmax = bf;
-    for &v in bs {
+    for &v in b {
         bmin = bmin.min(v);
         bmax = bmax.max(v);
     }
-    let lb = (af - bf)
+    (af - bf)
         .abs()
         .max((al - bl).abs())
         .max((amax - bmax).abs())
-        .max((amin - bmin).abs());
-    ctx.finish(lb)
+        .max((amin - bmin).abs())
 }
 
 /// LB_Improved DTW lower bound (Keogh plus leftover reverse Keogh).
@@ -4189,16 +4230,21 @@ pub fn swale(a: &Vector, b: &Vector, eps: f64, session: &Session) -> Result<Qual
         );
         return ctx.finish(f64::NAN);
     }
-    let as_ = a.as_slice();
-    let bs = b.as_slice();
-    let n = as_.len();
-    let m = bs.len();
+    ctx.finish(swale_raw(a.as_slice(), b.as_slice(), eps))
+}
+
+fn swale_raw(a: &[f64], b: &[f64], eps: f64) -> f64 {
+    let n = a.len();
+    let m = b.len();
+    if n == 0 || m == 0 {
+        return f64::NAN;
+    }
     let mut prev = vec![0.0_f64; m + 1];
     let mut cur = vec![0.0_f64; m + 1];
     for i in 1..=n {
         for j in 1..=m {
             let skip = prev[j].max(cur[j - 1]);
-            if (as_[i - 1] - bs[j - 1]).abs() <= eps {
+            if (a[i - 1] - b[j - 1]).abs() <= eps {
                 let w = 1.0 / (1.0 + (i as f64 - j as f64).abs());
                 cur[j] = skip.max(prev[j - 1] + w);
             } else {
@@ -4208,7 +4254,7 @@ pub fn swale(a: &Vector, b: &Vector, eps: f64, session: &Session) -> Result<Qual
         std::mem::swap(&mut prev, &mut cur);
     }
     let denom = n.min(m) as f64;
-    ctx.finish(1.0 - prev[m] / denom.max(1.0))
+    1.0 - prev[m] / denom.max(1.0)
 }
 
 /// Edit Distance with Real Penalty (tslearn `erp`).
@@ -20369,6 +20415,16 @@ mod tests {
             .value;
         assert_eq!(cli.shape(), (8, 8));
         assert!(cli.get(0, 0).abs() < 1e-12);
+        let csw = cdist_swale(&x, &x, 0.1, &Session::new("ts", "csw"))
+            .unwrap()
+            .value;
+        assert_eq!(csw.shape(), (8, 8));
+        assert!(csw.get(0, 0).abs() < 1e-12);
+        let ckm = cdist_lb_kim(&x, &x, &Session::new("ts", "ckm"))
+            .unwrap()
+            .value;
+        assert_eq!(ckm.shape(), (8, 8));
+        assert!(ckm.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

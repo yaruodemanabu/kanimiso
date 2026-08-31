@@ -6966,6 +6966,15 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.PertHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.HalfLogisticHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ExponentialPowerHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.MeixnerHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ChiSquaredHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.RankNet", "river.reco.BPR", "online"),
+    a("online.SoftImpute", "river.reco.BiasedMF", "online"),
+    a("tslearn.cdist_swale", "tslearn.metrics.cdist", "timeseries"),
+    a("tslearn.cdist_lb_kim", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7656,6 +7665,15 @@ mod tests {
             "online.ListNet",
             "tslearn.cdist_lb_keogh",
             "tslearn.cdist_lb_improved",
+            "hmm.PertHmm",
+            "hmm.HalfLogisticHmm",
+            "hmm.ExponentialPowerHmm",
+            "hmm.MeixnerHmm",
+            "hmm.ChiSquaredHmm",
+            "online.RankNet",
+            "online.SoftImpute",
+            "tslearn.cdist_swale",
+            "tslearn.cdist_lb_kim",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

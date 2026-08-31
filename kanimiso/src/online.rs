@@ -14,14 +14,14 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linalg::ridge_solve;
+use crate::linalg::{ridge_solve, thin_svd};
 use crate::rng::Rng;
 use crate::special::norm_cdf;
 use crate::traits::{PartialFit, Predict, Transform};
 use faer::Mat;
 use ojizou_san::{IncrementalExplain, Session};
 use signlred::{
-    IncrementalQuality, Issue, IssueCode, NumericalCompromise, Qualified, Result, Severity,
+    IncrementalQuality, Issue, IssueCode, NumericalCompromise, Qualified, Report, Result, Severity,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -46222,6 +46222,378 @@ impl Predict for ListNet {
     }
 }
 
+/// RankNet pairwise ranking (logistic loss on \(s_i-s_j\) for \(y_i>y_j\)).
+///
+/// Distinct from [`ListNet`] (listwise softmax CE), [`Bpr`] (one unweighted
+/// negative), and [`WarpReco`] (sample-until-violation). Rank is not
+/// identification `p`.
+#[derive(Clone, Debug)]
+pub struct RankNet {
+    /// Latent rank.
+    pub n_factors: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    /// \(\ell_2\) on factors.
+    pub l2: f64,
+    pu: Vec<Vec<f64>>,
+    qi: Vec<Vec<f64>>,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for RankNet {
+    fn default() -> Self {
+        Self {
+            n_factors: 4,
+            learning_rate: 0.05,
+            l2: 0.01,
+            pu: Vec::new(),
+            qi: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl RankNet {
+    /// RankNet with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn grow(&mut self, u: usize, i: usize) {
+        let k = self.n_factors.max(1);
+        while self.pu.len() <= u {
+            self.pu.push(vec![0.01; k]);
+        }
+        while self.qi.len() <= i {
+            self.qi.push(vec![0.01; k]);
+        }
+    }
+
+    fn score(&self, u: usize, i: usize) -> f64 {
+        let mut s = 0.0_f64;
+        if u < self.pu.len() && i < self.qi.len() {
+            for f in 0..self.n_factors.min(self.pu[u].len()).min(self.qi[i].len()) {
+                s += self.pu[u][f] * self.qi[i][f];
+            }
+        }
+        s
+    }
+}
+
+impl PartialFit for RankNet {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("RankNet needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let lr = self.learning_rate.max(1e-6);
+        let l2 = self.l2.max(0.0);
+        let mut by_user: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+        for r in 0..x.nrows().min(y.len()) {
+            if !y[r].is_finite() {
+                continue;
+            }
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.grow(u, i);
+            by_user.entry(u).or_default().push((i, y[r]));
+        }
+        let mut dsum = 0.0_f64;
+        let mut pairs = 0u64;
+        for (u, items) in by_user {
+            if items.len() < 2 {
+                continue;
+            }
+            for a in 0..items.len() {
+                for b in 0..items.len() {
+                    if items[a].1 <= items[b].1 {
+                        continue;
+                    }
+                    let ia = items[a].0;
+                    let ib = items[b].0;
+                    let p = sigmoid(self.score(u, ia) - self.score(u, ib));
+                    let err = p - 1.0;
+                    for f in 0..self.n_factors {
+                        let pua = self.pu[u][f];
+                        let qia = self.qi[ia][f];
+                        let qib = self.qi[ib][f];
+                        self.pu[u][f] -= lr * (err * (qia - qib) + l2 * pua);
+                        self.qi[ia][f] -= lr * (err * pua + l2 * qia);
+                        self.qi[ib][f] -= lr * (-err * pua + l2 * qib);
+                        dsum += (self.pu[u][f] - pua).abs()
+                            + (self.qi[ia][f] - qia).abs()
+                            + (self.qi[ib][f] - qib).abs();
+                    }
+                    pairs += 1;
+                }
+            }
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        if pairs == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message("RankNet needs a comparable pair in the batch")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(pairs as f64);
+        q.still_identified = pairs > 0;
+        q.warmup = pairs == 0;
+        q.explanation = format!(
+            "RankNet pairs={pairs} ||Δ||₁={dsum:.4e} users={} items={}",
+            self.pu.len(),
+            self.qi.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "RankNet pairwise logistic step",
+                "logistic on s_i-s_j; distinct from listwise ListNet and BPR/WARP",
+                "pre-batch factors",
+                format!("pairs={pairs} dsum={dsum:.4e}"),
+            ),
+        )
+    }
+}
+
+impl Predict for RankNet {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("RankNet predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.score(u, i)
+        })))
+    }
+}
+
+/// SoftImpute (Mazumder–Hastie–Tibshirani): fill missing ratings, thin SVD,
+/// soft-threshold singular values, reconstruct.
+///
+/// Distinct from [`AlsReco`] (ridge ALS), [`EaseReco`] (Gram inverse), and
+/// [`FunkMf`] (SGD). Nuclear-norm λ is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SoftImpute {
+    /// Soft-threshold on singular values.
+    pub lambda: f64,
+    observed: HashMap<(usize, usize), f64>,
+    recon: Vec<Vec<f64>>,
+    n_users: usize,
+    n_items: usize,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for SoftImpute {
+    fn default() -> Self {
+        Self {
+            lambda: 0.1,
+            observed: HashMap::new(),
+            recon: Vec::new(),
+            n_users: 0,
+            n_items: 0,
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl SoftImpute {
+    /// SoftImpute with default nuclear-norm threshold.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score(&self, u: usize, i: usize) -> f64 {
+        if u < self.recon.len() && i < self.recon[u].len() {
+            self.recon[u][i]
+        } else {
+            0.0
+        }
+    }
+}
+
+impl PartialFit for SoftImpute {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "missing y"),
+            );
+        };
+        inspect_online_xy(&mut ctx, x, Some(y));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("SoftImpute needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        for r in 0..x.nrows().min(y.len()) {
+            if !y[r].is_finite() {
+                continue;
+            }
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.observed.insert((u, i), y[r]);
+            self.n_users = self.n_users.max(u + 1);
+            self.n_items = self.n_items.max(i + 1);
+        }
+        if self.n_users == 0 || self.n_items == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "empty ratings"),
+            );
+        }
+        let nu = self.n_users;
+        let ni = self.n_items;
+        if self.recon.len() != nu || self.recon.as_slice().first().map(|r| r.len()) != Some(ni) {
+            self.recon = vec![vec![0.0; ni]; nu];
+        }
+        let filled = Matrix::from_fn(nu, ni, |u, i| {
+            if let Some(&r) = self.observed.get(&(u, i)) {
+                r
+            } else {
+                self.recon[u][i]
+            }
+        });
+        let mut scratch = Report::new("SoftImpute", "svd");
+        let mut nkeep = 0u64;
+        let mut dsum = 0.0_f64;
+        if let Some(svd) = thin_svd(&mut scratch, &filled, &ctx.policy) {
+            let lam = if self.lambda.is_finite() && self.lambda >= 0.0 {
+                self.lambda
+            } else {
+                0.1
+            };
+            let r = svd.singular_values.len();
+            let mut news = vec![0.0_f64; r];
+            for k in 0..r {
+                let sk: f64 = svd.singular_values[k];
+                news[k] = (sk - lam).max(0.0);
+                if news[k] > 0.0 {
+                    nkeep += 1;
+                }
+            }
+            let mut next = vec![vec![0.0_f64; ni]; nu];
+            for u in 0..nu {
+                for i in 0..ni {
+                    let mut s = 0.0_f64;
+                    for c in 0..r {
+                        s += svd.u[(u, c)] * news[c] * svd.v[(i, c)];
+                    }
+                    next[u][i] = s;
+                    dsum += (s - self.recon[u][i]).abs();
+                }
+            }
+            self.recon = next;
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .severity(Severity::Warning)
+                    .message("SoftImpute skipped a non-converged SVD")
+                    .build(),
+            );
+        }
+        self.n_seen += x.nrows().min(y.len()) as u64;
+        self.updates += 1;
+        let warmup = nkeep == 0;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(nkeep as f64);
+        q.still_identified = !warmup;
+        q.warmup = warmup;
+        q.explanation = format!(
+            "SoftImpute nuclear SVD on {nu}×{ni}; kept={nkeep} ||Δ||₁={dsum:.4e}"
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "SoftImpute soft-threshold SVD",
+                "fill-SVD-shrink; distinct from ALS, EASE, and FunkMF",
+                "previous reconstruction",
+                format!("kept={nkeep} dsum={dsum:.4e}"),
+            ),
+        )
+    }
+}
+
+impl Predict for SoftImpute {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("SoftImpute predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.score(u, i)
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47053,6 +47425,12 @@ mod tests {
         ListNet::new(2)
             .partial_fit(&xui, Some(&y), &session)
             .expect("lnet");
+        RankNet::new(2)
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("rnet");
+        SoftImpute::new()
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("simp");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
