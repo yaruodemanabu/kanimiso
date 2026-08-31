@@ -1854,6 +1854,149 @@ pub fn cdist_open_begin_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result
     ctx.finish(out)
 }
 
+fn open_end_dtw_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len();
+    let m = b.len();
+    if n == 0 || m == 0 {
+        return f64::NAN;
+    }
+    let mut prev = vec![0.0_f64; m];
+    prev[0] = (a[0] - b[0]).abs();
+    for j in 1..m {
+        prev[j] = prev[j - 1] + (a[0] - b[j]).abs();
+    }
+    let mut cur = vec![0.0_f64; m];
+    for i in 1..n {
+        cur[0] = prev[0] + (a[i] - b[0]).abs();
+        for j in 1..m {
+            let cost = (a[i] - b[j]).abs();
+            cur[j] = cost + prev[j].min(cur[j - 1]).min(prev[j - 1]);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev.iter().copied().fold(f64::INFINITY, f64::min)
+}
+
+/// Closed-begin, open-end DTW (pinned start, free end on `b`).
+///
+/// Standard DTW recurrence; the score is the minimum of the last row.
+/// Distinct from [`dtw`] (closed–closed), [`open_begin_dtw`] (free start),
+/// [`obe_dtw`] (open–open), and [`dtw_subsequence`] (open on the longer
+/// series only).
+pub fn open_end_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("open_end_dtw.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("open_end_dtw.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("open_end_dtw on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(open_end_dtw_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise open-end DTW.
+///
+/// Distinct from [`cdist_dtw`], [`cdist_open_begin_dtw`], and
+/// [`cdist_dtw_subsequence`].
+pub fn cdist_open_end_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        open_end_dtw_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+fn correlation_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    if n == 1 {
+        return if (a[0] - b[0]).abs() < 1e-15 { 0.0 } else { 1.0 };
+    }
+    let na = n as f64;
+    let mut ma = 0.0_f64;
+    let mut mb = 0.0_f64;
+    for i in 0..n {
+        ma += a[i];
+        mb += b[i];
+    }
+    ma /= na;
+    mb /= na;
+    let mut num = 0.0_f64;
+    let mut va = 0.0_f64;
+    let mut vb = 0.0_f64;
+    for i in 0..n {
+        let da = a[i] - ma;
+        let db = b[i] - mb;
+        num += da * db;
+        va += da * da;
+        vb += db * db;
+    }
+    let den = (va * vb).sqrt();
+    if den < 1e-18 {
+        let mut same = true;
+        for i in 0..n {
+            if (a[i] - b[i]).abs() >= 1e-12 {
+                same = false;
+                break;
+            }
+        }
+        return if same { 0.0 } else { 1.0 };
+    }
+    let r = (num / den).clamp(-1.0, 1.0);
+    1.0 - r
+}
+
+/// Pearson correlation distance \(1-r\) on aligned prefixes (no lag search).
+///
+/// Distinct from [`sbd`] (max NCC over shifts). Identical series score 0.
+pub fn correlation_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("correlation_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("correlation_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("correlation_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(correlation_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Pearson correlation distance.
+///
+/// Distinct from [`cdist_sbd`].
+pub fn cdist_correlation(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        correlation_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -20470,6 +20613,10 @@ mod tests {
         assert!(seu.abs() < 1e-12, "shape_euclidean={seu}");
         let opb = open_begin_dtw(&a, &a, &Session::new("ts", "opb")).unwrap().value;
         assert!(opb.abs() < 1e-12, "open_begin_dtw={opb}");
+        let oed = open_end_dtw(&a, &a, &Session::new("ts", "oed")).unwrap().value;
+        assert!(oed.abs() < 1e-12, "open_end_dtw={oed}");
+        let crd = correlation_distance(&a, &a, &Session::new("ts", "crd")).unwrap().value;
+        assert!(crd.abs() < 1e-12, "correlation_distance={crd}");
     }
 
     #[test]
@@ -21527,6 +21674,16 @@ mod tests {
             .value;
         assert_eq!(cop.shape(), (8, 8));
         assert!(cop.get(0, 0).abs() < 1e-12);
+        let coe = cdist_open_end_dtw(&x, &x, &Session::new("ts", "coe"))
+            .unwrap()
+            .value;
+        assert_eq!(coe.shape(), (8, 8));
+        assert!(coe.get(0, 0).abs() < 1e-12);
+        let ccr = cdist_correlation(&x, &x, &Session::new("ts", "ccr"))
+            .unwrap()
+            .value;
+        assert_eq!(ccr.shape(), (8, 8));
+        assert!(ccr.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

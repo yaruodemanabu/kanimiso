@@ -49305,6 +49305,169 @@ impl PartialFit for EwmaChart {
     }
 }
 
+/// Nishida–Yamauchi STEPD (two-window two-proportion z-test).
+///
+/// Binarizes the stream at the current window median and compares the older
+/// half to the recent half. Distinct from [`Mddm`] (McDiarmid mean gap),
+/// [`Ddm`] (p+s), [`Hddm`] (Hoeffding), and [`Kswin`] (KS). Window length is
+/// not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Stepd {
+    /// Length of each comparison window. Not identification `p`.
+    pub window_size: usize,
+    /// Two-sided type-I level.
+    pub alpha: f64,
+    window: Vec<f64>,
+    n_seen: u64,
+    updates: u64,
+    last_z: f64,
+}
+
+impl Default for Stepd {
+    fn default() -> Self {
+        Self {
+            window_size: 8,
+            alpha: 0.05,
+            window: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            last_z: 0.0,
+        }
+    }
+}
+
+impl Stepd {
+    /// STEPD with per-window length `window`.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window_size: window.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Consume one scalar.
+    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+        let mut ctx = FitCtx::with_session(session.child("update"));
+        if x.is_finite() {
+            self.window.push(x);
+        }
+        let cap = self.window_size.saturating_mul(2);
+        if self.window.len() > cap {
+            let drop = self.window.len() - cap;
+            self.window.drain(0..drop);
+        }
+        self.n_seen += 1;
+        let w = self.window_size.max(2);
+        if self.window.len() < w * 2 {
+            return ctx.finish(DriftDecision::Stable);
+        }
+        let n = self.window.len();
+        let past = &self.window[..w];
+        let recent = &self.window[n - w..];
+        let mut sorted: Vec<f64> = self.window.iter().copied().collect();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mid = sorted.len() / 2;
+        let med = if sorted.len() % 2 == 1 {
+            sorted[mid]
+        } else {
+            0.5 * (sorted[mid - 1] + sorted[mid])
+        };
+        let mut s1 = 0.0_f64;
+        let mut s2 = 0.0_f64;
+        for v in past.iter() {
+            if *v > med {
+                s1 += 1.0;
+            }
+        }
+        for v in recent.iter() {
+            if *v > med {
+                s2 += 1.0;
+            }
+        }
+        let n1 = past.len() as f64;
+        let n2 = recent.len() as f64;
+        let p1 = s1 / n1;
+        let p2 = s2 / n2;
+        let ph = (s1 + s2) / (n1 + n2);
+        let var = ph * (1.0 - ph) * (1.0 / n1 + 1.0 / n2);
+        let stat = if var > 1e-18 {
+            (p1 - p2).abs() / var.sqrt()
+        } else {
+            0.0
+        };
+        self.last_z = stat;
+        let pval = 2.0 * (1.0 - norm_cdf(stat));
+        let alpha = if self.alpha.is_finite() && self.alpha > 0.0 && self.alpha < 1.0 {
+            self.alpha
+        } else {
+            0.05
+        };
+        if pval < alpha {
+            ctx.push(
+                Issue::builder(IssueCode::ConceptDriftDetected)
+                    .message(format!("STEPD |z|={stat:.4e} p={pval:.4e} < α={alpha:.4e}"))
+                    .metric("drift_statistic", stat)
+                    .build(),
+            );
+            return ctx.finish(DriftDecision::Drift { statistic: stat });
+        }
+        ctx.finish(DriftDecision::Stable)
+    }
+}
+
+impl PartialFit for Stepd {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let mut fired = 0.0_f64;
+        for i in 0..x.nrows() {
+            match self.update(x.get(i, 0), &session.child("stepd")) {
+                Ok(q) => {
+                    if matches!(q.value, DriftDecision::Drift { .. }) {
+                        fired += 1.0;
+                    }
+                }
+                Err(e) => {
+                    if e.primary().code == IssueCode::ConceptDriftDetected {
+                        fired += 1.0;
+                    }
+                }
+            }
+        }
+        self.updates += 1;
+        let warmed = self.window.len() >= self.window_size.saturating_mul(2);
+        if !warmed {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message("STEPD needs two full windows")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.information_gain = Some(fired);
+        q.drift_statistic = Some(self.last_z);
+        q.still_identified = warmed;
+        q.warmup = !warmed;
+        q.explanation = format!("STEPD |z|={:.4e} cuts={fired}", self.last_z);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "STEPD two-proportion step",
+                "Nishida–Yamauchi z-test on median-binarized halves; not McDiarmid or KS",
+                "pre-batch windows",
+                format!("z={:.4e} fired={fired}", self.last_z),
+            ),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50187,6 +50350,9 @@ mod tests {
         EwmaChart::new(0.2)
             .partial_fit(&x, None, &session)
             .expect("ewc");
+        Stepd::new(6)
+            .partial_fit(&x, None, &session)
+            .expect("stp");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

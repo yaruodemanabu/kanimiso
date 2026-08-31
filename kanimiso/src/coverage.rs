@@ -7099,6 +7099,28 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.ShankerHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.SujathaHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.InverseChiHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ParetoTypeIiiHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.DiscreteParetoHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.Stepd", "river.drift.binary.STEPD", "online"),
+    a("tslearn.open_end_dtw", "tslearn.metrics.dtw", "timeseries"),
+    a(
+        "tslearn.cdist_open_end_dtw",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.correlation_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_correlation",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7878,6 +7900,16 @@ mod tests {
             "tslearn.cdist_shape_euclidean",
             "tslearn.open_begin_dtw",
             "tslearn.cdist_open_begin_dtw",
+            "hmm.ShankerHmm",
+            "hmm.SujathaHmm",
+            "hmm.InverseChiHmm",
+            "hmm.ParetoTypeIiiHmm",
+            "hmm.DiscreteParetoHmm",
+            "online.Stepd",
+            "tslearn.open_end_dtw",
+            "tslearn.cdist_open_end_dtw",
+            "tslearn.correlation_distance",
+            "tslearn.cdist_correlation",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
