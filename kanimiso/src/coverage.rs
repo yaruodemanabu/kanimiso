@@ -6856,6 +6856,15 @@ const INVENTORY: &[Algorithm] = &[
         "river.ensemble.LearnNseClassifier",
         "online",
     ),
+    a("hmm.GoodHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a("hmm.NoncentralChiSquaredHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.SineSkewedVonMisesHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.HyperbolicHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "online.AdditiveExpertClassifier",
+        "river.ensemble.AdditiveExpertEnsemble",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7479,6 +7488,10 @@ mod tests {
             "tslearn.adtw",
             "online.OnlineIca",
             "online.LearnNseClassifier",
+            "hmm.GoodHmm",
+            "hmm.HyperbolicHmm",
+            "hmm.SineSkewedVonMisesHmm",
+            "online.AdditiveExpertClassifier",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
