@@ -186361,7 +186361,7 @@ impl FitUnsupervised for DiscreteTsp14Hmm {
                     if !y.is_finite() || y < 1.0 {
                         continue;
                     }
-                    let z = y;
+                    let z = y + 1.0;
                     wsum += fb.gamma[t][j];
                     mx = mx.max((z - loc[j]).abs());
                 }
