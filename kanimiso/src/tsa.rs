@@ -19308,6 +19308,167 @@ impl FittedMinTReconciler {
     }
 }
 
+/// Last-value hierarchy plus OLS reconcile (sktime `OLSReconciler`).
+///
+/// Node count is not identification `p`. Distinct from
+/// [`MinTReconcilerForecaster`] (covariance weights) and
+/// [`WlsReconcilerForecaster`] (diagonal variances).
+#[derive(Clone, Debug, Default)]
+pub struct OlsReconcilerForecaster;
+
+/// Fitted OLS hierarchy.
+#[derive(Clone, Debug)]
+pub struct FittedOlsReconciler {
+    last: Vector,
+}
+
+impl OlsReconcilerForecaster {
+    /// Empty OLS reconciler.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Store last node values.
+    pub fn fit(
+        &self,
+        y: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedOlsReconciler>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let last = Vector::from_iter((0..y.ncols()).map(|j| {
+            y.column(j)
+                .as_slice()
+                .last()
+                .copied()
+                .unwrap_or(0.0)
+        }));
+        ctx.finish(FittedOlsReconciler { last })
+    }
+}
+
+impl FittedOlsReconciler {
+    /// Repeat last values, expand through `S` if needed, then OLS reconcile.
+    pub fn forecast(
+        &self,
+        h: usize,
+        summing: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<Matrix>> {
+        let n_nodes = summing.nrows();
+        let n_bot = summing.ncols();
+        let yhat = if self.last.len() == n_nodes {
+            Matrix::from_fn(h, n_nodes, |_, j| self.last[j])
+        } else if self.last.len() == n_bot {
+            Matrix::from_fn(h, n_nodes, |_, i| {
+                let mut s = 0.0;
+                for j in 0..n_bot {
+                    s += summing.get(i, j) * self.last[j];
+                }
+                s
+            })
+        } else {
+            Matrix::from_fn(h, n_nodes.max(1), |_, j| {
+                self.last.as_slice().get(j).copied().unwrap_or(0.0)
+            })
+        };
+        reconcile_ols(&yhat, summing, session)
+    }
+}
+
+/// Top-down hierarchy using **empirical** last-row bottom shares.
+///
+/// Distinct from [`reconcile_top_down`] (structural \(S\)-row weights).
+/// Node count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct TopDownReconcilerForecaster;
+
+/// Fitted empirical top-down hierarchy.
+#[derive(Clone, Debug)]
+pub struct FittedTopDownReconciler {
+    last: Vector,
+}
+
+impl TopDownReconcilerForecaster {
+    /// Empty empirical top-down reconciler.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Store the last training row.
+    pub fn fit(
+        &self,
+        y: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedTopDownReconciler>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let last = Vector::from_iter((0..y.ncols()).map(|j| {
+            y.column(j)
+                .as_slice()
+                .last()
+                .copied()
+                .unwrap_or(0.0)
+        }));
+        ctx.finish(FittedTopDownReconciler { last })
+    }
+}
+
+impl FittedTopDownReconciler {
+    /// Allocate a last-value top through empirical bottom shares, then \(S\).
+    pub fn forecast(
+        &self,
+        h: usize,
+        summing: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        inspect_xy(&mut ctx.report, summing, None, &ctx.policy);
+        let n_nodes = summing.nrows();
+        let n_bot = summing.ncols();
+        if n_nodes == 0 || n_bot == 0 {
+            return ctx.finish(Matrix::zeros(h, n_nodes));
+        }
+        let bottoms0 = if self.last.len() == n_bot {
+            self.last.clone()
+        } else if self.last.len() == n_nodes {
+            let yhat = Matrix::from_fn(1, n_nodes, |_, j| self.last[j]);
+            let b = reconcile_bottoms(&yhat, summing);
+            Vector::from_iter((0..n_bot).map(|j| b.get(0, j)))
+        } else {
+            Vector::from_iter((0..n_bot).map(|j| self.last.as_slice().get(j).copied().unwrap_or(0.0)))
+        };
+        let mut mass = 0.0_f64;
+        for j in 0..bottoms0.len() {
+            mass += bottoms0[j].abs();
+        }
+        let props = if mass > 1e-12 {
+            Vector::from_iter((0..n_bot).map(|j| bottoms0[j].abs() / mass))
+        } else {
+            Vector::filled(n_bot, 1.0 / n_bot.max(1) as f64)
+        };
+        let top = if self.last.len() == n_nodes {
+            let mut ti = 0usize;
+            let mut ts = f64::NEG_INFINITY;
+            for i in 0..n_nodes {
+                let mut rs = 0.0_f64;
+                for j in 0..n_bot {
+                    rs += summing.get(i, j).abs();
+                }
+                if rs > ts {
+                    ts = rs;
+                    ti = i;
+                }
+            }
+            self.last[ti]
+        } else {
+            mass
+        };
+        let bottoms = Matrix::from_fn(h, n_bot, |_, j| top * props[j]);
+        ctx.finish(apply_summing(&bottoms, summing))
+    }
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -20179,6 +20340,26 @@ impl FittedMinTReconciler {
             .value;
         assert_eq!(mintff.shape(), (2, 3));
         assert!((mintff.get(0, 0) + mintff.get(0, 1) - mintff.get(0, 2)).abs() < 1e-5);
+        let olrf = OlsReconcilerForecaster::new()
+            .fit(&y2, &Session::new("olrf", "fit"))
+            .expect("olrf");
+        let olrff = olrf
+            .value
+            .forecast(2, &s, &Session::new("olrf", "fc"))
+            .expect("olrff")
+            .value;
+        assert_eq!(olrff.shape(), (2, 3));
+        assert!((olrff.get(0, 0) + olrff.get(0, 1) - olrff.get(0, 2)).abs() < 1e-5);
+        let tdrf = TopDownReconcilerForecaster::new()
+            .fit(&y2, &Session::new("tdrf", "fit"))
+            .expect("tdrf");
+        let tdrff = tdrf
+            .value
+            .forecast(2, &s, &Session::new("tdrf", "fc"))
+            .expect("tdrff")
+            .value;
+        assert_eq!(tdrff.shape(), (2, 3));
+        assert!((tdrff.get(0, 0) + tdrff.get(0, 1) - tdrff.get(0, 2)).abs() < 1e-5);
         let dtab = DirectTabularForecaster::new(3, 3)
             .fit_series(&y, &Session::new("dtab", "fit"))
             .expect("dtab");

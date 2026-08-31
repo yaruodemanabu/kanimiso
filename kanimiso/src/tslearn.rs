@@ -16767,6 +16767,219 @@ impl Stomp {
     }
 }
 
+/// Matrix-profile discord (stumpy `mpdist` / MERLIN-lite).
+///
+/// Window length is not identification `p`. Distinct from [`Stamp`] (argmin /
+/// motif) and [`Stray`] (MAD z-scores).
+pub fn merlin_discord(
+    y: &Vector,
+    window: usize,
+    session: &Session,
+) -> Result<Qualified<MerlinResult>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y),
+        Some(y),
+        &ctx.policy,
+    );
+    let mp = match matrix_profile(y, window, &session.child("mp")) {
+        Ok(q) => q.value,
+        Err(e) => {
+            if !matches!(
+                e.primary.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::MeaninglessFit
+            ) {
+                ctx.push(e.primary);
+            }
+            Vector::zeros(0)
+        }
+    };
+    let mut discord = 0usize;
+    let mut best = f64::NEG_INFINITY;
+    for (i, &v) in mp.as_slice().iter().enumerate() {
+        if v.is_finite() && v > best {
+            best = v;
+            discord = i;
+        }
+    }
+    if !best.is_finite() {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .severity(Severity::Warning)
+                .message("merlin_discord profile was empty or non-finite")
+                .build(),
+        );
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("merlin_discord is the matrix-profile argmax, not published MERLIN")
+            .compromise(NumericalCompromise::new(
+                "stumpy MERLIN",
+                "argmax of the Euclidean matrix profile",
+                "the published discord radius search and z-normalized distance are omitted",
+                "read the index as a matrix-profile discord sketch",
+            ))
+            .build(),
+    );
+    ctx.finish(MerlinResult {
+        discord: discord as f64,
+        score: if best.is_finite() { best } else { f64::NAN },
+        profile: mp,
+    })
+}
+
+/// MERLIN discord payload.
+#[derive(Clone, Debug)]
+pub struct MerlinResult {
+    /// Argmax of the matrix profile.
+    pub discord: f64,
+    /// Distance at the discord.
+    pub score: f64,
+    /// Distance profile.
+    pub profile: Vector,
+}
+
+/// Named MERLIN discord annotator.
+#[derive(Clone, Debug)]
+pub struct Merlin {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+}
+
+impl Default for Merlin {
+    fn default() -> Self {
+        Self { window: 3 }
+    }
+}
+
+impl Merlin {
+    /// MERLIN with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+        }
+    }
+
+    /// Matrix-profile discord.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<MerlinResult>> {
+        merlin_discord(y, self.window, session)
+    }
+}
+
+/// Pan matrix profile across several windows (stumpy `pstamp` / `panmp`).
+///
+/// Window count is not identification `p`. Distinct from [`Stomp`] (one
+/// window) and [`Merlin`] (single discord).
+#[derive(Clone, Debug)]
+pub struct PanMatrixProfile {
+    /// Smallest window. Not identification `p`.
+    pub min_window: usize,
+    /// Number of consecutive windows. Not identification `p`.
+    pub n_windows: usize,
+}
+
+impl Default for PanMatrixProfile {
+    fn default() -> Self {
+        Self {
+            min_window: 2,
+            n_windows: 2,
+        }
+    }
+}
+
+impl PanMatrixProfile {
+    /// Pan-MP starting at `min_window` for `n_windows` lengths.
+    pub fn new(min_window: usize, n_windows: usize) -> Self {
+        Self {
+            min_window: min_window.max(2),
+            n_windows: n_windows.max(1),
+        }
+    }
+
+    /// Motif and discord of the matrix profile at each window.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedPanMatrixProfile>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(
+            &mut ctx.report,
+            &Matrix::from_vector(y),
+            Some(y),
+            &ctx.policy,
+        );
+        let nw = self.n_windows.max(1);
+        let mut windows = Vector::zeros(nw);
+        let mut motifs = Vector::zeros(nw);
+        let mut discords = Vector::zeros(nw);
+        let mut motif_scores = Vector::zeros(nw);
+        let mut discord_scores = Vector::zeros(nw);
+        for k in 0..nw {
+            let w = self.min_window.max(2) + k;
+            windows[k] = w as f64;
+            let mp = match matrix_profile(y, w, &session.child(format!("panmp-{w}"))) {
+                Ok(q) => q.value,
+                Err(e) => {
+                    if !matches!(
+                        e.primary.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::RankZero
+                            | IssueCode::R2IsOne
+                            | IssueCode::MeaninglessFit
+                    ) {
+                        ctx.push(e.primary);
+                    }
+                    Vector::zeros(0)
+                }
+            };
+            let mut mi = 0usize;
+            let mut di = 0usize;
+            let mut mb = f64::INFINITY;
+            let mut db = f64::NEG_INFINITY;
+            for (i, &v) in mp.as_slice().iter().enumerate() {
+                if v.is_finite() && v < mb {
+                    mb = v;
+                    mi = i;
+                }
+                if v.is_finite() && v > db {
+                    db = v;
+                    di = i;
+                }
+            }
+            motifs[k] = mi as f64;
+            discords[k] = di as f64;
+            motif_scores[k] = if mb.is_finite() { mb } else { f64::NAN };
+            discord_scores[k] = if db.is_finite() { db } else { f64::NAN };
+        }
+        ctx.finish(FittedPanMatrixProfile {
+            windows,
+            motifs,
+            discords,
+            motif_scores,
+            discord_scores,
+        })
+    }
+}
+
+/// Fitted pan matrix profile.
+#[derive(Clone, Debug)]
+pub struct FittedPanMatrixProfile {
+    /// Window lengths.
+    pub windows: Vector,
+    /// Motif (argmin) index per window.
+    pub motifs: Vector,
+    /// Discord (argmax) index per window.
+    pub discords: Vector,
+    /// Motif distances.
+    pub motif_scores: Vector,
+    /// Discord distances.
+    pub discord_scores: Vector,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -17377,6 +17590,15 @@ mod tests {
             stm.value.profile.as_slice().iter().all(|v| v.is_finite())
                 || stm.value.profile.is_empty()
         );
+        let mer = Merlin::new(3)
+            .fit(&yr, &Session::new("ts", "merlin"))
+            .unwrap();
+        assert!(mer.value.discord.is_finite() || mer.value.discord.is_nan());
+        let pmp = PanMatrixProfile::new(2, 2)
+            .fit(&yr, &Session::new("ts", "pmp"))
+            .unwrap();
+        assert_eq!(pmp.value.windows.len(), 2);
+        assert!(pmp.value.discords.as_slice().iter().all(|v| v.is_finite()));
         let igs = InformationGainSegmentation::new()
             .fit(&yr, &Session::new("ts", "igs"))
             .unwrap();

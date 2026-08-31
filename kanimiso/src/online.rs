@@ -38801,6 +38801,291 @@ impl Predict for OnlineHuberRegressor {
     }
 }
 
+/// Online negative-binomial GLM (NB2 log link).
+///
+/// Dispersion \(r\) is not identification `p`. Distinct from
+/// [`OnlinePoissonRegressor`] (equidispersion) — this is an overdispersed
+/// regression head on \(X\).
+#[derive(Clone, Debug)]
+pub struct OnlineNegBinRegressor {
+    /// NB2 dispersion \(r>0\). Not identification `p`.
+    pub r: f64,
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineNegBinRegressor {
+    fn default() -> Self {
+        Self {
+            r: 1.0,
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineNegBinRegressor {
+    /// NB2 GLM with dispersion `r`.
+    pub fn new(r: f64) -> Self {
+        Self {
+            r,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineNegBinRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineNegBinRegressor",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected NB2 GLM update"),
+            );
+        };
+        self.initialized = true;
+        let r = if self.r.is_finite() && self.r > 0.0 {
+            self.r
+        } else {
+            1.0
+        };
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() || y[i] < 0.0 {
+                if y[i].is_finite() && y[i] < 0.0 {
+                    ctx.push(
+                        Issue::builder(IssueCode::NonPositiveSeries)
+                            .severity(Severity::Warning)
+                            .message("OnlineNegBinRegressor skipped a negative count")
+                            .build(),
+                    );
+                }
+                continue;
+            }
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let eta = eta.clamp(-20.0, 20.0);
+            let mu = eta.exp();
+            loss_before += -y[i] * eta + (y[i] + r) * (mu + r).ln();
+            let g = (mu - y[i]) / (1.0 + mu / r);
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            let ea = ea.clamp(-20.0, 20.0);
+            loss_after += -y[i] * ea + (y[i] + r) * (ea.exp() + r).ln();
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online NB2 GLM",
+            "SGD on the NB2 log-link score; r is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineNegBinRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut eta = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            eta.clamp(-20.0, 20.0).exp()
+        })))
+    }
+}
+
+/// Online Beta GLM (logit quasi-likelihood on \((0,1)\)).
+///
+/// Rows with \(y\notin(0,1)\) are skipped with a warning and do not abort.
+/// Distinct from [`OnlineBeta`] (univariate tracker) — this is a
+/// fractional-response GLM.
+#[derive(Clone, Debug)]
+pub struct OnlineBetaRegressor {
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineBetaRegressor {
+    fn default() -> Self {
+        Self {
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineBetaRegressor {
+    /// Beta GLM with step `learning_rate`.
+    pub fn new(learning_rate: f64) -> Self {
+        Self {
+            learning_rate,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineBetaRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineBetaRegressor",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected Beta GLM update"),
+            );
+        };
+        self.initialized = true;
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() || y[i] <= 0.0 || y[i] >= 1.0 {
+                if y[i].is_finite() && (y[i] <= 0.0 || y[i] >= 1.0) {
+                    ctx.push(
+                        Issue::builder(IssueCode::NonPositiveSeries)
+                            .severity(Severity::Warning)
+                            .message("OnlineBetaRegressor skipped a response outside (0, 1)")
+                            .build(),
+                    );
+                }
+                continue;
+            }
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let eta = eta.clamp(-20.0, 20.0);
+            let mu = 1.0 / (1.0 + (-eta).exp());
+            let mu = mu.clamp(1e-8, 1.0 - 1e-8);
+            loss_before += -(y[i] * mu.ln() + (1.0 - y[i]) * (1.0 - mu).ln());
+            let g = mu - y[i];
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            let ea = ea.clamp(-20.0, 20.0);
+            let mua = (1.0 / (1.0 + (-ea).exp())).clamp(1e-8, 1.0 - 1e-8);
+            loss_after += -(y[i] * mua.ln() + (1.0 - y[i]) * (1.0 - mua).ln());
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online Beta GLM",
+            "logit quasi-likelihood on (0,1); skipped rows warn and do not abort",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineBetaRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut eta = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let eta = eta.clamp(-20.0, 20.0);
+            1.0 / (1.0 + (-eta).exp())
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -39476,6 +39761,12 @@ mod tests {
         OnlineHuberRegressor::new(1.0)
             .partial_fit(&x, Some(&y), &session)
             .expect("ohubr");
+        OnlineNegBinRegressor::new(1.0)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("onbr");
+        OnlineBetaRegressor::new(0.05)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("ober");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

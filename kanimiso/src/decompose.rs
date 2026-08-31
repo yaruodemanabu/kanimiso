@@ -2835,6 +2835,336 @@ impl FittedLisrel {
     }
 }
 
+fn latent_growth_row(x: &Matrix, i: usize) -> (f64, f64) {
+    let p = x.ncols();
+    if p < 2 {
+        return (x.get(i, 0), 0.0);
+    }
+    let t_mean = 0.5 * (p as f64 - 1.0);
+    let mut x_mean = 0.0_f64;
+    for j in 0..p {
+        x_mean += x.get(i, j);
+    }
+    x_mean /= p as f64;
+    let mut num = 0.0_f64;
+    let mut den = 0.0_f64;
+    for j in 0..p {
+        let dt = j as f64 - t_mean;
+        num += dt * (x.get(i, j) - x_mean);
+        den += dt * dt;
+    }
+    let slope = if den > 1e-15 { num / den } else { 0.0 };
+    (x_mean - slope * t_mean, slope)
+}
+
+/// Latent growth-curve intercepts and slopes (statsmodels SEM / LGM-lite).
+///
+/// Occasion count is not identification `p`. Distinct from
+/// [`ConfirmatoryFactor`] (no time coding) and [`Lisrel`] (no per-row slope).
+#[derive(Clone, Debug, Default)]
+pub struct LatentGrowth;
+
+impl LatentGrowth {
+    /// Empty growth-curve fitter.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedLatentGrowth>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted latent growth curves.
+#[derive(Clone, Debug)]
+pub struct FittedLatentGrowth {
+    /// Per-row intercepts.
+    pub intercepts: Vector,
+    /// Per-row slopes on occasion \(t=0,\ldots,p-1\).
+    pub slopes: Vector,
+    /// Mean intercept.
+    pub mean_intercept: f64,
+    /// Mean slope.
+    pub mean_slope: f64,
+}
+
+impl Transform for FittedLatentGrowth {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Matrix::from_fn(x.nrows(), 2, |i, j| {
+            let (a, b) = latent_growth_row(x, i);
+            if j == 0 {
+                a
+            } else {
+                b
+            }
+        }))
+    }
+}
+
+impl FitUnsupervised for LatentGrowth {
+    type Fitted = FittedLatentGrowth;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedLatentGrowth>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (n, p) = x.shape();
+        if p < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .severity(Severity::Warning)
+                    .message("LatentGrowth needs at least two occasion columns")
+                    .build(),
+            );
+            return ctx.finish(FittedLatentGrowth {
+                intercepts: Vector::zeros(n),
+                slopes: Vector::zeros(n),
+                mean_intercept: 0.0,
+                mean_slope: 0.0,
+            });
+        }
+        let intercepts = Vector::from_iter((0..n).map(|i| latent_growth_row(x, i).0));
+        let slopes = Vector::from_iter((0..n).map(|i| latent_growth_row(x, i).1));
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("LatentGrowth is per-row OLS on [1, t], not a published LGM")
+                .compromise(NumericalCompromise::new(
+                    "statsmodels latent growth model",
+                    "row-wise OLS of occasion columns on [1, t]",
+                    "a random-effects covariance, ML, and time-varying loadings are omitted",
+                    "read mean intercept/slope as a growth-curve sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedLatentGrowth {
+            mean_intercept: intercepts.mean(),
+            mean_slope: slopes.mean(),
+            intercepts,
+            slopes,
+        })
+    }
+}
+
+/// MIMIC: observed causes plus a latent scored from the remaining indicators.
+///
+/// Cause count is not identification `p`. Distinct from [`Lisrel`] (no
+/// cause/indicator split) and [`ConfirmatoryFactor`] (no structural \(y\)).
+#[derive(Clone, Debug)]
+pub struct Mimic {
+    /// Number of leading cause columns. Not identification `p`.
+    pub n_causes: usize,
+}
+
+impl Default for Mimic {
+    fn default() -> Self {
+        Self { n_causes: 1 }
+    }
+}
+
+impl Mimic {
+    /// MIMIC with `n_causes` leading columns of \(X\).
+    pub fn new(n_causes: usize) -> Self {
+        Self {
+            n_causes: n_causes.max(1),
+        }
+    }
+
+    /// Score remaining columns of \(X\), then OLS of \(y\) on causes and the factor.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedMimic>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let nc = self.n_causes.max(1).min(x.ncols().saturating_sub(1).max(1));
+        inspect_identification(&mut ctx.report, x.nrows(), nc, &ctx.policy);
+        let n = x.nrows().min(y.len());
+        let n_ind = x.ncols().saturating_sub(nc);
+        if n_ind == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::WindowTooShort)
+                    .severity(Severity::Warning)
+                    .message("Mimic needs at least one indicator column after the causes")
+                    .build(),
+            );
+            return ctx.finish(FittedMimic {
+                loadings: Vector::zeros(0),
+                uniqueness: Vector::zeros(0),
+                mean: Vector::zeros(0),
+                scale: Vector::zeros(0),
+                intercept: y.mean(),
+                coef_causes: Vector::zeros(nc),
+                slope_factor: 0.0,
+                scores: Vector::zeros(n),
+                n_causes: nc,
+            });
+        }
+        let ind = Matrix::from_fn(n, n_ind, |i, j| x.get(i, nc + j));
+        let mut cfa = ConfirmatoryFactor::new();
+        let q = match cfa.fit(&ind, &session.child("mimic-cfa")) {
+            Ok(q) => q,
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                        | IssueCode::MeaninglessFit
+                        | IssueCode::CholeskyFailed
+                ) {
+                    ctx.push(e.primary);
+                }
+                return ctx.finish(FittedMimic {
+                    loadings: Vector::zeros(n_ind),
+                    uniqueness: Vector::filled(n_ind.max(1), 1.0),
+                    mean: Vector::zeros(n_ind),
+                    scale: Vector::filled(n_ind.max(1), 1.0),
+                    intercept: y.mean(),
+                    coef_causes: Vector::zeros(nc),
+                    slope_factor: 0.0,
+                    scores: Vector::zeros(n),
+                    n_causes: nc,
+                });
+            }
+        };
+        for issue in q.report.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::MeaninglessFit
+                    | IssueCode::CholeskyFailed
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let scores = match q.value.transform(&ind, &session.child("mimic-f")) {
+            Ok(z) => Vector::from_iter((0..z.value.nrows()).map(|i| z.value.get(i, 0))),
+            Err(_) => Vector::zeros(n),
+        };
+        let qols = 1 + nc + 1;
+        let design = Matrix::from_fn(n, qols, |i, j| {
+            if j == 0 {
+                1.0
+            } else if j <= nc {
+                x.get(i, j - 1)
+            } else {
+                scores[i]
+            }
+        });
+        let mut scratch = Report::new("mimic", "ols");
+        let coef = least_squares(&mut scratch, &design, y, &ctx.policy)
+            .unwrap_or_else(|| Vector::from_slice(&[y.mean(), 0.0]));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::CholeskyFailed
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("Mimic is CFA scores plus OLS on causes, not a published MIMIC SEM")
+                .compromise(NumericalCompromise::new(
+                    "MIMIC structural equation",
+                    "MINRES scores of the indicator block, then OLS of y on [1, causes, f]",
+                    "a user path diagram, ML, and measurement-error correction are omitted",
+                    "read coefficients as a MIMIC-score regression sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedMimic {
+            loadings: q.value.loadings.clone(),
+            uniqueness: q.value.uniqueness.clone(),
+            mean: q.value.mean.clone(),
+            scale: q.value.scale.clone(),
+            intercept: coef.as_slice().first().copied().unwrap_or(0.0),
+            coef_causes: Vector::from_iter((0..nc).map(|j| {
+                coef.as_slice().get(1 + j).copied().unwrap_or(0.0)
+            })),
+            slope_factor: coef.as_slice().get(1 + nc).copied().unwrap_or(0.0),
+            scores,
+            n_causes: nc,
+        })
+    }
+}
+
+/// Fitted MIMIC sketch.
+#[derive(Clone, Debug)]
+pub struct FittedMimic {
+    /// Indicator loadings.
+    pub loadings: Vector,
+    /// Uniqueness.
+    pub uniqueness: Vector,
+    /// Indicator means.
+    pub mean: Vector,
+    /// Indicator scales.
+    pub scale: Vector,
+    /// Structural intercept.
+    pub intercept: f64,
+    /// Slopes on the cause columns.
+    pub coef_causes: Vector,
+    /// Slope on the latent score.
+    pub slope_factor: f64,
+    /// Training factor scores.
+    pub scores: Vector,
+    n_causes: usize,
+}
+
+impl FittedMimic {
+    /// Predict \(y\) from new causes and indicators.
+    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let nc = self.n_causes;
+        let n_ind = self.mean.len();
+        let ind = Matrix::from_fn(x.nrows(), n_ind, |i, j| {
+            x.get(i, nc + j)
+        });
+        let cfa = FittedConfirmatoryFactor {
+            loadings: self.loadings.clone(),
+            uniqueness: self.uniqueness.clone(),
+            mean: self.mean.clone(),
+            scale: self.scale.clone(),
+            residual_ss: 0.0,
+        };
+        let z = match cfa.transform(&ind, &session.child("f")) {
+            Ok(q) => q.value,
+            Err(_) => Matrix::zeros(x.nrows(), 1),
+        };
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept + self.slope_factor * z.get(i, 0);
+            for j in 0..nc.min(self.coef_causes.len()) {
+                s += x.get(i, j) * self.coef_causes[j];
+            }
+            s
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2960,5 +3290,27 @@ mod tests {
             .value;
         assert_eq!(lisp.len(), x.nrows());
         assert!(lisp.as_slice().iter().all(|v| v.is_finite()));
+        let lgw = LatentGrowth::new()
+            .fit(&x, &Session::new("lgw", "fit"))
+            .expect("lgw");
+        assert!(lgw.value.mean_slope.is_finite());
+        assert_eq!(lgw.value.intercepts.len(), x.nrows());
+        let lgwt = lgw
+            .value
+            .transform(&x, &Session::new("lgw", "t"))
+            .expect("lgwt")
+            .value;
+        assert_eq!(lgwt.shape(), (x.nrows(), 2));
+        let mmc = Mimic::new(1)
+            .fit(&x, &ycca, &Session::new("mmc", "fit"))
+            .expect("mmc");
+        assert!(mmc.value.slope_factor.is_finite());
+        let mmcp = mmc
+            .value
+            .predict(&x, &Session::new("mmc", "p"))
+            .expect("mmcp")
+            .value;
+        assert_eq!(mmcp.len(), x.nrows());
+        assert!(mmcp.as_slice().iter().all(|v| v.is_finite()));
     }
 }

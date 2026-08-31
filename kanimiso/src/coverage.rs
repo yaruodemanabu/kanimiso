@@ -6533,6 +6533,49 @@ const INVENTORY: &[Algorithm] = &[
     ),
     a("tslearn.Fluss", "sktime.annotation.clasp.FLUSS", "timeseries"),
     a("tslearn.Stomp", "stumpy.stomp", "timeseries"),
+    a("hmm.BetaHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.LogNormalHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.WeibullHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.DirichletProcessHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("stats.LocalLinearCate", "econml.dml.LocalLinearDML", "estimator"),
+    a("stats.SieveDml", "econml.dml.SieveDML", "estimator"),
+    a(
+        "decompose.LatentGrowth",
+        "statsmodels.multivariate.factor.Factor",
+        "estimator",
+    ),
+    a(
+        "decompose.Mimic",
+        "statsmodels.multivariate.factor.Factor",
+        "estimator",
+    ),
+    a("tslearn.Merlin", "stumpy.stump", "timeseries"),
+    a("tslearn.merlin_discord", "stumpy.stump", "function"),
+    a("tslearn.PanMatrixProfile", "stumpy.stump", "timeseries"),
+    a(
+        "tsa.OlsReconcilerForecaster",
+        "sktime.forecasting.reconcile.Reconciler",
+        "forecast",
+    ),
+    a(
+        "tsa.TopDownReconcilerForecaster",
+        "sktime.forecasting.reconcile.Reconciler",
+        "forecast",
+    ),
+    a(
+        "online.OnlineNegBinRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
+    a(
+        "online.OnlineBetaRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7082,6 +7125,14 @@ mod tests {
             "stats.OrthoIv",
             "tslearn.Fluss",
             "decompose.Lisrel",
+            "hmm.BetaHmm",
+            "hmm.DirichletProcessHmm",
+            "stats.LocalLinearCate",
+            "stats.SieveDml",
+            "decompose.LatentGrowth",
+            "tslearn.Merlin",
+            "tsa.OlsReconcilerForecaster",
+            "online.OnlineNegBinRegressor",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

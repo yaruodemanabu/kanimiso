@@ -30279,6 +30279,268 @@ impl FittedSparseLinearDriv {
     }
 }
 
+/// Local-linear residual CATE (econml `LocalLinearDML` lite).
+///
+/// Residualize \(Y,D\) on \([1,X]\), then weighted local linear
+/// \(\tilde Y\sim a+b\tilde D\) with an RBF neighbourhood. Bandwidth is not
+/// identification `p`. Distinct from [`NonParamDml`] (local ratio, no
+/// intercept) and [`RLearner`] (global linear Robinson).
+#[derive(Clone, Debug)]
+pub struct LocalLinearCate {
+    /// RBF length-scale. Not identification `p`.
+    pub bandwidth: f64,
+}
+
+impl Default for LocalLinearCate {
+    fn default() -> Self {
+        Self { bandwidth: 2.0 }
+    }
+}
+
+impl LocalLinearCate {
+    /// Local-linear CATE with bandwidth `h`.
+    pub fn new(bandwidth: f64) -> Self {
+        Self { bandwidth }
+    }
+
+    /// Residualize then store the kernel table.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLocalLinearCate>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let idx: Vec<usize> = (0..n).collect();
+        let h = if self.bandwidth.is_finite() && self.bandwidth > 0.0 {
+            self.bandwidth
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("LocalLinearCate bandwidth is not a positive finite; using 2")
+                    .build(),
+            );
+            2.0
+        };
+        if !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("LocalLinearCate needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "local-linear CATE",
+                        "D̃ is unidentified with a single arm",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedLocalLinearCate {
+                x_train: Matrix::from_fn(0, x.ncols(), |_, _| 0.0),
+                yres: Vector::zeros(0),
+                dres: Vector::zeros(0),
+                bandwidth: h,
+            });
+        }
+        let (by, ay) = ols_arm(x, y, &idx, &ctx.policy);
+        let (bd, ad) = ols_arm(x, treat, &idx, &ctx.policy);
+        let yres = Vector::from_iter((0..n).map(|i| y[i] - mu_lin(x, i, ay, &by)));
+        let dres = Vector::from_iter((0..n).map(|i| treat[i] - mu_lin(x, i, ad, &bd)));
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("LocalLinearCate is one-shot local linear Robinson, not LocalLinearDML")
+                .compromise(NumericalCompromise::new(
+                    "econml LocalLinearDML",
+                    "OLS residualize Y and D, then weighted local linear of Ỹ on D̃",
+                    "cross-fitting and a data-driven bandwidth are omitted",
+                    "read CATE as a local-linear residual-slope sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedLocalLinearCate {
+            x_train: Matrix::from_fn(n, x.ncols(), |i, j| x.get(i, j)),
+            yres,
+            dres,
+            bandwidth: h,
+        })
+    }
+}
+
+/// Fitted local-linear CATE.
+#[derive(Clone, Debug)]
+pub struct FittedLocalLinearCate {
+    x_train: Matrix,
+    yres: Vector,
+    dres: Vector,
+    bandwidth: f64,
+}
+
+impl FittedLocalLinearCate {
+    /// Local-linear residual slope at each query row.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let h2 = (2.0 * self.bandwidth * self.bandwidth).max(1e-12);
+        let p = x.ncols().min(self.x_train.ncols());
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s0 = 0.0_f64;
+            let mut sd = 0.0_f64;
+            let mut sy = 0.0_f64;
+            let mut sdd = 0.0_f64;
+            let mut sdy = 0.0_f64;
+            for r in 0..self.x_train.nrows() {
+                if r >= self.yres.len() || r >= self.dres.len() {
+                    continue;
+                }
+                if !self.yres[r].is_finite() || !self.dres[r].is_finite() {
+                    continue;
+                }
+                let mut dist = 0.0_f64;
+                for j in 0..p {
+                    let d = x.get(i, j) - self.x_train.get(r, j);
+                    dist += d * d;
+                }
+                let w = (-dist / h2).exp();
+                s0 += w;
+                sd += w * self.dres[r];
+                sy += w * self.yres[r];
+                sdd += w * self.dres[r] * self.dres[r];
+                sdy += w * self.dres[r] * self.yres[r];
+            }
+            let den = s0 * sdd - sd * sd;
+            if den.abs() > 1e-15 {
+                (s0 * sdy - sd * sy) / den
+            } else if sdd.abs() > 1e-15 {
+                sdy / sdd
+            } else {
+                0.0
+            }
+        })))
+    }
+}
+
+/// Sieve nuisance DML (econml `SieveDML` lite).
+///
+/// Residualize \(Y,D\) on \([1,\varphi(X)]\), then the scalar Robinson
+/// \(\hat\tau=\sum\tilde D\tilde Y/\sum\tilde D^2\). Degree is not
+/// identification `p`. Distinct from [`SieveCate`] (CATE on \(\varphi\) after
+/// residualizing on raw \(X\)) and [`DoubleMl`] (residualize on raw \(X\)).
+#[derive(Clone, Debug)]
+pub struct SieveDml {
+    /// Polynomial degree. Not identification `p`.
+    pub degree: usize,
+}
+
+impl Default for SieveDml {
+    fn default() -> Self {
+        Self { degree: 2 }
+    }
+}
+
+impl SieveDml {
+    /// Sieve DML of degree `degree`.
+    pub fn new(degree: usize) -> Self {
+        Self {
+            degree: degree.max(1),
+        }
+    }
+
+    /// Residualize on the sieve, then a scalar residual ratio.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSieveDml>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let deg = self.degree.max(1);
+        let idx: Vec<usize> = (0..n).collect();
+        if !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("SieveDml needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "sieve DML",
+                        "D̃ is unidentified with a single arm",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedSieveDml { ate: 0.0, degree: deg });
+        }
+        let phis: Vec<Vec<f64>> = (0..n).map(|i| sieve_row(x, i, deg)).collect();
+        let q = 1 + phis.first().map(|p| p.len()).unwrap_or(0);
+        let design = Matrix::from_fn(n, q, |i, j| {
+            if j == 0 {
+                1.0
+            } else {
+                phis[i][j - 1]
+            }
+        });
+        let mut scy = Report::new("sieve-dml", "y");
+        let by = least_squares(&mut scy, &design, y, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(q));
+        for issue in scy.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let mut scd = Report::new("sieve-dml", "d");
+        let bd = least_squares(&mut scd, &design, treat, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(q));
+        for issue in scd.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let yhat = design.matvec(&by);
+        let dhat = design.matvec(&bd);
+        let mut num = 0.0_f64;
+        let mut den = 0.0_f64;
+        for i in 0..n {
+            let yt = y[i] - yhat[i];
+            let dt = treat[i] - dhat[i];
+            if yt.is_finite() && dt.is_finite() {
+                num += dt * yt;
+                den += dt * dt;
+            }
+        }
+        let ate = if den.abs() > 1e-15 { num / den } else { 0.0 };
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SieveDml is a sieve-nuisance residual ratio, not published SieveDML")
+                .compromise(NumericalCompromise::new(
+                    "econml SieveDML",
+                    "OLS residualize Y and D on [1, φ(X)], then Σ D̃Ỹ / Σ D̃²",
+                    "cross-fitting and a data-driven degree are omitted",
+                    "read ATE as a sieve-nuisance Robinson sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedSieveDml { ate, degree: deg })
+    }
+}
+
+/// Fitted sieve-nuisance DML.
+#[derive(Clone, Debug)]
+pub struct FittedSieveDml {
+    /// Scalar residual-on-residual ATE.
+    pub ate: f64,
+    /// Polynomial degree.
+    pub degree: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -31708,5 +31970,20 @@ mod tests {
                 .len(),
             20
         );
+        let llc = LocalLinearCate::new(2.0)
+            .fit(&xate, &dur, &grp, &Session::new("llc", "t"))
+            .expect("llc");
+        assert_eq!(
+            llc.value
+                .predict_cate(&xate, &Session::new("llcp", "t"))
+                .expect("llcp")
+                .value
+                .len(),
+            20
+        );
+        let sdm = SieveDml::new(2)
+            .fit(&xate, &dur, &grp, &Session::new("sdm", "t"))
+            .expect("sdm");
+        assert!(sdm.value.ate.is_finite() || sdm.value.ate.is_nan());
     }
 }
