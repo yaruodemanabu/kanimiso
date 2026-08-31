@@ -9766,6 +9766,68 @@ pub fn cdist_minkowski76_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result
     ctx.finish(out)
 }
 
+
+fn minkowski77_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut sa = 0.0_f64;
+    let mut sb = 0.0_f64;
+    for i in 0..n {
+        sa += a[i].abs();
+        sb += b[i].abs();
+    }
+    if sa < 1e-18 && sb < 1e-18 {
+        return 0.0;
+    }
+    sa = sa.max(1e-18);
+    sb = sb.max(1e-18);
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let p = a[i].abs() / sa;
+        let q = b[i].abs() / sb;
+        s += (p - q).abs().powi(77);
+    }
+    s.powf(1.0 / 77.0)
+}
+
+/// Minkowski \(p=77\) distance after \(\ell_1\) normalisation.
+///
+/// Distinct from [`minkowski76_l1_distance`] and [`minkowski75_l1_distance`].
+/// Identical series score 0.
+pub fn minkowski77_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski77_l1_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("minkowski77_l1_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("minkowski77_l1_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(minkowski77_l1_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise \(\ell_1\)-normalised Minkowski \(p=77\) distance.
+pub fn cdist_minkowski77_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        minkowski77_l1_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -28636,6 +28698,8 @@ mod tests {
         assert!(m75.abs() < 1e-12, "minkowski75_l1_distance={m75}");
         let m76 = minkowski76_l1_distance(&a, &a, &Session::new("ts", "m76")).unwrap().value;
         assert!(m76.abs() < 1e-12, "minkowski76_l1_distance={m76}");
+        let m77 = minkowski77_l1_distance(&a, &a, &Session::new("ts", "m77")).unwrap().value;
+        assert!(m77.abs() < 1e-12, "minkowski77_l1_distance={m77}");
     }
 
     #[test]
@@ -30328,6 +30392,11 @@ mod tests {
             .value;
         assert_eq!(cd76.shape(), (8, 8));
         assert!(cd76.get(0, 0).abs() < 1e-12);
+        let cd77 = cdist_minkowski77_l1(&x, &x, &Session::new("ts", "cd77"))
+            .unwrap()
+            .value;
+        assert_eq!(cd77.shape(), (8, 8));
+        assert!(cd77.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;
