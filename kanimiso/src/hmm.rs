@@ -95253,6 +95253,1105 @@ impl FitUnsupervised for KumaraswamyInverseNakagamiHmm {
     }
 }
 
+fn power_lindley_rate_from_moment(s: f64) -> f64 {
+    let s = s.max(1e-6);
+    let disc = (s - 1.0) * (s - 1.0) + 8.0 * s;
+    (1.0 - s + disc.sqrt()) / (2.0 * s)
+}
+
+fn power_lindley_cdf(y: f64, theta: f64, alpha: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || theta <= 0.0 || alpha <= 0.0 {
+        return 0.0;
+    }
+    let ya = y.powf(alpha);
+    if !ya.is_finite() || ya > 80.0 {
+        return 1.0 - 1e-15;
+    }
+    let surv = (1.0 + theta * ya / (theta + 1.0)) * (-theta * ya).exp();
+    if !surv.is_finite() {
+        return 0.0;
+    }
+    (1.0 - surv).clamp(0.0, 1.0 - 1e-15)
+}
+
+fn log_unit_pl(y: f64, theta: f64, alpha: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || y >= 1.0 || theta <= 0.0 || alpha <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    log_power_lindley(y / (1.0 - y), theta, alpha) - 2.0 * (1.0 - y).ln()
+}
+
+fn log_beta_pl(y: f64, theta: f64, alpha: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || theta <= 0.0 || alpha <= 0.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = power_lindley_cdf(y, theta, alpha);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let surv = (1.0 - cdf).max(1e-15);
+    log_power_lindley(y, theta, alpha) + (a - 1.0) * cdf.ln() + (b - 1.0) * surv.ln() - ln_beta(a, b)
+}
+
+fn log_exp_pl(y: f64, theta: f64, alpha: f64, power: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || theta <= 0.0 || alpha <= 0.0 || power <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = power_lindley_cdf(y, theta, alpha);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    power.ln() + log_power_lindley(y, theta, alpha) + (power - 1.0) * cdf.ln()
+}
+
+fn log_kuma_pl(y: f64, theta: f64, alpha: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || theta <= 0.0 || alpha <= 0.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = power_lindley_cdf(y, theta, alpha);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let fa = cdf.powf(a);
+    let one_m = 1.0 - fa;
+    if one_m <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    a.ln() + b.ln() + log_power_lindley(y, theta, alpha) + (a - 1.0) * cdf.ln() + (b - 1.0) * one_m.ln()
+}
+
+fn log_disc_pl(y: f64, theta: f64, alpha: f64) -> f64 {
+    if !y.is_finite() || y < 1.0 || theta <= 0.0 || alpha <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let kk = y.round().max(1.0);
+    let p = (power_lindley_cdf(kk + 1.0, theta, alpha) - power_lindley_cdf(kk, theta, alpha)).max(0.0);
+    if p <= 1e-18 {
+        f64::NEG_INFINITY
+    } else {
+        p.ln()
+    }
+}
+
+/// Unit power-Lindley HMM on \((0,1)\) (power-Lindley on \(u=x/(1-x)\)).
+///
+/// Rate \(\theta\) maps \(\mathbb{E}[U^\alpha]=(\theta+2)/(\theta(\theta+1))\); power \(\alpha\neq 1\) is pinned, not identification `p`. Distinct from [`UnitLindleyHmm`] and [`PowerLindleyHmm`] (half-line).
+#[derive(Clone, Debug)]
+pub struct UnitPowerLindleyHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for UnitPowerLindleyHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl UnitPowerLindleyHmm {
+    /// `k`-state UnitPowerLindleyHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitPowerLindleyHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted UnitPowerLindleyHmm.
+#[derive(Clone, Debug)]
+pub struct FittedUnitPowerLindleyHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Rates \(\theta_j\).
+    pub scale: Vector,
+    /// Pinned powers \(\alpha_j\neq 1\).
+    pub shape: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedUnitPowerLindleyHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_unit_pl(y, self.scale[j], self.shape[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedUnitPowerLindleyHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for UnitPowerLindleyHmm {
+    type Fitted = FittedUnitPowerLindleyHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitPowerLindleyHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.70 + 0.25 * j as f64));
+let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0 || y >= 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "UnitPowerLindleyHmm skipped {n_skip} observations outside (0,1)"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedUnitPowerLindleyHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 1.10),
+                shape,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 1.10 + 0.20 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedUnitPowerLindleyHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wu = 0.0_f64;
+                let aj: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 || y >= 1.0 {
+                        continue;
+                    }
+                    let u = y / (1.0 - y);
+                    if !u.is_finite() || u <= 0.0 {
+                        continue;
+                    }
+                    let ya = u.powf(aj);
+                    if !ya.is_finite() || ya > 80.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wu += fb.gamma[t][j] * ya;
+                }
+                if wsum > 1e-12 && wu > 1e-18 {
+                    let s = (wu / wsum).max(1e-4);
+                    scale[j] = power_lindley_rate_from_moment(s).clamp(0.50, 1.80);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedUnitPowerLindleyHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedUnitPowerLindleyHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            loglik,
+        })
+    }
+}
+
+/// Beta–power-Lindley HMM (\(f F^{a-1}(1-F)^{b-1}/B(a,b)\), \(a,b\neq 1\)).
+///
+/// Extra shapes and \(\alpha\neq 1\) are hyperparameters, not identification `p`. Distinct from [`KumaraswamyPowerLindleyHmm`] and [`BetaLindleyHmm`].
+#[derive(Clone, Debug)]
+pub struct BetaPowerLindleyHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for BetaPowerLindleyHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl BetaPowerLindleyHmm {
+    /// `k`-state BetaPowerLindleyHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaPowerLindleyHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted BetaPowerLindleyHmm.
+#[derive(Clone, Debug)]
+pub struct FittedBetaPowerLindleyHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Rates \(\theta_j\).
+    pub scale: Vector,
+    /// Pinned powers \(\alpha_j\neq 1\).
+    pub shape: Vector,
+    /// First extra shapes \(a_j\neq 1\).
+    pub a: Vector,
+    /// Second extra shapes \(b_j\neq 1\).
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedBetaPowerLindleyHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_beta_pl(y, self.scale[j], self.shape[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedBetaPowerLindleyHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for BetaPowerLindleyHmm {
+    type Fitted = FittedBetaPowerLindleyHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaPowerLindleyHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.75 + 0.30 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.5 + 0.3 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 2.2 + 0.4 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "BetaPowerLindleyHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedBetaPowerLindleyHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.40),
+                shape,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.40 + 0.15 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedBetaPowerLindleyHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wu = 0.0_f64;
+                let aj: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let ya = y.powf(aj);
+                    if !ya.is_finite() || ya > 80.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wu += fb.gamma[t][j] * ya;
+                }
+                if wsum > 1e-12 && wu > 1e-18 {
+                    let s = (wu / wsum).max(1e-4);
+                    scale[j] = power_lindley_rate_from_moment(s).clamp(0.20, 0.85);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedBetaPowerLindleyHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedBetaPowerLindleyHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Exponentiated power-Lindley HMM (\(F^\gamma\), \(\gamma\neq 1\)).
+///
+/// The CDF power \(\gamma\) and Lindley power \(\alpha\neq 1\) are hyperparameters, not identification `p`. Distinct from [`KumaraswamyPowerLindleyHmm`] and [`PowerLindleyHmm`].
+#[derive(Clone, Debug)]
+pub struct ExponentiatedPowerLindleyHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for ExponentiatedPowerLindleyHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl ExponentiatedPowerLindleyHmm {
+    /// `k`-state ExponentiatedPowerLindleyHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedPowerLindleyHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted ExponentiatedPowerLindleyHmm.
+#[derive(Clone, Debug)]
+pub struct FittedExponentiatedPowerLindleyHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Rates \(\theta_j\).
+    pub scale: Vector,
+    /// Pinned powers \(\alpha_j\neq 1\).
+    pub shape: Vector,
+    /// CDF powers \(\gamma_j\neq 1\).
+    pub alpha: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedExponentiatedPowerLindleyHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_exp_pl(y, self.scale[j], self.shape[j], self.alpha[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedExponentiatedPowerLindleyHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for ExponentiatedPowerLindleyHmm {
+    type Fitted = FittedExponentiatedPowerLindleyHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedPowerLindleyHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.75 + 0.30 * j as f64));
+        let alpha = Vector::from_iter((0..k).map(|j| 1.6 + 0.5 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "ExponentiatedPowerLindleyHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedExponentiatedPowerLindleyHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.40),
+                shape,
+                alpha,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.40 + 0.15 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedExponentiatedPowerLindleyHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                alpha: alpha.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wu = 0.0_f64;
+                let aj: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let ya = y.powf(aj);
+                    if !ya.is_finite() || ya > 80.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wu += fb.gamma[t][j] * ya;
+                }
+                if wsum > 1e-12 && wu > 1e-18 {
+                    let s = (wu / wsum).max(1e-4);
+                    scale[j] = power_lindley_rate_from_moment(s).clamp(0.20, 0.85);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedExponentiatedPowerLindleyHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+                alpha: alpha.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedExponentiatedPowerLindleyHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            alpha,
+            loglik,
+        })
+    }
+}
+
+/// Kumaraswamy–power-Lindley HMM (\(ab\,f F^{a-1}(1-F^a)^{b-1}\), \(a,b\neq 1\)).
+///
+/// Shapes are hyperparameters, not identification `p`. Distinct from [`BetaPowerLindleyHmm`] and [`PowerLindleyHmm`].
+#[derive(Clone, Debug)]
+pub struct KumaraswamyPowerLindleyHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for KumaraswamyPowerLindleyHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl KumaraswamyPowerLindleyHmm {
+    /// `k`-state KumaraswamyPowerLindleyHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyPowerLindleyHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted KumaraswamyPowerLindleyHmm.
+#[derive(Clone, Debug)]
+pub struct FittedKumaraswamyPowerLindleyHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Rates \(\theta_j\).
+    pub scale: Vector,
+    /// Pinned powers \(\alpha_j\neq 1\).
+    pub shape: Vector,
+    /// First extra shapes \(a_j\neq 1\).
+    pub a: Vector,
+    /// Second extra shapes \(b_j\neq 1\).
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedKumaraswamyPowerLindleyHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_kuma_pl(y, self.scale[j], self.shape[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedKumaraswamyPowerLindleyHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for KumaraswamyPowerLindleyHmm {
+    type Fitted = FittedKumaraswamyPowerLindleyHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyPowerLindleyHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.75 + 0.30 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.5 + 0.3 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 2.2 + 0.4 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "KumaraswamyPowerLindleyHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedKumaraswamyPowerLindleyHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.40),
+                shape,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.40 + 0.15 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedKumaraswamyPowerLindleyHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wu = 0.0_f64;
+                let aj: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let ya = y.powf(aj);
+                    if !ya.is_finite() || ya > 80.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wu += fb.gamma[t][j] * ya;
+                }
+                if wsum > 1e-12 && wu > 1e-18 {
+                    let s = (wu / wsum).max(1e-4);
+                    scale[j] = power_lindley_rate_from_moment(s).clamp(0.20, 0.85);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedKumaraswamyPowerLindleyHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedKumaraswamyPowerLindleyHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Discrete power-Lindley HMM (\(P(X=k)=F(k+1)-F(k)\), \(\alpha\neq 1\)).
+///
+/// Power \(\alpha\neq 1\) is a hyperparameter, not identification `p`. Distinct from [`DiscreteLindleyHmm`] (\(\alpha=1\)) and [`PowerLindleyHmm`].
+#[derive(Clone, Debug)]
+pub struct DiscretePowerLindleyHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for DiscretePowerLindleyHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl DiscretePowerLindleyHmm {
+    /// `k`-state DiscretePowerLindleyHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscretePowerLindleyHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted DiscretePowerLindleyHmm.
+#[derive(Clone, Debug)]
+pub struct FittedDiscretePowerLindleyHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Rates \(\theta_j\).
+    pub scale: Vector,
+    /// Pinned powers \(\alpha_j\neq 1\).
+    pub shape: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedDiscretePowerLindleyHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_disc_pl(y, self.scale[j], self.shape[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedDiscretePowerLindleyHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for DiscretePowerLindleyHmm {
+    type Fitted = FittedDiscretePowerLindleyHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscretePowerLindleyHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let shape = Vector::from_iter((0..k).map(|j| 0.70 + 0.20 * j as f64));
+let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y < 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "DiscretePowerLindleyHmm skipped {n_skip} observations below 1"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedDiscretePowerLindleyHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.55),
+                shape,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.55 + 0.12 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedDiscretePowerLindleyHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                shape: shape.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wu = 0.0_f64;
+                let aj: f64 = shape[j];
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y < 1.0 {
+                        continue;
+                    }
+                    let ya = y.powf(aj);
+                    if !ya.is_finite() || ya > 80.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wu += fb.gamma[t][j] * ya;
+                }
+                if wsum > 1e-12 && wu > 1e-18 {
+                    let s = (wu / wsum).max(1e-4);
+                    scale[j] = power_lindley_rate_from_moment(s).clamp(0.30, 0.90);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedDiscretePowerLindleyHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            scale: scale.clone(),
+            shape: shape.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedDiscretePowerLindleyHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            shape,
+            loglik,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97037,6 +98136,26 @@ mod tests {
             .expect("knm");
         assert_eq!(knm.value.labels.len(), 80);
         assert!(knm.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let upl = UnitPowerLindleyHmm::new(2)
+            .fit(&betx, &Session::new("upl", "fit"))
+            .expect("upl");
+        assert_eq!(upl.value.labels.len(), 80);
+        assert!(upl.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let bpl = BetaPowerLindleyHmm::new(2)
+            .fit(&xpos, &Session::new("bpl", "fit"))
+            .expect("bpl");
+        assert_eq!(bpl.value.labels.len(), 80);
+        assert!(bpl.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let epl = ExponentiatedPowerLindleyHmm::new(2)
+            .fit(&xpos, &Session::new("epl", "fit"))
+            .expect("epl");
+        assert_eq!(epl.value.labels.len(), 80);
+        assert!(epl.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let kpl = KumaraswamyPowerLindleyHmm::new(2)
+            .fit(&xpos, &Session::new("kpl", "fit"))
+            .expect("kpl");
+        assert_eq!(kpl.value.labels.len(), 80);
+        assert!(kpl.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
@@ -97658,6 +98777,11 @@ mod tests {
             .expect("daw");
         assert_eq!(daw.value.labels.len(), 40);
         assert!(daw.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let dpl = DiscretePowerLindleyHmm::new(2)
+            .fit(&x, &Session::new("dpl", "fit"))
+            .expect("dpl");
+        assert_eq!(dpl.value.labels.len(), 40);
+        assert!(dpl.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
     }
 
     #[test]
