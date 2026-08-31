@@ -8025,6 +8025,39 @@ const INVENTORY: &[Algorithm] = &[
         "timeseries",
     ),
     a("tslearn.cdist_lorentzian_l1", "tslearn.metrics.cdist", "timeseries"),
+    a(
+        "hmm.UnitBirnbaumSaundersHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.BetaBirnbaumSaundersHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.ExponentiatedBirnbaumSaundersHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.KumaraswamyBirnbaumSaundersHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.DiscreteBirnbaumSaundersHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("online.WindowKurt", "river.anomaly.GaussianScorer", "online"),
+    a("online.HassanatAnomaly", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.hassanat_l1_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a("tslearn.cdist_hassanat_l1", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -9106,6 +9139,15 @@ mod tests {
             "online.LorentzianAnomaly",
             "tslearn.lorentzian_l1_distance",
             "tslearn.cdist_lorentzian_l1",
+            "hmm.UnitBirnbaumSaundersHmm",
+            "hmm.BetaBirnbaumSaundersHmm",
+            "hmm.ExponentiatedBirnbaumSaundersHmm",
+            "hmm.KumaraswamyBirnbaumSaundersHmm",
+            "hmm.DiscreteBirnbaumSaundersHmm",
+            "online.WindowKurt",
+            "online.HassanatAnomaly",
+            "tslearn.hassanat_l1_distance",
+            "tslearn.cdist_hassanat_l1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
