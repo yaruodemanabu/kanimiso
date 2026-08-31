@@ -6576,6 +6576,30 @@ const INVENTORY: &[Algorithm] = &[
         "river.linear_model.LinearRegression",
         "online",
     ),
+    a("hmm.BernoulliHmm", "hmmlearn.hmm.MultinomialHMM", "hmm"),
+    a("hmm.StickyHdpHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.LeftRightHsmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("stats.RbfCate", "econml.dml.KernelDML", "estimator"),
+    a(
+        "decompose.PathAnalysis",
+        "statsmodels.multivariate.factor.Factor",
+        "estimator",
+    ),
+    a(
+        "decompose.SeeminglyUnrelated",
+        "statsmodels.regression.linear_model.OLS",
+        "estimator",
+    ),
+    a(
+        "tsa.MiddleOutReconcilerForecaster",
+        "sktime.forecasting.reconcile.Reconciler",
+        "forecast",
+    ),
+    a(
+        "online.OnlineLogCoshRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7133,6 +7157,13 @@ mod tests {
             "tslearn.Merlin",
             "tsa.OlsReconcilerForecaster",
             "online.OnlineNegBinRegressor",
+            "hmm.BernoulliHmm",
+            "hmm.StickyHdpHmm",
+            "stats.RbfCate",
+            "decompose.PathAnalysis",
+            "decompose.SeeminglyUnrelated",
+            "tsa.MiddleOutReconcilerForecaster",
+            "online.OnlineLogCoshRegressor",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

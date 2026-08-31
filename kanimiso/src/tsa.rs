@@ -19469,6 +19469,102 @@ impl FittedTopDownReconciler {
     }
 }
 
+/// Middle-out hierarchy: allocate the **median** summing-matrix row.
+///
+/// Distinct from [`TopDownReconcilerForecaster`] (largest row-sum) and
+/// [`reconcile_bottom_up`] (basis rows). Node count is not identification `p`.
+#[derive(Clone, Debug, Default)]
+pub struct MiddleOutReconcilerForecaster;
+
+/// Fitted middle-out hierarchy.
+#[derive(Clone, Debug)]
+pub struct FittedMiddleOutReconciler {
+    last: Vector,
+}
+
+impl MiddleOutReconcilerForecaster {
+    /// Empty middle-out reconciler.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Store the last training row.
+    pub fn fit(
+        &self,
+        y: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedMiddleOutReconciler>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, y, None, &ctx.policy);
+        let last = Vector::from_iter((0..y.ncols()).map(|j| {
+            y.column(j)
+                .as_slice()
+                .last()
+                .copied()
+                .unwrap_or(0.0)
+        }));
+        ctx.finish(FittedMiddleOutReconciler { last })
+    }
+}
+
+impl FittedMiddleOutReconciler {
+    /// Allocate the median-\(S\)-row last value through empirical bottom shares.
+    pub fn forecast(
+        &self,
+        h: usize,
+        summing: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("forecast"));
+        inspect_xy(&mut ctx.report, summing, None, &ctx.policy);
+        let n_nodes = summing.nrows();
+        let n_bot = summing.ncols();
+        if n_nodes == 0 || n_bot == 0 {
+            return ctx.finish(Matrix::zeros(h, n_nodes));
+        }
+        let mut sums: Vec<(f64, usize)> = (0..n_nodes)
+            .map(|i| {
+                let mut s = 0.0_f64;
+                for j in 0..n_bot {
+                    s += summing.get(i, j).abs();
+                }
+                (s, i)
+            })
+            .collect();
+        sums.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mid = sums[sums.len() / 2].1;
+        let bottoms0 = if self.last.len() == n_bot {
+            self.last.clone()
+        } else if self.last.len() == n_nodes {
+            let yhat = Matrix::from_fn(1, n_nodes, |_, j| self.last[j]);
+            let b = reconcile_bottoms(&yhat, summing);
+            Vector::from_iter((0..n_bot).map(|j| b.get(0, j)))
+        } else {
+            Vector::from_iter((0..n_bot).map(|j| self.last.as_slice().get(j).copied().unwrap_or(0.0)))
+        };
+        let mut mass = 0.0_f64;
+        for j in 0..bottoms0.len() {
+            mass += bottoms0[j].abs();
+        }
+        let props = if mass > 1e-12 {
+            Vector::from_iter((0..n_bot).map(|j| bottoms0[j].abs() / mass))
+        } else {
+            Vector::filled(n_bot, 1.0 / n_bot.max(1) as f64)
+        };
+        let mid_val = if self.last.len() == n_nodes {
+            self.last[mid]
+        } else {
+            let mut s = 0.0_f64;
+            for j in 0..n_bot {
+                s += summing.get(mid, j) * bottoms0.as_slice().get(j).copied().unwrap_or(0.0);
+            }
+            s
+        };
+        let bottoms = Matrix::from_fn(h, n_bot, |_, j| mid_val * props[j]);
+        ctx.finish(apply_summing(&bottoms, summing))
+    }
+}
+
     #[cfg(test)]
     mod tests {
     use super::*;
@@ -20360,6 +20456,16 @@ impl FittedTopDownReconciler {
             .value;
         assert_eq!(tdrff.shape(), (2, 3));
         assert!((tdrff.get(0, 0) + tdrff.get(0, 1) - tdrff.get(0, 2)).abs() < 1e-5);
+        let morf = MiddleOutReconcilerForecaster::new()
+            .fit(&y2, &Session::new("morf", "fit"))
+            .expect("morf");
+        let morff = morf
+            .value
+            .forecast(2, &s, &Session::new("morf", "fc"))
+            .expect("morff")
+            .value;
+        assert_eq!(morff.shape(), (2, 3));
+        assert!((morff.get(0, 0) + morff.get(0, 1) - morff.get(0, 2)).abs() < 1e-5);
         let dtab = DirectTabularForecaster::new(3, 3)
             .fit_series(&y, &Session::new("dtab", "fit"))
             .expect("dtab");

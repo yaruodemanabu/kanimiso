@@ -3165,6 +3165,333 @@ impl FittedMimic {
     }
 }
 
+/// Observed-variable path analysis (statsmodels SEM path-lite).
+///
+/// Path count is not identification `p`. Distinct from [`Lisrel`] (latent
+/// measurement) and [`Mimic`] (cause/indicator split).
+#[derive(Clone, Debug, Default)]
+pub struct PathAnalysis;
+
+impl PathAnalysis {
+    /// Empty path analysis.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// OLS of \(y\) on \(X\), plus each column of \(X\) on the others.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedPathAnalysis>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len());
+        let p = x.ncols();
+        let design = Matrix::from_fn(n, 1 + p, |i, j| {
+            if j == 0 {
+                1.0
+            } else {
+                x.get(i, j - 1)
+            }
+        });
+        let mut scratch = Report::new("path", "y");
+        let coef = least_squares(&mut scratch, &design, y, &ctx.policy)
+            .unwrap_or_else(|| Vector::from_slice(&[y.mean()]));
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::CholeskyFailed
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let paths = Matrix::from_fn(p, p, |j, k| {
+            if j == k {
+                0.0
+            } else {
+                let z = Matrix::from_fn(n, p, |i, c| {
+                    if c == 0 {
+                        1.0
+                    } else if c - 1 == j {
+                        0.0
+                    } else {
+                        x.get(i, c - 1)
+                    }
+                });
+                let yj = Vector::from_iter((0..n).map(|i| x.get(i, j)));
+                let mut sc = Report::new("path", "x");
+                least_squares(&mut sc, &z, &yj, &ctx.policy)
+                    .and_then(|b| b.as_slice().get(if k < j { k + 1 } else { k }).copied())
+                    .unwrap_or(0.0)
+            }
+        });
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("PathAnalysis is OLS paths among observed variables, not a published SEM")
+                .compromise(NumericalCompromise::new(
+                    "statsmodels path analysis / SEM",
+                    "OLS of y on [1, X] and of each X_j on the other columns",
+                    "ML, a user path diagram, and measurement error are omitted",
+                    "read coefficients as an observed-path sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedPathAnalysis {
+            intercept: coef.as_slice().first().copied().unwrap_or(0.0),
+            coef_y: Vector::from_iter((0..p).map(|j| {
+                coef.as_slice().get(1 + j).copied().unwrap_or(0.0)
+            })),
+            paths,
+        })
+    }
+}
+
+/// Fitted observed-path model.
+#[derive(Clone, Debug)]
+pub struct FittedPathAnalysis {
+    /// Structural intercept.
+    pub intercept: f64,
+    /// Structural slopes on \(X\).
+    pub coef_y: Vector,
+    /// Path matrix among the columns of \(X\) (zero diagonal).
+    pub paths: Matrix,
+}
+
+impl FittedPathAnalysis {
+    /// Structural prediction \(\hat y=a+X\beta\).
+    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef_y.len()) {
+                s += x.get(i, j) * self.coef_y[j];
+            }
+            s
+        })))
+    }
+}
+
+/// Two-equation feasible GLS SUR (statsmodels `SUR`).
+///
+/// Equation 1 is \(y\sim[1,X_{\setminus 0}]\); equation 2 is
+/// \(X_0\sim[1,X_{\setminus 0,1}]\) so the regressor sets differ (identical
+/// regressors would collapse to OLS). Equation count is not identification
+/// `p`. Distinct from ordinary OLS and [`PathAnalysis`] (no GLS).
+#[derive(Clone, Debug, Default)]
+pub struct SeeminglyUnrelated;
+
+impl SeeminglyUnrelated {
+    /// Empty SUR.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit two-equation FGLS SUR.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSeeminglyUnrelated>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len());
+        let p = x.ncols();
+        let q1 = 1 + p.saturating_sub(1);
+        let z1 = Matrix::from_fn(n, q1, |i, j| {
+            if j == 0 {
+                1.0
+            } else {
+                x.get(i, j)
+            }
+        });
+        let q2 = 1 + p.saturating_sub(2);
+        let z2 = Matrix::from_fn(n, q2, |i, j| {
+            if j == 0 {
+                1.0
+            } else {
+                x.get(i, j + 1)
+            }
+        });
+        let x0 = Vector::from_iter((0..n).map(|i| x.get(i, 0)));
+        let mut sc1 = Report::new("sur", "eq1");
+        let b1 = least_squares(&mut sc1, &z1, y, &ctx.policy).unwrap_or_else(|| Vector::zeros(q1));
+        let mut sc2 = Report::new("sur", "eq2");
+        let b2 = least_squares(&mut sc2, &z2, &x0, &ctx.policy).unwrap_or_else(|| Vector::zeros(q2));
+        for issue in sc1.issues().iter().chain(sc2.issues()) {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::CholeskyFailed
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let e1 = y.sub(&z1.matvec(&b1));
+        let e2 = x0.sub(&z2.matvec(&b2));
+        let df = n.max(1) as f64;
+        let mut s11 = 0.0_f64;
+        let mut s22 = 0.0_f64;
+        let mut s12 = 0.0_f64;
+        for i in 0..n {
+            s11 += e1[i] * e1[i];
+            s22 += e2[i] * e2[i];
+            s12 += e1[i] * e2[i];
+        }
+        s11 = (s11 / df).max(1e-10);
+        s22 = (s22 / df).max(1e-10);
+        s12 /= df;
+        let det = (s11 * s22 - s12 * s12).max(1e-12);
+        let w11 = s22 / det;
+        let w22 = s11 / det;
+        let w12 = -s12 / det;
+        let q = q1 + q2;
+        let mut gram = Mat::<f64>::zeros(q, q);
+        for a in 0..q1 {
+            for b in 0..q1 {
+                let mut g = 0.0_f64;
+                for i in 0..n {
+                    g += z1.get(i, a) * z1.get(i, b);
+                }
+                gram[(a, b)] = w11 * g;
+            }
+            for b in 0..q2 {
+                let mut g = 0.0_f64;
+                for i in 0..n {
+                    g += z1.get(i, a) * z2.get(i, b);
+                }
+                gram[(a, q1 + b)] = w12 * g;
+                gram[(q1 + b, a)] = w12 * g;
+            }
+        }
+        for a in 0..q2 {
+            for b in 0..q2 {
+                let mut g = 0.0_f64;
+                for i in 0..n {
+                    g += z2.get(i, a) * z2.get(i, b);
+                }
+                gram[(q1 + a, q1 + b)] = w22 * g;
+            }
+        }
+        for i in 0..q {
+            gram[(i, i)] += 1e-10;
+        }
+        let mut rhs = Vector::zeros(q);
+        for a in 0..q1 {
+            let mut s = 0.0_f64;
+            for i in 0..n {
+                s += z1.get(i, a) * (w11 * y[i] + w12 * x0[i]);
+            }
+            rhs[a] = s;
+        }
+        for a in 0..q2 {
+            let mut s = 0.0_f64;
+            for i in 0..n {
+                s += z2.get(i, a) * (w12 * y[i] + w22 * x0[i]);
+            }
+            rhs[q1 + a] = s;
+        }
+        let mut scg = Report::new("sur", "gls");
+        let beta = chol_solve(&mut scg, &gram, &rhs, &ctx.policy).unwrap_or_else(|| {
+            let mut v = Vector::zeros(q);
+            for j in 0..q1.min(b1.len()) {
+                v[j] = b1[j];
+            }
+            for j in 0..q2.min(b2.len()) {
+                v[q1 + j] = b2[j];
+            }
+            v
+        });
+        for issue in scg.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::CholeskyFailed
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("SeeminglyUnrelated is two-equation FGLS, not a published SUR system")
+                .compromise(NumericalCompromise::new(
+                    "statsmodels SUR",
+                    "OLS residuals form Σ, then one FGLS step on two stacked equations",
+                    "iterated GLS, equation-specific instruments, and a full system ML are omitted",
+                    "read the first-equation slopes as a two-equation SUR sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedSeeminglyUnrelated {
+            intercept: beta.as_slice().first().copied().unwrap_or(0.0),
+            coef_y: Vector::from_iter((1..q1).map(|j| beta.as_slice().get(j).copied().unwrap_or(0.0))),
+            intercept_eq2: beta.as_slice().get(q1).copied().unwrap_or(0.0),
+            coef_eq2: Vector::from_iter((1..q2).map(|j| {
+                beta.as_slice().get(q1 + j).copied().unwrap_or(0.0)
+            })),
+            sigma11: s11,
+            sigma12: s12,
+            sigma22: s22,
+        })
+    }
+}
+
+/// Fitted two-equation SUR.
+#[derive(Clone, Debug)]
+pub struct FittedSeeminglyUnrelated {
+    /// Equation-1 intercept.
+    pub intercept: f64,
+    /// Equation-1 slopes on \(X_{\setminus 0}\).
+    pub coef_y: Vector,
+    /// Equation-2 intercept.
+    pub intercept_eq2: f64,
+    /// Equation-2 slopes on \(X_{\setminus 0,1}\).
+    pub coef_eq2: Vector,
+    /// Residual variance of equation 1.
+    pub sigma11: f64,
+    /// Residual covariance.
+    pub sigma12: f64,
+    /// Residual variance of equation 2.
+    pub sigma22: f64,
+}
+
+impl FittedSeeminglyUnrelated {
+    /// Predict equation 1.
+    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..self.coef_y.len() {
+                if 1 + j < x.ncols() {
+                    s += x.get(i, 1 + j) * self.coef_y[j];
+                }
+            }
+            s
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3312,5 +3639,26 @@ mod tests {
             .value;
         assert_eq!(mmcp.len(), x.nrows());
         assert!(mmcp.as_slice().iter().all(|v| v.is_finite()));
+        let pah = PathAnalysis::new()
+            .fit(&x, &ycca, &Session::new("pah", "fit"))
+            .expect("pah");
+        assert_eq!(pah.value.coef_y.len(), x.ncols());
+        let pahp = pah
+            .value
+            .predict(&x, &Session::new("pah", "p"))
+            .expect("pahp")
+            .value;
+        assert_eq!(pahp.len(), x.nrows());
+        let sur = SeeminglyUnrelated::new()
+            .fit(&x, &ycca, &Session::new("sur", "fit"))
+            .expect("sur");
+        assert!(sur.value.sigma11.is_finite() && sur.value.sigma11 > 0.0);
+        let surp = sur
+            .value
+            .predict(&x, &Session::new("sur", "p"))
+            .expect("surp")
+            .value;
+        assert_eq!(surp.len(), x.nrows());
+        assert!(surp.as_slice().iter().all(|v| v.is_finite()));
     }
 }

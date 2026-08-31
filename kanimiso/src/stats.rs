@@ -30541,6 +30541,157 @@ pub struct FittedSieveDml {
     pub degree: usize,
 }
 
+/// RBF-feature Robinson CATE (econml kernel CATE lite).
+///
+/// Residualize \(Y,D\) on \([1,X]\), map \(X\) through a few RBF landmarks,
+/// then OLS of \(\tilde Y\) on \(\tilde D[1,\varphi]\). Landmark count is not
+/// identification `p`. Distinct from [`NonParamDml`] (local ratio) and
+/// [`DeepCate`] (tanh hidden).
+#[derive(Clone, Debug)]
+pub struct RbfCate {
+    /// RBF length-scale. Not identification `p`.
+    pub bandwidth: f64,
+}
+
+impl Default for RbfCate {
+    fn default() -> Self {
+        Self { bandwidth: 2.0 }
+    }
+}
+
+impl RbfCate {
+    /// RBF CATE with bandwidth `h`.
+    pub fn new(bandwidth: f64) -> Self {
+        Self { bandwidth }
+    }
+
+    /// Residualize, build landmark features, then Robinson OLS.
+    pub fn fit(
+        &self,
+        x: &Matrix,
+        y: &Vector,
+        treat: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRbfCate>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
+        let n = x.nrows().min(y.len()).min(treat.len());
+        let idx: Vec<usize> = (0..n).collect();
+        let h = if self.bandwidth.is_finite() && self.bandwidth > 0.0 {
+            self.bandwidth
+        } else {
+            2.0
+        };
+        if !both_arms(treat, &idx) {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("RbfCate needs both treated and control rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "RBF CATE",
+                        "D̃ is unidentified with a single arm",
+                        "collect both arms",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedRbfCate {
+                intercept: 0.0,
+                coef_phi: Vector::zeros(0),
+                landmarks: Matrix::from_fn(0, x.ncols(), |_, _| 0.0),
+                bandwidth: h,
+            });
+        }
+        let (by, ay) = ols_arm(x, y, &idx, &ctx.policy);
+        let (bd, ad) = ols_arm(x, treat, &idx, &ctx.policy);
+        let yres = Vector::from_iter((0..n).map(|i| y[i] - mu_lin(x, i, ay, &by)));
+        let dres = Vector::from_iter((0..n).map(|i| treat[i] - mu_lin(x, i, ad, &bd)));
+        let marks = [0usize, n / 2, n.saturating_sub(1)];
+        let mut seen = Vec::new();
+        for &m in &marks {
+            if m < n && !seen.contains(&m) {
+                seen.push(m);
+            }
+        }
+        let m = seen.len().max(1);
+        let landmarks = Matrix::from_fn(m, x.ncols(), |r, j| x.get(seen[r], j));
+        let h2 = (2.0 * h * h).max(1e-12);
+        let q = 1 + m;
+        let design = Matrix::from_fn(n, q, |i, j| {
+            if j == 0 {
+                dres[i]
+            } else {
+                let mut dist = 0.0_f64;
+                for c in 0..x.ncols() {
+                    let d = x.get(i, c) - landmarks.get(j - 1, c);
+                    dist += d * d;
+                }
+                dres[i] * (-dist / h2).exp()
+            }
+        });
+        let mut scratch = Report::new("rbf-cate", "ols");
+        let coef = least_squares(&mut scratch, &design, &yres, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(q));
+        for issue in scratch.issues() {
+            if skip_aborting_inner(issue) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("RbfCate is landmark RBF Robinson, not a published kernel CATE")
+                .compromise(NumericalCompromise::new(
+                    "econml KernelDML CATE",
+                    "OLS residualize Y and D, RBF landmarks, Robinson OLS on D̃[1, φ]",
+                    "cross-fitting and a data-driven bandwidth are omitted",
+                    "read CATE as a landmark residual-ratio sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedRbfCate {
+            intercept: coef.as_slice().first().copied().unwrap_or(0.0),
+            coef_phi: Vector::from_iter((1..q).map(|j| coef.as_slice().get(j).copied().unwrap_or(0.0))),
+            landmarks,
+            bandwidth: h,
+        })
+    }
+}
+
+/// Fitted RBF-landmark CATE.
+#[derive(Clone, Debug)]
+pub struct FittedRbfCate {
+    /// Slope on \(\tilde D\).
+    pub intercept: f64,
+    /// Slopes on \(\tilde D\,\varphi_k\).
+    pub coef_phi: Vector,
+    landmarks: Matrix,
+    bandwidth: f64,
+}
+
+impl FittedRbfCate {
+    /// Landmark RBF CATE.
+    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let h2 = (2.0 * self.bandwidth * self.bandwidth).max(1e-12);
+        let m = self.landmarks.nrows();
+        let p = x.ncols().min(self.landmarks.ncols());
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for k in 0..m.min(self.coef_phi.len()) {
+                let mut dist = 0.0_f64;
+                for c in 0..p {
+                    let d = x.get(i, c) - self.landmarks.get(k, c);
+                    dist += d * d;
+                }
+                s += self.coef_phi[k] * (-dist / h2).exp();
+            }
+            s
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -31985,5 +32136,16 @@ mod tests {
             .fit(&xate, &dur, &grp, &Session::new("sdm", "t"))
             .expect("sdm");
         assert!(sdm.value.ate.is_finite() || sdm.value.ate.is_nan());
+        let rbc = RbfCate::new(2.0)
+            .fit(&xate, &dur, &grp, &Session::new("rbc", "t"))
+            .expect("rbc");
+        assert_eq!(
+            rbc.value
+                .predict_cate(&xate, &Session::new("rbcp", "t"))
+                .expect("rbcp")
+                .value
+                .len(),
+            20
+        );
     }
 }

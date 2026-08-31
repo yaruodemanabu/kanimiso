@@ -8353,6 +8353,599 @@ impl FitUnsupervised for DirichletProcessHmm {
     }
 }
 
+fn log_bernoulli(y: f64, p: f64) -> f64 {
+    if !y.is_finite() || y < 0.0 || y > 1.0 || !p.is_finite() {
+        return f64::NEG_INFINITY;
+    }
+    let p = p.clamp(1e-8, 1.0 - 1e-8);
+    y * p.ln() + (1.0 - y) * (1.0 - p).ln()
+}
+
+/// Bernoulli-emission HMM (binary / fractional codes).
+///
+/// State count is not identification `p`. Distinct from [`MultinomialHmm`]
+/// (integer codes over \(K>2\)) and [`PoissonHmm`] (unbounded counts).
+#[derive(Clone, Debug)]
+pub struct BernoulliHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for BernoulliHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl BernoulliHmm {
+    /// `k`-state Bernoulli HMM.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedBernoulliHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted Bernoulli HMM.
+#[derive(Clone, Debug)]
+pub struct FittedBernoulliHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Success probabilities.
+    pub p: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedBernoulliHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let s = self.p.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; s]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..s {
+                out[ti][j] = log_bernoulli(y, self.p[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedBernoulliHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for BernoulliHmm {
+    type Fitted = FittedBernoulliHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBernoulliHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        if t_len == 0 {
+            return ctx.finish(FittedBernoulliHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                p: Vector::filled(k, 0.5),
+                loglik: f64::NAN,
+            });
+        }
+        let mut p = Vector::from_iter((0..k).map(|j| 0.25 + 0.5 * j as f64 / k.max(1) as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let log_emit: Vec<Vec<f64>> = (0..t_len)
+                .map(|t| {
+                    let y = x.get(t, 0);
+                    (0..k).map(|j| log_bernoulli(y, p[j])).collect()
+                })
+                .collect();
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &log_emit) else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            let mut ns = Vector::zeros(k);
+            let mut nt = Matrix::zeros(k, k);
+            for j in 0..k {
+                ns[j] = fb.gamma[0][j];
+            }
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wy = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y < 0.0 || y > 1.0 {
+                        continue;
+                    }
+                    let w = fb.gamma[t][j];
+                    wsum += w;
+                    wy += w * y;
+                }
+                if wsum > 1e-12 {
+                    p[j] = (wy / wsum).clamp(1e-3, 1.0 - 1e-3);
+                }
+            }
+            for t in 0..t_len.saturating_sub(1) {
+                for i in 0..k {
+                    for j in 0..k {
+                        nt.set(i, j, nt.get(i, j) + fb.xi[t][i][j]);
+                    }
+                }
+            }
+            start = ns;
+            trans = nt;
+            renormalize_vec(&mut start, TRANS_FLOOR);
+            renormalize_rows(&mut trans, TRANS_FLOOR);
+        }
+        let occup: Vec<f64> = (0..k)
+            .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+            .collect();
+        if !last_gamma.is_empty() {
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedBernoulliHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            p: p.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedBernoulliHmm {
+            labels,
+            start,
+            trans,
+            p,
+            loglik,
+        })
+    }
+}
+
+/// Sticky hierarchical-DP Gaussian HMM (GEM start plus self-transition bias).
+///
+/// Concentration and \(\kappa\) are not identification `p`. Distinct from
+/// [`DirichletProcessHmm`] (no sticky bias) and [`StickyHmm`] (uniform start).
+#[derive(Clone, Debug)]
+pub struct StickyHdpHmm {
+    /// Truncation level. Not identification `p`.
+    pub n_states: usize,
+    /// DP concentration. Not identification `p`.
+    pub alpha: f64,
+    /// Sticky self-transition mass. Not identification `p`.
+    pub kappa: f64,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for StickyHdpHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 4,
+            alpha: 1.0,
+            kappa: 4.0,
+            max_iter: 40,
+        }
+    }
+}
+
+impl StickyHdpHmm {
+    /// Sticky HDP-HMM with truncation `k` and concentration `alpha`.
+    pub fn new(n_states: usize, alpha: f64) -> Self {
+        Self {
+            n_states,
+            alpha,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedStickyHdpHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted sticky HDP-HMM.
+#[derive(Clone, Debug)]
+pub struct FittedStickyHdpHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// GEM start.
+    pub start: Vector,
+    /// Sticky transitions.
+    pub trans: Matrix,
+    /// Emission means.
+    pub mu: Vector,
+    /// Emission variances.
+    pub var: Vector,
+    /// Concentration.
+    pub alpha: f64,
+    /// Sticky mass.
+    pub kappa: f64,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedStickyHdpHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let s = self.mu.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; s]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..s {
+                out[ti][j] = log_gauss1(y, self.mu[j], self.var[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedStickyHdpHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for StickyHdpHmm {
+    type Fitted = FittedStickyHdpHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedStickyHdpHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let alpha = if self.alpha.is_finite() && self.alpha > 0.0 {
+            self.alpha
+        } else {
+            1.0
+        };
+        let kappa = if self.kappa.is_finite() && self.kappa >= 0.0 {
+            self.kappa
+        } else {
+            4.0
+        };
+        if t_len == 0 {
+            return ctx.finish(FittedStickyHdpHmm {
+                labels: empty_labels(0),
+                start: gem_start(k, alpha),
+                trans: init_trans(k),
+                mu: Vector::zeros(k),
+                var: Vector::filled(k, 1.0),
+                alpha,
+                kappa,
+                loglik: f64::NAN,
+            });
+        }
+        let mean = x.column(0).mean();
+        let sd = x.column(0).std().max(0.1);
+        let mut mu = Vector::from_iter((0..k).map(|j| mean + (j as f64 - 0.5 * (k as f64 - 1.0)) * sd));
+        let mut var = Vector::filled(k, sd * sd);
+        let mut start = gem_start(k, alpha);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let log_emit: Vec<Vec<f64>> = (0..t_len)
+                .map(|t| {
+                    let y = x.get(t, 0);
+                    (0..k).map(|j| log_gauss1(y, mu[j], var[j])).collect()
+                })
+                .collect();
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &log_emit) else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            let mut ns = Vector::zeros(k);
+            let mut nt = Matrix::zeros(k, k);
+            for j in 0..k {
+                ns[j] = fb.gamma[0][j];
+            }
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wy = 0.0_f64;
+                let mut wy2 = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() {
+                        continue;
+                    }
+                    let w = fb.gamma[t][j];
+                    wsum += w;
+                    wy += w * y;
+                    wy2 += w * y * y;
+                }
+                if wsum > 1e-12 {
+                    mu[j] = wy / wsum;
+                    var[j] = (wy2 / wsum - mu[j] * mu[j]).max(COV_FLOOR);
+                }
+            }
+            for t in 0..t_len.saturating_sub(1) {
+                for i in 0..k {
+                    for j in 0..k {
+                        nt.set(i, j, nt.get(i, j) + fb.xi[t][i][j]);
+                    }
+                }
+            }
+            for j in 0..k {
+                nt.set(j, j, nt.get(j, j) + kappa);
+            }
+            start = ns;
+            trans = nt;
+            renormalize_vec(&mut start, TRANS_FLOOR);
+            renormalize_rows(&mut trans, TRANS_FLOOR);
+        }
+        let occup: Vec<f64> = (0..k)
+            .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+            .collect();
+        if !last_gamma.is_empty() {
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedStickyHdpHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            mu: mu.clone(),
+            var: var.clone(),
+            alpha,
+            kappa,
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedStickyHdpHmm {
+            labels,
+            start,
+            trans,
+            mu,
+            var,
+            alpha,
+            kappa,
+            loglik,
+        })
+    }
+}
+
+/// Left-right explicit-duration HSMM (Bakis sojourns).
+///
+/// Duration cap is not identification `p`. Distinct from [`Hsmm`] (ergodic
+/// next-state kernel) and [`GaussianHmmLeftRight`] (no explicit duration).
+#[derive(Clone, Debug)]
+pub struct LeftRightHsmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Maximum sojourn. Not identification `p`.
+    pub max_duration: usize,
+    /// Segmental iterations.
+    pub max_iter: usize,
+}
+
+impl Default for LeftRightHsmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_duration: 8,
+            max_iter: 12,
+        }
+    }
+}
+
+impl LeftRightHsmm {
+    /// Left-right HSMM with `k` states.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedLeftRightHsmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted left-right HSMM.
+#[derive(Clone, Debug)]
+pub struct FittedLeftRightHsmm {
+    /// Segmental Viterbi path.
+    pub labels: Vector,
+    /// Start (mass on state 0).
+    pub start: Vector,
+    /// Forward-only next-state kernel.
+    pub trans: Matrix,
+    /// Emission mean.
+    pub mu: Vector,
+    /// Emission variance.
+    pub var: Vector,
+    /// Geometric stay parameter.
+    pub rho: Vector,
+    /// Path score.
+    pub loglik: f64,
+}
+
+impl FittedLeftRightHsmm {
+    /// Segmental Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = hsmm_viterbi(
+            x,
+            &self.start,
+            &self.trans,
+            &self.mu,
+            &self.var,
+            &self.rho,
+            8,
+        );
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedLeftRightHsmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for LeftRightHsmm {
+    type Fitted = FittedLeftRightHsmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedLeftRightHsmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let dmax = self.max_duration.max(1);
+        if t_len == 0 {
+            return ctx.finish(FittedLeftRightHsmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                mu: Vector::zeros(k),
+                var: Vector::filled(k, 1.0),
+                rho: Vector::filled(k, 0.7),
+                loglik: f64::NAN,
+            });
+        }
+        let mean = x.column(0).mean();
+        let sd = x.column(0).std().max(0.1);
+        let mut mu = Vector::from_iter((0..k).map(|j| mean + (j as f64 - 0.5) * sd));
+        let mut var = Vector::filled(k, sd * sd);
+        let mut rho = Vector::filled(k, 0.75);
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        for i in 0..k {
+            trans.set(i, i, 0.0);
+        }
+        renormalize_rows(&mut trans, TRANS_FLOOR);
+        enforce_left_right(&mut start, &mut trans);
+        for i in 0..k {
+            trans.set(i, i, 0.0);
+        }
+        renormalize_rows(&mut trans, TRANS_FLOOR);
+        let mut labels = empty_labels(t_len);
+        let mut loglik = f64::NEG_INFINITY;
+        for it in 0..self.max_iter.max(1) {
+            let (path, score) = hsmm_viterbi(x, &start, &trans, &mu, &var, &rho, dmax);
+            labels = path;
+            loglik = score;
+            ctx.session.step(it as u64, -loglik, None);
+            let mut nrun = vec![0.0_f64; k];
+            let mut slen = vec![0.0_f64; k];
+            let mut wy = vec![0.0_f64; k];
+            let mut wy2 = vec![0.0_f64; k];
+            let mut wsum = vec![0.0_f64; k];
+            let mut nt = Matrix::zeros(k, k);
+            let mut t0 = 0usize;
+            while t0 < t_len {
+                let j = labels[t0] as usize;
+                let j = j.min(k.saturating_sub(1));
+                let mut t1 = t0 + 1;
+                while t1 < t_len && (labels[t1] as usize) == j {
+                    t1 += 1;
+                }
+                let d = (t1 - t0) as f64;
+                nrun[j] += 1.0;
+                slen[j] += d;
+                for t in t0..t1 {
+                    let y = x.get(t, 0);
+                    if y.is_finite() {
+                        wsum[j] += 1.0;
+                        wy[j] += y;
+                        wy2[j] += y * y;
+                    }
+                }
+                if t1 < t_len {
+                    let nxt = (labels[t1] as usize).min(k.saturating_sub(1));
+                    if nxt != j {
+                        nt.set(j, nxt, nt.get(j, nxt) + 1.0);
+                    }
+                }
+                t0 = t1;
+            }
+            for j in 0..k {
+                if wsum[j] > 0.0 {
+                    mu[j] = wy[j] / wsum[j];
+                    var[j] = (wy2[j] / wsum[j] - mu[j] * mu[j]).max(COV_FLOOR);
+                }
+                if nrun[j] > 0.0 {
+                    let md = (slen[j] / nrun[j]).max(1.0);
+                    rho[j] = (1.0 - 1.0 / md).clamp(1e-3, 0.99);
+                }
+            }
+            trans = nt;
+            for i in 0..k {
+                trans.set(i, i, 0.0);
+            }
+            renormalize_rows(&mut trans, TRANS_FLOOR);
+            enforce_left_right(&mut start, &mut trans);
+            for i in 0..k {
+                trans.set(i, i, 0.0);
+            }
+            renormalize_rows(&mut trans, TRANS_FLOOR);
+        }
+        ctx.finish(FittedLeftRightHsmm {
+            labels,
+            start,
+            trans,
+            mu,
+            var,
+            rho,
+            loglik,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8491,7 +9084,22 @@ mod tests {
             .expect("dph");
         assert_eq!(dph.value.labels.len(), 80);
         assert!(dph.value.var.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let hdp = StickyHdpHmm::new(2, 1.0)
+            .fit(&x, &Session::new("hdp", "fit"))
+            .expect("hdp");
+        assert_eq!(hdp.value.labels.len(), 80);
+        assert!(hdp.value.var.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let lrhs = LeftRightHsmm::new(2)
+            .fit(&x, &Session::new("lrhs", "fit"))
+            .expect("lrhs");
+        assert_eq!(lrhs.value.labels.len(), 80);
+        assert!(lrhs.value.trans.get(1, 0) <= 1e-8);
         let cat = Matrix::from_fn(40, 1, |i, _| if i < 20 { 0.0 } else { 1.0 });
+        let brh = BernoulliHmm::new(2)
+            .fit(&cat, &Session::new("brh", "fit"))
+            .expect("brh");
+        assert_eq!(brh.value.labels.len(), 40);
+        assert!(brh.value.p.as_slice().iter().all(|v| v.is_finite() && *v > 0.0 && *v < 1.0));
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
