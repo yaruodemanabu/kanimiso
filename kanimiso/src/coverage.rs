@@ -6872,6 +6872,9 @@ const INVENTORY: &[Algorithm] = &[
     a("hmm.ProjectedNormalHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
     a("online.OnlineNmf", "sklearn.decomposition.MiniBatchNMF", "online"),
     a("online.OnlineCca", "sklearn.cross_decomposition.CCA", "online"),
+    a("hmm.KatoJonesHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.NoncentralTHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.HypoexponentialHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7504,6 +7507,9 @@ mod tests {
             "hmm.PoissonBinomialHmm",
             "online.OnlineNmf",
             "online.OnlineCca",
+            "hmm.KatoJonesHmm",
+            "hmm.NoncentralTHmm",
+            "hmm.HypoexponentialHmm",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
