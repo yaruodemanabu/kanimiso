@@ -136797,6 +136797,1180 @@ impl FitUnsupervised for DiscreteFoldedExponentialPowerHmm {
     }
 }
 
+
+fn sas_cdf(y: f64, loc: f64, scale: f64, epsilon: f64, delta: f64) -> f64 {
+    if !y.is_finite() || !loc.is_finite() || scale <= 0.0 || delta <= 0.0 || !epsilon.is_finite() {
+        return 0.0;
+    }
+    let z = (y - loc) / scale;
+    let arg = (delta * z.asinh() - epsilon).clamp(-40.0, 40.0);
+    crate::special::norm_cdf(arg.sinh()).clamp(0.0, 1.0 - 1e-15)
+}
+
+fn log_folded_sas(y: f64, loc: f64, scale: f64, epsilon: f64, delta: f64) -> f64 {
+    if !y.is_finite() || y < 0.0 || scale <= 0.0 || delta <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    // Asymmetric when μ≠0 or ε≠0: f(|X|=y) = f(y)+f(-y).
+    logsumexp(&[
+        log_sinh_arcsinh(y, loc, scale, epsilon, delta),
+        log_sinh_arcsinh(-y, loc, scale, epsilon, delta),
+    ])
+}
+
+fn fsas_g_cdf(y: f64, loc: f64, scale: f64, epsilon: f64, delta: f64) -> f64 {
+    if !y.is_finite() || y < 0.0 || scale <= 0.0 || delta <= 0.0 {
+        return 0.0;
+    }
+    (sas_cdf(y, loc, scale, epsilon, delta) - sas_cdf(-y, loc, scale, epsilon, delta))
+        .clamp(0.0, 1.0 - 1e-15)
+}
+
+fn log_unit_fsas(y: f64, loc: f64, scale: f64, epsilon: f64, delta: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || y >= 1.0 || scale <= 0.0 || delta <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let u = y / (1.0 - y);
+    if !u.is_finite() || u < 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    log_folded_sas(u, loc, scale, epsilon, delta) - 2.0 * (1.0 - y).ln()
+}
+
+fn log_beta_fsas(y: f64, loc: f64, scale: f64, epsilon: f64, delta: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y < 0.0 || scale <= 0.0 || delta <= 0.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = fsas_g_cdf(y, loc, scale, epsilon, delta);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let surv = (1.0 - cdf).max(1e-15);
+    log_folded_sas(y, loc, scale, epsilon, delta) + (a - 1.0) * cdf.ln() + (b - 1.0) * surv.ln()
+        - ln_beta(a, b)
+}
+
+fn log_exp_fsas(y: f64, loc: f64, scale: f64, epsilon: f64, delta: f64, power: f64) -> f64 {
+    if !y.is_finite() || y < 0.0 || scale <= 0.0 || delta <= 0.0 || power <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = fsas_g_cdf(y, loc, scale, epsilon, delta);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    power.ln() + log_folded_sas(y, loc, scale, epsilon, delta) + (power - 1.0) * cdf.ln()
+}
+
+fn log_kuma_fsas(y: f64, loc: f64, scale: f64, epsilon: f64, delta: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y < 0.0 || scale <= 0.0 || delta <= 0.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = fsas_g_cdf(y, loc, scale, epsilon, delta);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let fa = cdf.powf(a);
+    let one_m = 1.0 - fa;
+    if one_m <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    a.ln() + b.ln() + log_folded_sas(y, loc, scale, epsilon, delta) + (a - 1.0) * cdf.ln()
+        + (b - 1.0) * one_m.ln()
+}
+
+fn log_disc_fsas(y: f64, loc: f64, scale: f64, epsilon: f64, delta: f64) -> f64 {
+    if !y.is_finite() || y < 1.0 || scale <= 0.0 || delta <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let kk = y.round().max(1.0);
+    let lo = fsas_g_cdf(kk, loc, scale, epsilon, delta);
+    let hi = fsas_g_cdf(kk + 1.0, loc, scale, epsilon, delta);
+    let p = (hi - lo).max(0.0);
+    if p <= 1e-18 {
+        f64::NEG_INFINITY
+    } else {
+        p.ln()
+    }
+}
+
+/// Unit folded sinh-arcsinh HMM (folded SAS on the odds $y/(1-y)$).
+///
+/// Scale is free from $\exp(\mathbb{E}[\ln U])$; location $\mu\neq 0$, skew $\varepsilon\neq 0$, and tail $\delta\neq 1$ are pinned, not identification `p`. Distinct from [`SinhArcsinhHmm`] (two-sided) and [`FoldedNormalHmm`] ($\varepsilon=0,\delta=1$). Fold uses $f(y)+f(-y)$.
+#[derive(Clone, Debug)]
+pub struct UnitFoldedSinhArcsinhHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for UnitFoldedSinhArcsinhHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl UnitFoldedSinhArcsinhHmm {
+    /// `k`-state UnitFoldedSinhArcsinhHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitFoldedSinhArcsinhHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted UnitFoldedSinhArcsinhHmm.
+#[derive(Clone, Debug)]
+pub struct FittedUnitFoldedSinhArcsinhHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free folded sinh-arcsinh scales from $\exp(\mathbb{E}[\ln Y])$.
+    pub scale: Vector,
+    /// Pinned pre-fold locations $\mu_j\neq 0$.
+    pub loc: Vector,
+    /// Pinned sinh-arcsinh skew $\varepsilon_j\neq 0$.
+    pub epsilon: Vector,
+    /// Pinned sinh-arcsinh tails $\delta_j\neq 1$.
+    pub delta: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedUnitFoldedSinhArcsinhHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_unit_fsas(y, self.loc[j], self.scale[j], self.epsilon[j], self.delta[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedUnitFoldedSinhArcsinhHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for UnitFoldedSinhArcsinhHmm {
+    type Fitted = FittedUnitFoldedSinhArcsinhHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitFoldedSinhArcsinhHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let loc = Vector::from_iter((0..k).map(|j| 0.12 + 0.03 * j as f64));
+        let epsilon = Vector::from_iter((0..k).map(|j| 0.35 + 0.15 * j as f64));
+        let delta = Vector::from_iter((0..k).map(|j| 1.35 + 0.20 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0 || y >= 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "UnitFoldedSinhArcsinhHmm skipped {n_skip} observations outside (0,1)"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedUnitFoldedSinhArcsinhHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 0.85),
+                loc,
+                epsilon,
+                delta,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.85 + 0.20 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedUnitFoldedSinhArcsinhHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                epsilon: epsilon.clone(),
+                delta: delta.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wln = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 || y >= 1.0 {
+                        continue;
+                    }
+                    let z = y / (1.0 - y);
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    wln += fb.gamma[t][j] * z.ln();
+                }
+                if wsum > 1e-12 {
+                    let hat = (wln / wsum).exp();
+                    if hat.is_finite() && hat > 0.0 {
+                        scale[j] = hat.clamp(0.45, 1.80);
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedUnitFoldedSinhArcsinhHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                epsilon: epsilon.clone(),
+                delta: delta.clone(),
+                loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedUnitFoldedSinhArcsinhHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            loc,
+            epsilon,
+            delta,
+            loglik,
+        })
+    }
+}
+
+/// Beta–folded-sinh-arcsinh HMM ($f F^{a-1}(1-F)^{b-1}/B(a,b)$, $a,b\neq 1$).
+///
+/// Scale is free from $\exp(\mathbb{E}[\ln Y])$; location $\mu\neq 0$, skew $\varepsilon\neq 0$, and tail $\delta\neq 1$ are pinned, not identification `p`. Distinct from [`KumaraswamyFoldedSinhArcsinhHmm`] and [`UnitFoldedSinhArcsinhHmm`].
+#[derive(Clone, Debug)]
+pub struct BetaFoldedSinhArcsinhHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for BetaFoldedSinhArcsinhHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl BetaFoldedSinhArcsinhHmm {
+    /// `k`-state BetaFoldedSinhArcsinhHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaFoldedSinhArcsinhHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted BetaFoldedSinhArcsinhHmm.
+#[derive(Clone, Debug)]
+pub struct FittedBetaFoldedSinhArcsinhHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free folded sinh-arcsinh scales from $\exp(\mathbb{E}[\ln Y])$.
+    pub scale: Vector,
+    /// Pinned pre-fold locations $\mu_j\neq 0$.
+    pub loc: Vector,
+    /// First extra shapes $a_j\neq 1$.
+    pub a: Vector,
+    /// Second extra shapes $b_j\neq 1$.
+    pub b: Vector,
+    /// Pinned sinh-arcsinh skew $\varepsilon_j\neq 0$.
+    pub epsilon: Vector,
+    /// Pinned sinh-arcsinh tails $\delta_j\neq 1$.
+    pub delta: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedBetaFoldedSinhArcsinhHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_beta_fsas(y, self.loc[j], self.scale[j], self.epsilon[j], self.delta[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedBetaFoldedSinhArcsinhHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for BetaFoldedSinhArcsinhHmm {
+    type Fitted = FittedBetaFoldedSinhArcsinhHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaFoldedSinhArcsinhHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let loc = Vector::from_iter((0..k).map(|j| 1.40 + 0.15 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.35 + 0.25 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 1.55 + 0.20 * j as f64));
+        let epsilon = Vector::from_iter((0..k).map(|j| 0.35 + 0.15 * j as f64));
+        let delta = Vector::from_iter((0..k).map(|j| 1.35 + 0.20 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y < 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "BetaFoldedSinhArcsinhHmm skipped {n_skip} negative observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedBetaFoldedSinhArcsinhHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 3.50),
+                loc,
+                a,
+                b,
+                epsilon,
+                delta,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 3.50 + 0.80 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedBetaFoldedSinhArcsinhHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                epsilon: epsilon.clone(),
+                delta: delta.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wln = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    wsum += fb.gamma[t][j];
+                    wln += fb.gamma[t][j] * z.ln();
+                }
+                if wsum > 1e-12 {
+                    let hat = (wln / wsum).exp();
+                    if hat.is_finite() && hat > 0.0 {
+                        scale[j] = hat.clamp(2.00, 6.50);
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedBetaFoldedSinhArcsinhHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                epsilon: epsilon.clone(),
+                delta: delta.clone(),
+                loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedBetaFoldedSinhArcsinhHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            loc,
+            a,
+            b,
+            epsilon,
+            delta,
+            loglik,
+        })
+    }
+}
+
+/// Exponentiated folded sinh-arcsinh HMM ($a f F^{a-1}$, $a\neq 1$).
+///
+/// Scale is free from $\exp(\mathbb{E}[\ln Y])$; location $\mu\neq 0$, skew $\varepsilon\neq 0$, and tail $\delta\neq 1$ are pinned, not identification `p`. Distinct from [`KumaraswamyFoldedSinhArcsinhHmm`] and [`DiscreteFoldedSinhArcsinhHmm`].
+#[derive(Clone, Debug)]
+pub struct ExponentiatedFoldedSinhArcsinhHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for ExponentiatedFoldedSinhArcsinhHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl ExponentiatedFoldedSinhArcsinhHmm {
+    /// `k`-state ExponentiatedFoldedSinhArcsinhHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedFoldedSinhArcsinhHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted ExponentiatedFoldedSinhArcsinhHmm.
+#[derive(Clone, Debug)]
+pub struct FittedExponentiatedFoldedSinhArcsinhHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free folded sinh-arcsinh scales from $\exp(\mathbb{E}[\ln Y])$.
+    pub scale: Vector,
+    /// Pinned pre-fold locations $\mu_j\neq 0$.
+    pub loc: Vector,
+    /// Extra CDF powers $a_j\neq 1$.
+    pub power: Vector,
+    /// Pinned sinh-arcsinh skew $\varepsilon_j\neq 0$.
+    pub epsilon: Vector,
+    /// Pinned sinh-arcsinh tails $\delta_j\neq 1$.
+    pub delta: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedExponentiatedFoldedSinhArcsinhHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_exp_fsas(y, self.loc[j], self.scale[j], self.epsilon[j], self.delta[j], self.power[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedExponentiatedFoldedSinhArcsinhHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for ExponentiatedFoldedSinhArcsinhHmm {
+    type Fitted = FittedExponentiatedFoldedSinhArcsinhHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedFoldedSinhArcsinhHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let loc = Vector::from_iter((0..k).map(|j| 1.40 + 0.15 * j as f64));
+        let power = Vector::from_iter((0..k).map(|j| 1.45 + 0.30 * j as f64));
+        let epsilon = Vector::from_iter((0..k).map(|j| 0.35 + 0.15 * j as f64));
+        let delta = Vector::from_iter((0..k).map(|j| 1.35 + 0.20 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y < 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "ExponentiatedFoldedSinhArcsinhHmm skipped {n_skip} negative observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedExponentiatedFoldedSinhArcsinhHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 3.50),
+                loc,
+                power,
+                epsilon,
+                delta,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 3.50 + 0.80 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedExponentiatedFoldedSinhArcsinhHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                power: power.clone(),
+                epsilon: epsilon.clone(),
+                delta: delta.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wln = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    wsum += fb.gamma[t][j];
+                    wln += fb.gamma[t][j] * z.ln();
+                }
+                if wsum > 1e-12 {
+                    let hat = (wln / wsum).exp();
+                    if hat.is_finite() && hat > 0.0 {
+                        scale[j] = hat.clamp(2.00, 6.50);
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedExponentiatedFoldedSinhArcsinhHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                power: power.clone(),
+                epsilon: epsilon.clone(),
+                delta: delta.clone(),
+                loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedExponentiatedFoldedSinhArcsinhHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            loc,
+            power,
+            epsilon,
+            delta,
+            loglik,
+        })
+    }
+}
+
+/// Kumaraswamy–folded-sinh-arcsinh HMM ($ab f F^{a-1}(1-F^a)^{b-1}$, $a,b\neq 1$).
+///
+/// Scale is free from $\exp(\mathbb{E}[\ln Y])$; location $\mu\neq 0$, skew $\varepsilon\neq 0$, and tail $\delta\neq 1$ are pinned, not identification `p`. Distinct from [`BetaFoldedSinhArcsinhHmm`] and [`UnitFoldedSinhArcsinhHmm`].
+#[derive(Clone, Debug)]
+pub struct KumaraswamyFoldedSinhArcsinhHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for KumaraswamyFoldedSinhArcsinhHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl KumaraswamyFoldedSinhArcsinhHmm {
+    /// `k`-state KumaraswamyFoldedSinhArcsinhHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyFoldedSinhArcsinhHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted KumaraswamyFoldedSinhArcsinhHmm.
+#[derive(Clone, Debug)]
+pub struct FittedKumaraswamyFoldedSinhArcsinhHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free folded sinh-arcsinh scales from $\exp(\mathbb{E}[\ln Y])$.
+    pub scale: Vector,
+    /// Pinned pre-fold locations $\mu_j\neq 0$.
+    pub loc: Vector,
+    /// First extra shapes $a_j\neq 1$.
+    pub a: Vector,
+    /// Second extra shapes $b_j\neq 1$.
+    pub b: Vector,
+    /// Pinned sinh-arcsinh skew $\varepsilon_j\neq 0$.
+    pub epsilon: Vector,
+    /// Pinned sinh-arcsinh tails $\delta_j\neq 1$.
+    pub delta: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedKumaraswamyFoldedSinhArcsinhHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_kuma_fsas(y, self.loc[j], self.scale[j], self.epsilon[j], self.delta[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedKumaraswamyFoldedSinhArcsinhHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for KumaraswamyFoldedSinhArcsinhHmm {
+    type Fitted = FittedKumaraswamyFoldedSinhArcsinhHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyFoldedSinhArcsinhHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let loc = Vector::from_iter((0..k).map(|j| 1.40 + 0.15 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.35 + 0.25 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 1.55 + 0.20 * j as f64));
+        let epsilon = Vector::from_iter((0..k).map(|j| 0.35 + 0.15 * j as f64));
+        let delta = Vector::from_iter((0..k).map(|j| 1.35 + 0.20 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y < 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "KumaraswamyFoldedSinhArcsinhHmm skipped {n_skip} negative observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedKumaraswamyFoldedSinhArcsinhHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 3.50),
+                loc,
+                a,
+                b,
+                epsilon,
+                delta,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 3.50 + 0.80 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedKumaraswamyFoldedSinhArcsinhHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                epsilon: epsilon.clone(),
+                delta: delta.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wln = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    wsum += fb.gamma[t][j];
+                    wln += fb.gamma[t][j] * z.ln();
+                }
+                if wsum > 1e-12 {
+                    let hat = (wln / wsum).exp();
+                    if hat.is_finite() && hat > 0.0 {
+                        scale[j] = hat.clamp(2.00, 6.50);
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedKumaraswamyFoldedSinhArcsinhHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                epsilon: epsilon.clone(),
+                delta: delta.clone(),
+                loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedKumaraswamyFoldedSinhArcsinhHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            loc,
+            a,
+            b,
+            epsilon,
+            delta,
+            loglik,
+        })
+    }
+}
+
+/// Discrete folded sinh-arcsinh HMM ($P=F(k+1)-F(k)$ on $\{1,2,\ldots\}$).
+///
+/// Scale is free from $\exp(\mathbb{E}[\ln Y])$; location $\mu\neq 0$, skew $\varepsilon\neq 0$, and tail $\delta\neq 1$ are pinned, not identification `p`. Distinct from [`SinhArcsinhHmm`] (two-sided).
+#[derive(Clone, Debug)]
+pub struct DiscreteFoldedSinhArcsinhHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for DiscreteFoldedSinhArcsinhHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl DiscreteFoldedSinhArcsinhHmm {
+    /// `k`-state DiscreteFoldedSinhArcsinhHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteFoldedSinhArcsinhHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted DiscreteFoldedSinhArcsinhHmm.
+#[derive(Clone, Debug)]
+pub struct FittedDiscreteFoldedSinhArcsinhHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free folded sinh-arcsinh scales from $\exp(\mathbb{E}[\ln Y])$.
+    pub scale: Vector,
+    /// Pinned pre-fold locations $\mu_j\neq 0$.
+    pub loc: Vector,
+    /// Pinned sinh-arcsinh skew $\varepsilon_j\neq 0$.
+    pub epsilon: Vector,
+    /// Pinned sinh-arcsinh tails $\delta_j\neq 1$.
+    pub delta: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedDiscreteFoldedSinhArcsinhHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_disc_fsas(y, self.loc[j], self.scale[j], self.epsilon[j], self.delta[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedDiscreteFoldedSinhArcsinhHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for DiscreteFoldedSinhArcsinhHmm {
+    type Fitted = FittedDiscreteFoldedSinhArcsinhHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteFoldedSinhArcsinhHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let loc = Vector::from_iter((0..k).map(|j| 0.15 + 0.05 * j as f64));
+        let epsilon = Vector::from_iter((0..k).map(|j| 0.35 + 0.15 * j as f64));
+        let delta = Vector::from_iter((0..k).map(|j| 1.35 + 0.20 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y < 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "DiscreteFoldedSinhArcsinhHmm skipped {n_skip} observations below 1"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedDiscreteFoldedSinhArcsinhHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 2.20),
+                loc,
+                epsilon,
+                delta,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 2.20 + 0.60 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedDiscreteFoldedSinhArcsinhHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                epsilon: epsilon.clone(),
+                delta: delta.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut wln = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y < 1.0 {
+                        continue;
+                    }
+                    let z = y;
+                    wsum += fb.gamma[t][j];
+                    wln += fb.gamma[t][j] * z.ln();
+                }
+                if wsum > 1e-12 {
+                    let hat = (wln / wsum).exp();
+                    if hat.is_finite() && hat > 0.0 {
+                        scale[j] = hat.clamp(1.20, 5.50);
+                    }
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedDiscreteFoldedSinhArcsinhHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                epsilon: epsilon.clone(),
+                delta: delta.clone(),
+                loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedDiscreteFoldedSinhArcsinhHmm {
+            labels,
+            start,
+            trans,
+            scale,
+            loc,
+            epsilon,
+            delta,
+            loglik,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139336,6 +140510,26 @@ mod tests {
             .expect("kfep");
         assert_eq!(kfep.value.labels.len(), 80);
         assert!(kfep.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let usas = UnitFoldedSinhArcsinhHmm::new(2)
+            .fit(&betx, &Session::new("usas", "fit"))
+            .expect("usas");
+        assert_eq!(usas.value.labels.len(), 80);
+        assert!(usas.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let bsas = BetaFoldedSinhArcsinhHmm::new(2)
+            .fit(&xpos, &Session::new("bsas", "fit"))
+            .expect("bsas");
+        assert_eq!(bsas.value.labels.len(), 80);
+        assert!(bsas.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let esas = ExponentiatedFoldedSinhArcsinhHmm::new(2)
+            .fit(&xpos, &Session::new("esas", "fit"))
+            .expect("esas");
+        assert_eq!(esas.value.labels.len(), 80);
+        assert!(esas.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let ksas = KumaraswamyFoldedSinhArcsinhHmm::new(2)
+            .fit(&xpos, &Session::new("ksas", "fit"))
+            .expect("ksas");
+        assert_eq!(ksas.value.labels.len(), 80);
+        assert!(ksas.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
@@ -140117,6 +141311,11 @@ mod tests {
             .expect("dfep");
         assert_eq!(dfep.value.labels.len(), 40);
         assert!(dfep.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let dsas = DiscreteFoldedSinhArcsinhHmm::new(2)
+            .fit(&x, &Session::new("dsas", "fit"))
+            .expect("dsas");
+        assert_eq!(dsas.value.labels.len(), 40);
+        assert!(dsas.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
     }
 
     #[test]
