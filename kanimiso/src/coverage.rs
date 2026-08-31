@@ -7787,6 +7787,45 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a("hmm.UnitHalfLogisticHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.BetaHalfLogisticHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.ExponentiatedHalfLogisticHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.KumaraswamyHalfLogisticHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.DiscreteHalfLogisticHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("online.KnnMedian", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "online.QuantileAnomaly",
+        "river.anomaly.GaussianScorer",
+        "online",
+    ),
+    a(
+        "tslearn.cosine_l1_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a("tslearn.cdist_cosine_l1", "tslearn.metrics.cdist", "timeseries"),
+    a(
+        "tslearn.tanimoto_l1_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_tanimoto_l1",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8774,6 +8813,17 @@ mod tests {
             "tslearn.cdist_squared_chord",
             "tslearn.kullback_leibler_distance",
             "tslearn.cdist_kullback_leibler",
+            "hmm.UnitHalfLogisticHmm",
+            "hmm.BetaHalfLogisticHmm",
+            "hmm.ExponentiatedHalfLogisticHmm",
+            "hmm.KumaraswamyHalfLogisticHmm",
+            "hmm.DiscreteHalfLogisticHmm",
+            "online.KnnMedian",
+            "online.QuantileAnomaly",
+            "tslearn.cosine_l1_distance",
+            "tslearn.cdist_cosine_l1",
+            "tslearn.tanimoto_l1_distance",
+            "tslearn.cdist_tanimoto_l1",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }
