@@ -41326,6 +41326,476 @@ impl Predict for OnlineAtanRegressor {
     }
 }
 
+/// Online \(\varepsilon\)-insensitive regressor (SVM dead-zone).
+///
+/// \(\varepsilon\) is not identification `p`. Distinct from [`OnlineHuberRegressor`]
+/// (quadratic bowl) and [`OnlineLaplaceRegressor`] (no dead-zone).
+#[derive(Clone, Debug)]
+pub struct OnlineEpsilonInsensitiveRegressor {
+    /// Dead-zone radius. Not identification `p`.
+    pub epsilon: f64,
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineEpsilonInsensitiveRegressor {
+    fn default() -> Self {
+        Self {
+            epsilon: 0.1,
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineEpsilonInsensitiveRegressor {
+    /// \(\varepsilon\)-insensitive regressor.
+    pub fn new(epsilon: f64) -> Self {
+        Self {
+            epsilon,
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineEpsilonInsensitiveRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineEpsilonInsensitiveRegressor",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected eps-insensitive update"),
+            );
+        };
+        self.initialized = true;
+        let eps = if self.epsilon.is_finite() && self.epsilon >= 0.0 {
+            self.epsilon
+        } else {
+            0.1
+        };
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let r = y[i] - eta;
+            let ar = r.abs();
+            loss_before += (ar - eps).max(0.0);
+            let g = if ar <= eps {
+                0.0
+            } else if r > 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            loss_after += ((y[i] - ea).abs() - eps).max(0.0);
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online epsilon-insensitive regressor",
+            "SGD on the SVM dead-zone loss; ε is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineEpsilonInsensitiveRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
+/// Online Barron robust regressor (one-parameter robust family).
+///
+/// Shape \(\alpha\) is not identification `p`. Distinct from [`OnlineCharbonnierRegressor`]
+/// (\(\alpha=1\)) and [`OnlineGemanMcClureRegressor`] (\(\alpha=-2\)).
+#[derive(Clone, Debug)]
+pub struct OnlineBarronRegressor {
+    /// Barron shape. Not identification `p`.
+    pub alpha: f64,
+    /// Scale \(c>0\). Not identification `p`.
+    pub scale: f64,
+    /// SGD step.
+    pub learning_rate: f64,
+    coef: Vector,
+    intercept: f64,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineBarronRegressor {
+    fn default() -> Self {
+        Self {
+            alpha: 1.0,
+            scale: 1.0,
+            learning_rate: 0.05,
+            coef: Vector::zeros(0),
+            intercept: 0.0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineBarronRegressor {
+    /// Barron regressor with shape `alpha`.
+    pub fn new(alpha: f64) -> Self {
+        Self {
+            alpha,
+            ..Self::default()
+        }
+    }
+}
+
+fn barron_rho_grad(r: f64, alpha: f64, c: f64) -> (f64, f64) {
+    let c2 = (c * c).max(1e-12);
+    let u = (r * r) / c2;
+    if (alpha - 2.0).abs() < 1e-8 {
+        return (0.5 * u, -r / c2);
+    }
+    if alpha.abs() < 1e-8 {
+        let den = 1.0 + 0.5 * u;
+        return (den.ln(), -r / (c2 * den));
+    }
+    let beta = (alpha - 2.0).abs();
+    let inner = u / beta + 1.0;
+    let rho = (beta / alpha) * (inner.powf(0.5 * alpha) - 1.0);
+    let g = -(r / c2) * inner.powf(0.5 * alpha - 1.0);
+    (rho, g)
+}
+
+impl PartialFit for OnlineBarronRegressor {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        let Some((y, lr)) = online_glm_prepare(
+            &mut ctx,
+            x,
+            y,
+            self.initialized,
+            self.n_seen,
+            &mut self.coef,
+            self.learning_rate,
+            "OnlineBarronRegressor",
+        ) else {
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "rejected Barron update"),
+            );
+        };
+        self.initialized = true;
+        let alpha = if self.alpha.is_finite() { self.alpha } else { 1.0 };
+        let c = if self.scale.is_finite() && self.scale > 0.0 {
+            self.scale
+        } else {
+            1.0
+        };
+        let before = self.coef.clone();
+        let mut loss_before = 0.0_f64;
+        let mut loss_after = 0.0_f64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let mut eta = self.intercept;
+            for j in 0..x.ncols() {
+                eta += self.coef[j] * x.get(i, j);
+            }
+            let r = y[i] - eta;
+            let (rho, g) = barron_rho_grad(r, alpha, c);
+            loss_before += rho;
+            self.intercept -= lr * g;
+            for j in 0..x.ncols() {
+                self.coef[j] -= lr * g * x.get(i, j);
+            }
+            let mut ea = self.intercept;
+            for j in 0..x.ncols() {
+                ea += self.coef[j] * x.get(i, j);
+            }
+            loss_after += barron_rho_grad(y[i] - ea, alpha, c).0;
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let delta = self.coef.sub(&before);
+        let expl = pack_linear_explain(
+            &mut ctx,
+            self.updates,
+            n_rows,
+            self.n_seen,
+            &delta,
+            loss_before,
+            loss_after,
+            self.n_seen as usize > x.ncols(),
+            self.n_seen < 5,
+            "online Barron regressor",
+            "SGD on the Barron robust family; α is not identification p",
+        );
+        finish_explain(ctx, expl)
+    }
+}
+
+impl Predict for OnlineBarronRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut s = self.intercept;
+            for j in 0..x.ncols().min(self.coef.len()) {
+                s += self.coef[j] * x.get(i, j);
+            }
+            s
+        })))
+    }
+}
+
+/// Lightweight online detector of anomalies (river `anomaly.LODA`).
+///
+/// Projection count is not identification `p`. Distinct from [`HalfSpaceTrees`]
+/// (axis-aligned splits) and [`GaussianScorer`] (per-feature moments).
+#[derive(Clone, Debug)]
+pub struct Loda {
+    /// Random projections. Not identification `p`.
+    pub n_projections: usize,
+    /// Histogram bins. Not identification `p`.
+    pub n_bins: usize,
+    weights: Vec<Vector>,
+    lo: Vector,
+    hi: Vector,
+    counts: Vec<Vector>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for Loda {
+    fn default() -> Self {
+        Self {
+            n_projections: 4,
+            n_bins: 8,
+            weights: Vec::new(),
+            lo: Vector::zeros(0),
+            hi: Vector::zeros(0),
+            counts: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl Loda {
+    /// LODA with `n_projections` histograms.
+    pub fn new(n_projections: usize) -> Self {
+        Self {
+            n_projections: n_projections.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for Loda {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let k = self.n_projections.max(1);
+        let nb = self.n_bins.max(2);
+        if !self.initialized {
+            let mut rng = Rng::new(0x10da);
+            self.weights = (0..k)
+                .map(|_| {
+                    Vector::from_iter((0..x.ncols()).map(|_| rng.standard_normal()))
+                })
+                .collect();
+            self.lo = Vector::filled(k, f64::INFINITY);
+            self.hi = Vector::filled(k, f64::NEG_INFINITY);
+            self.counts = (0..k).map(|_| Vector::zeros(nb)).collect();
+            self.initialized = true;
+        } else if self.weights.as_slice().first().map(|w| w.len()) != Some(x.ncols()) {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            for j in 0..k {
+                let mut z = 0.0_f64;
+                for c in 0..x.ncols() {
+                    z += self.weights[j][c] * x.get(i, c);
+                }
+                if !z.is_finite() {
+                    continue;
+                }
+                if z < self.lo[j] {
+                    self.lo[j] = z;
+                }
+                if z > self.hi[j] {
+                    self.hi[j] = z;
+                }
+                let span = self.hi[j] - self.lo[j];
+                let bin = if span <= 1e-12 {
+                    0
+                } else {
+                    let u = ((z - self.lo[j]) / span * (nb as f64 - 1e-9)).floor() as usize;
+                    u.min(nb - 1)
+                };
+                self.counts[j][bin] += 1.0;
+            }
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!("LODA updated {k} projection histograms on {} rows", x.nrows());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "projection histograms",
+                "LODA incrementally bins random 1-d projections",
+                "previous bin counts",
+                "updated bin counts",
+            ),
+        )
+    }
+}
+
+impl Predict for Loda {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let k = self.weights.len();
+        let nb = self.n_bins.max(2);
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut acc = 0.0_f64;
+            let mut ok = 0usize;
+            for j in 0..k {
+                let mut z = 0.0_f64;
+                for c in 0..x.ncols().min(self.weights[j].len()) {
+                    z += self.weights[j][c] * x.get(i, c);
+                }
+                let span = self.hi[j] - self.lo[j];
+                let bin = if span <= 1e-12 {
+                    0
+                } else {
+                    let u = ((z - self.lo[j]) / span * (nb as f64 - 1e-9)).floor() as usize;
+                    u.min(nb - 1)
+                };
+                let tot: f64 = self.counts[j].as_slice().iter().sum();
+                let p = if tot > 0.0 {
+                    (self.counts[j][bin] / tot).max(1e-12)
+                } else {
+                    1.0
+                };
+                acc -= p.ln();
+                ok += 1;
+            }
+            if ok == 0 {
+                0.0
+            } else {
+                acc / ok as f64
+            }
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42055,6 +42525,15 @@ mod tests {
         OnlineAtanRegressor::new(1.0)
             .partial_fit(&x, Some(&y), &session)
             .expect("oata");
+        OnlineEpsilonInsensitiveRegressor::new(0.1)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("oeps");
+        OnlineBarronRegressor::new(1.0)
+            .partial_fit(&x, Some(&y), &session)
+            .expect("obar");
+        Loda::new(4)
+            .partial_fit(&x, None, &session)
+            .expect("loda");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

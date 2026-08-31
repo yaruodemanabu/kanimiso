@@ -18429,6 +18429,167 @@ impl Mmotifs {
     }
 }
 
+/// Pan multidimensional matrix profile (stumpy `mpstump`).
+///
+/// Window count is not identification `p`. Distinct from [`PanMatrixProfile`]
+/// (one series) and [`Mstump`] (one window).
+#[derive(Clone, Debug)]
+pub struct Mpstump {
+    /// Smallest window. Not identification `p`.
+    pub min_window: usize,
+    /// Number of consecutive windows. Not identification `p`.
+    pub n_windows: usize,
+}
+
+impl Default for Mpstump {
+    fn default() -> Self {
+        Self {
+            min_window: 2,
+            n_windows: 2,
+        }
+    }
+}
+
+impl Mpstump {
+    /// MPSTUMP starting at `min_window` for `n_windows` lengths.
+    pub fn new(min_window: usize, n_windows: usize) -> Self {
+        Self {
+            min_window: min_window.max(2),
+            n_windows: n_windows.max(1),
+        }
+    }
+
+    /// Motif and discord of the MSTUMP profile at each window.
+    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedPanMatrixProfile>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let nw = self.n_windows.max(1);
+        let mut windows = Vector::zeros(nw);
+        let mut motifs = Vector::zeros(nw);
+        let mut discords = Vector::zeros(nw);
+        let mut motif_scores = Vector::zeros(nw);
+        let mut discord_scores = Vector::zeros(nw);
+        for k in 0..nw {
+            let w = self.min_window.max(2) + k;
+            windows[k] = w as f64;
+            let mp = panel_profile(x, w, true, &mut ctx, "mpstump");
+            let mut mi = 0usize;
+            let mut di = 0usize;
+            let mut mb = f64::INFINITY;
+            let mut db = f64::NEG_INFINITY;
+            for (i, &v) in mp.profile.as_slice().iter().enumerate() {
+                if v.is_finite() && v < mb {
+                    mb = v;
+                    mi = i;
+                }
+                if v.is_finite() && v > db {
+                    db = v;
+                    di = i;
+                }
+            }
+            motifs[k] = mi as f64;
+            discords[k] = di as f64;
+            motif_scores[k] = if mb.is_finite() { mb } else { f64::NAN };
+            discord_scores[k] = if db.is_finite() { db } else { f64::NAN };
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("MPSTUMP is pan-MSTUMP, not published mpstump")
+                .compromise(NumericalCompromise::new(
+                    "stumpy mpstump",
+                    "motif/discord of the mean row-wise z-normalized profile at each window",
+                    "the published multidimensional pan kernel is omitted",
+                    "read the windows as a multi-series pan-profile sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedPanMatrixProfile {
+            windows,
+            motifs,
+            discords,
+            motif_scores,
+            discord_scores,
+        })
+    }
+}
+
+/// Snippet area profile (stumpy snippets area / facility cost).
+///
+/// Window length is not identification `p`. Distinct from [`Snippets`]
+/// (greedy selection) and [`Motif`] (nearest-neighbour only).
+pub fn snippet_area(y: &Vector, window: usize, session: &Session) -> Result<Qualified<Vector>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(
+        &mut ctx.report,
+        &Matrix::from_vector(y),
+        Some(y),
+        &ctx.policy,
+    );
+    let m = window.max(2);
+    if m >= y.len() {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .severity(Severity::Warning)
+                .message(format!("snippet_area window={m} is unusable for n={}", y.len()))
+                .build(),
+        );
+        return ctx.finish(Vector::zeros(0));
+    }
+    let n_sub = y.len() + 1 - m;
+    let mut area = Vector::zeros(n_sub);
+    for i in 0..n_sub {
+        let mut acc = 0.0_f64;
+        for j in 0..n_sub {
+            if i == j {
+                continue;
+            }
+            acc += subsequence_dist(y, i, y, j, m);
+        }
+        area[i] = acc;
+    }
+    ctx.push(
+        Issue::builder(IssueCode::CausalClaimUnidentified)
+            .severity(Severity::Advisory)
+            .message("snippet_area is the sum of pairwise subsequence distances")
+            .compromise(NumericalCompromise::new(
+                "stumpy snippet area profile",
+                "facility-location cost of choosing each subsequence as the only snippet",
+                "the published MPdist area kernel is omitted",
+                "read the vector as a diversity-cost sketch",
+            ))
+            .build(),
+    );
+    ctx.finish(area)
+}
+
+/// Named snippet-area transform.
+#[derive(Clone, Debug)]
+pub struct SnippetArea {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+}
+
+impl Default for SnippetArea {
+    fn default() -> Self {
+        Self { window: 3 }
+    }
+}
+
+impl SnippetArea {
+    /// Snippet-area profile with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+        }
+    }
+
+    /// Facility-location cost of every subsequence of `y`.
+    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+        snippet_area(y, self.window, session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -19124,6 +19285,14 @@ mod tests {
             .fit(&x, &Session::new("ts", "mmo"))
             .unwrap();
         assert!(!mmo.value.indices.is_empty());
+        let mps = Mpstump::new(2, 2)
+            .fit(&x, &Session::new("ts", "mps"))
+            .unwrap();
+        assert_eq!(mps.value.windows.len(), 2);
+        let sna = SnippetArea::new(3)
+            .fit(&yr, &Session::new("ts", "sna"))
+            .unwrap();
+        assert!(sna.value.as_slice().iter().all(|v| v.is_finite()) || sna.value.is_empty());
         let igs = InformationGainSegmentation::new()
             .fit(&yr, &Session::new("ts", "igs"))
             .unwrap();
