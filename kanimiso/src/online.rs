@@ -67838,6 +67838,330 @@ impl Predict for LogEuclideanAnomaly {
 }
 
 
+/// Score is \(|\Delta^{18} x|/\overline{|x|}\) on the trailing eighteen
+/// first-coordinates (binomial \(1,-18,153,-816,3060,-8568,18564,-31824,43758,-48620,43758,-31824,18564,-8568,3060,-816,153,-18,1\)).
+/// Distinct from [`WindowLag17`] (seventeenth difference) and [`WindowLag16`].
+#[derive(Clone, Debug)]
+pub struct WindowLag18 {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for WindowLag18 {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl WindowLag18 {
+    /// Empty windowed lag-18 detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        let y = x.get(i, 0);
+        if !y.is_finite() {
+            return 0.0;
+        }
+        let xs = reservoir_first_coords(&self.rows);
+        if xs.len() < 18 {
+            return 0.0;
+        }
+        let start = xs.len().saturating_sub(18);
+        let win = &xs[start..];
+        if win.len() < 18 {
+            return 0.0;
+        }
+        let mut mean_abs = 0.0_f64;
+        for v in win {
+            mean_abs += v.abs();
+        }
+        mean_abs /= win.len() as f64;
+        let n = win.len();
+        let p1 = win[n - 1];
+        let p2 = win[n - 2];
+        let p3 = win[n - 3];
+        let p4 = win[n - 4];
+        let p5 = win[n - 5];
+        let p6 = win[n - 6];
+        let p7 = win[n - 7];
+        let p8 = win[n - 8];
+        let p9 = win[n - 9];
+        let p10 = win[n - 10];
+        let p11 = win[n - 11];
+        let p12 = win[n - 12];
+        let p13 = win[n - 13];
+        let p14 = win[n - 14];
+        let p15 = win[n - 15];
+        let p16 = win[n - 16];
+        let p17 = win[n - 17];
+        let p18 = win[n - 18];
+        (y - 18.0 * p1 + 153.0 * p2 - 816.0 * p3 + 3060.0 * p4 - 8568.0 * p5 + 18564.0 * p6
+            - 31824.0 * p7 + 43758.0 * p8 - 48620.0 * p9 + 43758.0 * p10 - 31824.0 * p11
+            + 18564.0 * p12 - 8568.0 * p13 + 3060.0 * p14 - 816.0 * p15 + 153.0 * p16
+            - 18.0 * p17 + p18)
+            .abs()
+            / mean_abs.max(1e-12)
+    }
+}
+
+impl PartialFit for WindowLag18 {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 18;
+        q.warmup = self.rows.len() < 18;
+        q.explanation = format!("window-lag18 reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "windowed eighteenth-difference anomaly",
+                "WindowLag18 uses last-18 eighteenth difference; not WindowLag17 or WindowLag16",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for WindowLag18 {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
+fn bray_curtis_rows(a: &[f64], b: &[f64]) -> f64 {
+    let p = a.len().min(b.len());
+    let mut num = 0.0_f64;
+    let mut den = 0.0_f64;
+    for j in 0..p {
+        let u = a[j].abs();
+        let v = b[j].abs();
+        num += (u - v).abs();
+        den += u + v;
+    }
+    if den < 1e-18 {
+        return 0.0;
+    }
+    (num / den).max(0.0)
+}
+
+/// Bray–Curtis \(k\)-NN anomaly.
+///
+/// Score is the mean of the \(k\) smallest raw Bray–Curtis dissimilarities
+/// \(\sum|x-y|/\sum(x+y)\) without \(\ell_1\) normalisation.
+/// Distinct from [`ManhattanAnomaly`] (no denominator) and Whittaker after \(\ell_1\).
+#[derive(Clone, Debug)]
+pub struct BrayCurtisAnomaly {
+    rows: Vec<Vec<f64>>,
+    ncols: usize,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for BrayCurtisAnomaly {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            ncols: 0,
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl BrayCurtisAnomaly {
+    /// Empty Bray–Curtis \(k\)-NN detector (reservoir cap 64).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+        if self.rows.len() < 3 || self.ncols == 0 {
+            return 0.0;
+        }
+        let p = self.ncols.min(x.ncols());
+        let mut qrow = Vec::with_capacity(p);
+        for j in 0..p {
+            let z = x.get(i, j);
+            if !z.is_finite() {
+                return 0.0;
+            }
+            qrow.push(z);
+        }
+        let mut ds: Vec<f64> = self
+            .rows
+            .iter()
+            .map(|row| bray_curtis_rows(&qrow, row))
+            .filter(|d| d.is_finite() && *d > 1e-15)
+            .collect();
+        if ds.is_empty() {
+            return 0.0;
+        }
+        ds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let kk = 5.min(ds.len());
+        let mut s = 0.0_f64;
+        for t in 0..kk {
+            s += ds[t];
+        }
+        s / kk as f64
+    }
+}
+
+impl PartialFit for BrayCurtisAnomaly {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        if !self.initialized {
+            self.ncols = p;
+            self.initialized = true;
+        } else if self.ncols != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before_n = self.n_seen;
+        for i in 0..x.nrows() {
+            let mut row = Vec::with_capacity(p);
+            let mut ok = true;
+            for j in 0..p {
+                let z = x.get(i, j);
+                if !z.is_finite() {
+                    ok = false;
+                    break;
+                }
+                row.push(z);
+            }
+            if !ok {
+                continue;
+            }
+            if self.rows.len() >= 64 {
+                self.rows.remove(0);
+            }
+            self.rows.push(row);
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some((self.n_seen - before_n) as f64);
+        q.information_gain = Some(x.nrows() as f64);
+        q.still_identified = self.rows.len() >= 3;
+        q.warmup = self.rows.len() < 3;
+        q.explanation = format!("bray-curtis-knn reservoir n={}", self.rows.len());
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Bray-Curtis k-NN anomaly",
+                "BrayCurtisAnomaly is raw Bray-Curtis k-NN; not Manhattan or Whittaker-L1",
+                "previous reservoir",
+                "updated reservoir",
+            ),
+        )
+    }
+}
+
+impl Predict for BrayCurtisAnomaly {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i))))
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69062,6 +69386,12 @@ mod tests {
         LogEuclideanAnomaly::new()
             .partial_fit(&x, None, &session)
             .expect("lge");
+        WindowLag18::new()
+            .partial_fit(&x, None, &session)
+            .expect("w18");
+        BrayCurtisAnomaly::new()
+            .partial_fit(&x, None, &session)
+            .expect("bcy");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
