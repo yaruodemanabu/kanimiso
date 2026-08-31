@@ -278295,6 +278295,1169 @@ impl FitUnsupervised for DiscreteTsp57Hmm {
     }
 }
 
+
+fn log_cos53(y: f64, loc: f64, scale: f64) -> f64 {
+    if !y.is_finite() || !loc.is_finite() || scale <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let u = (y - loc) / scale;
+    if u.abs() >= 1.0 {
+        return f64::NEG_INFINITY;
+    }
+    let c = (std::f64::consts::PI * u / 2.0).cos();
+    if c <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let c2 = c * c;
+    let c4 = c2 * c2;
+    let dens = (3285460280781189.0 * std::f64::consts::PI / (2251799813685248.0 * scale))
+        * c4
+        * c4
+        * c4
+        * c4
+        * c4
+        * c4
+        * c4
+        * c4
+        * c4
+        * c4
+        * c4
+        * c4
+        * c4
+        * c;
+    dens.max(1e-15).ln()
+}
+
+fn cos53_cdf(y: f64, loc: f64, scale: f64) -> f64 {
+    if !y.is_finite() || !loc.is_finite() || scale <= 0.0 {
+        return 0.0;
+    }
+    let u = (y - loc) / scale;
+    if u <= -1.0 {
+        return 0.0;
+    }
+    if u >= 1.0 {
+        return 1.0 - 1e-15;
+    }
+    let s = (std::f64::consts::PI * u / 2.0).sin();
+        let s2 = s * s;
+        let s3 = s * s2;
+        let s5 = s3 * s2;
+        let s7 = s5 * s2;
+        let s9 = s7 * s2;
+        let s11 = s9 * s2;
+        let s13 = s11 * s2;
+        let s15 = s13 * s2;
+        let s17 = s15 * s2;
+        let s19 = s17 * s2;
+        let s21 = s19 * s2;
+        let s23 = s21 * s2;
+        let s25 = s23 * s2;
+        let s27 = s25 * s2;
+        let s29 = s27 * s2;
+        let s31 = s29 * s2;
+        let s33 = s31 * s2;
+        let s35 = s33 * s2;
+        let s37 = s35 * s2;
+        let s39 = s37 * s2;
+        let s41 = s39 * s2;
+        let s43 = s41 * s2;
+        let s45 = s43 * s2;
+        let s47 = s45 * s2;
+        let s49 = s47 * s2;
+        let s51 = s49 * s2;
+        let s53 = s51 * s2;
+    (0.5 + (3285460280781189.0 / 1125899906842624.0) * s
+        - (14236994550051819.0 / 562949953421312.0) * s3
+        + (213554918250777285.0 / 1125899906842624.0) * s5
+        - (152539227321983775.0 / 140737488355328.0) * s7
+        + (2728757288759931975.0 / 562949953421312.0) * s9
+        - (4911763119767877555.0 / 281474976710656.0) * s11
+        + (29092750786317428595.0 / 562949953421312.0) * s13
+        - (18009798105815551035.0 / 140737488355328.0) * s15
+        + (301928968244554826175.0 / 1125899906842624.0) * s17
+        - (270146971587233265525.0 / 562949953421312.0) * s19
+        + (831023541168346140615.0 / 1125899906842624.0) * s21
+        - (68978238595001063055.0 / 70368744177664.0) * s23
+        + (317299897537004890053.0 / 281474976710656.0) * s25
+        - (158197954612466825525.0 / 140737488355328.0) * s27
+        + (273534394428452491425.0 / 281474976710656.0) * s29
+        - (51177402828549175815.0 / 70368744177664.0) * s31
+        + (528833162561674816755.0 / 1125899906842624.0) * s33
+        - (146651213147355201285.0 / 562949953421312.0) * s35
+        + (138724120544795460675.0 / 1125899906842624.0) * s37
+        - (6926845425313673475.0 / 140737488355328.0) * s39
+        + (9224530737125038335.0 / 562949953421312.0) * s41
+        - (1256497542266201235.0 / 281474976710656.0) * s43
+        + (545751457751986395.0 / 562949953421312.0) * s45
+        - (22718608324550775.0 / 140737488355328.0) * s47
+        + (21791318188854825.0 / 1125899906842624.0) * s49
+        - (837470267650107.0 / 562949953421312.0) * s51
+        + (61989816618513.0 / 1125899906842624.0) * s53)
+        .clamp(0.0, 1.0 - 1e-15)
+}
+
+fn log_unit_c53(y: f64, loc: f64, scale: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || y >= 1.0 || scale <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let u = y / (1.0 - y);
+    if !u.is_finite() || u < 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    log_cos53(u, loc, scale) - 2.0 * (1.0 - y).ln()
+}
+
+fn log_beta_c53(y: f64, loc: f64, scale: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || scale <= 0.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = cos53_cdf(y, loc, scale);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let surv = (1.0 - cdf).max(1e-15);
+    log_cos53(y, loc, scale) + (a - 1.0) * cdf.ln() + (b - 1.0) * surv.ln() - ln_beta(a, b)
+}
+
+fn log_exp_c53(y: f64, loc: f64, scale: f64, power: f64) -> f64 {
+    if !y.is_finite() || scale <= 0.0 || power <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = cos53_cdf(y, loc, scale);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    power.ln() + log_cos53(y, loc, scale) + (power - 1.0) * cdf.ln()
+}
+
+fn log_kuma_c53(y: f64, loc: f64, scale: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || scale <= 0.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = cos53_cdf(y, loc, scale);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let fa = cdf.powf(a);
+    let one_m = 1.0 - fa;
+    if one_m <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    a.ln()
+        + b.ln()
+        + log_cos53(y, loc, scale)
+        + (a - 1.0) * cdf.ln()
+        + (b - 1.0) * one_m.ln()
+}
+
+fn log_disc_c53(y: f64, loc: f64, scale: f64) -> f64 {
+    if !y.is_finite() || y < 1.0 || scale <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let kk = y.round().max(1.0);
+    let lo = cos53_cdf(kk, loc, scale);
+    let hi = cos53_cdf(kk + 1.0, loc, scale);
+    let p = (hi - lo).max(0.0);
+    if p <= 1e-18 {
+        f64::NEG_INFINITY
+    } else {
+        p.ln()
+    }
+}
+/// Unit cosine-fifty-third HMM ($f\propto\cos^{53}(\pi u/2)$ on the odds $y/(1-y)$, $|u|<1$).
+///
+/// Half-width is free and expanded to cover every odds value; location $\mu$ sits below the sample and is not identification `p`. Distinct from [`UnitCosine52Hmm`] ($\cos^{52}$) and [`UnitCosine51Hmm`] ($\cos^{51}$).
+#[derive(Clone, Debug)]
+pub struct UnitCosine53Hmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for UnitCosine53Hmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl UnitCosine53Hmm {
+    /// `k`-state UnitCosine53Hmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitCosine53Hmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted UnitCosine53Hmm.
+#[derive(Clone, Debug)]
+pub struct FittedUnitCosine53Hmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free half-width expanded to cover every observation.
+    pub scale: Vector,
+    /// Pinned locations below the sample (not identification `p`).
+    pub loc: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedUnitCosine53Hmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_unit_c53(y, self.loc[j], self.scale[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedUnitCosine53Hmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for UnitCosine53Hmm {
+    type Fitted = FittedUnitCosine53Hmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitCosine53Hmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let loc = Vector::from_iter((0..k).map(|j| -0.20 - 0.05 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y <= 0.0 || y >= 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "UnitCosine53Hmm skipped {n_skip} observations outside (0,1)"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedUnitCosine53Hmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 5.00),
+                loc,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 5.00 + 0.40 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedUnitCosine53Hmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut mx = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 || y >= 1.0 {
+                        continue;
+                    }
+                    let z = y / (1.0 - y);
+                    if !z.is_finite() || z <= 0.0 {
+                        continue;
+                    }
+                    wsum += fb.gamma[t][j];
+                    mx = mx.max((z - loc[j]).abs());
+                }
+                if wsum > 1e-12 {
+                    scale[j] = (mx * 1.40 + 2.50).clamp(0.80, 40.00);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedUnitCosine53Hmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedUnitCosine53Hmm {
+            labels,
+            start,
+            trans,
+            scale,
+            loc,
+            loglik,
+        })
+    }
+}
+
+/// Beta–cosine-fifty-third HMM ($f F^{a-1}(1-F)^{b-1}/B(a,b)$, $a,b\neq 1$, $K\propto\cos^{53}$).
+///
+/// Half-width is free and expanded to cover every observation; location $\mu$ sits below the sample and is not identification `p`. Distinct from [`KumaraswamyCosine53Hmm`] and [`BetaCosine52Hmm`].
+#[derive(Clone, Debug)]
+pub struct BetaCosine53Hmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for BetaCosine53Hmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl BetaCosine53Hmm {
+    /// `k`-state BetaCosine53Hmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaCosine53Hmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted BetaCosine53Hmm.
+#[derive(Clone, Debug)]
+pub struct FittedBetaCosine53Hmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free half-width expanded to cover every observation.
+    pub scale: Vector,
+    /// Pinned locations below the sample (not identification `p`).
+    pub loc: Vector,
+    /// First extra shapes $a_j\neq 1$.
+    pub a: Vector,
+    /// Second extra shapes $b_j\neq 1$.
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedBetaCosine53Hmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_beta_c53(y, self.loc[j], self.scale[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedBetaCosine53Hmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for BetaCosine53Hmm {
+    type Fitted = FittedBetaCosine53Hmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaCosine53Hmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let loc = Vector::from_iter((0..k).map(|j| 1.40 + 0.15 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.35 + 0.25 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 1.55 + 0.20 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y < 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "BetaCosine53Hmm skipped {n_skip} negative observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedBetaCosine53Hmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 10.00),
+                loc,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 10.00 + 0.80 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedBetaCosine53Hmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut mx = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    wsum += fb.gamma[t][j];
+                    mx = mx.max((z - loc[j]).abs());
+                }
+                if wsum > 1e-12 {
+                    scale[j] = (mx * 1.40 + 2.50).clamp(2.00, 40.00);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedBetaCosine53Hmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedBetaCosine53Hmm {
+            labels,
+            start,
+            trans,
+            scale,
+            loc,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Exponentiated cosine-fifty-third HMM ($a f F^{a-1}$, $a\neq 1$, $K\propto\cos^{53}$).
+///
+/// Half-width is free and expanded to cover every observation; location $\mu$ sits below the sample and is not identification `p`. Distinct from [`ExponentiatedCosine52Hmm`].
+#[derive(Clone, Debug)]
+pub struct ExponentiatedCosine53Hmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for ExponentiatedCosine53Hmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl ExponentiatedCosine53Hmm {
+    /// `k`-state ExponentiatedCosine53Hmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedCosine53Hmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted ExponentiatedCosine53Hmm.
+#[derive(Clone, Debug)]
+pub struct FittedExponentiatedCosine53Hmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free half-width expanded to cover every observation.
+    pub scale: Vector,
+    /// Pinned locations below the sample (not identification `p`).
+    pub loc: Vector,
+    /// Extra CDF powers $a_j\neq 1$.
+    pub power: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedExponentiatedCosine53Hmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_exp_c53(y, self.loc[j], self.scale[j], self.power[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedExponentiatedCosine53Hmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for ExponentiatedCosine53Hmm {
+    type Fitted = FittedExponentiatedCosine53Hmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedCosine53Hmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let loc = Vector::from_iter((0..k).map(|j| 1.40 + 0.15 * j as f64));
+        let power = Vector::from_iter((0..k).map(|j| 1.45 + 0.30 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y < 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "ExponentiatedCosine53Hmm skipped {n_skip} negative observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedExponentiatedCosine53Hmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 10.00),
+                loc,
+                power,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 10.00 + 0.80 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedExponentiatedCosine53Hmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                power: power.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut mx = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    wsum += fb.gamma[t][j];
+                    mx = mx.max((z - loc[j]).abs());
+                }
+                if wsum > 1e-12 {
+                    scale[j] = (mx * 1.40 + 2.50).clamp(2.00, 40.00);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedExponentiatedCosine53Hmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                power: power.clone(),
+                loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedExponentiatedCosine53Hmm {
+            labels,
+            start,
+            trans,
+            scale,
+            loc,
+            power,
+            loglik,
+        })
+    }
+}
+
+/// Kumaraswamy–cosine-fifty-third HMM ($ab f F^{a-1}(1-F^a)^{b-1}$, $a,b\neq 1$, $K\propto\cos^{53}$).
+///
+/// Half-width is free and expanded to cover every observation; location $\mu$ sits below the sample and is not identification `p`. Distinct from [`KumaraswamyCosine52Hmm`].
+#[derive(Clone, Debug)]
+pub struct KumaraswamyCosine53Hmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for KumaraswamyCosine53Hmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl KumaraswamyCosine53Hmm {
+    /// `k`-state KumaraswamyCosine53Hmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyCosine53Hmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted KumaraswamyCosine53Hmm.
+#[derive(Clone, Debug)]
+pub struct FittedKumaraswamyCosine53Hmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free half-width expanded to cover every observation.
+    pub scale: Vector,
+    /// Pinned locations below the sample (not identification `p`).
+    pub loc: Vector,
+    /// First extra shapes $a_j\neq 1$.
+    pub a: Vector,
+    /// Second extra shapes $b_j\neq 1$.
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedKumaraswamyCosine53Hmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_kuma_c53(y, self.loc[j], self.scale[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedKumaraswamyCosine53Hmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for KumaraswamyCosine53Hmm {
+    type Fitted = FittedKumaraswamyCosine53Hmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyCosine53Hmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let loc = Vector::from_iter((0..k).map(|j| 1.40 + 0.15 * j as f64));
+        let a = Vector::from_iter((0..k).map(|j| 1.35 + 0.25 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 1.55 + 0.20 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y < 0.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "KumaraswamyCosine53Hmm skipped {n_skip} negative observations"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedKumaraswamyCosine53Hmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 10.00),
+                loc,
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 10.00 + 0.80 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedKumaraswamyCosine53Hmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut mx = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    let z = y;
+                    wsum += fb.gamma[t][j];
+                    mx = mx.max((z - loc[j]).abs());
+                }
+                if wsum > 1e-12 {
+                    scale[j] = (mx * 1.40 + 2.50).clamp(2.00, 40.00);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedKumaraswamyCosine53Hmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedKumaraswamyCosine53Hmm {
+            labels,
+            start,
+            trans,
+            scale,
+            loc,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Discrete cosine-fifty-third HMM ($P=F(k+1)-F(k)$ on $\{1,2,\ldots\}$, $K\propto\cos^{53}$).
+///
+/// Half-width is free and expanded to cover every count; location $\mu$ sits below every count and is not identification `p`. Distinct from [`DiscreteCosine52Hmm`].
+#[derive(Clone, Debug)]
+pub struct DiscreteCosine53Hmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for DiscreteCosine53Hmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl DiscreteCosine53Hmm {
+    /// `k`-state DiscreteCosine53Hmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteCosine53Hmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted DiscreteCosine53Hmm.
+#[derive(Clone, Debug)]
+pub struct FittedDiscreteCosine53Hmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Free half-width expanded to cover every observation.
+    pub scale: Vector,
+    /// Pinned locations below the sample (not identification `p`).
+    pub loc: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedDiscreteCosine53Hmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_disc_c53(y, self.loc[j], self.scale[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedDiscreteCosine53Hmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for DiscreteCosine53Hmm {
+    type Fitted = FittedDiscreteCosine53Hmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteCosine53Hmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let loc = Vector::from_iter((0..k).map(|j| 0.15 + 0.05 * j as f64));
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && (y < 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "DiscreteCosine53Hmm skipped {n_skip} observations below 1"
+                    ))
+                    .build(),
+            );
+        }
+        if t_len == 0 {
+            return ctx.finish(FittedDiscreteCosine53Hmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                scale: Vector::filled(k, 16.00),
+                loc,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 16.00 + 0.60 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedDiscreteCosine53Hmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut wsum = 0.0_f64;
+                let mut mx = 0.0_f64;
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y < 1.0 {
+                        continue;
+                    }
+                    let z = y + 1.0;
+                    wsum += fb.gamma[t][j];
+                    mx = mx.max((z - loc[j]).abs());
+                }
+                if wsum > 1e-12 {
+                    scale[j] = (mx * 1.40 + 2.50).clamp(12.00, 40.00);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedDiscreteCosine53Hmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                scale: scale.clone(),
+                loc: loc.clone(),
+                loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedDiscreteCosine53Hmm {
+            labels,
+            start,
+            trans,
+            scale,
+            loc,
+            loglik,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283394,6 +284557,26 @@ mod tests {
             .expect("ks57");
         assert_eq!(ks57.value.labels.len(), 80);
         assert!(ks57.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let uc53 = UnitCosine53Hmm::new(2)
+            .fit(&betx, &Session::new("uc53", "fit"))
+            .expect("uc53");
+        assert_eq!(uc53.value.labels.len(), 80);
+        assert!(uc53.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let bc53 = BetaCosine53Hmm::new(2)
+            .fit(&xpos, &Session::new("bc53", "fit"))
+            .expect("bc53");
+        assert_eq!(bc53.value.labels.len(), 80);
+        assert!(bc53.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let ec53 = ExponentiatedCosine53Hmm::new(2)
+            .fit(&xpos, &Session::new("ec53", "fit"))
+            .expect("ec53");
+        assert_eq!(ec53.value.labels.len(), 80);
+        assert!(ec53.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let kc53 = KumaraswamyCosine53Hmm::new(2)
+            .fit(&xpos, &Session::new("kc53", "fit"))
+            .expect("kc53");
+        assert_eq!(kc53.value.labels.len(), 80);
+        assert!(kc53.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
@@ -284815,6 +285998,11 @@ mod tests {
             .expect("ds57");
         assert_eq!(ds57.value.labels.len(), 40);
         assert!(ds57.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let dc53 = DiscreteCosine53Hmm::new(2)
+            .fit(&x, &Session::new("dc53", "fit"))
+            .expect("dc53");
+        assert_eq!(dc53.value.labels.len(), 40);
+        assert!(dc53.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
     }
 
     #[test]
