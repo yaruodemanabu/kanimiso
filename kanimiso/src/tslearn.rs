@@ -498,6 +498,62 @@ pub fn edr(a: &Vector, b: &Vector, eps: f64, session: &Session) -> Result<Qualif
     ctx.finish(edr_raw(a.as_slice(), b.as_slice(), eps))
 }
 
+/// Amerced DTW (Herrmann & Webb; tslearn `adtw`).
+///
+/// Off-diagonal steps pay an extra warp penalty `ω` on top of the local
+/// absolute cost. Distinct from [`dtw`] (`ω = 0`) and [`wdtw`] (logistic
+/// multiplicative weights). `ω` is not identification `p`.
+pub fn adtw(a: &Vector, b: &Vector, omega: f64, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("adtw.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("adtw.b") {
+        ctx.push(issue);
+    }
+    let omega = if omega.is_finite() && omega >= 0.0 {
+        omega
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("adtw ω={omega} is not a finite ≥0 warp penalty; using 0"))
+                .build(),
+        );
+        0.0
+    };
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("adtw on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(adtw_raw(a.as_slice(), b.as_slice(), omega))
+}
+
+fn adtw_raw(a: &[f64], b: &[f64], omega: f64) -> f64 {
+    let n = a.len();
+    let m = b.len();
+    let inf = 1e300_f64;
+    let mut prev = vec![inf; m];
+    let mut cur = vec![inf; m];
+    prev[0] = (a[0] - b[0]).abs();
+    for j in 1..m {
+        prev[j] = prev[j - 1] + (a[0] - b[j]).abs() + omega;
+    }
+    for i in 1..n {
+        cur[0] = prev[0] + (a[i] - b[0]).abs() + omega;
+        for j in 1..m {
+            let c = (a[i] - b[j]).abs();
+            cur[j] = c + prev[j - 1].min(prev[j] + omega).min(cur[j - 1] + omega);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[m - 1]
+}
+
 fn edr_raw(a: &[f64], b: &[f64], eps: f64) -> f64 {
     let n = a.len();
     let m = b.len();
@@ -18814,6 +18870,8 @@ mod tests {
         assert!(hd.abs() < 1e-12, "hausdorff={hd}");
         let erd = edr(&a, &a, 0.1, &Session::new("ts", "edr")).unwrap().value;
         assert!(erd.abs() < 1e-12, "edr={erd}");
+        let ad = adtw(&a, &a, 0.1, &Session::new("ts", "adtw")).unwrap().value;
+        assert!(ad.abs() < 1e-12, "adtw={ad}");
     }
 
     #[test]

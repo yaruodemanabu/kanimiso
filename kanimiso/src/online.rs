@@ -43250,6 +43250,411 @@ impl Predict for DwmClassifier {
     }
 }
 
+/// Streaming natural-gradient ICA (Amari; online Infomax).
+///
+/// Distinct from [`crate::decompose::FastIca`] (batch fixed-point Newton) and
+/// [`OnlinePca`] (second-order Oja axes). Component count is not identification
+/// `p` on a 1-row stream.
+#[derive(Clone, Debug)]
+pub struct OnlineIca {
+    /// Independent components. Not identification `p` for a streaming update.
+    pub n_components: usize,
+    /// Base natural-gradient step.
+    pub learning_rate: f64,
+    mean: Vector,
+    unmix: Vec<Vector>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineIca {
+    fn default() -> Self {
+        Self {
+            n_components: 1,
+            learning_rate: 0.05,
+            mean: Vector::zeros(0),
+            unmix: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineIca {
+    /// Track `n_components` independent directions.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components: n_components.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineIca {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        let k = self.n_components.max(1).min(p);
+        if !self.initialized {
+            self.mean = Vector::zeros(p);
+            self.unmix = (0..k)
+                .map(|c| {
+                    let mut w = Vector::zeros(p);
+                    w[c % p] = 1.0;
+                    w
+                })
+                .collect();
+            self.initialized = true;
+        } else if self.mean.len() != p {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self
+            .unmix
+            .as_slice()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Vector::zeros(p));
+        let lr0 = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            0.05
+        };
+        for i in 0..x.nrows() {
+            self.n_seen += 1;
+            let n = self.n_seen as f64;
+            for j in 0..p {
+                self.mean[j] += (x.get(i, j) - self.mean[j]) / n;
+            }
+            let xc = Vector::from_iter((0..p).map(|j| x.get(i, j) - self.mean[j]));
+            let y = Vector::from_iter(self.unmix.iter().map(|w| w.dot(&xc)));
+            let g = Vector::from_iter((0..y.len()).map(|c| y[c].tanh()));
+            let lr = lr0 / n.sqrt();
+            let kk = self.unmix.len();
+            let mut gy = vec![vec![0.0_f64; kk]; kk];
+            for a in 0..kk {
+                for b in 0..kk {
+                    gy[a][b] = g[a] * y[b];
+                }
+            }
+            let mut new_w = self.unmix.clone();
+            for a in 0..kk {
+                for j in 0..p {
+                    let mut acc = 0.0_f64;
+                    for b in 0..kk {
+                        let igr = if a == b { 1.0 } else { 0.0 };
+                        acc += (igr - gy[a][b]) * self.unmix[b][j];
+                    }
+                    new_w[a][j] += lr * acc;
+                }
+            }
+            for a in 0..kk {
+                for prev in 0..a {
+                    let proj = new_w[a].dot(&new_w[prev]);
+                    for j in 0..p {
+                        new_w[a][j] -= proj * new_w[prev][j];
+                    }
+                }
+                let nrm = new_w[a].norm();
+                if nrm > 1e-12 {
+                    for j in 0..p {
+                        new_w[a][j] /= nrm;
+                    }
+                }
+            }
+            self.unmix = new_w;
+        }
+        self.updates += 1;
+        let after = self
+            .unmix
+            .as_slice()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Vector::zeros(p));
+        let delta = after.sub(&before);
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta.norm());
+        q.information_gain = Some(delta.norm().max(x.nrows() as f64));
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < (p as u64).saturating_add(2);
+        q.explanation = format!(
+            "OnlineIca Amari-updated {k} unmixing rows on {} rows; ||Δw0||={:.6e}",
+            x.nrows(),
+            delta.norm()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Amari unmixing",
+                "streaming natural-gradient ICA; distinct from batch FastICA",
+                "previous W",
+                "updated W",
+            ),
+        )
+    }
+}
+
+impl Transform for OnlineIca {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), self.n_components.max(1)));
+        }
+        let k = self.unmix.len();
+        let p = self.mean.len();
+        ctx.finish(Matrix::from_fn(x.nrows(), k, |i, c| {
+            let mut s = 0.0_f64;
+            for j in 0..x.ncols().min(p) {
+                s += self.unmix[c][j] * (x.get(i, j) - self.mean[j]);
+            }
+            s
+        }))
+    }
+}
+
+/// One Learn++.NSE linear expert.
+#[derive(Clone, Debug)]
+struct NseExpert {
+    coef: Vector,
+    intercept: f64,
+    err: f64,
+}
+
+impl NseExpert {
+    fn new(p: usize) -> Self {
+        Self {
+            coef: Vector::zeros(p),
+            intercept: 0.0,
+            err: 0.5,
+        }
+    }
+
+    fn score_pm(&self, x: &Matrix, i: usize) -> f64 {
+        let mut s = self.intercept;
+        for j in 0..x.ncols().min(self.coef.len()) {
+            s += self.coef[j] * x.get(i, j);
+        }
+        if s >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        }
+    }
+
+    fn update(&mut self, x: &Matrix, i: usize, ys: f64) {
+        if self.coef.len() != x.ncols() {
+            let err = self.err;
+            *self = Self::new(x.ncols());
+            self.err = err;
+        }
+        let mut s = self.intercept;
+        for j in 0..x.ncols() {
+            s += self.coef[j] * x.get(i, j);
+        }
+        if ys * s <= 0.0 {
+            for j in 0..x.ncols() {
+                self.coef[j] += ys * x.get(i, j);
+            }
+            self.intercept += ys;
+        }
+    }
+}
+
+/// Learn++.NSE classifier (Ditzler & Polikar; river `ensemble.LearnNseClassifier`).
+///
+/// Experts are born when the ensemble is wrong; weights are sigmoid functions
+/// of an EMA error (no death). Distinct from [`DwmClassifier`] (multiplicative
+/// decay and removal) and [`BoleClassifier`] (fixed pool). `β` is not
+/// identification `p`.
+#[derive(Clone, Debug)]
+pub struct LearnNseClassifier {
+    /// Sigmoid slope on the error.
+    pub beta: f64,
+    /// Cap on the expert pool. Not identification `p`.
+    pub max_experts: usize,
+    experts: Vec<NseExpert>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for LearnNseClassifier {
+    fn default() -> Self {
+        Self {
+            beta: 1.0,
+            max_experts: 8,
+            experts: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl LearnNseClassifier {
+    /// Learn++.NSE with sigmoid slope `beta`.
+    pub fn new(beta: f64) -> Self {
+        Self {
+            beta,
+            ..Self::default()
+        }
+    }
+
+    fn vote_pm(&self, x: &Matrix, i: usize) -> f64 {
+        let beta = if self.beta.is_finite() && self.beta > 0.0 {
+            self.beta
+        } else {
+            1.0
+        };
+        let mut acc = 0.0_f64;
+        let mut wsum = 0.0_f64;
+        for e in &self.experts {
+            let w = 1.0 / (1.0 + (beta * (2.0 * e.err - 1.0)).exp());
+            acc += w * e.score_pm(x, i);
+            wsum += w;
+        }
+        if wsum <= 0.0 {
+            0.0
+        } else if acc >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        }
+    }
+}
+
+impl PartialFit for LearnNseClassifier {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        let Some(y) = y else {
+            ctx.push(Issue::builder(IssueCode::MissingTarget).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "LearnNSE needs a target"),
+            );
+        };
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        if self.initialized {
+            if self
+                .experts
+                .as_slice()
+                .first()
+                .map(|e| e.coef.len())
+                != Some(x.ncols())
+            {
+                ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+                return finish_explain(
+                    ctx,
+                    reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+                );
+            }
+        } else {
+            self.experts.push(NseExpert::new(x.ncols()));
+            self.initialized = true;
+        }
+        let cap = self.max_experts.max(1);
+        let mut births = 0u64;
+        let mut mistakes = 0u64;
+        let n_rows = x.nrows().min(y.len());
+        for i in 0..n_rows {
+            if !y[i].is_finite() {
+                continue;
+            }
+            let ys = as_pm(y[i]);
+            let vote = self.vote_pm(x, i);
+            if vote != ys {
+                mistakes += 1;
+                if self.experts.len() < cap {
+                    self.experts.push(NseExpert::new(x.ncols()));
+                    births += 1;
+                }
+            }
+            for e in self.experts.iter_mut() {
+                let wrong = e.score_pm(x, i) != ys;
+                e.err = 0.9 * e.err + 0.1 * if wrong { 1.0 } else { 0.0 };
+                e.update(x, i, ys);
+            }
+        }
+        self.n_seen += n_rows as u64;
+        self.updates += 1;
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), n_rows, self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(births as f64 + mistakes as f64);
+        q.information_gain = Some((mistakes + births) as f64);
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < 4;
+        q.explanation = format!(
+            "LearnNSE {mistakes} ensemble mistakes, {births} births, {} experts remain",
+            self.experts.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "Learn++.NSE pool",
+                "sigmoid-weighted experts born on ensemble error; no death",
+                "previous expert errors",
+                "updated expert errors",
+            ),
+        )
+    }
+}
+
+impl Predict for LearnNseClassifier {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
+            if self.vote_pm(x, i) >= 0.0 {
+                1.0
+            } else {
+                0.0
+            }
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44015,6 +44420,12 @@ mod tests {
         DwmClassifier::new(0.5)
             .partial_fit(&x, Some(&yb), &session)
             .expect("dwm");
+        OnlineIca::new(1)
+            .partial_fit(&x, None, &session)
+            .expect("oica");
+        LearnNseClassifier::new(1.0)
+            .partial_fit(&x, Some(&yb), &session)
+            .expect("nse");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
