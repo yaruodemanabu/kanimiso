@@ -72893,6 +72893,1173 @@ impl FitUnsupervised for DiscreteBirnbaumSaundersHmm {
     }
 }
 
+
+fn log_inv_moyal(y: f64, loc: f64, scale: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    log_moyal(1.0 / y, loc, scale) - 2.0 * y.ln()
+}
+
+fn inv_moyal_cdf(y: f64, loc: f64, scale: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 {
+        return 0.0;
+    }
+    (1.0 - moyal_cdf(1.0 / y, loc, scale)).clamp(0.0, 1.0 - 1e-15)
+}
+
+fn log_unit_inv_moyal(y: f64, loc: f64, scale: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || y >= 1.0 || scale <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    log_inv_moyal(y / (1.0 - y), loc, scale) - 2.0 * (1.0 - y).ln()
+}
+
+fn log_beta_inv_moyal(y: f64, loc: f64, scale: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = inv_moyal_cdf(y, loc, scale);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let surv = (1.0 - cdf).max(1e-15);
+    log_inv_moyal(y, loc, scale) + (a - 1.0) * cdf.ln() + (b - 1.0) * surv.ln() - ln_beta(a, b)
+}
+
+fn log_exp_inv_moyal(y: f64, loc: f64, scale: f64, alpha: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || alpha <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = inv_moyal_cdf(y, loc, scale);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    alpha.ln() + log_inv_moyal(y, loc, scale) + (alpha - 1.0) * cdf.ln()
+}
+
+fn log_kuma_inv_moyal(y: f64, loc: f64, scale: f64, a: f64, b: f64) -> f64 {
+    if !y.is_finite() || y <= 0.0 || scale <= 0.0 || a <= 0.0 || b <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let cdf = inv_moyal_cdf(y, loc, scale);
+    if cdf <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    let fa = cdf.powf(a);
+    let one_m = 1.0 - fa;
+    if one_m <= 1e-15 {
+        return f64::NEG_INFINITY;
+    }
+    a.ln() + b.ln() + log_inv_moyal(y, loc, scale) + (a - 1.0) * cdf.ln() + (b - 1.0) * one_m.ln()
+}
+
+fn log_disc_inv_moyal(y: f64, loc: f64, scale: f64) -> f64 {
+    if !y.is_finite() || y < 1.0 || scale <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let kk = y.round().max(1.0);
+    let p = (inv_moyal_cdf(kk + 1.0, loc, scale) - inv_moyal_cdf(kk, loc, scale)).max(0.0);
+    if p <= 1e-18 {
+        f64::NEG_INFINITY
+    } else {
+        p.ln()
+    }
+}
+
+/// Unit inverse-Moyal HMM on \((0,1)\) (inverse-Moyal on \(u=x/(1-x)\)).
+///
+/// \(X=1/U\sim\mathrm{Moyal}(\mu,\sigma)\) with \(\mu\) pinned below every
+/// reciprocal. Scale from the reciprocal median. Distinct from [`UnitMoyalHmm`]
+/// and [`UnitInverseLevyHmm`].
+#[derive(Clone, Debug)]
+pub struct UnitInverseMoyalHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for UnitInverseMoyalHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl UnitInverseMoyalHmm {
+    /// `k`-state UnitInverseMoyalHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitInverseMoyalHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted UnitInverseMoyalHmm.
+#[derive(Clone, Debug)]
+pub struct FittedUnitInverseMoyalHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Moyal locations on the reciprocal (pinned below every \(1/y\)).
+    pub loc: Vector,
+    /// Scales from the reciprocal Moyal median.
+    pub scale: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedUnitInverseMoyalHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_unit_inv_moyal(y, self.loc[j], self.scale[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedUnitInverseMoyalHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for UnitInverseMoyalHmm {
+    type Fitted = FittedUnitInverseMoyalHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedUnitInverseMoyalHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let mut ymin = f64::INFINITY;
+        let mut ymax = f64::NEG_INFINITY;
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && y > 0.0 && y < 1.0 {
+                let r = (1.0 - y) / y;
+                if r < ymin {
+                    ymin = r;
+                }
+                if r > ymax {
+                    ymax = r;
+                }
+            }
+            if y.is_finite() && (y <= 0.0 || y >= 1.0) {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "UnitInverseMoyalHmm skipped {n_skip} observations outside (0,1)"
+                    ))
+                    .build(),
+            );
+        }
+        let span = if ymin.is_finite() {
+            (ymax - ymin).max(0.1)
+        } else {
+            1.0
+        };
+        let loc = Vector::from_iter((0..k).map(|j| {
+            if ymin.is_finite() {
+                ymin - 0.15 * span - 0.05 * j as f64
+            } else {
+                -0.2 - 0.05 * j as f64
+            }
+        }));
+        if t_len == 0 {
+            return ctx.finish(FittedUnitInverseMoyalHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                loc,
+                scale: Vector::filled(k, 0.3),
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.2 + 0.15 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedUnitInverseMoyalHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                loc: loc.clone(),
+                scale: scale.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut pairs = Vec::with_capacity(t_len);
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 || y >= 1.0 {
+                        continue;
+                    }
+                    pairs.push(((1.0 - y) / y, fb.gamma[t][j]));
+                }
+                if let Some(med) = weighted_pos_median(&pairs) {
+                    scale[j] = moyal_scale_from_median(med, loc[j], 0.02, 8.0);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedUnitInverseMoyalHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            loc: loc.clone(),
+            scale: scale.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedUnitInverseMoyalHmm {
+            labels,
+            start,
+            trans,
+            loc,
+            scale,
+            loglik,
+        })
+    }
+}
+
+/// Beta–inverse-Moyal HMM (\(f F^{a-1}(1-F)^{b-1}/B(a,b)\), \(a,b\neq 1\)).
+///
+/// Shapes are hyperparameters, not identification `p`. Loc stays below
+/// every \(1/y\). Distinct from [`KumaraswamyInverseMoyalHmm`] and
+/// [`BetaMoyalHmm`].
+#[derive(Clone, Debug)]
+pub struct BetaInverseMoyalHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for BetaInverseMoyalHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl BetaInverseMoyalHmm {
+    /// `k`-state BetaInverseMoyalHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaInverseMoyalHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted BetaInverseMoyalHmm.
+#[derive(Clone, Debug)]
+pub struct FittedBetaInverseMoyalHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Moyal locations on the reciprocal (pinned below every \(1/y\)).
+    pub loc: Vector,
+    /// Scales from the reciprocal Moyal median.
+    pub scale: Vector,
+    /// First extra shapes \(a_j\neq 1\).
+    pub a: Vector,
+    /// Second extra shapes \(b_j\neq 1\).
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedBetaInverseMoyalHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_beta_inv_moyal(y, self.loc[j], self.scale[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedBetaInverseMoyalHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for BetaInverseMoyalHmm {
+    type Fitted = FittedBetaInverseMoyalHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBetaInverseMoyalHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let a = Vector::from_iter((0..k).map(|j| 1.5 + 0.3 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 2.2 + 0.4 * j as f64));
+        let mut ymin = f64::INFINITY;
+        let mut ymax = f64::NEG_INFINITY;
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && y > 0.0 {
+                let r = 1.0 / y;
+                if r < ymin {
+                    ymin = r;
+                }
+                if r > ymax {
+                    ymax = r;
+                }
+            }
+            if y.is_finite() && y <= 0.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "BetaInverseMoyalHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        let span = if ymin.is_finite() {
+            (ymax - ymin).max(0.1)
+        } else {
+            1.0
+        };
+        let loc = Vector::from_iter((0..k).map(|j| {
+            if ymin.is_finite() {
+                ymin - 0.15 * span - 0.05 * j as f64
+            } else {
+                -0.2 - 0.05 * j as f64
+            }
+        }));
+        if t_len == 0 {
+            return ctx.finish(FittedBetaInverseMoyalHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                loc,
+                scale: Vector::filled(k, 0.1),
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.08 + 0.04 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedBetaInverseMoyalHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                loc: loc.clone(),
+                scale: scale.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut pairs = Vec::with_capacity(t_len);
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    pairs.push((1.0 / y, fb.gamma[t][j]));
+                }
+                if let Some(med) = weighted_pos_median(&pairs) {
+                    scale[j] = moyal_scale_from_median(med, loc[j], 0.02, 0.8);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedBetaInverseMoyalHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            loc: loc.clone(),
+            scale: scale.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedBetaInverseMoyalHmm {
+            labels,
+            start,
+            trans,
+            loc,
+            scale,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Exponentiated inverse-Moyal HMM (\(F^\alpha\), \(\alpha\neq 1\)).
+///
+/// Power is a hyperparameter, not identification `p`. Loc stays below
+/// every \(1/y\). Distinct from [`KumaraswamyInverseMoyalHmm`] and
+/// [`ExponentiatedMoyalHmm`].
+#[derive(Clone, Debug)]
+pub struct ExponentiatedInverseMoyalHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for ExponentiatedInverseMoyalHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl ExponentiatedInverseMoyalHmm {
+    /// `k`-state ExponentiatedInverseMoyalHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedInverseMoyalHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted ExponentiatedInverseMoyalHmm.
+#[derive(Clone, Debug)]
+pub struct FittedExponentiatedInverseMoyalHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Moyal locations on the reciprocal (pinned below every \(1/y\)).
+    pub loc: Vector,
+    /// Scales from the reciprocal Moyal median.
+    pub scale: Vector,
+    /// Powers \(\alpha_j\neq 1\).
+    pub alpha: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedExponentiatedInverseMoyalHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_exp_inv_moyal(y, self.loc[j], self.scale[j], self.alpha[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedExponentiatedInverseMoyalHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for ExponentiatedInverseMoyalHmm {
+    type Fitted = FittedExponentiatedInverseMoyalHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedExponentiatedInverseMoyalHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let alpha = Vector::from_iter((0..k).map(|j| 1.6 + 0.5 * j as f64));
+        let mut ymin = f64::INFINITY;
+        let mut ymax = f64::NEG_INFINITY;
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && y > 0.0 {
+                let r = 1.0 / y;
+                if r < ymin {
+                    ymin = r;
+                }
+                if r > ymax {
+                    ymax = r;
+                }
+            }
+            if y.is_finite() && y <= 0.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "ExponentiatedInverseMoyalHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        let span = if ymin.is_finite() {
+            (ymax - ymin).max(0.1)
+        } else {
+            1.0
+        };
+        let loc = Vector::from_iter((0..k).map(|j| {
+            if ymin.is_finite() {
+                ymin - 0.15 * span - 0.05 * j as f64
+            } else {
+                -0.2 - 0.05 * j as f64
+            }
+        }));
+        if t_len == 0 {
+            return ctx.finish(FittedExponentiatedInverseMoyalHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                loc,
+                scale: Vector::filled(k, 0.1),
+                alpha,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.08 + 0.04 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedExponentiatedInverseMoyalHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                loc: loc.clone(),
+                scale: scale.clone(),
+                alpha: alpha.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut pairs = Vec::with_capacity(t_len);
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    pairs.push((1.0 / y, fb.gamma[t][j]));
+                }
+                if let Some(med) = weighted_pos_median(&pairs) {
+                    scale[j] = moyal_scale_from_median(med, loc[j], 0.02, 0.8);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedExponentiatedInverseMoyalHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            loc: loc.clone(),
+            scale: scale.clone(),
+                alpha: alpha.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedExponentiatedInverseMoyalHmm {
+            labels,
+            start,
+            trans,
+            loc,
+            scale,
+            alpha,
+            loglik,
+        })
+    }
+}
+
+/// Kumaraswamy–inverse-Moyal HMM (\(ab\,f F^{a-1}(1-F^a)^{b-1}\), \(a,b\neq 1\)).
+///
+/// Shapes are hyperparameters, not identification `p`. Distinct from
+/// [`BetaInverseMoyalHmm`] and [`KumaraswamyMoyalHmm`].
+#[derive(Clone, Debug)]
+pub struct KumaraswamyInverseMoyalHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for KumaraswamyInverseMoyalHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl KumaraswamyInverseMoyalHmm {
+    /// `k`-state KumaraswamyInverseMoyalHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyInverseMoyalHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted KumaraswamyInverseMoyalHmm.
+#[derive(Clone, Debug)]
+pub struct FittedKumaraswamyInverseMoyalHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Moyal locations on the reciprocal (pinned below every \(1/y\)).
+    pub loc: Vector,
+    /// Scales from the reciprocal Moyal median.
+    pub scale: Vector,
+    /// First extra shapes \(a_j\neq 1\).
+    pub a: Vector,
+    /// Second extra shapes \(b_j\neq 1\).
+    pub b: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedKumaraswamyInverseMoyalHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_kuma_inv_moyal(y, self.loc[j], self.scale[j], self.a[j], self.b[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedKumaraswamyInverseMoyalHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for KumaraswamyInverseMoyalHmm {
+    type Fitted = FittedKumaraswamyInverseMoyalHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKumaraswamyInverseMoyalHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let a = Vector::from_iter((0..k).map(|j| 1.5 + 0.3 * j as f64));
+        let b = Vector::from_iter((0..k).map(|j| 2.2 + 0.4 * j as f64));
+        let mut ymin = f64::INFINITY;
+        let mut ymax = f64::NEG_INFINITY;
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && y > 0.0 {
+                let r = 1.0 / y;
+                if r < ymin {
+                    ymin = r;
+                }
+                if r > ymax {
+                    ymax = r;
+                }
+            }
+            if y.is_finite() && y <= 0.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "KumaraswamyInverseMoyalHmm skipped {n_skip} non-positive observations"
+                    ))
+                    .build(),
+            );
+        }
+        let span = if ymin.is_finite() {
+            (ymax - ymin).max(0.1)
+        } else {
+            1.0
+        };
+        let loc = Vector::from_iter((0..k).map(|j| {
+            if ymin.is_finite() {
+                ymin - 0.15 * span - 0.05 * j as f64
+            } else {
+                -0.2 - 0.05 * j as f64
+            }
+        }));
+        if t_len == 0 {
+            return ctx.finish(FittedKumaraswamyInverseMoyalHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                loc,
+                scale: Vector::filled(k, 0.1),
+                a,
+                b,
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.08 + 0.04 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedKumaraswamyInverseMoyalHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                loc: loc.clone(),
+                scale: scale.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut pairs = Vec::with_capacity(t_len);
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y <= 0.0 {
+                        continue;
+                    }
+                    pairs.push((1.0 / y, fb.gamma[t][j]));
+                }
+                if let Some(med) = weighted_pos_median(&pairs) {
+                    scale[j] = moyal_scale_from_median(med, loc[j], 0.02, 0.8);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedKumaraswamyInverseMoyalHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            loc: loc.clone(),
+            scale: scale.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedKumaraswamyInverseMoyalHmm {
+            labels,
+            start,
+            trans,
+            loc,
+            scale,
+            a,
+            b,
+            loglik,
+        })
+    }
+}
+
+/// Discrete inverse-Moyal HMM (\(P=F(k+1)-F(k)\)).
+///
+/// Loc is pinned below every reciprocal. Distinct from [`DiscreteMoyalHmm`]
+/// and [`DiscreteInverseLevyHmm`].
+#[derive(Clone, Debug)]
+pub struct DiscreteInverseMoyalHmm {
+    /// Hidden states. Not identification `p`.
+    pub n_states: usize,
+    /// Baum–Welch cap.
+    pub max_iter: usize,
+}
+
+impl Default for DiscreteInverseMoyalHmm {
+    fn default() -> Self {
+        Self {
+            n_states: 2,
+            max_iter: 40,
+        }
+    }
+}
+
+impl DiscreteInverseMoyalHmm {
+    /// `k`-state DiscreteInverseMoyalHmm.
+    pub fn new(n_states: usize) -> Self {
+        Self {
+            n_states,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteInverseMoyalHmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted DiscreteInverseMoyalHmm.
+#[derive(Clone, Debug)]
+pub struct FittedDiscreteInverseMoyalHmm {
+    /// Viterbi path.
+    pub labels: Vector,
+    /// Start distribution.
+    pub start: Vector,
+    /// Transitions.
+    pub trans: Matrix,
+    /// Moyal locations on the reciprocal (pinned below every \(1/y\)).
+    pub loc: Vector,
+    /// Scales from the reciprocal Moyal median.
+    pub scale: Vector,
+    /// Training log-likelihood.
+    pub loglik: f64,
+}
+
+impl FittedDiscreteInverseMoyalHmm {
+    fn log_emit_seq(&self, x: &Matrix) -> Vec<Vec<f64>> {
+        let t = x.nrows();
+        let ns = self.scale.len();
+        let mut out = vec![vec![f64::NEG_INFINITY; ns]; t];
+        for ti in 0..t {
+            let y = x.get(ti, 0);
+            for j in 0..ns {
+                out[ti][j] = log_disc_inv_moyal(y, self.loc[j], self.scale[j]);
+            }
+        }
+        out
+    }
+
+    /// Viterbi path.
+    pub fn decode(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let ctx = FitCtx::with_session(session.child("decode"));
+        let (path, _) = viterbi_path(&self.start, &self.trans, &self.log_emit_seq(x));
+        ctx.finish(path)
+    }
+}
+
+impl Predict for FittedDiscreteInverseMoyalHmm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.decode(x, session)
+    }
+}
+
+impl FitUnsupervised for DiscreteInverseMoyalHmm {
+    type Fitted = FittedDiscreteInverseMoyalHmm;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedDiscreteInverseMoyalHmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let t_len = x.nrows();
+        let k = self.n_states.max(1);
+        let mut ymin = f64::INFINITY;
+        let mut ymax = f64::NEG_INFINITY;
+        let mut n_skip = 0usize;
+        for i in 0..t_len {
+            let y = x.get(i, 0);
+            if y.is_finite() && y >= 1.0 {
+                let r = 1.0 / y;
+                if r < ymin {
+                    ymin = r;
+                }
+                if r > ymax {
+                    ymax = r;
+                }
+            }
+            if y.is_finite() && y < 1.0 {
+                n_skip += 1;
+            }
+        }
+        if n_skip > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "DiscreteInverseMoyalHmm skipped {n_skip} observations below 1"
+                    ))
+                    .build(),
+            );
+        }
+        let span = if ymin.is_finite() {
+            (ymax - ymin).max(0.1)
+        } else {
+            1.0
+        };
+        let loc = Vector::from_iter((0..k).map(|j| {
+            if ymin.is_finite() {
+                ymin - 0.15 * span - 0.05 * j as f64
+            } else {
+                -0.2 - 0.05 * j as f64
+            }
+        }));
+        if t_len == 0 {
+            return ctx.finish(FittedDiscreteInverseMoyalHmm {
+                labels: empty_labels(0),
+                start: init_start(k),
+                trans: init_trans(k),
+                loc,
+                scale: Vector::filled(k, 0.15),
+                loglik: f64::NAN,
+            });
+        }
+        let mut scale = Vector::from_iter((0..k).map(|j| 0.1 + 0.08 * j as f64));
+        let mut start = init_start(k);
+        let mut trans = init_trans(k);
+        let mut loglik = f64::NEG_INFINITY;
+        let mut last_gamma: Vec<Vec<f64>> = Vec::new();
+        for it in 0..self.max_iter.max(1) {
+            let dummy = FittedDiscreteInverseMoyalHmm {
+                labels: Vector::zeros(0),
+                start: start.clone(),
+                trans: trans.clone(),
+                loc: loc.clone(),
+                scale: scale.clone(),
+                loglik,
+            };
+            let Some(fb) = scaled_forward_backward(&mut ctx, &start, &trans, &dummy.log_emit_seq(x))
+            else {
+                break;
+            };
+            loglik = fb.loglik;
+            last_gamma = fb.gamma.clone();
+            ctx.session.step(it as u64, -loglik, None);
+            for j in 0..k {
+                let mut pairs = Vec::with_capacity(t_len);
+                for t in 0..t_len {
+                    let y = x.get(t, 0);
+                    if !y.is_finite() || y < 1.0 {
+                        continue;
+                    }
+                    pairs.push((1.0 / y, fb.gamma[t][j]));
+                }
+                if let Some(med) = weighted_pos_median(&pairs) {
+                    scale[j] = moyal_scale_from_median(med, loc[j], 0.05, 2.0);
+                }
+            }
+            let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
+            start = ns;
+            trans = ntr;
+        }
+        if !last_gamma.is_empty() {
+            let occup: Vec<f64> = (0..k)
+                .map(|j| last_gamma.iter().map(|g| g.get(j).copied().unwrap_or(0.0)).sum())
+                .collect();
+            diagnose_chain(&mut ctx, &start, &trans, &occup);
+        }
+        let dummy = FittedDiscreteInverseMoyalHmm {
+            labels: Vector::zeros(0),
+            start: start.clone(),
+            trans: trans.clone(),
+            loc: loc.clone(),
+            scale: scale.clone(),
+            loglik,
+        };
+        let (labels, _) = viterbi_path(&start, &trans, &dummy.log_emit_seq(x));
+        ctx.finish(FittedDiscreteInverseMoyalHmm {
+            labels,
+            start,
+            trans,
+            loc,
+            scale,
+            loglik,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74237,6 +75404,26 @@ mod tests {
             .expect("kbs");
         assert_eq!(kbs.value.labels.len(), 80);
         assert!(kbs.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let umz = UnitInverseMoyalHmm::new(2)
+            .fit(&betx, &Session::new("umz", "fit"))
+            .expect("umz");
+        assert_eq!(umz.value.labels.len(), 80);
+        assert!(umz.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let bmz = BetaInverseMoyalHmm::new(2)
+            .fit(&xpos, &Session::new("bmz", "fit"))
+            .expect("bmz");
+        assert_eq!(bmz.value.labels.len(), 80);
+        assert!(bmz.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let emz = ExponentiatedInverseMoyalHmm::new(2)
+            .fit(&xpos, &Session::new("emz", "fit"))
+            .expect("emz");
+        assert_eq!(emz.value.labels.len(), 80);
+        assert!(emz.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let kmz = KumaraswamyInverseMoyalHmm::new(2)
+            .fit(&xpos, &Session::new("kmz", "fit"))
+            .expect("kmz");
+        assert_eq!(kmz.value.labels.len(), 80);
+        assert!(kmz.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
         let mlr = MultinomialHmm::left_right(2)
             .fit(&cat, &Session::new("mlr_hmm", "fit"))
             .expect("mlr");
@@ -74773,6 +75960,11 @@ mod tests {
             .expect("dbs");
         assert_eq!(dbs.value.labels.len(), 40);
         assert!(dbs.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
+        let dmz = DiscreteInverseMoyalHmm::new(2)
+            .fit(&x, &Session::new("dmz", "fit"))
+            .expect("dmz");
+        assert_eq!(dmz.value.labels.len(), 40);
+        assert!(dmz.value.scale.as_slice().iter().all(|v| v.is_finite() && *v > 0.0));
     }
 
     #[test]
