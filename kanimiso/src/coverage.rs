@@ -6725,6 +6725,30 @@ const INVENTORY: &[Algorithm] = &[
         "stumpy.core.make_complexity_av",
         "timeseries",
     ),
+    a("hmm.ComPoissonHmm", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a("hmm.GevHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.SlashHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.SkewNormalHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.DiscreteWeibullHmm", "hmmlearn.hmm.MultinomialHMM", "hmm"),
+    a("hmm.BurrHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "online.OnlineCharbonnierRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
+    a(
+        "online.OnlineTanhRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
+    a(
+        "online.OnlineAtanRegressor",
+        "river.linear_model.LinearRegression",
+        "online",
+    ),
+    a("tslearn.Mstump", "stumpy.mstump", "timeseries"),
+    a("tslearn.Maamp", "stumpy.maamp", "timeseries"),
+    a("tslearn.Mmotifs", "stumpy.mmotifs", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7309,6 +7333,11 @@ mod tests {
             "online.OnlineGemanMcClureRegressor",
             "tslearn.Prescrimp",
             "tslearn.Aamp",
+            "hmm.ComPoissonHmm",
+            "hmm.GevHmm",
+            "online.OnlineCharbonnierRegressor",
+            "tslearn.Mstump",
+            "tslearn.Mmotifs",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

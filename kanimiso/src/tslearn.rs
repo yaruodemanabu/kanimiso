@@ -18136,6 +18136,299 @@ impl AnnotationVector {
     }
 }
 
+fn row_self_profile(row: &Vector, m: usize, znorm: bool) -> (Vector, Vector) {
+    let n = row.len();
+    if m >= n {
+        return (Vector::zeros(0), Vector::zeros(0));
+    }
+    let n_sub = n + 1 - m;
+    let excl = (m / 4).max(1);
+    let mut means = Vector::zeros(n_sub);
+    let mut stds = Vector::filled(n_sub, 1.0);
+    if znorm {
+        for i in 0..n_sub {
+            let mut s = 0.0_f64;
+            let mut ss = 0.0_f64;
+            for t in 0..m {
+                let v = row[i + t];
+                s += v;
+                ss += v * v;
+            }
+            let mean = s / m as f64;
+            means[i] = mean;
+            stds[i] = ((ss / m as f64 - mean * mean).max(0.0).sqrt()).max(1e-12);
+        }
+    }
+    let mut profile = Vector::filled(n_sub, f64::INFINITY);
+    let mut nn_index = Vector::zeros(n_sub);
+    for i in 0..n_sub {
+        for j in 0..n_sub {
+            if i.abs_diff(j) < excl {
+                continue;
+            }
+            let d = if znorm {
+                let mut acc = 0.0_f64;
+                for t in 0..m {
+                    let zi = (row[i + t] - means[i]) / stds[i];
+                    let zj = (row[j + t] - means[j]) / stds[j];
+                    let e = zi - zj;
+                    acc += e * e;
+                }
+                acc.max(0.0).sqrt()
+            } else {
+                subsequence_dist(row, i, row, j, m)
+            };
+            if d < profile[i] {
+                profile[i] = d;
+                nn_index[i] = j as f64;
+            }
+        }
+    }
+    for i in 0..n_sub {
+        if !profile[i].is_finite() {
+            profile[i] = 0.0;
+        }
+    }
+    (profile, nn_index)
+}
+
+fn panel_profile(
+    x: &Matrix,
+    window: usize,
+    znorm: bool,
+    ctx: &mut FitCtx,
+    name: &str,
+) -> StompResult {
+    let m = window.max(2);
+    let (n_series, tlen) = x.shape();
+    if m >= tlen || n_series == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .severity(Severity::Warning)
+                .message(format!("{name} window={m} is unusable for n_series={n_series} length={tlen}"))
+                .build(),
+        );
+        return StompResult {
+            profile: Vector::zeros(0),
+            nn_index: Vector::zeros(0),
+        };
+    }
+    let n_sub = tlen + 1 - m;
+    let mut profile = Vector::zeros(n_sub);
+    let mut nn_index = Vector::zeros(n_sub);
+    let mut best = Vector::filled(n_sub, f64::INFINITY);
+    for i in 0..n_series {
+        let row = x.row(i);
+        let (mp, nn) = row_self_profile(&row, m, znorm);
+        if mp.len() != n_sub {
+            continue;
+        }
+        for j in 0..n_sub {
+            profile[j] += mp[j];
+            if mp[j] < best[j] {
+                best[j] = mp[j];
+                nn_index[j] = nn[j];
+            }
+        }
+    }
+    let n = n_series.max(1) as f64;
+    for j in 0..n_sub {
+        profile[j] /= n;
+    }
+    StompResult { profile, nn_index }
+}
+
+/// Multidimensional matrix profile (stumpy `mstump`).
+///
+/// Window length is not identification `p`. Distinct from [`Mpx`] (one
+/// series) and [`Ostinato`] (consensus host series).
+#[derive(Clone, Debug)]
+pub struct Mstump {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+}
+
+impl Default for Mstump {
+    fn default() -> Self {
+        Self { window: 3 }
+    }
+}
+
+impl Mstump {
+    /// MSTUMP with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+        }
+    }
+
+    /// Mean z-normalized self-profile across the rows of `x`.
+    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<StompResult>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let out = panel_profile(x, self.window, true, &mut ctx, "MSTUMP");
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("MSTUMP averages per-row z-normalized profiles, not published mstump")
+                .compromise(NumericalCompromise::new(
+                    "stumpy mstump",
+                    "mean of row-wise z-normalized self nearest-neighbour profiles",
+                    "the published multidimensional ablation and FFT kernel are omitted",
+                    "read the profile as a multi-series matrix-profile sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(out)
+    }
+}
+
+/// Multidimensional AAMP (stumpy `maamp`).
+///
+/// Window length is not identification `p`. Distinct from [`Aamp`] (one
+/// series) and [`Mstump`] (z-normalized).
+#[derive(Clone, Debug)]
+pub struct Maamp {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+}
+
+impl Default for Maamp {
+    fn default() -> Self {
+        Self { window: 3 }
+    }
+}
+
+impl Maamp {
+    /// MAAMP with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+        }
+    }
+
+    /// Mean raw-Euclidean self-profile across the rows of `x`.
+    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<StompResult>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let out = panel_profile(x, self.window, false, &mut ctx, "MAAMP");
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("MAAMP averages per-row unnormalized profiles, not published maamp")
+                .compromise(NumericalCompromise::new(
+                    "stumpy maamp",
+                    "mean of row-wise raw Euclidean self nearest-neighbour profiles",
+                    "the published multidimensional ablation and FFT kernel are omitted",
+                    "read the profile as an amplitude-aware multi-series sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(out)
+    }
+}
+
+/// Multidimensional motifs (stumpy `mmotifs`).
+///
+/// Motif count is not identification `p`. Distinct from [`Motif`] (one series)
+/// and [`Ostinato`] (consensus radius).
+#[derive(Clone, Debug)]
+pub struct Mmotifs {
+    /// Subsequence length. Not identification `p`.
+    pub window: usize,
+    /// Number of motifs. Not identification `p`.
+    pub n_motifs: usize,
+}
+
+impl Default for Mmotifs {
+    fn default() -> Self {
+        Self {
+            window: 3,
+            n_motifs: 2,
+        }
+    }
+}
+
+/// Fitted multidimensional motif set.
+#[derive(Clone, Debug)]
+pub struct FittedMmotifs {
+    /// Motif starts.
+    pub indices: Vector,
+    /// MSTUMP distances at those starts.
+    pub scores: Vector,
+}
+
+impl Mmotifs {
+    /// Multidimensional motif search with a given window.
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Top-\(k\) argmin of the MSTUMP profile with an exclusion zone.
+    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedMmotifs>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let mp = panel_profile(x, self.window, true, &mut ctx, "mmotifs");
+        let n = mp.profile.len();
+        let k = self.n_motifs.max(1);
+        if n == 0 {
+            return ctx.finish(FittedMmotifs {
+                indices: Vector::zeros(0),
+                scores: Vector::zeros(0),
+            });
+        }
+        let excl = (self.window.max(2) / 4).max(1);
+        let mut taken = vec![false; n];
+        let mut idx = Vector::zeros(k);
+        let mut scores = Vector::zeros(k);
+        let mut found = 0usize;
+        for s in 0..k {
+            let mut best_i = 0usize;
+            let mut best = f64::INFINITY;
+            for i in 0..n {
+                if taken[i] {
+                    continue;
+                }
+                let v = mp.profile[i];
+                if v < best {
+                    best = v;
+                    best_i = i;
+                }
+            }
+            if !best.is_finite() {
+                break;
+            }
+            idx[s] = best_i as f64;
+            scores[s] = best;
+            found += 1;
+            let lo = best_i.saturating_sub(excl);
+            let hi = (best_i + excl + 1).min(n);
+            for t in lo..hi {
+                taken[t] = true;
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("mmotifs is top-k MSTUMP argmin, not published mmotifs")
+                .compromise(NumericalCompromise::new(
+                    "stumpy mmotifs",
+                    "exclusion-zone argmin of the mean row-wise z-normalized profile",
+                    "the published multidimensional motif radius search is omitted",
+                    "read the indices as a multi-series motif sketch",
+                ))
+                .build(),
+        );
+        ctx.finish(FittedMmotifs {
+            indices: Vector::from_iter(idx.as_slice().iter().take(found).copied()),
+            scores: Vector::from_iter(scores.as_slice().iter().take(found).copied()),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -18813,6 +19106,24 @@ mod tests {
             .fit(&yr, &Session::new("ts", "anv"))
             .unwrap();
         assert!(anv.value.as_slice().iter().all(|v| v.is_finite()) || anv.value.is_empty());
+        let mst = Mstump::new(3)
+            .fit(&x, &Session::new("ts", "mst"))
+            .unwrap();
+        assert!(
+            mst.value.profile.as_slice().iter().all(|v| v.is_finite())
+                || mst.value.profile.is_empty()
+        );
+        let maa = Maamp::new(3)
+            .fit(&x, &Session::new("ts", "maa"))
+            .unwrap();
+        assert!(
+            maa.value.profile.as_slice().iter().all(|v| v.is_finite())
+                || maa.value.profile.is_empty()
+        );
+        let mmo = Mmotifs::new(3)
+            .fit(&x, &Session::new("ts", "mmo"))
+            .unwrap();
+        assert!(!mmo.value.indices.is_empty());
         let igs = InformationGainSegmentation::new()
             .fit(&yr, &Session::new("ts", "igs"))
             .unwrap();
