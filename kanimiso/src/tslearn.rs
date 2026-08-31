@@ -597,6 +597,26 @@ pub fn cdist_wddtw(
     ctx.finish(out)
 }
 
+/// Pairwise shape DTW (tslearn-style `cdist` with [`shape_dtw`]).
+///
+/// Series / pair counts are not identification `p`. Distinct from
+/// [`cdist_dtw`] and [`cdist_ddtw`].
+pub fn cdist_shape_dtw(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        dtw_raw(&shape_desc(ai.as_slice()), &shape_desc(bj.as_slice()))
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -3874,6 +3894,79 @@ pub fn lb_kim(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64
         .max((al - bl).abs())
         .max((amax - bmax).abs())
         .max((amin - bmin).abs());
+    ctx.finish(lb)
+}
+
+/// LB_Improved DTW lower bound (Keogh plus leftover reverse Keogh).
+///
+/// Candidate points inside the query envelope get a second pass against the
+/// candidate envelope. Distinct from [`lb_keogh`] (one-sided) and [`lb_kim`].
+/// Window width is not identification `p`.
+pub fn lb_improved(
+    query: &Vector,
+    candidate: &Vector,
+    r: usize,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if query.is_empty() || candidate.is_empty() {
+        ctx.push(Issue::builder(IssueCode::EmptyMatrix).build());
+        return ctx.finish(f64::NAN);
+    }
+    if query.len() != candidate.len() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("lb_improved requires equal-length series")
+                .build(),
+        );
+    }
+    let n = query.len().min(candidate.len());
+    let w = r.max(1);
+    let qs = query.as_slice();
+    let cs = candidate.as_slice();
+    let mut leftover = vec![false; n];
+    let mut lb = 0.0_f64;
+    for i in 0..n {
+        let a = i.saturating_sub(w);
+        let b = (i + w + 1).min(n);
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for t in a..b {
+            lo = lo.min(qs[t]);
+            hi = hi.max(qs[t]);
+        }
+        let c = cs[i];
+        if c > hi {
+            let d = c - hi;
+            lb += d * d;
+        } else if c < lo {
+            let d = lo - c;
+            lb += d * d;
+        } else {
+            leftover[i] = true;
+        }
+    }
+    for i in 0..n {
+        if !leftover[i] {
+            continue;
+        }
+        let a = i.saturating_sub(w);
+        let b = (i + w + 1).min(n);
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for t in a..b {
+            lo = lo.min(cs[t]);
+            hi = hi.max(cs[t]);
+        }
+        let qv = qs[i];
+        if qv > hi {
+            let d = qv - hi;
+            lb += d * d;
+        } else if qv < lo {
+            let d = lo - qv;
+            lb += d * d;
+        }
+    }
     ctx.finish(lb)
 }
 
@@ -19103,6 +19196,8 @@ mod tests {
         assert!(sw.abs() < 1e-12, "swale={sw}");
         let lk = lb_kim(&a, &a, &Session::new("ts", "lbkim")).unwrap().value;
         assert!(lk.abs() < 1e-12, "lb_kim={lk}");
+        let lbi = lb_improved(&a, &a, 1, &Session::new("ts", "lbi")).unwrap().value;
+        assert!(lbi.abs() < 1e-12, "lb_improved={lbi}");
     }
 
     #[test]
@@ -20065,6 +20160,11 @@ mod tests {
             .value;
         assert_eq!(cwd2.shape(), (8, 8));
         assert!(cwd2.get(0, 0).abs() < 1e-12);
+        let csd = cdist_shape_dtw(&x, &x, &Session::new("ts", "csd"))
+            .unwrap()
+            .value;
+        assert_eq!(csd.shape(), (8, 8));
+        assert!(csd.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;

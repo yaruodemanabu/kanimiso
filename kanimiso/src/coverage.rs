@@ -6922,6 +6922,18 @@ const INVENTORY: &[Algorithm] = &[
     a("online.AlsReco", "river.reco.ALS", "online"),
     a("tslearn.swale", "tslearn.metrics.lcss", "timeseries"),
     a("tslearn.lb_kim", "tslearn.metrics.lb_keogh", "timeseries"),
+    a("hmm.NoncentralBetaHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.ExponentiatedParetoHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.GeneralizedHyperbolicHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.WakebyHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.WarpReco", "river.reco.WARP", "online"),
+    a(
+        "online.OnlineSvd",
+        "sklearn.decomposition.IncrementalPCA",
+        "online",
+    ),
+    a("tslearn.lb_improved", "tslearn.metrics.lb_keogh", "timeseries"),
+    a("tslearn.cdist_shape_dtw", "tslearn.metrics.cdist", "timeseries"),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -7588,6 +7600,14 @@ mod tests {
             "online.AlsReco",
             "tslearn.swale",
             "tslearn.lb_kim",
+            "hmm.NoncentralBetaHmm",
+            "hmm.ExponentiatedParetoHmm",
+            "hmm.GeneralizedHyperbolicHmm",
+            "hmm.WakebyHmm",
+            "online.WarpReco",
+            "online.OnlineSvd",
+            "tslearn.lb_improved",
+            "tslearn.cdist_shape_dtw",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

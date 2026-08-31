@@ -45089,6 +45089,361 @@ impl PartialFit for AlsReco {
     }
 }
 
+/// WARP ranking recommender (Weston et al.): sample negatives until a
+/// margin violation, then weight the pairwise step by the estimated rank
+/// \(\lfloor n_{\mathrm{items}}/N\rfloor\).
+///
+/// Distinct from [`Bpr`] (one unweighted negative). Rank is not
+/// identification `p`.
+#[derive(Clone, Debug)]
+pub struct WarpReco {
+    /// Latent rank.
+    pub n_factors: usize,
+    /// SGD step.
+    pub learning_rate: f64,
+    /// \(\ell_2\) on factors.
+    pub l2: f64,
+    pu: Vec<Vec<f64>>,
+    qi: Vec<Vec<f64>>,
+    rng: Rng,
+    n_seen: u64,
+    updates: u64,
+}
+
+impl Default for WarpReco {
+    fn default() -> Self {
+        Self {
+            n_factors: 4,
+            learning_rate: 0.05,
+            l2: 0.01,
+            pu: Vec::new(),
+            qi: Vec::new(),
+            rng: Rng::new(19),
+            n_seen: 0,
+            updates: 0,
+        }
+    }
+}
+
+impl WarpReco {
+    /// WARP reco with `k` factors.
+    pub fn new(n_factors: usize) -> Self {
+        Self {
+            n_factors: n_factors.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn grow(&mut self, u: usize, i: usize) {
+        let k = self.n_factors.max(1);
+        while self.pu.len() <= u {
+            self.pu.push(vec![0.01; k]);
+        }
+        while self.qi.len() <= i {
+            self.qi.push(vec![0.01; k]);
+        }
+    }
+
+    fn score(&self, u: usize, i: usize) -> f64 {
+        let mut s = 0.0_f64;
+        if u < self.pu.len() && i < self.qi.len() {
+            for f in 0..self.n_factors.min(self.pu[u].len()).min(self.qi[i].len()) {
+                s += self.pu[u][f] * self.qi[i][f];
+            }
+        }
+        s
+    }
+}
+
+impl PartialFit for WarpReco {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, y);
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("WarpReco needs two columns (user, item)")
+                    .build(),
+            );
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "need user/item"),
+            );
+        }
+        let lr = self.learning_rate.max(1e-6);
+        let l2 = self.l2.max(0.0);
+        let mut dsum = 0.0_f64;
+        let mut pairs = 0u64;
+        for r in 0..x.nrows() {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.grow(u, i);
+            let n_items = self.qi.len();
+            if n_items < 2 {
+                continue;
+            }
+            let s_ui = self.score(u, i);
+            let cap = n_items.min(32);
+            let mut n_try = 0usize;
+            let mut j = i;
+            let mut viol = false;
+            while n_try < cap {
+                n_try += 1;
+                j = self.rng.below(n_items);
+                if j == i {
+                    j = (j + 1) % n_items;
+                }
+                if self.score(u, j) + 1.0 >= s_ui {
+                    viol = true;
+                    break;
+                }
+            }
+            if !viol {
+                continue;
+            }
+            let rank = ((n_items as f64) / (n_try as f64)).floor().max(1.0);
+            let wgt = (rank + 1.0).ln();
+            let xui = s_ui - self.score(u, j);
+            let sig = sigmoid(xui);
+            let err = wgt * (1.0 - sig);
+            for f in 0..self.n_factors {
+                let pu = self.pu[u][f];
+                let qi = self.qi[i][f];
+                let qj = self.qi[j][f];
+                self.pu[u][f] += lr * (err * (qi - qj) - l2 * pu);
+                self.qi[i][f] += lr * (err * pu - l2 * qi);
+                self.qi[j][f] += lr * (-err * pu - l2 * qj);
+                dsum += (self.pu[u][f] - pu).abs()
+                    + (self.qi[i][f] - qi).abs()
+                    + (self.qi[j][f] - qj).abs();
+            }
+            pairs += 1;
+        }
+        self.n_seen += x.nrows() as u64;
+        self.updates += 1;
+        if pairs == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message("WarpReco found no margin-violating negatives")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(dsum);
+        q.information_gain = Some(pairs as f64);
+        q.still_identified = pairs > 0;
+        q.warmup = pairs == 0;
+        q.explanation = format!(
+            "WarpReco pairs={pairs} ||Δ||₁={dsum:.4e} users={} items={}",
+            self.pu.len(),
+            self.qi.len()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "WARP rank-weighted pairwise step",
+                "sample-until-violation SGD; distinct from unweighted BPR",
+                "pre-batch factors",
+                format!("pairs={pairs} dsum={dsum:.4e}"),
+            ),
+        )
+    }
+}
+
+impl Predict for WarpReco {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        if x.ncols() < 2 {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("WarpReco predict needs user/item columns")
+                    .build(),
+            );
+            return ctx.finish(Vector::zeros(x.nrows()));
+        }
+        let out = Vector::from_iter((0..x.nrows()).map(|r| {
+            let u = x.get(r, 0).max(0.0).round() as usize;
+            let i = x.get(r, 1).max(0.0).round() as usize;
+            self.score(u, i)
+        }));
+        ctx.finish(out)
+    }
+}
+
+/// Uncentered streaming Oja / power-method SVD.
+///
+/// Distinct from [`OnlinePca`] (centered) and
+/// [`crate::decompose::IncrementalPca`] (SKL sequential KL). Component count
+/// is not identification `p` on a 1-row stream.
+#[derive(Clone, Debug)]
+pub struct OnlineSvd {
+    /// Singular vectors to track. Not identification `p` for a streaming update.
+    pub n_components: usize,
+    /// Base Oja step; effective rate is `lr / (n_seen + 1)`.
+    pub learning_rate: f64,
+    components: Vec<Vector>,
+    n_seen: u64,
+    updates: u64,
+    initialized: bool,
+}
+
+impl Default for OnlineSvd {
+    fn default() -> Self {
+        Self {
+            n_components: 1,
+            learning_rate: 1.0,
+            components: Vec::new(),
+            n_seen: 0,
+            updates: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl OnlineSvd {
+    /// Track `n_components` uncentered singular vectors.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components: n_components.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl PartialFit for OnlineSvd {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        if x.ncols() == 0 {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "no features"),
+            );
+        }
+        let p = x.ncols();
+        let k = self.n_components.max(1).min(p);
+        if !self.initialized {
+            self.components = (0..k)
+                .map(|c| {
+                    let mut w = Vector::zeros(p);
+                    w[c % p] = 1.0;
+                    w
+                })
+                .collect();
+            self.initialized = true;
+        } else if self.components.as_slice().first().map(|c| c.len()) != Some(p) {
+            ctx.push(Issue::builder(IssueCode::FeatureSpaceChangedOnline).build());
+            return finish_explain(
+                ctx,
+                reject_explain(self.updates, x.nrows(), self.n_seen, "feature space changed"),
+            );
+        }
+        let before = self
+            .components
+            .as_slice()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Vector::zeros(p));
+        let lr0 = if self.learning_rate.is_finite() && self.learning_rate > 0.0 {
+            self.learning_rate
+        } else {
+            1.0
+        };
+        for i in 0..x.nrows() {
+            self.n_seen += 1;
+            let n = self.n_seen as f64;
+            let mut residual = Vector::from_iter((0..p).map(|j| x.get(i, j)));
+            let lr = lr0 / n;
+            for c in 0..self.components.len() {
+                let y = self.components[c].dot(&residual);
+                for j in 0..p {
+                    self.components[c][j] += lr * y * residual[j];
+                }
+                for prev in 0..c {
+                    let proj = self.components[c].dot(&self.components[prev]);
+                    for j in 0..p {
+                        self.components[c][j] -= proj * self.components[prev][j];
+                    }
+                }
+                let nrm = self.components[c].norm();
+                if nrm > 1e-12 {
+                    for j in 0..p {
+                        self.components[c][j] /= nrm;
+                    }
+                }
+                let y2 = self.components[c].dot(&residual);
+                for j in 0..p {
+                    residual[j] -= y2 * self.components[c][j];
+                }
+            }
+        }
+        self.updates += 1;
+        let after = self
+            .components
+            .as_slice()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Vector::zeros(p));
+        let delta = after.sub(&before);
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.parameter_delta_norm = Some(delta.norm());
+        q.information_gain = Some(delta.norm().max(x.nrows() as f64));
+        q.still_identified = self.n_seen >= 2;
+        q.warmup = self.n_seen < (p as u64).saturating_add(2);
+        q.explanation = format!(
+            "OnlineSvd Oja-updated {k} uncentered axes on {} rows; ||Δw0||={:.6e}",
+            x.nrows(),
+            delta.norm()
+        );
+        flag_info(&mut ctx, &q);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "uncentered Oja singular vectors",
+                "streaming power-method SVD; distinct from centered OnlinePca",
+                "previous axes",
+                "updated axes",
+            ),
+        )
+    }
+}
+
+impl Transform for OnlineSvd {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_online_xy(&mut ctx, x, None);
+        if !self.initialized {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), self.n_components.max(1)));
+        }
+        let k = self.components.len();
+        ctx.finish(Matrix::from_fn(x.nrows(), k, |i, c| {
+            let mut s = 0.0_f64;
+            for j in 0..x.ncols().min(self.components[c].len()) {
+                s += self.components[c][j] * x.get(i, j);
+            }
+            s
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45902,6 +46257,12 @@ mod tests {
         AlsReco::new(2)
             .partial_fit(&xui, Some(&y), &session)
             .expect("alsr");
+        WarpReco::new(2)
+            .partial_fit(&xui, Some(&y), &session)
+            .expect("wrp");
+        OnlineSvd::new(1)
+            .partial_fit(&x, None, &session)
+            .expect("osvd");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");
