@@ -49468,6 +49468,144 @@ impl PartialFit for Stepd {
     }
 }
 
+/// EWMA concept-drift detector (Ross, Adams, Tasoulis, Hand; ECDD).
+///
+/// Bernoulli EWMA with time-varying limits
+/// \(L\sigma\sqrt{\lambda/(2-\lambda)\,(1-(1-\lambda)^{2t})}\). Distinct from
+/// [`EwmaChart`] (Roberts on a continuous mean) and [`Ddm`] (\(p+s\)).
+/// \(\lambda\) is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Ecdd {
+    /// Smoothing \(\lambda\in(0,1]\).
+    pub lambda: f64,
+    /// Limit width \(L\).
+    pub l: f64,
+    z: f64,
+    p0: f64,
+    n_seen: u64,
+    t_chart: u64,
+    updates: u64,
+    warmed: bool,
+}
+
+impl Default for Ecdd {
+    fn default() -> Self {
+        Self {
+            lambda: 0.2,
+            l: 3.0,
+            z: 0.0,
+            p0: 0.0,
+            n_seen: 0,
+            t_chart: 0,
+            updates: 0,
+            warmed: false,
+        }
+    }
+}
+
+impl Ecdd {
+    /// ECDD with smoothing `lambda`.
+    pub fn new(lambda: f64) -> Self {
+        Self {
+            lambda,
+            ..Self::default()
+        }
+    }
+
+    /// Consume one error indicator (thresholded at 0.5).
+    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+        let mut ctx = FitCtx::with_session(session.child("update"));
+        if !x.is_finite() {
+            return ctx.finish(DriftDecision::Stable);
+        }
+        let e = if x > 0.5 { 1.0 } else { 0.0 };
+        self.n_seen += 1;
+        if !self.warmed {
+            let n = self.n_seen as f64;
+            self.p0 += (e - self.p0) / n;
+            self.z = self.p0;
+            if self.n_seen >= 8 {
+                self.warmed = true;
+            }
+            return ctx.finish(DriftDecision::Stable);
+        }
+        let lam = if self.lambda.is_finite() && self.lambda > 0.0 && self.lambda <= 1.0 {
+            self.lambda
+        } else {
+            0.2
+        };
+        self.t_chart += 1;
+        self.z = lam * e + (1.0 - lam) * self.z;
+        let t = self.t_chart as f64;
+        let fade = 1.0 - (1.0 - lam).powf(2.0 * t);
+        let p = self.p0.clamp(1e-6, 1.0 - 1e-6);
+        let half = self.l.max(1e-3) * (p * (1.0 - p) * (lam / (2.0 - lam)) * fade.max(0.0)).sqrt();
+        let stat = (self.z - self.p0).abs();
+        if stat > half {
+            ctx.push(
+                Issue::builder(IssueCode::ConceptDriftDetected)
+                    .message(format!("ECDD |z-p₀|={stat:.4e} > Lσ_t={half:.4e}"))
+                    .metric("drift_statistic", stat)
+                    .build(),
+            );
+            return ctx.finish(DriftDecision::Drift { statistic: stat });
+        }
+        ctx.finish(DriftDecision::Stable)
+    }
+}
+
+impl PartialFit for Ecdd {
+    fn partial_fit(
+        &mut self,
+        x: &Matrix,
+        _y: Option<&Vector>,
+        session: &Session,
+    ) -> Result<Qualified<IncrementalExplain>> {
+        let mut ctx = FitCtx::with_session(session.child("partial_fit"));
+        inspect_online_xy(&mut ctx, x, None);
+        let mut fired = 0.0_f64;
+        for i in 0..x.nrows() {
+            match self.update(x.get(i, 0), &session.child("ecdd")) {
+                Ok(q) => {
+                    if matches!(q.value, DriftDecision::Drift { .. }) {
+                        fired += 1.0;
+                    }
+                }
+                Err(e) => {
+                    if e.primary().code == IssueCode::ConceptDriftDetected {
+                        fired += 1.0;
+                    }
+                }
+            }
+        }
+        self.updates += 1;
+        if !self.warmed {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message("ECDD is estimating the in-control error rate")
+                    .build(),
+            );
+        }
+        let mut q = IncrementalQuality::new(self.updates.saturating_sub(1), x.nrows(), self.n_seen);
+        q.effective_sample_size = self.n_seen as f64;
+        q.information_gain = Some(fired);
+        q.drift_statistic = Some((self.z - self.p0).abs());
+        q.still_identified = self.warmed;
+        q.warmup = !self.warmed;
+        q.explanation = format!("ECDD z={:.4e} cuts={fired}", self.z);
+        finish_explain(
+            ctx,
+            IncrementalExplain::from_quality(
+                q,
+                "ECDD Bernoulli-EWMA step",
+                "Ross time-varying limits on a 0/1 stream; not Roberts on a continuous mean",
+                "pre-batch z",
+                format!("z={:.4e} fired={fired}", self.z),
+            ),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50353,6 +50491,9 @@ mod tests {
         Stepd::new(6)
             .partial_fit(&x, None, &session)
             .expect("stp");
+        Ecdd::new(0.2)
+            .partial_fit(&x, None, &session)
+            .expect("ecd");
         AdaMaxRegressor::new()
             .partial_fit(&x, Some(&y), &session)
             .expect("adamax");

@@ -1997,6 +1997,64 @@ pub fn cdist_correlation(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qu
     ctx.finish(out)
 }
 
+fn cosine_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut num = 0.0_f64;
+    let mut na = 0.0_f64;
+    let mut nb = 0.0_f64;
+    for i in 0..n {
+        num += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    let den = na.sqrt() * nb.sqrt();
+    if den < 1e-18 {
+        return if na < 1e-18 && nb < 1e-18 { 0.0 } else { 1.0 };
+    }
+    1.0 - (num / den).clamp(-1.0, 1.0)
+}
+
+/// Cosine distance \(1-\langle a,b\rangle/(\|a\|\|b\|)\) on aligned prefixes.
+///
+/// No mean-centering. Distinct from [`correlation_distance`] (Pearson) and
+/// [`sbd`] (max NCC over shifts). Identical series score 0.
+pub fn cosine_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("cosine_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("cosine_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("cosine_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(cosine_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise cosine distance.
+///
+/// Distinct from [`cdist_correlation`] and [`cdist_sbd`].
+pub fn cdist_cosine(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        cosine_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -20617,6 +20675,8 @@ mod tests {
         assert!(oed.abs() < 1e-12, "open_end_dtw={oed}");
         let crd = correlation_distance(&a, &a, &Session::new("ts", "crd")).unwrap().value;
         assert!(crd.abs() < 1e-12, "correlation_distance={crd}");
+        let cnd = cosine_distance(&a, &a, &Session::new("ts", "cnd")).unwrap().value;
+        assert!(cnd.abs() < 1e-12, "cosine_distance={cnd}");
     }
 
     #[test]
@@ -21684,6 +21744,11 @@ mod tests {
             .value;
         assert_eq!(ccr.shape(), (8, 8));
         assert!(ccr.get(0, 0).abs() < 1e-12);
+        let ccd = cdist_cosine(&x, &x, &Session::new("ts", "ccd"))
+            .unwrap()
+            .value;
+        assert_eq!(ccd.shape(), (8, 8));
+        assert!(ccd.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;
