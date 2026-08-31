@@ -7300,6 +7300,45 @@ const INVENTORY: &[Algorithm] = &[
         "tslearn.metrics.cdist",
         "timeseries",
     ),
+    a(
+        "hmm.ExponentiatedChenHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a(
+        "hmm.MarshallOlkinGompertzHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.DiscreteGammaHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a(
+        "hmm.KumaraswamyGompertzHmm",
+        "hmmlearn.hmm.GaussianHMM",
+        "hmm",
+    ),
+    a("hmm.InverseChenHmm", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("online.RankSvm", "river.reco.FM", "online"),
+    a("online.Abod", "river.anomaly.HalfSpaceTrees", "online"),
+    a(
+        "tslearn.tanimoto_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_tanimoto",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
+    a(
+        "tslearn.wave_hedges_distance",
+        "tslearn.metrics.dtw",
+        "timeseries",
+    ),
+    a(
+        "tslearn.cdist_wave_hedges",
+        "tslearn.metrics.cdist",
+        "timeseries",
+    ),
 ];
 
 /// Return the static coverage ledger (every public estimator / function).
@@ -8144,6 +8183,17 @@ mod tests {
             "tslearn.cdist_squared_euclidean",
             "tslearn.dice_distance",
             "tslearn.cdist_dice",
+            "hmm.ExponentiatedChenHmm",
+            "hmm.MarshallOlkinGompertzHmm",
+            "hmm.DiscreteGammaHmm",
+            "hmm.KumaraswamyGompertzHmm",
+            "hmm.InverseChenHmm",
+            "online.RankSvm",
+            "online.Abod",
+            "tslearn.tanimoto_distance",
+            "tslearn.cdist_tanimoto",
+            "tslearn.wave_hedges_distance",
+            "tslearn.cdist_wave_hedges",
         ] {
             assert!(names.contains(&must), "missing {must}");
         }

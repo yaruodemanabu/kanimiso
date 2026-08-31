@@ -2573,6 +2573,114 @@ pub fn cdist_dice(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified
     ctx.finish(out)
 }
 
+fn tanimoto_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut num = 0.0_f64;
+    let mut na = 0.0_f64;
+    let mut nb = 0.0_f64;
+    for i in 0..n {
+        num += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    let den = na + nb - num;
+    if den.abs() < 1e-18 {
+        return 0.0;
+    }
+    1.0 - num / den
+}
+
+fn wave_hedges_distance_raw(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return f64::NAN;
+    }
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let ma = a[i].abs().max(b[i].abs());
+        if ma < 1e-18 {
+            continue;
+        }
+        s += (a[i] - b[i]).abs() / ma;
+    }
+    s
+}
+
+/// Tanimoto / Jaccard distance \(1-\langle a,b\rangle/(\|a\|^2+\|b\|^2-\langle a,b\rangle)\).
+///
+/// Distinct from [`dice_distance`] (factor 2 in the numerator) and
+/// [`cosine_distance`]. Identical series score 0.
+pub fn tanimoto_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("tanimoto_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("tanimoto_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("tanimoto_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(tanimoto_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Tanimoto distance.
+pub fn cdist_tanimoto(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        tanimoto_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
+/// Wave Hedges distance \(\sum |a_i-b_i|/\max(|a_i|,|b_i|)\).
+///
+/// Distinct from [`canberra_distance`] (sum in the denominator) and
+/// [`clark_distance`]. Identical series score 0.
+pub fn wave_hedges_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("wave_hedges_distance.a") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(b.as_slice()).to_issue("wave_hedges_distance.b") {
+        ctx.push(issue);
+    }
+    if a.is_empty() || b.is_empty() {
+        ctx.push(
+            Issue::builder(IssueCode::EmptyMatrix)
+                .message("wave_hedges_distance on an empty series")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    ctx.finish(wave_hedges_distance_raw(a.as_slice(), b.as_slice()))
+}
+
+/// Pairwise Wave Hedges distance.
+pub fn cdist_wave_hedges(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        let ai = a.row(i);
+        let bj = b.row(j);
+        wave_hedges_distance_raw(ai.as_slice(), bj.as_slice())
+    });
+    ctx.finish(out)
+}
+
 /// Edit Distance on Real sequences (Chen, Özsu, Oria; tslearn `edr`).
 ///
 /// A pair matches at cost 0 when `|a_i − b_j| ≤ ε`; otherwise insert, delete,
@@ -21215,6 +21323,10 @@ mod tests {
         assert!(sqe.abs() < 1e-12, "squared_euclidean_distance={sqe}");
         let dic = dice_distance(&a, &a, &Session::new("ts", "dic")).unwrap().value;
         assert!(dic.abs() < 1e-12, "dice_distance={dic}");
+        let tan = tanimoto_distance(&a, &a, &Session::new("ts", "tan")).unwrap().value;
+        assert!(tan.abs() < 1e-12, "tanimoto_distance={tan}");
+        let wav = wave_hedges_distance(&a, &a, &Session::new("ts", "wav")).unwrap().value;
+        assert!(wav.abs() < 1e-12, "wave_hedges_distance={wav}");
     }
 
     #[test]
@@ -22337,6 +22449,16 @@ mod tests {
             .value;
         assert_eq!(cdi.shape(), (8, 8));
         assert!(cdi.get(0, 0).abs() < 1e-12);
+        let cta = cdist_tanimoto(&x, &x, &Session::new("ts", "cta"))
+            .unwrap()
+            .value;
+        assert_eq!(cta.shape(), (8, 8));
+        assert!(cta.get(0, 0).abs() < 1e-12);
+        let cwa = cdist_wave_hedges(&x, &x, &Session::new("ts", "cwa"))
+            .unwrap()
+            .value;
+        assert_eq!(cwa.shape(), (8, 8));
+        assert!(cwa.get(0, 0).abs() < 1e-12);
         let cwd = cdist_wdtw(&x, &x, 0.1, &Session::new("ts", "cwdtw"))
             .unwrap()
             .value;
