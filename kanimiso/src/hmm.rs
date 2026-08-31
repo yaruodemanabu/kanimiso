@@ -297372,12 +297372,12 @@ impl FitUnsupervised for DiscreteCosine61Hmm {
                 labels: empty_labels(0),
                 start: init_start(k),
                 trans: init_trans(k),
-                scale: Vector::filled(k, 16.00),
+                scale: Vector::filled(k, 40.00),
                 loc,
                 loglik: f64::NAN,
             });
         }
-        let mut scale = Vector::from_iter((0..k).map(|j| 16.00 + 0.60 * j as f64));
+        let mut scale = Vector::from_iter((0..k).map(|j| 40.00 + 0.80 * j as f64));
         let mut start = init_start(k);
         let mut trans = init_trans(k);
         let mut loglik = f64::NEG_INFINITY;
@@ -297411,7 +297411,7 @@ impl FitUnsupervised for DiscreteCosine61Hmm {
                     mx = mx.max((z - loc[j]).abs());
                 }
                 if wsum > 1e-12 {
-                    scale[j] = (mx * 1.40 + 2.50).clamp(12.00, 40.00);
+                    scale[j] = (mx * 1.40 + 2.50).clamp(32.00, 80.00);
                 }
             }
             let (ns, ntr) = hmm_em_trans(&fb.xi, &fb.gamma[0], k, t_len);
