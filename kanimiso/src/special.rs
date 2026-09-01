@@ -95,7 +95,7 @@ fn gamma_q_cf(s: f64, x: f64, policy: &Policy) -> f64 {
     let mut d = 1.0 / b;
     let mut h = d;
     for i in 1..policy.cf_max_iter {
-        let an = -i as f64 * (i as f64 - s);
+        let an = -(i as f64) * (i as f64 - s);
         b += 2.0;
         d = an * d + b;
         if d.abs() < CF_TINY {

@@ -19,7 +19,7 @@ pub enum CoverageStatus {
 
 impl CoverageStatus {
     /// Stable lowercase name for logs and README filters.
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Verified => "verified",
             Self::Experimental => "experimental",
@@ -40,50 +40,33 @@ pub struct Algorithm {
     /// `online`, `forecast`, `hmm`, `manifold`, `covariance`, `anomaly`,
     /// `neural`, `timeseries`, `stats`.
     pub kind: &'static str,
+    stored: CoverageStatus,
+}
+
+impl Algorithm {
     /// How far this entry has been verified. README must not advertise
     /// [`CoverageStatus::Experimental`] or [`CoverageStatus::Generated`] items
     /// as equivalent to a Python library.
-    pub status: CoverageStatus,
+    ///
+    /// Type-baked families are classified at runtime so `INVENTORY` const-eval
+    /// does not walk every name (rustc `long_running_const_eval`).
+    pub fn status(&self) -> CoverageStatus {
+        if self.stored == CoverageStatus::Verified {
+            CoverageStatus::Verified
+        } else if is_generated_name(self.name) {
+            CoverageStatus::Generated
+        } else {
+            self.stored
+        }
+    }
 }
 
-const fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    if hay.len() < needle.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i + needle.len() <= hay.len() {
-        let mut j = 0;
-        let mut ok = true;
-        while j < needle.len() {
-            if hay[i + j] != needle[j] {
-                ok = false;
-                break;
-            }
-            j += 1;
-        }
-        if ok {
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
-
-const fn infer_status(name: &'static str) -> CoverageStatus {
-    let b = name.as_bytes();
-    if contains(b, b"Cosine")
-        || contains(b, b"Tsp")
-        || contains(b, b"WindowLag")
-        || contains(b, b"LogMinkowski")
-        || contains(b, b"minkowski")
-    {
-        CoverageStatus::Generated
-    } else {
-        CoverageStatus::Experimental
-    }
+fn is_generated_name(name: &str) -> bool {
+    name.contains("Cosine")
+        || name.contains("Tsp")
+        || name.contains("WindowLag")
+        || name.contains("LogMinkowski")
+        || name.contains("minkowski")
 }
 
 const fn a(name: &'static str, python_equiv: &'static str, kind: &'static str) -> Algorithm {
@@ -91,7 +74,7 @@ const fn a(name: &'static str, python_equiv: &'static str, kind: &'static str) -
         name,
         python_equiv,
         kind,
-        status: infer_status(name),
+        stored: CoverageStatus::Experimental,
     }
 }
 
@@ -100,7 +83,7 @@ const fn v(name: &'static str, python_equiv: &'static str, kind: &'static str) -
         name,
         python_equiv,
         kind,
-        status: CoverageStatus::Verified,
+        stored: CoverageStatus::Verified,
     }
 }
 
@@ -13795,7 +13778,7 @@ pub fn inventory() -> &'static [Algorithm] {
 pub fn verified() -> impl Iterator<Item = &'static Algorithm> {
     INVENTORY
         .iter()
-        .filter(|a| a.status == CoverageStatus::Verified)
+        .filter(|a| a.status() == CoverageStatus::Verified)
 }
 
 #[cfg(test)]
@@ -18759,7 +18742,7 @@ mod tests {
     fn generated_includes_type_baked_families() {
         let gen: Vec<&str> = inventory()
             .iter()
-            .filter(|a| a.status == CoverageStatus::Generated)
+            .filter(|a| a.status() == CoverageStatus::Generated)
             .map(|a| a.name)
             .collect();
         assert!(gen.iter().any(|n| n.contains("WindowLag418")));

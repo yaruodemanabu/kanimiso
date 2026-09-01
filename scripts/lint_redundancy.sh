@@ -37,7 +37,8 @@ budget "R10 'Distinct from' docstrings" "$r10" "$MAX_R10_DISTINCT_FROM"
 if [ "$ALLOW_RUST_MIN_STACK" -eq 0 ] && grep -q RUST_MIN_STACK .cargo/config.toml 2>/dev/null; then
   echo "FAIL RUST_MIN_STACK is forbidden"; fail=1; fi
 
-faer_versions=$(cargo tree -i faer -e normal --prefix none 2>/dev/null | sort -u | wc -l)
+# Invert tree lists dependents too; count distinct `faer v…` roots (D6).
+faer_versions=$(cargo tree -i faer -e normal --prefix none 2>/dev/null | awk '/^faer /' | sort -u | wc -l)
 if [ "$faer_versions" -gt 1 ]; then echo "FAIL multiple faer versions in the graph"; fail=1; fi
 
 exit $fail
