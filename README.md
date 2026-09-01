@@ -1,8 +1,10 @@
 # kanimiso
 
-Pure Rust の機械学習・統計クレート。Python の **scikit-learn / statsmodels / sktime / tslearn / hmmlearn / river** がカバーする計算範囲（回帰・分類・次元縮約・特徴量生成・各種統計量・オンライン／非オンライン学習）を、`faer` 上で計算する。
+Pure Rust の機械学習・統計クレート。線形代数は `faer` のみ。`unsafe` なし。
 
-線形代数は `faer` のみ。`unsafe` なし。
+v0.2 は小さい検証済み核から再構成中である（`AGENTS.md`）。README の機能主張は
+`kanimiso::coverage::verified()` に連動する。`0.2.0-alpha.1` までは
+scikit-learn / statsmodels / sktime / tslearn / hmmlearn / river 相当という表記はしない。
 
 ## ワークスペース
 
@@ -20,6 +22,12 @@ Pure Rust の機械学習・統計クレート。Python の **scikit-learn / sta
 2. 数値的妥協（擬似逆、リッジフォールバック、ジッタ、打ち切り SVD）は `NumericalCompromise` として記録される。
 3. 統計的に空の計算（定数ターゲット、ランク 0、単一クラス分類器、補間だけの \(R^2=1\)）は `Meaninglessness` を付け、Vacuous / False なら abort する。
 4. 追加学習は `ojizou_san::IncrementalExplain` なしでは完了しない。`n_eff`、`‖Δθ‖`、情報利得、識別の可否、warmup、文章による説明が必須。
+
+## 検証済み表面（`verified()`）
+
+現在 `CoverageStatus::Verified` なのは `special.rs` の特殊関数だけである。scipy 1.18.1 ゴールデン（`golden/special_functions.json`、1,099 ケース）を `cargo test -p kanimiso --lib special::` でリプレイする。
+
+生成型（Cosine/Tsp 冪族、`WindowLag*`, `LogMinkowski*Anomaly` など）は `CoverageStatus::Generated` であり、削除対象である。
 
 ## 使う
 
@@ -49,7 +57,7 @@ let q = rls.partial_fit(&x, Some(&y), &session)?;
 // q.value.narrative / trust / quality.effective_sample_size
 ```
 
-実装一覧は `kanimiso::coverage::inventory()`。
+実装一覧は `kanimiso::coverage::inventory()`。検証済みだけを見るなら `verified()`。
 
 ## 制約
 

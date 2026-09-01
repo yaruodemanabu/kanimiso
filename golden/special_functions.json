@@ -1,0 +1,9603 @@
+{
+ "generator": "special_oracle_check.py emit",
+ "created": "2026-09-01",
+ "oracle": {
+  "scipy": "1.18.1",
+  "numpy": "2.4.4",
+  "python": "3.12.3"
+ },
+ "seed": 0,
+ "tolerance_policy": "Rust 側で実測誤差 × 3〜4 を閾値にし、実測値をテストのコメントに残す（AGENTS.md R9）",
+ "n_cases": 1099,
+ "cases": [
+  {
+   "fn": "erf",
+   "args": [
+    -3.0
+   ],
+   "expected": -0.9999779095030014
+  },
+  {
+   "fn": "norm_cdf",
+   "args": [
+    -3.0
+   ],
+   "expected": 0.0013498980316300933
+  },
+  {
+   "fn": "erf",
+   "args": [
+    -1.0
+   ],
+   "expected": -0.8427007929497148
+  },
+  {
+   "fn": "norm_cdf",
+   "args": [
+    -1.0
+   ],
+   "expected": 0.15865525393145707
+  },
+  {
+   "fn": "erf",
+   "args": [
+    -0.5
+   ],
+   "expected": -0.5204998778130465
+  },
+  {
+   "fn": "norm_cdf",
+   "args": [
+    -0.5
+   ],
+   "expected": 0.3085375387259869
+  },
+  {
+   "fn": "erf",
+   "args": [
+    0.0
+   ],
+   "expected": 0.0
+  },
+  {
+   "fn": "norm_cdf",
+   "args": [
+    0.0
+   ],
+   "expected": 0.5
+  },
+  {
+   "fn": "erf",
+   "args": [
+    0.5
+   ],
+   "expected": 0.5204998778130465
+  },
+  {
+   "fn": "norm_cdf",
+   "args": [
+    0.5
+   ],
+   "expected": 0.6914624612740131
+  },
+  {
+   "fn": "erf",
+   "args": [
+    1.0
+   ],
+   "expected": 0.8427007929497148
+  },
+  {
+   "fn": "norm_cdf",
+   "args": [
+    1.0
+   ],
+   "expected": 0.8413447460685429
+  },
+  {
+   "fn": "erf",
+   "args": [
+    3.0
+   ],
+   "expected": 0.9999779095030014
+  },
+  {
+   "fn": "norm_cdf",
+   "args": [
+    3.0
+   ],
+   "expected": 0.9986501019683699
+  },
+  {
+   "fn": "erf",
+   "args": [
+    6.0
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "norm_cdf",
+   "args": [
+    6.0
+   ],
+   "expected": 0.9999999990134123
+  },
+  {
+   "fn": "ln_gamma",
+   "args": [
+    0.1
+   ],
+   "expected": 2.252712651734206
+  },
+  {
+   "fn": "digamma",
+   "args": [
+    0.1
+   ],
+   "expected": -10.423754940411076
+  },
+  {
+   "fn": "ln_gamma",
+   "args": [
+    0.5
+   ],
+   "expected": 0.5723649429247
+  },
+  {
+   "fn": "digamma",
+   "args": [
+    0.5
+   ],
+   "expected": -1.9635100260214235
+  },
+  {
+   "fn": "ln_gamma",
+   "args": [
+    1.0
+   ],
+   "expected": 0.0
+  },
+  {
+   "fn": "digamma",
+   "args": [
+    1.0
+   ],
+   "expected": -0.5772156649015329
+  },
+  {
+   "fn": "ln_gamma",
+   "args": [
+    1.5
+   ],
+   "expected": -0.12078223763524526
+  },
+  {
+   "fn": "digamma",
+   "args": [
+    1.5
+   ],
+   "expected": 0.03648997397857652
+  },
+  {
+   "fn": "ln_gamma",
+   "args": [
+    2.0
+   ],
+   "expected": 0.0
+  },
+  {
+   "fn": "digamma",
+   "args": [
+    2.0
+   ],
+   "expected": 0.42278433509846713
+  },
+  {
+   "fn": "ln_gamma",
+   "args": [
+    5.0
+   ],
+   "expected": 3.1780538303479458
+  },
+  {
+   "fn": "digamma",
+   "args": [
+    5.0
+   ],
+   "expected": 1.5061176684318003
+  },
+  {
+   "fn": "ln_gamma",
+   "args": [
+    10.0
+   ],
+   "expected": 12.801827480081469
+  },
+  {
+   "fn": "digamma",
+   "args": [
+    10.0
+   ],
+   "expected": 2.251752589066721
+  },
+  {
+   "fn": "ln_gamma",
+   "args": [
+    50.0
+   ],
+   "expected": 144.56574394634487
+  },
+  {
+   "fn": "digamma",
+   "args": [
+    50.0
+   ],
+   "expected": 3.9019896734278925
+  },
+  {
+   "fn": "ln_gamma",
+   "args": [
+    100.0
+   ],
+   "expected": 359.1342053695754
+  },
+  {
+   "fn": "digamma",
+   "args": [
+    100.0
+   ],
+   "expected": 4.600161852738088
+  },
+  {
+   "fn": "ln_gamma",
+   "args": [
+    170.0
+   ],
+   "expected": 701.4372638087372
+  },
+  {
+   "fn": "digamma",
+   "args": [
+    170.0
+   ],
+   "expected": 5.132854377083308
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    0.1,
+    0.01
+   ],
+   "expected": 0.6626212599544796
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    0.1,
+    0.5
+   ],
+   "expected": 0.9414024458901334
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    0.1,
+    1.0
+   ],
+   "expected": 0.9758726562736721
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    0.1,
+    2.0
+   ],
+   "expected": 0.9943261760201885
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    0.1,
+    5.0
+   ],
+   "expected": 0.9998560610341533
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    0.1,
+    20.0
+   ],
+   "expected": 0.9999999999859864
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    0.1,
+    100.0
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    0.5,
+    0.01
+   ],
+   "expected": 0.11246291601828491
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    0.5,
+    0.5
+   ],
+   "expected": 0.6826894921370859
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    0.5,
+    1.0
+   ],
+   "expected": 0.8427007929497151
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    0.5,
+    2.0
+   ],
+   "expected": 0.9544997361036415
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    0.5,
+    5.0
+   ],
+   "expected": 0.9984345977419975
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    0.5,
+    20.0
+   ],
+   "expected": 0.9999999997460371
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    0.5,
+    100.0
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    1.0,
+    0.01
+   ],
+   "expected": 0.009950166250831952
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    1.0,
+    0.5
+   ],
+   "expected": 0.3934693402873665
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    1.0,
+    1.0
+   ],
+   "expected": 0.6321205588285577
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    1.0,
+    2.0
+   ],
+   "expected": 0.8646647167633873
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    1.0,
+    5.0
+   ],
+   "expected": 0.9932620530009145
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    1.0,
+    20.0
+   ],
+   "expected": 0.9999999979388464
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    1.0,
+    100.0
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    1.5,
+    0.01
+   ],
+   "expected": 0.0007477553393911979
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    1.5,
+    0.5
+   ],
+   "expected": 0.19874804309879915
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    1.5,
+    1.0
+   ],
+   "expected": 0.42759329552912023
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    1.5,
+    2.0
+   ],
+   "expected": 0.7385358700508888
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    1.5,
+    5.0
+   ],
+   "expected": 0.9814338645369568
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    1.5,
+    20.0
+   ],
+   "expected": 0.9999999893449096
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    1.5,
+    100.0
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    2.0,
+    0.01
+   ],
+   "expected": 4.966791334026596e-05
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    2.0,
+    0.5
+   ],
+   "expected": 0.09020401043104986
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    2.0,
+    1.0
+   ],
+   "expected": 0.2642411176571153
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    2.0,
+    2.0
+   ],
+   "expected": 0.5939941502901616
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    2.0,
+    5.0
+   ],
+   "expected": 0.9595723180054873
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    2.0,
+    20.0
+   ],
+   "expected": 0.9999999567157739
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    2.0,
+    100.0
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    5.0,
+    0.01
+   ],
+   "expected": 8.264185641806515e-13
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    5.0,
+    0.5
+   ],
+   "expected": 0.00017211562995584072
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    5.0,
+    1.0
+   ],
+   "expected": 0.003659846827343713
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    5.0,
+    2.0
+   ],
+   "expected": 0.052653017343711125
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    5.0,
+    5.0
+   ],
+   "expected": 0.5595067149347879
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    5.0,
+    20.0
+   ],
+   "expected": 0.9999830552560699
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    5.0,
+    100.0
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    10.0,
+    0.01
+   ],
+   "expected": 2.7307942836962656e-27
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    10.0,
+    0.5
+   ],
+   "expected": 1.709670029348906e-10
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    10.0,
+    1.0
+   ],
+   "expected": 1.1142547833872071e-07
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    10.0,
+    2.0
+   ],
+   "expected": 4.649807501726386e-05
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    10.0,
+    5.0
+   ],
+   "expected": 0.03182805730620481
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    10.0,
+    20.0
+   ],
+   "expected": 0.9950045876916924
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    10.0,
+    100.0
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    50.0,
+    0.01
+   ],
+   "expected": 3.255872177214946e-165
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    50.0,
+    0.5
+   ],
+   "expected": 1.7887765104351563e-80
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    50.0,
+    1.0
+   ],
+   "expected": 1.2337508979097585e-65
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    50.0,
+    2.0
+   ],
+   "expected": 5.2143019033173107e-51
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    50.0,
+    5.0
+   ],
+   "expected": 2.181059214078525e-32
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    50.0,
+    20.0
+   ],
+   "expected": 1.2458926079719434e-08
+  },
+  {
+   "fn": "gamma_p",
+   "args": [
+    50.0,
+    100.0
+   ],
+   "expected": 0.9999999882154993
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.1,
+    1e-06
+   ],
+   "expected": 0.12741225313416496
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.1,
+    0.01
+   ],
+   "expected": 0.3203082503756264
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.1,
+    0.1
+   ],
+   "expected": 0.40638509393627603
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.1,
+    0.3
+   ],
+   "expected": 0.46280418611555213
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.1,
+    0.5
+   ],
+   "expected": 0.4999999999999999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.1,
+    0.7
+   ],
+   "expected": 0.5371958138844479
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.1,
+    0.9
+   ],
+   "expected": 0.593614906063724
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.1,
+    0.99
+   ],
+   "expected": 0.6796917496243736
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.1,
+    0.999999
+   ],
+   "expected": 0.8725877468654687
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.5,
+    1e-06
+   ],
+   "expected": 0.22183760940672442
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.5,
+    0.01
+   ],
+   "expected": 0.5574851432009764
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.5,
+    0.1
+   ],
+   "expected": 0.7048336220512212
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.5,
+    0.3
+   ],
+   "expected": 0.795176530367368
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.5,
+    0.5
+   ],
+   "expected": 0.8480017123997708
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.5,
+    0.7
+   ],
+   "expected": 0.8926585878364058
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.5,
+    0.9
+   ],
+   "expected": 0.9423662883157906
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.5,
+    0.99
+   ],
+   "expected": 0.9822836789796021
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    0.5,
+    0.999999
+   ],
+   "expected": 0.9998233696690305
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    1.0,
+    1e-06
+   ],
+   "expected": 0.251188643150958
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    1.0,
+    0.01
+   ],
+   "expected": 0.6309573444801932
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    1.0,
+    0.1
+   ],
+   "expected": 0.7943282347242815
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    1.0,
+    0.3
+   ],
+   "expected": 0.8865681505652133
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    1.0,
+    0.5
+   ],
+   "expected": 0.9330329915368074
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    1.0,
+    0.7
+   ],
+   "expected": 0.9649610951198176
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    1.0,
+    0.9
+   ],
+   "expected": 0.9895192582062144
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    1.0,
+    0.99
+   ],
+   "expected": 0.99899547129175
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    1.0,
+    0.999999
+   ],
+   "expected": 0.999999899999955
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    2.0,
+    1e-06
+   ],
+   "expected": 0.2763074823471896
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    2.0,
+    0.01
+   ],
+   "expected": 0.6934221215837327
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    2.0,
+    0.1
+   ],
+   "expected": 0.8658177758494668
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    2.0,
+    0.3
+   ],
+   "expected": 0.9486279211047787
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    2.0,
+    0.5
+   ],
+   "expected": 0.9796846411136478
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    2.0,
+    0.7
+   ],
+   "expected": 0.9939099279734122
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    2.0,
+    0.9
+   ],
+   "expected": 0.9994144507882765
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    2.0,
+    0.99
+   ],
+   "expected": 0.9999944667630418
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    2.0,
+    0.999999
+   ],
+   "expected": 0.999999999999945
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    3.0,
+    1e-06
+   ],
+   "expected": 0.29012283008975526
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    3.0,
+    0.01
+   ],
+   "expected": 0.7274341927166094
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    3.0,
+    0.1
+   ],
+   "expected": 0.9012050987064336
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    3.0,
+    0.3
+   ],
+   "expected": 0.9725209327625114
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    3.0,
+    0.5
+   ],
+   "expected": 0.9925138447472793
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    3.0,
+    0.7
+   ],
+   "expected": 0.9986864853942555
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    3.0,
+    0.9
+   ],
+   "expected": 0.99995868638029
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    3.0,
+    0.99
+   ],
+   "expected": 0.999999961238134
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    3.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    10.0,
+    1e-06
+   ],
+   "expected": 0.3308863969439871
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    10.0,
+    0.01
+   ],
+   "expected": 0.8244896709066988
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    10.0,
+    0.1
+   ],
+   "expected": 0.9761439492556259
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    10.0,
+    0.3
+   ],
+   "expected": 0.999057850198376
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    10.0,
+    0.5
+   ],
+   "expected": 0.9999777025275418
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    10.0,
+    0.7
+   ],
+   "expected": 0.9999998962997414
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    10.0,
+    0.9
+   ],
+   "expected": 0.9999999999985645
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    10.0,
+    0.99
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    10.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    50.0,
+    1e-06
+   ],
+   "expected": 0.3900879068915247
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    50.0,
+    0.01
+   ],
+   "expected": 0.9411645901311703
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    50.0,
+    0.1
+   ],
+   "expected": 0.9998884522365835
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    50.0,
+    0.3
+   ],
+   "expected": 0.9999999998412045
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    50.0,
+    0.5
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    50.0,
+    0.7
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    50.0,
+    0.9
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    50.0,
+    0.99
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1,
+    50.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.1,
+    1e-06
+   ],
+   "expected": 0.00017663033096698734
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.1,
+    0.01
+   ],
+   "expected": 0.017716321020397916
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.1,
+    0.1
+   ],
+   "expected": 0.05763371168420957
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.1,
+    0.3
+   ],
+   "expected": 0.10734141216359433
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.1,
+    0.5
+   ],
+   "expected": 0.1519982876002296
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.1,
+    0.7
+   ],
+   "expected": 0.20482346963263195
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.1,
+    0.9
+   ],
+   "expected": 0.295166377948779
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.1,
+    0.99
+   ],
+   "expected": 0.44251485679902364
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.1,
+    0.999999
+   ],
+   "expected": 0.7781623905926376
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.5,
+    1e-06
+   ],
+   "expected": 0.0006366198784709245
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.5,
+    0.01
+   ],
+   "expected": 0.06376856085851985
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.5,
+    0.1
+   ],
+   "expected": 0.20483276469913345
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.5,
+    0.3
+   ],
+   "expected": 0.36901011956554536
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.5,
+    0.5
+   ],
+   "expected": 0.5000000000000001
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.5,
+    0.7
+   ],
+   "expected": 0.6309898804344546
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.5,
+    0.9
+   ],
+   "expected": 0.7951672353008665
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.5,
+    0.99
+   ],
+   "expected": 0.9362314391414803
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    0.5,
+    0.999999
+   ],
+   "expected": 0.9993633801215482
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    1.0,
+    1e-06
+   ],
+   "expected": 0.001
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    1.0,
+    0.01
+   ],
+   "expected": 0.1
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    1.0,
+    0.1
+   ],
+   "expected": 0.31622776601683794
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    1.0,
+    0.3
+   ],
+   "expected": 0.5477225575051661
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    1.0,
+    0.5
+   ],
+   "expected": 0.7071067811865476
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    1.0,
+    0.7
+   ],
+   "expected": 0.8366600265340756
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    1.0,
+    0.9
+   ],
+   "expected": 0.9486832980505138
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    1.0,
+    0.99
+   ],
+   "expected": 0.99498743710662
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    1.0,
+    0.999999
+   ],
+   "expected": 0.999999499999875
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    2.0,
+    1e-06
+   ],
+   "expected": 0.0014999994999999996
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    2.0,
+    0.01
+   ],
+   "expected": 0.14949999999999997
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    2.0,
+    0.1
+   ],
+   "expected": 0.45853026072441494
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    2.0,
+    0.3
+   ],
+   "expected": 0.7394254526319747
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    2.0,
+    0.5
+   ],
+   "expected": 0.8838834764831843
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    2.0,
+    0.7
+   ],
+   "expected": 0.9621590305141866
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    2.0,
+    0.9
+   ],
+   "expected": 0.9961174629530394
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    2.0,
+    0.99
+   ],
+   "expected": 0.9999623742921531
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    2.0,
+    0.999999
+   ],
+   "expected": 0.999999999999625
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    3.0,
+    1e-06
+   ],
+   "expected": 0.0018749987500003749
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    3.0,
+    0.01
+   ],
+   "expected": 0.18625375
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    3.0,
+    0.1
+   ],
+   "expected": 0.5545844446520297
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    3.0,
+    0.3
+   ],
+   "expected": 0.8400694725735486
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    3.0,
+    0.5
+   ],
+   "expected": 0.9501747372194231
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    3.0,
+    0.7
+   ],
+   "expected": 0.9903963064097122
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    3.0,
+    0.9
+   ],
+   "expected": 0.9996750253207289
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    3.0,
+    0.99
+   ],
+   "expected": 0.9999996863210445
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    3.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    10.0,
+    1e-06
+   ],
+   "expected": 0.003523930468241314
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    10.0,
+    0.01
+   ],
+   "expected": 0.3420718248432154
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    10.0,
+    0.1
+   ],
+   "expected": 0.84835909036529
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    10.0,
+    0.3
+   ],
+   "expected": 0.9916774951375363
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    10.0,
+    0.5
+   ],
+   "expected": 0.9997665525652514
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    10.0,
+    0.7
+   ],
+   "expected": 0.9999987794770719
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    10.0,
+    0.9
+   ],
+   "expected": 0.9999999999815198
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    10.0,
+    0.99
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    10.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    50.0,
+    1e-06
+   ],
+   "expected": 0.007958793744835393
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    50.0,
+    0.01
+   ],
+   "expected": 0.6826956021258024
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    50.0,
+    0.1
+   ],
+   "expected": 0.9987958501674402
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    50.0,
+    0.3
+   ],
+   "expected": 0.9999999974428065
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    50.0,
+    0.5
+   ],
+   "expected": 0.9999999999999999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    50.0,
+    0.7
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    50.0,
+    0.9
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    50.0,
+    0.99
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5,
+    50.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.1,
+    1e-06
+   ],
+   "expected": 1.0000004500002851e-07
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.1,
+    0.01
+   ],
+   "expected": 0.0010045287082499491
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.1,
+    0.1
+   ],
+   "expected": 0.010480741793785608
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.1,
+    0.3
+   ],
+   "expected": 0.03503890488018239
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.1,
+    0.5
+   ],
+   "expected": 0.06696700846319258
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.1,
+    0.7
+   ],
+   "expected": 0.11343184943478667
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.1,
+    0.9
+   ],
+   "expected": 0.20567176527571854
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.1,
+    0.99
+   ],
+   "expected": 0.36904265551980675
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.1,
+    0.999999
+   ],
+   "expected": 0.7488113568483197
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.5,
+    1e-06
+   ],
+   "expected": 5.000001250000625e-07
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.5,
+    0.01
+   ],
+   "expected": 0.005012562893380045
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.5,
+    0.1
+   ],
+   "expected": 0.051316701949486204
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.5,
+    0.3
+   ],
+   "expected": 0.16333997346592444
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.5,
+    0.5
+   ],
+   "expected": 0.2928932188134525
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.5,
+    0.7
+   ],
+   "expected": 0.45227744249483387
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.5,
+    0.9
+   ],
+   "expected": 0.6837722339831621
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.5,
+    0.99
+   ],
+   "expected": 0.9
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    0.5,
+    0.999999
+   ],
+   "expected": 0.9989999999999857
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    1.0,
+    1e-06
+   ],
+   "expected": 1e-06
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    1.0,
+    0.01
+   ],
+   "expected": 0.01
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    1.0,
+    0.1
+   ],
+   "expected": 0.1
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    1.0,
+    0.3
+   ],
+   "expected": 0.3
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    1.0,
+    0.5
+   ],
+   "expected": 0.5
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    1.0,
+    0.7
+   ],
+   "expected": 0.7
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    1.0,
+    0.9
+   ],
+   "expected": 0.9
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    1.0,
+    0.99
+   ],
+   "expected": 0.99
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    1.0,
+    0.999999
+   ],
+   "expected": 0.999999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    2.0,
+    1e-06
+   ],
+   "expected": 1.999999e-06
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    2.0,
+    0.01
+   ],
+   "expected": 0.0199
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    2.0,
+    0.1
+   ],
+   "expected": 0.19
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    2.0,
+    0.3
+   ],
+   "expected": 0.51
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    2.0,
+    0.5
+   ],
+   "expected": 0.75
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    2.0,
+    0.7
+   ],
+   "expected": 0.9099999999999999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    2.0,
+    0.9
+   ],
+   "expected": 0.99
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    2.0,
+    0.99
+   ],
+   "expected": 0.9999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    2.0,
+    0.999999
+   ],
+   "expected": 0.999999999999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    3.0,
+    1e-06
+   ],
+   "expected": 2.9999970000010006e-06
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    3.0,
+    0.01
+   ],
+   "expected": 0.029701
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    3.0,
+    0.1
+   ],
+   "expected": 0.271
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    3.0,
+    0.3
+   ],
+   "expected": 0.6569999999999999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    3.0,
+    0.5
+   ],
+   "expected": 0.875
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    3.0,
+    0.7
+   ],
+   "expected": 0.973
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    3.0,
+    0.9
+   ],
+   "expected": 0.999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    3.0,
+    0.99
+   ],
+   "expected": 0.999999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    3.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    10.0,
+    1e-06
+   ],
+   "expected": 9.99995500012e-06
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    10.0,
+    0.01
+   ],
+   "expected": 0.09561792499119552
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    10.0,
+    0.1
+   ],
+   "expected": 0.6513215599000001
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    10.0,
+    0.3
+   ],
+   "expected": 0.9717524751
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    10.0,
+    0.5
+   ],
+   "expected": 0.9990234375
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    10.0,
+    0.7
+   ],
+   "expected": 0.9999940951
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    10.0,
+    0.9
+   ],
+   "expected": 0.9999999999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    10.0,
+    0.99
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    10.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    50.0,
+    1e-06
+   ],
+   "expected": 4.999877501959977e-05
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    50.0,
+    0.01
+   ],
+   "expected": 0.39499393286246337
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    50.0,
+    0.1
+   ],
+   "expected": 0.9948462247926799
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    50.0,
+    0.3
+   ],
+   "expected": 0.9999999820153496
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    50.0,
+    0.5
+   ],
+   "expected": 0.9999999999999991
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    50.0,
+    0.7
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    50.0,
+    0.9
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    50.0,
+    0.99
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0,
+    50.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.1,
+    1e-06
+   ],
+   "expected": 5.500003300002352e-14
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.1,
+    0.01
+   ],
+   "expected": 5.533236958198866e-06
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.1,
+    0.1
+   ],
+   "expected": 0.0005855492117234637
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.1,
+    0.3
+   ],
+   "expected": 0.006090072026587863
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.1,
+    0.5
+   ],
+   "expected": 0.0203153588863522
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.1,
+    0.7
+   ],
+   "expected": 0.0513720788952217
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.1,
+    0.9
+   ],
+   "expected": 0.13418222415053324
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.1,
+    0.99
+   ],
+   "expected": 0.3065778784162672
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.1,
+    0.999999
+   ],
+   "expected": 0.7236925176520159
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.5,
+    1e-06
+   ],
+   "expected": 3.7500012500007017e-13
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.5,
+    0.01
+   ],
+   "expected": 3.762570784694551e-05
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.5,
+    0.1
+   ],
+   "expected": 0.0038825370469605107
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.5,
+    0.3
+   ],
+   "expected": 0.03784096948581308
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.5,
+    0.5
+   ],
+   "expected": 0.11611652351681556
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.5,
+    0.7
+   ],
+   "expected": 0.2605745473680253
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.5,
+    0.9
+   ],
+   "expected": 0.5414697392755851
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.5,
+    0.99
+   ],
+   "expected": 0.8505
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    0.5,
+    0.999999
+   ],
+   "expected": 0.9985000004999784
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    1.0,
+    1e-06
+   ],
+   "expected": 1e-12
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    1.0,
+    0.01
+   ],
+   "expected": 0.0001
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    1.0,
+    0.1
+   ],
+   "expected": 0.010000000000000002
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    1.0,
+    0.3
+   ],
+   "expected": 0.09
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    1.0,
+    0.5
+   ],
+   "expected": 0.25
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    1.0,
+    0.7
+   ],
+   "expected": 0.48999999999999994
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    1.0,
+    0.9
+   ],
+   "expected": 0.81
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    1.0,
+    0.99
+   ],
+   "expected": 0.9801
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    1.0,
+    0.999999
+   ],
+   "expected": 0.9999980000009999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    2.0,
+    1e-06
+   ],
+   "expected": 2.9999979999999998e-12
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    2.0,
+    0.01
+   ],
+   "expected": 0.00029800000000000003
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    2.0,
+    0.1
+   ],
+   "expected": 0.028000000000000008
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    2.0,
+    0.3
+   ],
+   "expected": 0.21599999999999994
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    2.0,
+    0.5
+   ],
+   "expected": 0.5
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    2.0,
+    0.7
+   ],
+   "expected": 0.7839999999999999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    2.0,
+    0.9
+   ],
+   "expected": 0.972
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    2.0,
+    0.99
+   ],
+   "expected": 0.999702
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    2.0,
+    0.999999
+   ],
+   "expected": 0.999999999997
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    3.0,
+    1e-06
+   ],
+   "expected": 5.999992000002998e-12
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    3.0,
+    0.01
+   ],
+   "expected": 0.0005920299999999999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    3.0,
+    0.1
+   ],
+   "expected": 0.05230000000000001
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    3.0,
+    0.3
+   ],
+   "expected": 0.34829999999999994
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    3.0,
+    0.5
+   ],
+   "expected": 0.6875
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    3.0,
+    0.7
+   ],
+   "expected": 0.9163
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    3.0,
+    0.9
+   ],
+   "expected": 0.9963
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    3.0,
+    0.99
+   ],
+   "expected": 0.99999603
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    3.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    10.0,
+    1e-06
+   ],
+   "expected": 5.499967000098999e-11
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    10.0,
+    0.01
+   ],
+   "expected": 0.005179717490315062
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    10.0,
+    0.1
+   ],
+   "expected": 0.3026431198
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    10.0,
+    0.3
+   ],
+   "expected": 0.8870099004
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    10.0,
+    0.5
+   ],
+   "expected": 0.994140625
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    10.0,
+    0.7
+   ],
+   "expected": 0.9999527608
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    10.0,
+    0.9
+   ],
+   "expected": 0.999999999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    10.0,
+    0.99
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    10.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    50.0,
+    1e-06
+   ],
+   "expected": 1.27495835074969e-09
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    50.0,
+    0.01
+   ],
+   "expected": 0.09249089929369504
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    50.0,
+    0.1
+   ],
+   "expected": 0.9690773487560793
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    50.0,
+    0.3
+   ],
+   "expected": 0.9999997122455931
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    50.0,
+    0.5
+   ],
+   "expected": 0.9999999999999769
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    50.0,
+    0.7
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    50.0,
+    0.9
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    50.0,
+    0.99
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.0,
+    50.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.1,
+    1e-06
+   ],
+   "expected": 3.850002598751975e-20
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.1,
+    0.01
+   ],
+   "expected": 3.8761866094238394e-08
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.1,
+    0.1
+   ],
+   "expected": 4.131361971004551e-05
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.1,
+    0.3
+   ],
+   "expected": 0.0013135146057447653
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.1,
+    0.5
+   ],
+   "expected": 0.007486155252721111
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.1,
+    0.7
+   ],
+   "expected": 0.027479067237489215
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.1,
+    0.9
+   ],
+   "expected": 0.09879490129356645
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.1,
+    0.99
+   ],
+   "expected": 0.27256580728339047
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.1,
+    0.999999
+   ],
+   "expected": 0.7098771699094105
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.5,
+    1e-06
+   ],
+   "expected": 3.125001171875703e-19
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.5,
+    0.01
+   ],
+   "expected": 3.1367895544724357e-07
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.5,
+    0.1
+   ],
+   "expected": 0.0003249746792710838
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.5,
+    0.3
+   ],
+   "expected": 0.009603693590288068
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.5,
+    0.5
+   ],
+   "expected": 0.04982526278057676
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.5,
+    0.7
+   ],
+   "expected": 0.15993052742645136
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.5,
+    0.9
+   ],
+   "expected": 0.44541555534797056
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.5,
+    0.99
+   ],
+   "expected": 0.8137462499999999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    0.5,
+    0.999999
+   ],
+   "expected": 0.9981250012499727
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    1.0,
+    1e-06
+   ],
+   "expected": 9.999999999999999e-19
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    1.0,
+    0.01
+   ],
+   "expected": 1.0000000000000002e-06
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    1.0,
+    0.1
+   ],
+   "expected": 0.0010000000000000002
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    1.0,
+    0.3
+   ],
+   "expected": 0.026999999999999996
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    1.0,
+    0.5
+   ],
+   "expected": 0.125
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    1.0,
+    0.7
+   ],
+   "expected": 0.3429999999999999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    1.0,
+    0.9
+   ],
+   "expected": 0.7290000000000001
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    1.0,
+    0.99
+   ],
+   "expected": 0.970299
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    1.0,
+    0.999999
+   ],
+   "expected": 0.999997000003
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    2.0,
+    1e-06
+   ],
+   "expected": 3.9999969999999994e-18
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    2.0,
+    0.01
+   ],
+   "expected": 3.97e-06
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    2.0,
+    0.1
+   ],
+   "expected": 0.0037000000000000006
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    2.0,
+    0.3
+   ],
+   "expected": 0.0837
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    2.0,
+    0.5
+   ],
+   "expected": 0.3125
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    2.0,
+    0.7
+   ],
+   "expected": 0.6517
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    2.0,
+    0.9
+   ],
+   "expected": 0.9477
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    2.0,
+    0.99
+   ],
+   "expected": 0.99940797
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    2.0,
+    0.999999
+   ],
+   "expected": 0.999999999994
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    3.0,
+    1e-06
+   ],
+   "expected": 9.999985000005997e-18
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    3.0,
+    0.01
+   ],
+   "expected": 9.850600000000002e-06
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    3.0,
+    0.1
+   ],
+   "expected": 0.008560000000000002
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    3.0,
+    0.3
+   ],
+   "expected": 0.16308
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    3.0,
+    0.5
+   ],
+   "expected": 0.5
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    3.0,
+    0.7
+   ],
+   "expected": 0.8369199999999999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    3.0,
+    0.9
+   ],
+   "expected": 0.99144
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    3.0,
+    0.99
+   ],
+   "expected": 0.9999901494
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    3.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    10.0,
+    1e-06
+   ],
+   "expected": 2.1999851500475187e-16
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    10.0,
+    0.01
+   ],
+   "expected": 0.00020561607776663622
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    10.0,
+    0.1
+   ],
+   "expected": 0.11086997774500003
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    10.0,
+    0.3
+   ],
+   "expected": 0.7471846521450002
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    10.0,
+    0.5
+   ],
+   "expected": 0.980712890625
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    10.0,
+    0.7
+   ],
+   "expected": 0.999793623745
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    10.0,
+    0.9
+   ],
+   "expected": 0.999999994545
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    10.0,
+    0.99
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    10.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    50.0,
+    1e-06
+   ],
+   "expected": 2.209918784059351e-14
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    50.0,
+    0.01
+   ],
+   "expected": 0.015352625733659083
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    50.0,
+    0.1
+   ],
+   "expected": 0.9033667148627478
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    50.0,
+    0.3
+   ],
+   "expected": 0.9999976485069567
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    50.0,
+    0.5
+   ],
+   "expected": 0.9999999999996938
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    50.0,
+    0.7
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    50.0,
+    0.9
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    50.0,
+    0.99
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.0,
+    50.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.1,
+    1e-06
+   ],
+   "expected": 1.3172846281737026e-62
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.1,
+    0.01
+   ],
+   "expected": 1.328156026492123e-22
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.1,
+    0.1
+   ],
+   "expected": 1.43536789168095e-12
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.1,
+    0.3
+   ],
+   "expected": 1.0370025857993869e-07
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.1,
+    0.5
+   ],
+   "expected": 2.2297472458379084e-05
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.1,
+    0.7
+   ],
+   "expected": 0.0009421498016241886
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.1,
+    0.9
+   ],
+   "expected": 0.023856050744374125
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.1,
+    0.99
+   ],
+   "expected": 0.17551032909330117
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.1,
+    0.999999
+   ],
+   "expected": 0.6691136030550614
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.5,
+    1e-06
+   ],
+   "expected": 1.761971320915771e-61
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.5,
+    0.01
+   ],
+   "expected": 1.770034965528571e-21
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.5,
+    0.1
+   ],
+   "expected": 1.8480273740563758e-11
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.5,
+    0.3
+   ],
+   "expected": 1.2205229279531696e-06
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.5,
+    0.5
+   ],
+   "expected": 0.00023344743474862207
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.5,
+    0.7
+   ],
+   "expected": 0.008322504862464206
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.5,
+    0.9
+   ],
+   "expected": 0.15164090963470994
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.5,
+    0.99
+   ],
+   "expected": 0.6579281751567845
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    0.5,
+    0.999999
+   ],
+   "expected": 0.996476069531708
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    1.0,
+    1e-06
+   ],
+   "expected": 9.999999999999996e-61
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    1.0,
+    0.01
+   ],
+   "expected": 1.0000000000000002e-20
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    1.0,
+    0.1
+   ],
+   "expected": 1.0000000000000006e-10
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    1.0,
+    0.3
+   ],
+   "expected": 5.9048999999999975e-06
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    1.0,
+    0.5
+   ],
+   "expected": 0.0009765625
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    1.0,
+    0.7
+   ],
+   "expected": 0.02824752489999998
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    1.0,
+    0.9
+   ],
+   "expected": 0.34867844010000004
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    1.0,
+    0.99
+   ],
+   "expected": 0.9043820750088044
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    1.0,
+    0.999999
+   ],
+   "expected": 0.9999900000449996
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    2.0,
+    1e-06
+   ],
+   "expected": 1.0999989999999995e-59
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    2.0,
+    0.01
+   ],
+   "expected": 1.0900000000000003e-19
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    2.0,
+    0.1
+   ],
+   "expected": 1.0000000000000005e-09
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    2.0,
+    0.3
+   ],
+   "expected": 4.723919999999998e-05
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    2.0,
+    0.5
+   ],
+   "expected": 0.005859375
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    2.0,
+    0.7
+   ],
+   "expected": 0.11299009959999995
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    2.0,
+    0.9
+   ],
+   "expected": 0.6973568802000002
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    2.0,
+    0.99
+   ],
+   "expected": 0.9948202825096849
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    2.0,
+    0.999999
+   ],
+   "expected": 0.9999999999450003
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    3.0,
+    1e-06
+   ],
+   "expected": 6.599988000005496e-59
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    3.0,
+    0.01
+   ],
+   "expected": 6.480550000000001e-19
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    3.0,
+    0.1
+   ],
+   "expected": 5.455000000000004e-09
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    3.0,
+    0.3
+   ],
+   "expected": 0.00020637625499999988
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    3.0,
+    0.5
+   ],
+   "expected": 0.019287109375
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    3.0,
+    0.7
+   ],
+   "expected": 0.25281534785499993
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    3.0,
+    0.9
+   ],
+   "expected": 0.889130022255
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    3.0,
+    0.99
+   ],
+   "expected": 0.9997943839222334
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    3.0,
+    0.999999
+   ],
+   "expected": 0.9999999999999998
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    10.0,
+    1e-06
+   ],
+   "expected": 9.237724418277126e-56
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    10.0,
+    0.01
+   ],
+   "expected": 8.509104732905513e-16
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    10.0,
+    0.1
+   ],
+   "expected": 3.929882327128003e-06
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    10.0,
+    0.3
+   ],
+   "expected": 0.032553356881300934
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    10.0,
+    0.5
+   ],
+   "expected": 0.5
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    10.0,
+    0.7
+   ],
+   "expected": 0.967446643118699
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    10.0,
+    0.9
+   ],
+   "expected": 0.9999960701176729
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    10.0,
+    0.99
+   ],
+   "expected": 0.9999999999999991
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    10.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    50.0,
+    1e-06
+   ],
+   "expected": 6.282555764888028e-50
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    50.0,
+    0.01
+   ],
+   "expected": 4.019555174225147e-10
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    50.0,
+    0.1
+   ],
+   "expected": 0.06658944558287136
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    50.0,
+    0.3
+   ],
+   "expected": 0.9927943681007908
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    50.0,
+    0.5
+   ],
+   "expected": 0.9999999736758395
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    50.0,
+    0.7
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    50.0,
+    0.9
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    50.0,
+    0.99
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.0,
+    50.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.1,
+    1e-06
+   ],
+   "expected": 3.105952433560992e-303
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.1,
+    0.01
+   ],
+   "expected": 3.133612921546788e-103
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.1,
+    0.1
+   ],
+   "expected": 3.4082167617989116e-53
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.1,
+    0.3
+   ],
+   "expected": 3.050861536847352e-29
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.1,
+    0.5
+   ],
+   "expected": 5.060105777610523e-18
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.1,
+    0.7
+   ],
+   "expected": 1.587958759362563e-10
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.1,
+    0.9
+   ],
+   "expected": 0.00011154776341650149
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.1,
+    0.99
+   ],
+   "expected": 0.05883540986882965
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.1,
+    0.999999
+   ],
+   "expected": 0.6099120931073537
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.5,
+    1e-06
+   ],
+   "expected": 7.958927640153899e-302
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.5,
+    0.01
+   ],
+   "expected": 7.998227417904836e-102
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.5,
+    0.1
+   ],
+   "expected": 8.380332558688329e-52
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.5,
+    0.3
+   ],
+   "expected": 6.800825885173791e-28
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.5,
+    0.5
+   ],
+   "expected": 9.90168898459413e-17
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.5,
+    0.7
+   ],
+   "expected": 2.5571939944368708e-09
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.5,
+    0.9
+   ],
+   "expected": 0.001204149832559813
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.5,
+    0.99
+   ],
+   "expected": 0.3173043978741973
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    0.5,
+    0.999999
+   ],
+   "expected": 0.9920412062550501
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    1.0,
+    1e-06
+   ],
+   "expected": 9.999999999999977e-301
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    1.0,
+    0.01
+   ],
+   "expected": 1.000000000000001e-100
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    1.0,
+    0.1
+   ],
+   "expected": 1.0000000000000027e-50
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    1.0,
+    0.3
+   ],
+   "expected": 7.178979876918513e-27
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    1.0,
+    0.5
+   ],
+   "expected": 8.881784197001252e-16
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    1.0,
+    0.7
+   ],
+   "expected": 1.798465042647409e-08
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    1.0,
+    0.9
+   ],
+   "expected": 0.005153775207320118
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    1.0,
+    0.99
+   ],
+   "expected": 0.6050060671375364
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    1.0,
+    0.999999
+   ],
+   "expected": 0.999950001224979
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    2.0,
+    1e-06
+   ],
+   "expected": 5.099994999999988e-299
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    2.0,
+    0.01
+   ],
+   "expected": 5.050000000000005e-99
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    2.0,
+    0.1
+   ],
+   "expected": 4.600000000000013e-49
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    2.0,
+    0.3
+   ],
+   "expected": 2.584432755690664e-25
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    2.0,
+    0.5
+   ],
+   "expected": 2.3092638912203256e-14
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    2.0,
+    0.7
+   ],
+   "expected": 2.87754406823585e-07
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    2.0,
+    0.9
+   ],
+   "expected": 0.030922651243920716
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    2.0,
+    0.99
+   ],
+   "expected": 0.9075091007063049
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    2.0,
+    0.999999
+   ],
+   "expected": 0.9999999987250416
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    3.0,
+    1e-06
+   ],
+   "expected": 1.3259974000012721e-297
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    3.0,
+    0.01
+   ],
+   "expected": 1.3001275000000013e-97
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    3.0,
+    0.1
+   ],
+   "expected": 1.078750000000003e-47
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    3.0,
+    0.3
+   ],
+   "expected": 4.743510953673906e-24
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    3.0,
+    0.5
+   ],
+   "expected": 3.0619951019161817e-13
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    3.0,
+    0.7
+   ],
+   "expected": 2.3514930432614843e-06
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    3.0,
+    0.9
+   ],
+   "expected": 0.09663328513725222
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    3.0,
+    0.99
+   ],
+   "expected": 0.9846473742663409
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    3.0,
+    0.999999
+   ],
+   "expected": 0.9999999999999779
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    10.0,
+    1e-06
+   ],
+   "expected": 1.2565560387864983e-290
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    10.0,
+    0.01
+   ],
+   "expected": 1.149945086264383e-90
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    10.0,
+    0.1
+   ],
+   "expected": 4.965309328433746e-41
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    10.0,
+    0.3
+   ],
+   "expected": 3.9347901150756164e-18
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    10.0,
+    0.5
+   ],
+   "expected": 2.6324160511126404e-08
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    10.0,
+    0.7
+   ],
+   "expected": 0.007205631899209186
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    10.0,
+    0.9
+   ],
+   "expected": 0.9334105544171287
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    10.0,
+    0.99
+   ],
+   "expected": 0.9999999995980445
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    10.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    50.0,
+    1e-06
+   ],
+   "expected": 5.0443248959292936e-272
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    50.0,
+    0.01
+   ],
+   "expected": 3.1130219337164244e-72
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    50.0,
+    0.1
+   ],
+   "expected": 3.2321822349737616e-24
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    50.0,
+    0.3
+   ],
+   "expected": 1.5547799761443088e-05
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    50.0,
+    0.5
+   ],
+   "expected": 0.5000000000000007
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    50.0,
+    0.7
+   ],
+   "expected": 0.9999844522002386
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    50.0,
+    0.9
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    50.0,
+    0.99
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.0,
+    50.0,
+    0.999999
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    8.1448869730761,
+    0.644703668271646,
+    0.04097352393619469
+   ],
+   "expected": 1.7001057793521543e-12
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.11209413928285786,
+    27.530285650729844,
+    0.9127555772777217
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    6.60552479805031,
+    15.434397571179069,
+    0.5436249914654229
+   ],
+   "expected": 0.9905459352307006
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    63.85828802382954,
+    28.0259706180413,
+    0.002738500170148095
+   ],
+   "expected": 2.0646084226185085e-141
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    37.34331170867692,
+    0.12611209081195615,
+    0.7296554464299441
+   ],
+   "expected": 1.2964262170968144e-07
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.3364858933419802,
+    38.86303977238022,
+    0.5414612202490917
+   ],
+   "expected": 0.9999999999999967
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.7927489429502098,
+    1.8537948170285827,
+    0.028319671145462966
+   ],
+   "expected": 0.09870927207386711
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.23596621672706306,
+    10.277162986056998,
+    0.6471895115742501
+   ],
+   "expected": 0.9999986927378198
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    7.017062333532991,
+    1.4159002641738985,
+    0.997209935789211
+   ],
+   "expected": 0.9968682226649341
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    87.6003852925707,
+    11.39268142826557,
+    0.6504592762678163
+   ],
+   "expected": 3.1860329650614356e-08
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    11.623587566145872,
+    1.4681291844203366,
+    0.13509650502241122
+   ],
+   "expected": 2.703423796862726e-10
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    14.603771214247201,
+    3.767584204208893,
+    0.31024187555895566
+   ],
+   "expected": 7.550467442416686e-06
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.8675174965950796,
+    46.60832579588587,
+    0.9340435159562497
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.184092390420854,
+    5.183098856911574,
+    0.32186939107594215
+   ],
+   "expected": 0.8292266305782588
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    6.065967660121742,
+    1.0321282770791997,
+    0.39161900052816123
+   ],
+   "expected": 0.003618847813487823
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    46.862241307877945,
+    0.4802559792604228,
+    0.6231871446860424
+   ],
+   "expected": 2.8364770781195574e-11
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.17866769341908828,
+    31.472587015729466,
+    0.7870983074886834
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5225265100290886,
+    42.60422723978781,
+    0.05856803480519435
+   ],
+   "expected": 0.9745388942839007
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0194153802344126,
+    0.2823829043418498,
+    0.450339366649287
+   ],
+   "expected": 0.15159577810749839
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    24.489099222950394,
+    0.4919564137951558,
+    0.05202130106440961
+   ],
+   "expected": 4.0585300543879826e-33
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.6355187202997734,
+    0.39403893221461056,
+    0.0907530456191219
+   ],
+   "expected": 0.006264354830898306
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    5.508040919108849,
+    0.787206005210782,
+    0.6719948779563594
+   ],
+   "expected": 0.07821597505859286
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.3967768560798435,
+    67.04082213879614,
+    0.36511016824482856
+   ],
+   "expected": 0.9999999999999964
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.20724584806382104,
+    7.714796141841602,
+    0.9271545530678674
+   ],
+   "expected": 0.9999999999218401
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.094746455111589,
+    73.07544707911359,
+    0.499895813687647
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.886626257594487,
+    7.255049101460319,
+    0.9950965052353241
+   ],
+   "expected": 0.9999999999999999
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    70.27988218939149,
+    2.399581018859058,
+    0.7577288453082914
+   ],
+   "expected": 1.5770482611594123e-07
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.1064765992102945,
+    3.8720100920725646,
+    0.7857857007138075
+   ],
+   "expected": 0.9726380899667603
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.7537494509340668,
+    15.975362270646025,
+    0.7111428779897498
+   ],
+   "expected": 0.9999999825733653
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    62.543050494555516,
+    0.2212065079354179,
+    0.7290151170763094
+   ],
+   "expected": 6.731821945425689e-11
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    60.571982175007804,
+    80.12694224409807,
+    0.014706304965369288
+   ],
+   "expected": 7.088864301083664e-72
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    38.98704063664033,
+    87.81831910631324,
+    0.9572101796109636
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.27944222890926734,
+    82.77257032024983,
+    0.8899355557205206
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    29.317132013747948,
+    2.7539989568695997,
+    0.23237291963930384
+   ],
+   "expected": 4.216403049056418e-17
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    25.44730154631358,
+    58.96448087486738,
+    0.2661302722922926
+   ],
+   "expected": 0.2447187603178051
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    4.138121356739469,
+    2.129406066117046,
+    0.931017315981155
+   ],
+   "expected": 0.9658567784676043
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1322915587268277,
+    15.704300142836226,
+    0.6143732469489966
+   ],
+   "expected": 0.9999999939670164
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.12164551330979674,
+    14.376703578900049,
+    0.015991729523571974
+   ],
+   "expected": 0.8640324002431163
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    18.786808438546036,
+    3.4536328756814263,
+    0.9291042207970062
+   ],
+   "expected": 0.8849547721992073
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.15785105547988781,
+    33.41579814632984,
+    0.0666900087671014
+   ],
+   "expected": 0.993245070455273
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.0787726726300035,
+    1.9538723894770722,
+    0.9660620807840702
+   ],
+   "expected": 0.9984952782627813
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    4.860663169200994,
+    0.5978521281349042,
+    0.24167571409434496
+   ],
+   "expected": 0.00038036266297038717
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    46.16947774551642,
+    0.47600146049739056,
+    0.1245547058352835
+   ],
+   "expected": 1.3178659009409153e-43
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.7328114914494656,
+    5.732831728445665,
+    0.5540905021732678
+   ],
+   "expected": 0.9945211616405741
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    26.861627837070237,
+    4.802063028681257,
+    0.2884212144312105
+   ],
+   "expected": 1.9018450029587824e-11
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.7325629701568874,
+    28.468390402558455,
+    0.6265064624197535
+   ],
+   "expected": 0.9999999999937681
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    75.37597243841408,
+    1.2829603458673107,
+    0.5526115105212872
+   ],
+   "expected": 1.1631892859803528e-19
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    6.050240032290987,
+    35.06498236557966,
+    0.14547353818653175
+   ],
+   "expected": 0.5294518515905035
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.6577957054138936,
+    53.68795786727682,
+    0.043066888568204176
+   ],
+   "expected": 0.7727334404460822
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    29.384536217762108,
+    1.7625932885228994,
+    0.8298039852781027
+   ],
+   "expected": 0.017617457976849632
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.10711830265116751,
+    1.2449114841648306,
+    0.07863003716563988
+   ],
+   "expected": 0.7867730791367685
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    9.074939303745667,
+    0.6630515517775631,
+    0.7026520706597863
+   ],
+   "expected": 0.019795291043356446
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    67.8272611693001,
+    0.2401327015349002,
+    0.8647782954007741
+   ],
+   "expected": 2.416150738817147e-06
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1507969142928542,
+    1.3877509232468999,
+    0.42977406117857664
+   ],
+   "expected": 0.9216080863998448
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.9278487688224986,
+    84.99374504585799,
+    0.7756911881018284
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.84444639918897,
+    0.6449266990763335,
+    0.8631202041893178
+   ],
+   "expected": 0.7534533536071837
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    44.047525759289734,
+    3.4050188197734186,
+    0.34429573096232524
+   ],
+   "expected": 4.906923757701479e-18
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    96.54994806006474,
+    0.8868101110142553,
+    0.18271237892656245
+   ],
+   "expected": 2.988396220963348e-72
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    43.68118020716359,
+    27.353077396696616,
+    0.6678894055713512
+   ],
+   "expected": 0.8197196217269032
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    75.03102775379128,
+    59.86096747501632,
+    0.7482485033017541
+   ],
+   "expected": 0.9999992763826636
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    38.20359466778846,
+    0.5513663036201163,
+    0.1412465569010316
+   ],
+   "expected": 4.328301850264341e-34
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.237302773150986,
+    13.92693696612781,
+    0.16705292878227218
+   ],
+   "expected": 0.0017763885833049309
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.5369927513398558,
+    53.79814469278217,
+    0.561400767550223
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    5.432600193686341,
+    0.3822868142338799,
+    0.5260222486178752
+   ],
+   "expected": 0.0065357749276889554
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.7179554551748164,
+    0.18484466512229838,
+    0.9819426931267062
+   ],
+   "expected": 0.3603534008232822
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    5.178295160170874,
+    0.10452655762248357,
+    0.7726492012253886
+   ],
+   "expected": 0.017860711013520974
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    86.05916768523382,
+    5.883152213834253,
+    0.319681636282665
+   ],
+   "expected": 1.2498134968381991e-36
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.3651935909553799,
+    10.413096707578845,
+    0.19510739845680503
+   ],
+   "expected": 0.9772302629625833
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    5.408336157718349,
+    6.40792661014806,
+    0.962423093124381
+   ],
+   "expected": 0.9999997697251527
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.16473876147715164,
+    3.1616840693578747,
+    0.7440974792826482
+   ],
+   "expected": 0.9989288380368226
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.3401576334896442,
+    1.4594868802862186,
+    0.06289549845497133
+   ],
+   "expected": 0.4565572056833397
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    15.0536769303683,
+    0.1833596031268166,
+    0.3950917083579676
+   ],
+   "expected": 2.6773251257263055e-08
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    41.74148479298557,
+    2.6115660262444553,
+    0.9126219336408856
+   ],
+   "expected": 0.18672304437160717
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    19.84958143135839,
+    55.7149673481125,
+    0.12740300904890633
+   ],
+   "expected": 0.0009596746655286132
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1662220813364528,
+    0.1625469259780679,
+    0.8688542943473193
+   ],
+   "expected": 0.6171268819155294
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    7.983805313157966,
+    3.088268711155965,
+    0.16354341619648027
+   ],
+   "expected": 1.929710647970905e-05
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.50026629313997,
+    0.8996056275579273,
+    0.7108798632659449
+   ],
+   "expected": 0.022735658097312417
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.404728146082846,
+    3.329734313610464,
+    0.7896657324598704
+   ],
+   "expected": 0.9709410912849517
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.18977387544101365,
+    5.448481868293253,
+    0.19723494729586855
+   ],
+   "expected": 0.9583425515179966
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    26.571144147801654,
+    2.927777766172623,
+    0.9886953333678197
+   ],
+   "expected": 0.9951788851193293
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.3538587785079878,
+    77.45642002665902,
+    0.800917036608609
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.7783150387761593,
+    27.58050364599768,
+    0.6028489052411163
+   ],
+   "expected": 0.9999999991106653
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    9.233432782774749,
+    55.089938573059676,
+    0.06527041641129139
+   ],
+   "expected": 0.016960497621064864
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    31.986344610023675,
+    1.3977977591190784,
+    0.3255456161007044
+   ],
+   "expected": 9.976791006338657e-16
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    95.95780688898981,
+    22.058272941442777,
+    0.48553513877958776
+   ],
+   "expected": 6.974491568382223e-14
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.8530416858418186,
+    42.91278666578934,
+    0.08681487221489415
+   ],
+   "expected": 0.9196172864373324
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    13.343085556222654,
+    23.305792267259232,
+    0.7991963797161148
+   ],
+   "expected": 0.9999999945226252
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.9265314685789027,
+    24.54242928038475,
+    0.22532844187566514
+   ],
+   "expected": 0.9984177926893338
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.2215854504160946,
+    1.7879045788378756,
+    0.5414099836301646
+   ],
+   "expected": 0.6947138722302346
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.2176912617781211,
+    1.6628129644796996,
+    0.0003006901069229073
+   ],
+   "expected": 0.1983177045243109
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    17.105752304281882,
+    35.94411016896046,
+    0.13893167912019755
+   ],
+   "expected": 0.00040263797313829305
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    12.922820376564118,
+    29.060913727905582,
+    0.9818283228717938
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    33.99160623049969,
+    1.872058674317233,
+    0.9796887085096565
+   ],
+   "expected": 0.8125956204377865
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    83.5513005686125,
+    3.2436272297868456,
+    0.7534465385839052
+   ],
+   "expected": 2.1174854181188426e-08
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    55.1458713116619,
+    2.6818915745921053,
+    0.8637862410970849
+   ],
+   "expected": 0.0076115426721219456
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    12.726403776643112,
+    0.761680378433035,
+    0.7676522699834736
+   ],
+   "expected": 0.02088808199966782
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    5.152931361546989,
+    0.19122094508167695,
+    0.3913804263046642
+   ],
+   "expected": 0.0005984781006839366
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.16642671469850798,
+    2.682260102204907,
+    0.4285396081429238
+   ],
+   "expected": 0.9724354277167189
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.8672923970132693,
+    5.739856841939442,
+    0.12269066017607344
+   ],
+   "expected": 0.22685685139744316
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    63.285866369056876,
+    11.275903337293268,
+    0.8237813583927717
+   ],
+   "expected": 0.2577609395579845
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    49.02343030793182,
+    5.622897162836021,
+    0.0402182209046007
+   ],
+   "expected": 4.20418565689395e-63
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    13.628889561747345,
+    5.094218430888326,
+    0.8259572221703992
+   ],
+   "expected": 0.8309579628216504
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.9489480497045357,
+    27.525314261607505,
+    0.9970102930724918
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.1263268420013495,
+    0.32588496177832693,
+    0.3916747994539028
+   ],
+   "expected": 0.12533341040697726
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    18.161427008298226,
+    2.0781973924746335,
+    0.5883801094292148
+   ],
+   "expected": 0.000635672851020792
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.24103239480325897,
+    15.078930266866463,
+    0.28008240186649946
+   ],
+   "expected": 0.9994381175907251
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.3731235675716874,
+    38.80163229552572,
+    0.5644128211205941
+   ],
+   "expected": 0.9999999999999994
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.841167427300484,
+    49.71315152346681,
+    0.08601243606100262
+   ],
+   "expected": 0.8539358110398011
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    12.259234458342293,
+    0.9637111179481266,
+    0.17540974998508108
+   ],
+   "expected": 4.850442185482957e-10
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.577814579055564,
+    1.2259305072580557,
+    0.32989583249393584
+   ],
+   "expected": 1.4040542981669558e-05
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    67.76934617702864,
+    0.39618225723193995,
+    0.512173657837735
+   ],
+   "expected": 1.0840739608069544e-21
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.11804282704654036,
+    0.3091037496587615,
+    0.8834187336335619
+   ],
+   "expected": 0.8472203141572572
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    23.32075705853833,
+    4.682809278170219,
+    0.22245339599136027
+   ],
+   "expected": 2.540138665941267e-12
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    4.712406516348842,
+    0.10875258239749212,
+    0.7129936309379207
+   ],
+   "expected": 0.013377726983716167
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    14.133575450915714,
+    8.672315530470314,
+    0.6113386842752012
+   ],
+   "expected": 0.4537920133457928
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.16639845817983076,
+    0.5485521317841863,
+    0.5743780480979319
+   ],
+   "expected": 0.8118717299823129
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.52251050581159,
+    94.63890042607781,
+    0.9237453573751813
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.28577465397621116,
+    5.886833843100671,
+    0.6962151061034566
+   ],
+   "expected": 0.99990175522085
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.25682082863932476,
+    0.8665366609022098,
+    0.7159178469254943
+   ],
+   "expected": 0.8943595855604916
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.50382602491632,
+    1.059809847648222,
+    0.2389437116912806
+   ],
+   "expected": 5.134672872719536e-32
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    29.199539893871492,
+    5.687848769165373,
+    0.4765884217057704
+   ],
+   "expected": 3.5701040061268934e-06
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.5867459009711136,
+    0.16518668811553347,
+    0.017891420896975263
+   ],
+   "expected": 0.023145807383618315
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    5.494276881374074,
+    0.37439567261478807,
+    0.9755329784268204
+   ],
+   "expected": 0.4957658132732862
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.21010272499196256,
+    2.2712574506500918,
+    0.39465979707096
+   ],
+   "expected": 0.9410592640074175
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.4976619373074475,
+    17.630603355823574,
+    0.6437047620803104
+   ],
+   "expected": 0.9999999979663584
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    15.04087337805177,
+    0.17718450012762427,
+    0.3527434156964051
+   ],
+   "expected": 4.455439630139074e-09
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.626596374090754,
+    1.90617790486907,
+    0.040617561872745234
+   ],
+   "expected": 3.602259676085007e-05
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.3820167141033021,
+    68.40281030401374,
+    0.1625697247533182
+   ],
+   "expected": 0.9999995017826537
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    35.987940799423804,
+    29.26924211809954,
+    0.391293757078108
+   ],
+   "expected": 0.004521763206465413
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.513914827585328,
+    29.64868411021778,
+    0.6806863255702125
+   ],
+   "expected": 0.9999999999998467
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    32.42135856351603,
+    18.74087040544184,
+    0.6912714794406046
+   ],
+   "expected": 0.8016245231112128
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    54.817890373715635,
+    29.40501459406793,
+    0.17906268758299326
+   ],
+   "expected": 6.789597082139955e-22
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    17.565997849325907,
+    0.18198851001928487,
+    0.4258562402940216
+   ],
+   "expected": 8.831017593210318e-09
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.5497286482127095,
+    0.4041143588593786,
+    0.9379051086359893
+   ],
+   "expected": 0.5991476270045385
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.192455370687037,
+    0.10344231824834059,
+    0.32292080366397835
+   ],
+   "expected": 0.3053279513390818
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    93.80676402569466,
+    0.6224226455459344,
+    0.830694265517731
+   ],
+   "expected": 6.648162552464017e-09
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.3306289752497595,
+    5.742950386225676,
+    0.958409335179392
+   ],
+   "expected": 0.9999999986472663
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    14.110412295620176,
+    87.40251418174172,
+    0.5745566490890397
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    89.12593924628764,
+    32.44450070945663,
+    0.7782482261019282
+   ],
+   "expected": 0.8721745403285411
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    46.28813263416465,
+    7.84286160969617,
+    0.35636454637657144
+   ],
+   "expected": 1.1343011205874935e-14
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.8445659937660253,
+    0.4780806728742094,
+    0.7775441238817054
+   ],
+   "expected": 0.16905448443720433
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.32376917963005425,
+    5.3900630699169465,
+    0.5358989295791143
+   ],
+   "expected": 0.9974506362391673
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.368320428841068,
+    19.11876328015466,
+    0.10982788606390892
+   ],
+   "expected": 0.00033820945668687144
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    7.4958844806639435,
+    1.7452901892109849,
+    0.6142014356679537
+   ],
+   "expected": 0.07667227550701128
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    12.076848810975163,
+    5.7074058661703235,
+    0.7328860768587152
+   ],
+   "expected": 0.6680372097987413
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.6314140673844237,
+    2.446827919623455,
+    0.2867688654485352
+   ],
+   "expected": 0.05681517865840595
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.4869170811931108,
+    12.187266788631524,
+    0.6957113528124577
+   ],
+   "expected": 0.9999999098726432
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.38587579649642456,
+    82.32130563748852,
+    0.671150780289396
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.923271556169456,
+    33.38305320650069,
+    0.48652043330315486
+   ],
+   "expected": 0.9999998220472139
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.6781482278590056,
+    0.5954197009020561,
+    0.15613548139069233
+   ],
+   "expected": 0.0031125475323802187
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    13.641487727559161,
+    34.06692267196614,
+    0.677798778095959
+   ],
+   "expected": 0.9999999859387182
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.2778049026449687,
+    5.335391267761038,
+    0.5634124736739899
+   ],
+   "expected": 0.9807249558881577
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    64.52057816528617,
+    1.4555349425563566,
+    0.1647826520660035
+   ],
+   "expected": 2.08450101960876e-50
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    42.73647325445614,
+    48.32651643994591,
+    0.04826559500189531
+   ],
+   "expected": 5.443210284856177e-32
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.3932530435710402,
+    8.106828036805378,
+    0.7888451556348379
+   ],
+   "expected": 0.9999995341683571
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    6.608113902702464,
+    0.3756363296360564,
+    0.1176415752621991
+   ],
+   "expected": 9.853561649512807e-08
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.2954740957567847,
+    27.95961712688132,
+    0.2170671810721262
+   ],
+   "expected": 0.9619002266067853
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.16803435551668822,
+    4.4991967716437955,
+    0.19181714813525463
+   ],
+   "expected": 0.9475386437725751
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.15932031685250206,
+    20.88304354780147,
+    0.8212266060779224
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.566775072569342,
+    0.7624810954825202,
+    0.2771208894369578
+   ],
+   "expected": 0.09864543592707452
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.2103592051739658,
+    5.379264873517888,
+    0.5278200781124773
+   ],
+   "expected": 0.9747605888551891
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.1642534767505697,
+    8.170769097910474,
+    0.67576744194746
+   ],
+   "expected": 0.999853455461164
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    4.7297353852875785,
+    1.451726301403178,
+    0.6239027819391343
+   ],
+   "expected": 0.18751532949637514
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    5.966344822719608,
+    1.0494737304121,
+    0.30320101266424526
+   ],
+   "expected": 0.0008976321142940486
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    4.3375714035456125,
+    6.871083353212274,
+    0.6107984389218087
+   ],
+   "expected": 0.9362485742985082
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.4077126934476767,
+    4.981059409728753,
+    0.9857696351964191
+   ],
+   "expected": 0.9999999985579254
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.923417473532413,
+    33.80992004805888,
+    0.08132369130695694
+   ],
+   "expected": 0.8020494352740724
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    42.23619254953955,
+    66.85262528912226,
+    0.26186401585393726
+   ],
+   "expected": 0.0022933327663988107
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.10871869907926118,
+    2.8120642570365484,
+    0.18271225766227794
+   ],
+   "expected": 0.9337438673955445
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    82.20415374960395,
+    49.32820421732695,
+    0.9606648859302717
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    6.480506838230336,
+    3.5114064351628667,
+    0.8327178493802309
+   ],
+   "expected": 0.903872505704937
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    9.058304112498483,
+    0.5567664137374657,
+    0.9342860382578622
+   ],
+   "expected": 0.30618790104892757
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.084962988284482,
+    20.92515506159349,
+    0.5009379569884868
+   ],
+   "expected": 0.999993419330725
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.3548695447042514,
+    0.7722902304935809,
+    0.5744107688028172
+   ],
+   "expected": 0.7573502702767618
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.2685383108418688,
+    0.10995464376673747,
+    0.43389122434993144
+   ],
+   "expected": 0.26741204930619317
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    19.346014795466207,
+    6.957798082458084,
+    0.32414637580737604
+   ],
+   "expected": 7.0387486374534805e-06
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    14.181521179014826,
+    2.8414753923179927,
+    0.9995013522570269
+   ],
+   "expected": 0.9999998137367246
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    21.28604408802959,
+    31.03804252488428,
+    0.2595489061387781
+   ],
+   "expected": 0.01106578014393748
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.2863418908917172,
+    0.3961974968081048,
+    0.43226496434626605
+   ],
+   "expected": 0.5559102579438736
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    3.439120230377836,
+    0.38355534853441736,
+    0.7799447709885816
+   ],
+   "expected": 0.1551515129530103
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    40.2989251896159,
+    0.8871865665823422,
+    0.50806419675629
+   ],
+   "expected": 9.28247740320766e-13
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    6.069093210558044,
+    14.693813449129348,
+    0.1474724544653564
+   ],
+   "expected": 0.05539191127345189
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.6960063216398594,
+    15.563884082225453,
+    0.5681923142926266
+   ],
+   "expected": 0.9999991838005983
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    50.09996013748988,
+    2.205845476079954,
+    0.406612845033848
+   ],
+   "expected": 1.4835614980612723e-18
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.8308481412117499,
+    0.49444469084175807,
+    0.6507663347633983
+   ],
+   "expected": 0.4579576674374136
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.6223834067180954,
+    38.621270992163296,
+    0.2706483956521083
+   ],
+   "expected": 0.999998582571728
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    10.473187860744554,
+    5.064684839982645,
+    0.6284587978789083
+   ],
+   "expected": 0.332744268384352
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    48.55683005882366,
+    0.3235678434619596,
+    0.1498155458754621
+   ],
+   "expected": 2.6991223167417718e-42
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.23211684774227453,
+    0.16955752270778543,
+    0.5342310236037406
+   ],
+   "expected": 0.4295865473749426
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.3141907940612534,
+    26.393913574036485,
+    0.022610530546880114
+   ],
+   "expected": 0.8339481520753315
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.3299059075804622,
+    2.6279186325410073,
+    0.2165283006768245
+   ],
+   "expected": 0.3467405832313516
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    1.1687420198937957,
+    0.46598754247020746,
+    0.28182810633472577
+   ],
+   "expected": 0.10875202064727355
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    60.34109433367377,
+    1.7845392272135743,
+    0.38586494126072
+   ],
+   "expected": 2.075478601934077e-24
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    6.815902311471458,
+    9.82710440823501,
+    0.6602765449276847
+   ],
+   "expected": 0.981489314272016
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.1795878295315138,
+    5.568109112454731,
+    0.7359235998979756
+   ],
+   "expected": 0.9999651602123634
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    24.3615601906154,
+    5.829116777248011,
+    0.1305730582345579
+   ],
+   "expected": 1.4357680785823784e-17
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.17832858834268922,
+    0.9314532863465348,
+    0.9275588094659627
+   ],
+   "expected": 0.9832153667702175
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    2.6172944636015654,
+    48.57599681937554,
+    0.4596749532770249
+   ],
+   "expected": 0.9999999999882697
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    18.422744103291308,
+    2.8535239833663337,
+    0.7087022614323838
+   ],
+   "expected": 0.032513217450694194
+  },
+  {
+   "fn": "betainc_reg",
+   "args": [
+    0.8944124379426505,
+    46.73000106370991,
+    0.26570806873658315
+   ],
+   "expected": 0.9999996172528678
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    0.1,
+    1.0
+   ],
+   "expected": 0.24817036595415076
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    0.1,
+    2.0
+   ],
+   "expected": 0.04877057549928599
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    0.1,
+    5.0
+   ],
+   "expected": 0.0001623166119226152
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    0.1,
+    10.0
+   ],
+   "expected": 2.4979513360065075e-09
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    0.1,
+    30.0
+   ],
+   "expected": 2.2268695366738641e-32
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    0.1,
+    200.0
+   ],
+   "expected": 8.044463847173702e-289
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    1.0,
+    1.0
+   ],
+   "expected": 0.6826894921370859
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    1.0,
+    2.0
+   ],
+   "expected": 0.3934693402873665
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    1.0,
+    5.0
+   ],
+   "expected": 0.03743422675270361
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    1.0,
+    10.0
+   ],
+   "expected": 0.00017211562995584072
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    1.0,
+    30.0
+   ],
+   "expected": 1.4610500924439148e-17
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    1.0,
+    200.0
+   ],
+   "expected": 5.152342733971675e-189
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    3.0,
+    1.0
+   ],
+   "expected": 0.9167354833364496
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    3.0,
+    2.0
+   ],
+   "expected": 0.7768698398515702
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    3.0,
+    5.0
+   ],
+   "expected": 0.3000141641213724
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    3.0,
+    10.0
+   ],
+   "expected": 0.018575936222140675
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    3.0,
+    30.0
+   ],
+   "expected": 8.239722367590797e-11
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    3.0,
+    200.0
+   ],
+   "expected": 9.866834733246482e-142
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    10.0,
+    1.0
+   ],
+   "expected": 0.9984345977419975
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    10.0,
+    2.0
+   ],
+   "expected": 0.9932620530009145
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    10.0,
+    5.0
+   ],
+   "expected": 0.9247647538534878
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    10.0,
+    10.0
+   ],
+   "expected": 0.5595067149347879
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    10.0,
+    30.0
+   ],
+   "expected": 0.00022625367617675488
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    10.0,
+    200.0
+   ],
+   "expected": 5.991878303535628e-91
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    50.0,
+    1.0
+   ],
+   "expected": 0.9999999999984626
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    50.0,
+    2.0
+   ],
+   "expected": 0.9999999999861121
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    50.0,
+    5.0
+   ],
+   "expected": 0.9999999986142026
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    50.0,
+    10.0
+   ],
+   "expected": 0.9999997330916575
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    50.0,
+    30.0
+   ],
+   "expected": 0.9875979392810995
+  },
+  {
+   "fn": "chi2_cdf",
+   "args": [
+    50.0,
+    200.0
+   ],
+   "expected": 1.2293884805874628e-29
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -5.0,
+    1.0
+   ],
+   "expected": 0.0628329581890012
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -5.0,
+    1.0
+   ],
+   "expected": 0.1256659163780024
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -5.0,
+    2.0
+   ],
+   "expected": 0.018874775675311862
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -5.0,
+    2.0
+   ],
+   "expected": 0.037749551350623724
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -5.0,
+    5.0
+   ],
+   "expected": 0.0020523579900266617
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -5.0,
+    5.0
+   ],
+   "expected": 0.004104715980053323
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -5.0,
+    10.0
+   ],
+   "expected": 0.00026866680137822634
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -5.0,
+    10.0
+   ],
+   "expected": 0.0005373336027564527
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -5.0,
+    30.0
+   ],
+   "expected": 1.16483427335039e-05
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -5.0,
+    30.0
+   ],
+   "expected": 2.32966854670078e-05
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -5.0,
+    200.0
+   ],
+   "expected": 6.250990638857704e-07
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -5.0,
+    200.0
+   ],
+   "expected": 1.2501981277715407e-06
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -2.5,
+    1.0
+   ],
+   "expected": 0.12111894159084341
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -2.5,
+    1.0
+   ],
+   "expected": 0.24223788318168682
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -2.5,
+    2.0
+   ],
+   "expected": 0.06480586011075541
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -2.5,
+    2.0
+   ],
+   "expected": 0.12961172022151082
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -2.5,
+    5.0
+   ],
+   "expected": 0.02724504967118813
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -2.5,
+    5.0
+   ],
+   "expected": 0.05449009934237626
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -2.5,
+    10.0
+   ],
+   "expected": 0.01572342211830441
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -2.5,
+    10.0
+   ],
+   "expected": 0.03144684423660882
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -2.5,
+    30.0
+   ],
+   "expected": 0.009057824534033344
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -2.5,
+    30.0
+   ],
+   "expected": 0.01811564906806669
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -2.5,
+    200.0
+   ],
+   "expected": 0.006611586320850391
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -2.5,
+    200.0
+   ],
+   "expected": 0.013223172641700783
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -1.5,
+    1.0
+   ],
+   "expected": 0.18716704181099886
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -1.5,
+    1.0
+   ],
+   "expected": 0.3743340836219977
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -1.5,
+    2.0
+   ],
+   "expected": 0.13619656244550055
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -1.5,
+    2.0
+   ],
+   "expected": 0.2723931248910011
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -1.5,
+    5.0
+   ],
+   "expected": 0.09695184012123664
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -1.5,
+    5.0
+   ],
+   "expected": 0.1939036802424733
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -1.5,
+    10.0
+   ],
+   "expected": 0.08225366322272007
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -1.5,
+    10.0
+   ],
+   "expected": 0.16450732644544014
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -1.5,
+    30.0
+   ],
+   "expected": 0.072032964564323
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -1.5,
+    30.0
+   ],
+   "expected": 0.144065929128646
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -1.5,
+    200.0
+   ],
+   "expected": 0.06759566061351745
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -1.5,
+    200.0
+   ],
+   "expected": 0.1351913212270349
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -1.0,
+    1.0
+   ],
+   "expected": 0.25000000000000006
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -1.0,
+    1.0
+   ],
+   "expected": 0.5000000000000001
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -1.0,
+    2.0
+   ],
+   "expected": 0.2113248654051871
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -1.0,
+    2.0
+   ],
+   "expected": 0.4226497308103742
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -1.0,
+    5.0
+   ],
+   "expected": 0.18160873382456144
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -1.0,
+    5.0
+   ],
+   "expected": 0.3632174676491229
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -1.0,
+    10.0
+   ],
+   "expected": 0.17044656615103
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -1.0,
+    10.0
+   ],
+   "expected": 0.34089313230206
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -1.0,
+    30.0
+   ],
+   "expected": 0.1626543077130151
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -1.0,
+    30.0
+   ],
+   "expected": 0.3253086154260302
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -1.0,
+    200.0
+   ],
+   "expected": 0.15925942395487336
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -1.0,
+    200.0
+   ],
+   "expected": 0.3185188479097467
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -0.5,
+    1.0
+   ],
+   "expected": 0.35241638234956674
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -0.5,
+    1.0
+   ],
+   "expected": 0.7048327646991335
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -0.5,
+    2.0
+   ],
+   "expected": 0.33333333333333337
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -0.5,
+    2.0
+   ],
+   "expected": 0.6666666666666667
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -0.5,
+    5.0
+   ],
+   "expected": 0.31914943582046457
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -0.5,
+    5.0
+   ],
+   "expected": 0.6382988716409291
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -0.5,
+    10.0
+   ],
+   "expected": 0.3139468028714865
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -0.5,
+    10.0
+   ],
+   "expected": 0.627893605742973
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -0.5,
+    30.0
+   ],
+   "expected": 0.3103615024425636
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -0.5,
+    30.0
+   ],
+   "expected": 0.6207230048851272
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    -0.5,
+    200.0
+   ],
+   "expected": 0.30881237615823043
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    -0.5,
+    200.0
+   ],
+   "expected": 0.6176247523164609
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    0.0,
+    1.0
+   ],
+   "expected": 0.5
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    0.0,
+    1.0
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    0.0,
+    2.0
+   ],
+   "expected": 0.5
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    0.0,
+    2.0
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    0.0,
+    5.0
+   ],
+   "expected": 0.5
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    0.0,
+    5.0
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    0.0,
+    10.0
+   ],
+   "expected": 0.5
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    0.0,
+    10.0
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    0.0,
+    30.0
+   ],
+   "expected": 0.5
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    0.0,
+    30.0
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    0.0,
+    200.0
+   ],
+   "expected": 0.5
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    0.0,
+    200.0
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    0.3,
+    1.0
+   ],
+   "expected": 0.5927735790777423
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    0.3,
+    1.0
+   ],
+   "expected": 0.8144528418445154
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    0.3,
+    2.0
+   ],
+   "expected": 0.6037571695799112
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    0.3,
+    2.0
+   ],
+   "expected": 0.7924856608401776
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    0.3,
+    5.0
+   ],
+   "expected": 0.6118754788683627
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    0.3,
+    5.0
+   ],
+   "expected": 0.7762490422632745
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    0.3,
+    10.0
+   ],
+   "expected": 0.6148396962171008
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    0.3,
+    10.0
+   ],
+   "expected": 0.7703206075657986
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    0.3,
+    30.0
+   ],
+   "expected": 0.6168769473578236
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    0.3,
+    30.0
+   ],
+   "expected": 0.7662461052843528
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    0.3,
+    200.0
+   ],
+   "expected": 0.617755634905336
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    0.3,
+    200.0
+   ],
+   "expected": 0.764488730189328
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    1.0,
+    1.0
+   ],
+   "expected": 0.75
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    1.0,
+    1.0
+   ],
+   "expected": 0.5000000000000001
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    1.0,
+    2.0
+   ],
+   "expected": 0.7886751345948129
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    1.0,
+    2.0
+   ],
+   "expected": 0.4226497308103742
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    1.0,
+    5.0
+   ],
+   "expected": 0.8183912661754386
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    1.0,
+    5.0
+   ],
+   "expected": 0.3632174676491229
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    1.0,
+    10.0
+   ],
+   "expected": 0.8295534338489701
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    1.0,
+    10.0
+   ],
+   "expected": 0.34089313230206
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    1.0,
+    30.0
+   ],
+   "expected": 0.8373456922869849
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    1.0,
+    30.0
+   ],
+   "expected": 0.3253086154260302
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    1.0,
+    200.0
+   ],
+   "expected": 0.8407405760451266
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    1.0,
+    200.0
+   ],
+   "expected": 0.3185188479097467
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    1.5,
+    1.0
+   ],
+   "expected": 0.8128329581890011
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    1.5,
+    1.0
+   ],
+   "expected": 0.3743340836219977
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    1.5,
+    2.0
+   ],
+   "expected": 0.8638034375544994
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    1.5,
+    2.0
+   ],
+   "expected": 0.2723931248910011
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    1.5,
+    5.0
+   ],
+   "expected": 0.9030481598787634
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    1.5,
+    5.0
+   ],
+   "expected": 0.1939036802424733
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    1.5,
+    10.0
+   ],
+   "expected": 0.9177463367772799
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    1.5,
+    10.0
+   ],
+   "expected": 0.16450732644544014
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    1.5,
+    30.0
+   ],
+   "expected": 0.927967035435677
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    1.5,
+    30.0
+   ],
+   "expected": 0.144065929128646
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    1.5,
+    200.0
+   ],
+   "expected": 0.9324043393864826
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    1.5,
+    200.0
+   ],
+   "expected": 0.1351913212270349
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    2.0,
+    1.0
+   ],
+   "expected": 0.8524163823495667
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    2.0,
+    1.0
+   ],
+   "expected": 0.2951672353008665
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    2.0,
+    2.0
+   ],
+   "expected": 0.908248290463863
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    2.0,
+    2.0
+   ],
+   "expected": 0.18350341907227397
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    2.0,
+    5.0
+   ],
+   "expected": 0.9490302605850708
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    2.0,
+    5.0
+   ],
+   "expected": 0.10193947882985835
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    2.0,
+    10.0
+   ],
+   "expected": 0.9633059826146299
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    2.0,
+    10.0
+   ],
+   "expected": 0.07338803477074037
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    2.0,
+    30.0
+   ],
+   "expected": 0.9726874775185085
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    2.0,
+    30.0
+   ],
+   "expected": 0.054625044962983094
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    2.0,
+    200.0
+   ],
+   "expected": 0.9765734069064645
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    2.0,
+    200.0
+   ],
+   "expected": 0.04685318618707097
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    2.5,
+    1.0
+   ],
+   "expected": 0.8788810584091566
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    2.5,
+    1.0
+   ],
+   "expected": 0.24223788318168682
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    2.5,
+    2.0
+   ],
+   "expected": 0.9351941398892446
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    2.5,
+    2.0
+   ],
+   "expected": 0.12961172022151082
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    2.5,
+    5.0
+   ],
+   "expected": 0.9727549503288119
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    2.5,
+    5.0
+   ],
+   "expected": 0.05449009934237626
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    2.5,
+    10.0
+   ],
+   "expected": 0.9842765778816955
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    2.5,
+    10.0
+   ],
+   "expected": 0.03144684423660882
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    2.5,
+    30.0
+   ],
+   "expected": 0.9909421754659666
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    2.5,
+    30.0
+   ],
+   "expected": 0.01811564906806669
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    2.5,
+    200.0
+   ],
+   "expected": 0.9933884136791497
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    2.5,
+    200.0
+   ],
+   "expected": 0.013223172641700783
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    5.0,
+    1.0
+   ],
+   "expected": 0.9371670418109987
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    5.0,
+    1.0
+   ],
+   "expected": 0.1256659163780024
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    5.0,
+    2.0
+   ],
+   "expected": 0.9811252243246882
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    5.0,
+    2.0
+   ],
+   "expected": 0.037749551350623724
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    5.0,
+    5.0
+   ],
+   "expected": 0.9979476420099733
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    5.0,
+    5.0
+   ],
+   "expected": 0.004104715980053323
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    5.0,
+    10.0
+   ],
+   "expected": 0.9997313331986217
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    5.0,
+    10.0
+   ],
+   "expected": 0.0005373336027564527
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    5.0,
+    30.0
+   ],
+   "expected": 0.9999883516572665
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    5.0,
+    30.0
+   ],
+   "expected": 2.32966854670078e-05
+  },
+  {
+   "fn": "student_t_cdf",
+   "args": [
+    5.0,
+    200.0
+   ],
+   "expected": 0.9999993749009362
+  },
+  {
+   "fn": "student_t_pvalue",
+   "args": [
+    5.0,
+    200.0
+   ],
+   "expected": 1.2501981277715407e-06
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.2,
+    1.0,
+    5.0
+   ],
+   "expected": 0.3265715644624463
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.2,
+    1.0,
+    5.0
+   ],
+   "expected": 0.6734284355375537
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.2,
+    1.0,
+    20.0
+   ],
+   "expected": 0.3404734867967272
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.2,
+    1.0,
+    20.0
+   ],
+   "expected": 0.6595265132032729
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.2,
+    1.0,
+    50.0
+   ],
+   "expected": 0.3433477708108623
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.2,
+    1.0,
+    50.0
+   ],
+   "expected": 0.6566522291891375
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.2,
+    1.0,
+    200.0
+   ],
+   "expected": 0.34479521075158204
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.2,
+    1.0,
+    200.0
+   ],
+   "expected": 0.6552047892484179
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.2,
+    3.0,
+    5.0
+   ],
+   "expected": 0.10781637826791764
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.2,
+    3.0,
+    5.0
+   ],
+   "expected": 0.8921836217320825
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.2,
+    3.0,
+    20.0
+   ],
+   "expected": 0.104855112130025
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.2,
+    3.0,
+    20.0
+   ],
+   "expected": 0.8951448878699749
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.2,
+    3.0,
+    50.0
+   ],
+   "expected": 0.10410299600011856
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.2,
+    3.0,
+    50.0
+   ],
+   "expected": 0.8958970039998815
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.2,
+    3.0,
+    200.0
+   ],
+   "expected": 0.10370409546081126
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.2,
+    3.0,
+    200.0
+   ],
+   "expected": 0.8962959045391887
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.2,
+    5.0,
+    5.0
+   ],
+   "expected": 0.05096973941492917
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.2,
+    5.0,
+    5.0
+   ],
+   "expected": 0.9490302605850707
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.2,
+    5.0,
+    20.0
+   ],
+   "expected": 0.041288358490421624
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.2,
+    5.0,
+    20.0
+   ],
+   "expected": 0.9587116415095783
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.2,
+    5.0,
+    50.0
+   ],
+   "expected": 0.03901818940991424
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.2,
+    5.0,
+    50.0
+   ],
+   "expected": 0.9609818105900857
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.2,
+    5.0,
+    200.0
+   ],
+   "expected": 0.03783566918931469
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.2,
+    5.0,
+    200.0
+   ],
+   "expected": 0.9621643308106853
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.2,
+    20.0,
+    5.0
+   ],
+   "expected": 0.003930419924392704
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.2,
+    20.0,
+    5.0
+   ],
+   "expected": 0.9960695800756073
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.2,
+    20.0,
+    20.0
+   ],
+   "expected": 0.00035176164656415917
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.2,
+    20.0,
+    20.0
+   ],
+   "expected": 0.9996482383534359
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.2,
+    20.0,
+    50.0
+   ],
+   "expected": 0.00012397266184663067
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.2,
+    20.0,
+    50.0
+   ],
+   "expected": 0.9998760273381534
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.2,
+    20.0,
+    200.0
+   ],
+   "expected": 6.123901673854228e-05
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.2,
+    20.0,
+    200.0
+   ],
+   "expected": 0.9999387609832615
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.5,
+    1.0,
+    5.0
+   ],
+   "expected": 0.48891591956971936
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.5,
+    1.0,
+    5.0
+   ],
+   "expected": 0.5110840804302806
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.5,
+    1.0,
+    20.0
+   ],
+   "expected": 0.5123419049486242
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.5,
+    1.0,
+    20.0
+   ],
+   "expected": 0.487658095051376
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.5,
+    1.0,
+    50.0
+   ],
+   "expected": 0.5172171562033192
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.5,
+    1.0,
+    50.0
+   ],
+   "expected": 0.48278284379668057
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.5,
+    1.0,
+    200.0
+   ],
+   "expected": 0.519676807801382
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.5,
+    1.0,
+    200.0
+   ],
+   "expected": 0.48032319219861785
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.5,
+    3.0,
+    5.0
+   ],
+   "expected": 0.30154736269507604
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.5,
+    3.0,
+    5.0
+   ],
+   "expected": 0.6984526373049241
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.5,
+    3.0,
+    20.0
+   ],
+   "expected": 0.3134813871635969
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.5,
+    3.0,
+    20.0
+   ],
+   "expected": 0.686518612836403
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.5,
+    3.0,
+    50.0
+   ],
+   "expected": 0.31601173233565727
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.5,
+    3.0,
+    50.0
+   ],
+   "expected": 0.6839882676643427
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.5,
+    3.0,
+    200.0
+   ],
+   "expected": 0.31729774999437516
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.5,
+    3.0,
+    200.0
+   ],
+   "expected": 0.6827022500056248
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.5,
+    5.0,
+    5.0
+   ],
+   "expected": 0.2325113191303787
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.5,
+    5.0,
+    5.0
+   ],
+   "expected": 0.7674886808696212
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.5,
+    5.0,
+    20.0
+   ],
+   "expected": 0.22739561420949508
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.5,
+    5.0,
+    20.0
+   ],
+   "expected": 0.7726043857905049
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.5,
+    5.0,
+    50.0
+   ],
+   "expected": 0.22524790335201142
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.5,
+    5.0,
+    50.0
+   ],
+   "expected": 0.7747520966479886
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.5,
+    5.0,
+    200.0
+   ],
+   "expected": 0.2239665260326422
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.5,
+    5.0,
+    200.0
+   ],
+   "expected": 0.7760334739673578
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.5,
+    20.0,
+    5.0
+   ],
+   "expected": 0.12250724468184261
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.5,
+    20.0,
+    5.0
+   ],
+   "expected": 0.8774927553181574
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.5,
+    20.0,
+    20.0
+   ],
+   "expected": 0.06476617279096289
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.5,
+    20.0,
+    20.0
+   ],
+   "expected": 0.9352338272090371
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.5,
+    20.0,
+    50.0
+   ],
+   "expected": 0.04591438049524961
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.5,
+    20.0,
+    50.0
+   ],
+   "expected": 0.9540856195047503
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    0.5,
+    20.0,
+    200.0
+   ],
+   "expected": 0.035435040306235156
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    0.5,
+    20.0,
+    200.0
+   ],
+   "expected": 0.9645649596937649
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    1.0,
+    1.0,
+    5.0
+   ],
+   "expected": 0.6367825323508771
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    1.0,
+    1.0,
+    5.0
+   ],
+   "expected": 0.3632174676491229
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    1.0,
+    1.0,
+    20.0
+   ],
+   "expected": 0.6707434228282907
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    1.0,
+    1.0,
+    20.0
+   ],
+   "expected": 0.32925657717170936
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    1.0,
+    1.0,
+    50.0
+   ],
+   "expected": 0.6778743548997554
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    1.0,
+    1.0,
+    50.0
+   ],
+   "expected": 0.32212564510024433
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    1.0,
+    1.0,
+    200.0
+   ],
+   "expected": 0.6814811520902534
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    1.0,
+    1.0,
+    200.0
+   ],
+   "expected": 0.3185188479097467
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    1.0,
+    3.0,
+    5.0
+   ],
+   "expected": 0.535145210006365
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    1.0,
+    3.0,
+    5.0
+   ],
+   "expected": 0.4648547899936351
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    1.0,
+    3.0,
+    20.0
+   ],
+   "expected": 0.5867480859375397
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    1.0,
+    3.0,
+    20.0
+   ],
+   "expected": 0.4132519140624603
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    1.0,
+    3.0,
+    50.0
+   ],
+   "expected": 0.5993767746957143
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    1.0,
+    3.0,
+    50.0
+   ],
+   "expected": 0.40062322530428573
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    1.0,
+    3.0,
+    200.0
+   ],
+   "expected": 0.6060783501909217
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    1.0,
+    3.0,
+    200.0
+   ],
+   "expected": 0.3939216498090783
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    1.0,
+    5.0,
+    5.0
+   ],
+   "expected": 0.49999999999999983
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    1.0,
+    5.0,
+    5.0
+   ],
+   "expected": 0.5
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    1.0,
+    5.0,
+    20.0
+   ],
+   "expected": 0.5569748153151206
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    1.0,
+    5.0,
+    20.0
+   ],
+   "expected": 0.44302518468487945
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    1.0,
+    5.0,
+    50.0
+   ],
+   "expected": 0.572505533583361
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    1.0,
+    5.0,
+    50.0
+   ],
+   "expected": 0.427494466416639
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    1.0,
+    5.0,
+    200.0
+   ],
+   "expected": 0.5811075135284638
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    1.0,
+    5.0,
+    200.0
+   ],
+   "expected": 0.4188924864715362
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    1.0,
+    20.0,
+    5.0
+   ],
+   "expected": 0.44302518468487945
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    1.0,
+    20.0,
+    5.0
+   ],
+   "expected": 0.5569748153151206
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    1.0,
+    20.0,
+    20.0
+   ],
+   "expected": 0.5
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    1.0,
+    20.0,
+    20.0
+   ],
+   "expected": 0.5
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    1.0,
+    20.0,
+    50.0
+   ],
+   "expected": 0.5214137796148969
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    1.0,
+    20.0,
+    50.0
+   ],
+   "expected": 0.4785862203851031
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    1.0,
+    20.0,
+    200.0
+   ],
+   "expected": 0.536144225487552
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    1.0,
+    20.0,
+    200.0
+   ],
+   "expected": 0.46385577451244797
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    2.0,
+    1.0,
+    5.0
+   ],
+   "expected": 0.7835627707303144
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    2.0,
+    1.0,
+    5.0
+   ],
+   "expected": 0.2164372292696857
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    2.0,
+    1.0,
+    20.0
+   ],
+   "expected": 0.8273216960128283
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    2.0,
+    1.0,
+    20.0
+   ],
+   "expected": 0.17267830398717168
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    2.0,
+    1.0,
+    50.0
+   ],
+   "expected": 0.8365038281044938
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    2.0,
+    1.0,
+    50.0
+   ],
+   "expected": 0.16349617189550622
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    2.0,
+    1.0,
+    200.0
+   ],
+   "expected": 0.8411459814424794
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    2.0,
+    1.0,
+    200.0
+   ],
+   "expected": 0.1588540185575206
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    2.0,
+    3.0,
+    5.0
+   ],
+   "expected": 0.7673760819999211
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    2.0,
+    3.0,
+    5.0
+   ],
+   "expected": 0.2326239180000786
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    2.0,
+    3.0,
+    20.0
+   ],
+   "expected": 0.8535611969133785
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    2.0,
+    3.0,
+    20.0
+   ],
+   "expected": 0.14643880308662147
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    2.0,
+    3.0,
+    50.0
+   ],
+   "expected": 0.874057941797381
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    2.0,
+    3.0,
+    50.0
+   ],
+   "expected": 0.12594205820261892
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    2.0,
+    3.0,
+    200.0
+   ],
+   "expected": 0.8847571985530274
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    2.0,
+    3.0,
+    200.0
+   ],
+   "expected": 0.11524280144697269
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    2.0,
+    5.0,
+    5.0
+   ],
+   "expected": 0.7674886808696212
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    2.0,
+    5.0,
+    5.0
+   ],
+   "expected": 0.2325113191303787
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    2.0,
+    5.0,
+    20.0
+   ],
+   "expected": 0.8774927553181574
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    2.0,
+    5.0,
+    20.0
+   ],
+   "expected": 0.12250724468184261
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    2.0,
+    5.0,
+    50.0
+   ],
+   "expected": 0.9052470979699005
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    2.0,
+    5.0,
+    50.0
+   ],
+   "expected": 0.09475290203009946
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    2.0,
+    5.0,
+    200.0
+   ],
+   "expected": 0.9198233628457356
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    2.0,
+    5.0,
+    200.0
+   ],
+   "expected": 0.0801766371542644
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    2.0,
+    20.0,
+    5.0
+   ],
+   "expected": 0.7726043857905049
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    2.0,
+    20.0,
+    5.0
+   ],
+   "expected": 0.22739561420949508
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    2.0,
+    20.0,
+    20.0
+   ],
+   "expected": 0.9352338272090371
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    2.0,
+    20.0,
+    20.0
+   ],
+   "expected": 0.06476617279096289
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    2.0,
+    20.0,
+    50.0
+   ],
+   "expected": 0.9755549318405198
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    2.0,
+    20.0,
+    50.0
+   ],
+   "expected": 0.024445068159480176
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    2.0,
+    20.0,
+    200.0
+   ],
+   "expected": 0.9913071225985204
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    2.0,
+    20.0,
+    200.0
+   ],
+   "expected": 0.008692877401479665
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    4.0,
+    1.0,
+    5.0
+   ],
+   "expected": 0.8980605211701423
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    4.0,
+    1.0,
+    5.0
+   ],
+   "expected": 0.10193947882985835
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    4.0,
+    1.0,
+    20.0
+   ],
+   "expected": 0.9407344645534296
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    4.0,
+    1.0,
+    20.0
+   ],
+   "expected": 0.05926553544657044
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    4.0,
+    1.0,
+    50.0
+   ],
+   "expected": 0.9490529312623067
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    4.0,
+    1.0,
+    50.0
+   ],
+   "expected": 0.05094706873769324
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    4.0,
+    1.0,
+    200.0
+   ],
+   "expected": 0.953146813812929
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    4.0,
+    1.0,
+    200.0
+   ],
+   "expected": 0.04685318618707097
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    4.0,
+    3.0,
+    5.0
+   ],
+   "expected": 0.9151230024584865
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    4.0,
+    3.0,
+    5.0
+   ],
+   "expected": 0.08487699754151325
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    4.0,
+    3.0,
+    20.0
+   ],
+   "expected": 0.9779230003376375
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    4.0,
+    3.0,
+    20.0
+   ],
+   "expected": 0.022076999662362404
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    4.0,
+    3.0,
+    50.0
+   ],
+   "expected": 0.9874942868750578
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    4.0,
+    3.0,
+    50.0
+   ],
+   "expected": 0.012505713124942228
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    4.0,
+    3.0,
+    200.0
+   ],
+   "expected": 0.9914470201892173
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    4.0,
+    3.0,
+    200.0
+   ],
+   "expected": 0.00855297981078271
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    4.0,
+    5.0,
+    5.0
+   ],
+   "expected": 0.9228113747577934
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    4.0,
+    5.0,
+    5.0
+   ],
+   "expected": 0.07718862524220674
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    4.0,
+    5.0,
+    20.0
+   ],
+   "expected": 0.9888162481447345
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    4.0,
+    5.0,
+    20.0
+   ],
+   "expected": 0.011183751855265586
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    4.0,
+    5.0,
+    50.0
+   ],
+   "expected": 0.9960495563077503
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    4.0,
+    5.0,
+    50.0
+   ],
+   "expected": 0.003950443692249712
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    4.0,
+    5.0,
+    200.0
+   ],
+   "expected": 0.9982385952428123
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    4.0,
+    5.0,
+    200.0
+   ],
+   "expected": 0.001761404757187635
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    4.0,
+    20.0,
+    5.0
+   ],
+   "expected": 0.9348803244934306
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    4.0,
+    20.0,
+    5.0
+   ],
+   "expected": 0.06511967550656939
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    4.0,
+    20.0,
+    20.0
+   ],
+   "expected": 0.9984208794508329
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    4.0,
+    20.0,
+    20.0
+   ],
+   "expected": 0.001579120549167105
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    4.0,
+    20.0,
+    50.0
+   ],
+   "expected": 0.9999645724062747
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    4.0,
+    20.0,
+    50.0
+   ],
+   "expected": 3.542759372534957e-05
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    4.0,
+    20.0,
+    200.0
+   ],
+   "expected": 0.9999998317784754
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    4.0,
+    20.0,
+    200.0
+   ],
+   "expected": 1.6822152458508505e-07
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    10.0,
+    1.0,
+    5.0
+   ],
+   "expected": 0.9749689841815469
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    10.0,
+    1.0,
+    5.0
+   ],
+   "expected": 0.02503101581845295
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    10.0,
+    1.0,
+    20.0
+   ],
+   "expected": 0.9951000231504513
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    10.0,
+    1.0,
+    20.0
+   ],
+   "expected": 0.004899976849549488
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    10.0,
+    1.0,
+    50.0
+   ],
+   "expected": 0.9973394458095088
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    10.0,
+    1.0,
+    50.0
+   ],
+   "expected": 0.0026605541904910716
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    10.0,
+    1.0,
+    200.0
+   ],
+   "expected": 0.9981908671696811
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    10.0,
+    1.0,
+    200.0
+   ],
+   "expected": 0.001809132830318887
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    10.0,
+    3.0,
+    5.0
+   ],
+   "expected": 0.9851114742762083
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    10.0,
+    3.0,
+    5.0
+   ],
+   "expected": 0.014888525723791667
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    10.0,
+    3.0,
+    20.0
+   ],
+   "expected": 0.9996905945364852
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    10.0,
+    3.0,
+    20.0
+   ],
+   "expected": 0.0003094054635144071
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    10.0,
+    3.0,
+    50.0
+   ],
+   "expected": 0.9999714775075028
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    10.0,
+    3.0,
+    50.0
+   ],
+   "expected": 2.8522492497201697e-05
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    10.0,
+    3.0,
+    200.0
+   ],
+   "expected": 0.9999964051795555
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    10.0,
+    3.0,
+    200.0
+   ],
+   "expected": 3.5948204444886414e-06
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    10.0,
+    5.0,
+    5.0
+   ],
+   "expected": 0.9877580834689302
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    10.0,
+    5.0,
+    5.0
+   ],
+   "expected": 0.012241916531069727
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    10.0,
+    5.0,
+    20.0
+   ],
+   "expected": 0.999934478168584
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    10.0,
+    5.0,
+    20.0
+   ],
+   "expected": 6.552183141595506e-05
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    10.0,
+    5.0,
+    50.0
+   ],
+   "expected": 0.9999988714936897
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    10.0,
+    5.0,
+    50.0
+   ],
+   "expected": 1.1285063102906247e-06
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    10.0,
+    5.0,
+    200.0
+   ],
+   "expected": 0.999999985190936
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    10.0,
+    5.0,
+    200.0
+   ],
+   "expected": 1.480906396734211e-08
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    10.0,
+    20.0,
+    5.0
+   ],
+   "expected": 0.9909911262572199
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    10.0,
+    20.0,
+    5.0
+   ],
+   "expected": 0.009008873742780131
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    10.0,
+    20.0,
+    20.0
+   ],
+   "expected": 0.9999983572611396
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    10.0,
+    20.0,
+    20.0
+   ],
+   "expected": 1.6427388603993783e-06
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    10.0,
+    20.0,
+    50.0
+   ],
+   "expected": 0.9999999999741724
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    10.0,
+    20.0,
+    50.0
+   ],
+   "expected": 2.5827549769392515e-11
+  },
+  {
+   "fn": "f_cdf",
+   "args": [
+    10.0,
+    20.0,
+    200.0
+   ],
+   "expected": 1.0
+  },
+  {
+   "fn": "f_pvalue",
+   "args": [
+    10.0,
+    20.0,
+    200.0
+   ],
+   "expected": 7.203401329871231e-21
+  }
+ ]
+}

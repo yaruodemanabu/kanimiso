@@ -1,0 +1,6 @@
+---
+description: kanimiso agent decision record (v0.2 reconstitution)
+alwaysApply: true
+---
+
+Follow @AGENTS.md. That file is the decision record: what not to build, what may be broken, and how completion is measured. Machine-checkable rules live in `scripts/lint_redundancy.sh` and CI.

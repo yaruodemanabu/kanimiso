@@ -46,6 +46,17 @@ pub struct Policy {
     pub r2_one_tol: f64,
     /// |R²| below this is treated as R² = 0.
     pub r2_zero_tol: f64,
+    /// Optional floor on a log-probability. `None` means do not clamp.
+    /// Applying a floor must record [`crate::CompromiseKind::ProbabilityClamped`].
+    pub log_prob_floor: Option<f64>,
+    /// Scale factor below this emits [`crate::IssueCode::ForwardUnderflow`].
+    pub underflow_guard: f64,
+    /// Maximum backward-difference order (`WindowLag`). Above this is a `Failure`.
+    pub max_difference_order: usize,
+    /// Continued-fraction relative stop for `betainc_reg` / `gamma_p`.
+    pub cf_tol: f64,
+    /// Continued-fraction iteration cap for `betainc_reg` / `gamma_p`.
+    pub cf_max_iter: usize,
 }
 
 impl Default for Policy {
@@ -67,6 +78,11 @@ impl Default for Policy {
             imbalance_warn: 0.05,
             r2_one_tol: 1e-12,
             r2_zero_tol: 1e-12,
+            log_prob_floor: None,
+            underflow_guard: 1e-300,
+            max_difference_order: 8,
+            cf_tol: 1e-15,
+            cf_max_iter: 300,
         }
     }
 }
@@ -118,5 +134,20 @@ impl Policy {
     pub fn must_abort(&self, issue: &Issue) -> bool {
         issue.severity.is_at_least(self.abort_at)
             || (self.abort_on_meaningless && Self::is_vacuous_or_false(issue))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numerical_fields_match_agents_d8() {
+        let p = Policy::default();
+        assert!(p.log_prob_floor.is_none());
+        assert_eq!(p.underflow_guard, 1e-300);
+        assert_eq!(p.max_difference_order, 8);
+        assert_eq!(p.cf_tol, 1e-15);
+        assert_eq!(p.cf_max_iter, 300);
     }
 }

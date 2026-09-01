@@ -1,8 +1,33 @@
 //! Coverage ledger: every estimator and public function mapped to its Python peer.
 //!
-//! [`inventory`] is the sklearn / statsmodels / sktime / tslearn / hmmlearn /
-//! river surface that this crate implements. New algorithms must be appended
-//! here so the ledger stays the source of truth.
+//! [`inventory`] lists the implemented surface. README claims track
+//! [`verified`], not the raw ledger (AGENTS.md D10). Until 0.2.0-alpha.1 this
+//! crate does **not** claim equivalence to the six Python libraries.
+
+/// Verification state of one ledger entry (AGENTS.md D10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoverageStatus {
+    /// Oracle-backed (Tier 0/1) with a recorded tolerance.
+    Verified,
+    /// Implemented; not yet oracle-verified.
+    Experimental,
+    /// Type-baked / generated variant scheduled for deletion.
+    Generated,
+    /// Name exists; body is incomplete.
+    Stub,
+}
+
+impl CoverageStatus {
+    /// Stable lowercase name for logs and README filters.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::Experimental => "experimental",
+            Self::Generated => "generated",
+            Self::Stub => "stub",
+        }
+    }
+}
 
 /// One implemented algorithm or public computational entry point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15,6 +40,33 @@ pub struct Algorithm {
     /// `online`, `forecast`, `hmm`, `manifold`, `covariance`, `anomaly`,
     /// `neural`, `timeseries`, `stats`.
     pub kind: &'static str,
+    stored: CoverageStatus,
+}
+
+impl Algorithm {
+    /// How far this entry has been verified. README must not advertise
+    /// [`CoverageStatus::Experimental`] or [`CoverageStatus::Generated`] items
+    /// as equivalent to a Python library.
+    ///
+    /// Type-baked families are classified at runtime so `INVENTORY` const-eval
+    /// does not walk every name (rustc `long_running_const_eval`).
+    pub fn status(&self) -> CoverageStatus {
+        if self.stored == CoverageStatus::Verified {
+            CoverageStatus::Verified
+        } else if is_generated_name(self.name) {
+            CoverageStatus::Generated
+        } else {
+            self.stored
+        }
+    }
+}
+
+fn is_generated_name(name: &str) -> bool {
+    name.contains("Cosine")
+        || name.contains("Tsp")
+        || name.contains("WindowLag")
+        || name.contains("LogMinkowski")
+        || name.contains("minkowski")
 }
 
 const fn a(name: &'static str, python_equiv: &'static str, kind: &'static str) -> Algorithm {
@@ -22,6 +74,16 @@ const fn a(name: &'static str, python_equiv: &'static str, kind: &'static str) -
         name,
         python_equiv,
         kind,
+        stored: CoverageStatus::Experimental,
+    }
+}
+
+const fn v(name: &'static str, python_equiv: &'static str, kind: &'static str) -> Algorithm {
+    Algorithm {
+        name,
+        python_equiv,
+        kind,
+        stored: CoverageStatus::Verified,
     }
 }
 
@@ -729,22 +791,23 @@ const INVENTORY: &[Algorithm] = &[
     a("linalg.thin_svd", "numpy.linalg.svd", "function"),
     a("linalg.symmetric_eigen", "numpy.linalg.eigh", "function"),
     a("linalg.chol_solve", "scipy.linalg.cho_solve", "function"),
-    a("special.erf", "scipy.special.erf", "function"),
-    a("special.norm_cdf", "scipy.stats.norm.cdf", "function"),
-    a(
+    v("special.erf", "scipy.special.erf", "function"),
+    v("special.norm_cdf", "scipy.stats.norm.cdf", "function"),
+    v(
         "special.norm_pvalue_two_sided",
         "scipy.stats.norm.sf",
         "function",
     ),
-    a("special.ln_gamma", "scipy.special.gammaln", "function"),
-    a("special.gamma_p", "scipy.special.gammainc", "function"),
-    a("special.chi2_cdf", "scipy.stats.chi2.cdf", "function"),
-    a("special.chi2_pvalue", "scipy.stats.chi2.sf", "function"),
-    a("special.betainc_reg", "scipy.special.betainc", "function"),
-    a("special.student_t_cdf", "scipy.stats.t.cdf", "function"),
-    a("special.student_t_pvalue", "scipy.stats.t.sf", "function"),
-    a("special.f_cdf", "scipy.stats.f.cdf", "function"),
-    a("special.f_pvalue", "scipy.stats.f.sf", "function"),
+    v("special.ln_gamma", "scipy.special.gammaln", "function"),
+    v("special.digamma", "scipy.special.digamma", "function"),
+    v("special.gamma_p", "scipy.special.gammainc", "function"),
+    v("special.chi2_cdf", "scipy.stats.chi2.cdf", "function"),
+    v("special.chi2_pvalue", "scipy.stats.chi2.sf", "function"),
+    v("special.betainc_reg", "scipy.special.betainc", "function"),
+    v("special.student_t_cdf", "scipy.stats.t.cdf", "function"),
+    v("special.student_t_pvalue", "scipy.stats.t.sf", "function"),
+    v("special.f_cdf", "scipy.stats.f.cdf", "function"),
+    v("special.f_pvalue", "scipy.stats.f.sf", "function"),
     a(
         "tree.isolation_c_factor",
         "sklearn.ensemble._iforest._average_path_length",
@@ -13710,6 +13773,14 @@ pub fn inventory() -> &'static [Algorithm] {
     INVENTORY
 }
 
+/// Ledger entries with [`CoverageStatus::Verified`]. README claims must
+/// follow this set, not [`inventory`].
+pub fn verified() -> impl Iterator<Item = &'static Algorithm> {
+    INVENTORY
+        .iter()
+        .filter(|a| a.status() == CoverageStatus::Verified)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -18654,5 +18725,29 @@ mod tests {
         let n = v.len();
         v.dedup();
         assert_eq!(v.len(), n);
+    }
+
+    #[test]
+    fn verified_surface_is_special_functions() {
+        let names: Vec<&str> = verified().map(|a| a.name).collect();
+        assert!(names.contains(&"special.betainc_reg"));
+        assert!(names.contains(&"special.digamma"));
+        assert!(
+            names.iter().all(|n| n.starts_with("special.")),
+            "README tracks verified(); do not mark unverified kernels: {names:?}"
+        );
+    }
+
+    #[test]
+    fn generated_includes_type_baked_families() {
+        let gen: Vec<&str> = inventory()
+            .iter()
+            .filter(|a| a.status() == CoverageStatus::Generated)
+            .map(|a| a.name)
+            .collect();
+        assert!(gen.iter().any(|n| n.contains("WindowLag418")));
+        assert!(gen.iter().any(|n| n.contains("LogMinkowski")));
+        assert!(gen.iter().any(|n| n.contains("Cosine173")));
+        assert!(gen.iter().any(|n| n.contains("minkowski430")));
     }
 }
