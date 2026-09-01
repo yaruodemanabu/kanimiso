@@ -6,10 +6,10 @@ ALLOW=scripts/lint_allowlist.txt        # 固有名詞の数値（Exp3, Ucb1, Ca
 [ -f "$ALLOW" ] || : > "$ALLOW"
 
 # ---- 予算（下げるのみ。初期値 = 2026-09-01 実測）-----------------------------
-MAX_R1_NUMERAL_IDENTS=4782     # 目標 0  （Garch11 のような「パラメータ値」は allowlist に入れない）
-MAX_R4_PUB_ITEMS=18899         # 目標 1000
+MAX_R1_NUMERAL_IDENTS=4425     # 目標 0  （Garch11 のような「パラメータ値」は allowlist に入れない）
+MAX_R4_PUB_ITEMS=18188         # 目標 1000
 MAX_R5_FILES_OVER_3000=13      # 目標 0
-MAX_R7_DENSITY_FLOORS=1857     # 目標 0
+MAX_R7_DENSITY_FLOORS=1143     # 目標 0
 MAX_R10_DISTINCT_FROM=3022     # 目標 0
 ALLOW_RUST_MIN_STACK=1         # PR 8 で 0 にする
 # ------------------------------------------------------------------------------
