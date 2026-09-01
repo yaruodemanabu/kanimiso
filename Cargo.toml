@@ -19,3 +19,5 @@ ojizou-san = { path = "ojizou-san", version = "0.1.0" }
 wormhole = { git = "https://github.com/yaruodemanabu/wormhole", rev = "7c338c01aecc447511ea76132b35e86b024d33f4" }
 coronel = { git = "https://github.com/yaruodemanabu/wormhole", rev = "7c338c01aecc447511ea76132b35e86b024d33f4" }
 jelly-wave = { git = "https://github.com/yaruodemanabu/wormhole", rev = "7c338c01aecc447511ea76132b35e86b024d33f4" }
+# 1.6 works on rustc 1.84+ (AGENTS.md §6 Tier 2).
+proptest = "1.6"

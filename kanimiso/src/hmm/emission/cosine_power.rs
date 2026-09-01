@@ -184,6 +184,19 @@ mod tests {
     }
 
     #[test]
+    fn cdf_is_monotone_on_a_grid() {
+        let law = CosinePower::new(0.0, 1.0, 3.0);
+        let mut prev = 0.0;
+        for k in 0..=20 {
+            let u = -0.95 + 1.9 * (k as f64) / 20.0;
+            let f = law.cdf(u);
+            assert!((0.0..=1.0).contains(&f), "cdf({u})={f}");
+            assert!(f + 1e-12 >= prev, "cdf decreased at {u}: {f} < {prev}");
+            prev = f;
+        }
+    }
+
+    #[test]
     fn n3_cdf_matches_trig_closed_form() {
         let law = CosinePower::new(0.0, 1.0, 3.0);
         for u in [-0.8, -0.3, 0.0, 0.3, 0.8] {

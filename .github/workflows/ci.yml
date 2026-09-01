@@ -100,5 +100,6 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - name: llvm-cov (ratchet set in PR 10)
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: llvm-cov ratchet (line %)
+        # Measured 2026-09-01: 75.34% lines on this stack. Budget goes down only.
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info --fail-under-lines 75
