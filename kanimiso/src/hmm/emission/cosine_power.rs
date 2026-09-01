@@ -12,7 +12,7 @@ const LN_2: f64 = std::f64::consts::LN_2;
 /// `log_prob` is the closed form `n log cos θ − log Z_n − log s`. Support
 /// outside `|θ| < π/2` is `−∞` (no density-then-`ln`).
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct CosinePower {
+pub struct CosinePower {
     /// Location μ.
     pub loc: f64,
     /// Half-width s > 0.
@@ -24,7 +24,7 @@ pub(crate) struct CosinePower {
 impl CosinePower {
     /// Cosine-power law. `scale` must be positive; `power` must be finite and
     /// `≥ 0`.
-    pub(crate) fn new(loc: f64, scale: f64, power: f64) -> Self {
+    pub fn new(loc: f64, scale: f64, power: f64) -> Self {
         Self { loc, scale, power }
     }
 
@@ -127,8 +127,9 @@ impl ContinuousLaw for CosinePower {
     }
 }
 
+/// Posterior-weighted location/scale sums for a cosine-power M-step.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct CosineStats {
+pub struct CosineStats {
     mass: f64,
     sum_y: f64,
     sum_abs: f64,

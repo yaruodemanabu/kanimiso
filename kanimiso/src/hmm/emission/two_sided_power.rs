@@ -7,7 +7,7 @@ use signlred::{Issue, IssueCode, Result};
 /// Symmetric two-sided power on `(μ − s, μ + s)`:
 /// `f(y) = (n / (2s)) (1 − |u|)^{n−1}`, `u = (y−μ)/s`.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TwoSidedPower {
+pub struct TwoSidedPower {
     /// Location μ.
     pub loc: f64,
     /// Half-width s > 0.
@@ -18,7 +18,7 @@ pub(crate) struct TwoSidedPower {
 
 impl TwoSidedPower {
     /// Two-sided power law.
-    pub(crate) fn new(loc: f64, scale: f64, power: f64) -> Self {
+    pub fn new(loc: f64, scale: f64, power: f64) -> Self {
         Self { loc, scale, power }
     }
 
@@ -103,8 +103,9 @@ impl ContinuousLaw for TwoSidedPower {
     }
 }
 
+/// Posterior-weighted location/scale sums for a two-sided-power M-step.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct TspStats {
+pub struct TspStats {
     mass: f64,
     sum_y: f64,
     sum_abs: f64,

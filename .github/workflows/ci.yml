@@ -1,5 +1,5 @@
-# AGENTS.md §7. Workspace clippy/fmt on the generated v0.1 surface
-# (hmm.rs / online.rs) is expected to stay noisy until PR 8 deletes it.
+# AGENTS.md §7. Generated HMM is gone (PR 8). Workspace clippy/fmt on
+# online.rs / tslearn.rs is still noisy until those files are split.
 # Required today: redundancy lint, small-crate quality, special oracle, deny.
 
 name: CI
@@ -82,8 +82,8 @@ jobs:
     name: AGENTS.md §7 workspace suite
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    # Generated v0.1 files (568k-line hmm.rs) are not clippy-clean.
-    # This job becomes a required green check after PR 8.
+    # online.rs / tslearn.rs are still not clippy/fmt-clean.
+    # This job becomes a required green check after those files shrink.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4

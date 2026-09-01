@@ -7,12 +7,12 @@ mod poisson;
 mod transformed;
 mod two_sided_power;
 
-pub(crate) use categorical::Categorical;
-pub(crate) use cosine_power::CosinePower;
-pub(crate) use gaussian::Gaussian;
-pub(crate) use poisson::Poisson;
-pub(crate) use transformed::{Transform, Transformed};
-pub(crate) use two_sided_power::TwoSidedPower;
+pub use categorical::{Categorical, CategoricalStats};
+pub use cosine_power::{CosinePower, CosineStats};
+pub use gaussian::{Gaussian, GaussianStats};
+pub use poisson::{Poisson, PoissonStats};
+pub use transformed::{Transform, Transformed};
+pub use two_sided_power::{TspStats, TwoSidedPower};
 
 use crate::context::FitCtx;
 use signlred::Result;
@@ -27,7 +27,7 @@ pub(crate) trait ContinuousLaw {
 
 /// One hidden-state emission. The observation type is the data, not a
 /// parameter value (AGENTS.md R3).
-pub(crate) trait Emission: Clone {
+pub trait Emission: Clone {
     /// Observation stored in a sequence (`Vec<f64>`, count, or symbol).
     type Observation;
     /// Running sums for one Baum–Welch M-step.

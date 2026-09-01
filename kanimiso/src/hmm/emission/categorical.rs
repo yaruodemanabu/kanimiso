@@ -6,20 +6,21 @@ use signlred::{Issue, IssueCode, Result};
 
 /// Discrete emission over `{0, …, n_symbols-1}`.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Categorical {
+pub struct Categorical {
     /// `p[symbol]`. Must be non-negative; `log_prob` is `−∞` on zeros.
     pub probs: Vec<f64>,
 }
 
 impl Categorical {
     /// Categorical with the given probability vector (not renormalised here).
-    pub(crate) fn new(probs: Vec<f64>) -> Self {
+    pub fn new(probs: Vec<f64>) -> Self {
         Self { probs }
     }
 }
 
+/// Posterior-weighted symbol counts for a categorical M-step.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct CategoricalStats {
+pub struct CategoricalStats {
     counts: Vec<f64>,
 }
 

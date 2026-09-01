@@ -10,7 +10,7 @@ use signlred::{Issue, IssueCode, Qualified, Result};
 
 /// Hidden Markov model with one emission object per state.
 #[derive(Clone, Debug)]
-pub(crate) struct HiddenMarkovModel<E> {
+pub struct HiddenMarkovModel<E> {
     /// Start distribution `π` (length `K`).
     pub initial: Vec<f64>,
     /// Row-stochastic transitions `A` (`K` × `K`).
@@ -21,7 +21,7 @@ pub(crate) struct HiddenMarkovModel<E> {
 
 impl<E: Emission> HiddenMarkovModel<E> {
     /// Assemble a model. Dimensions are checked on the first scoring call.
-    pub(crate) fn new(initial: Vec<f64>, transition: Vec<Vec<f64>>, emissions: Vec<E>) -> Self {
+    pub fn new(initial: Vec<f64>, transition: Vec<Vec<f64>>, emissions: Vec<E>) -> Self {
         Self {
             initial,
             transition,
@@ -29,7 +29,8 @@ impl<E: Emission> HiddenMarkovModel<E> {
         }
     }
 
-    pub(crate) fn n_states(&self) -> usize {
+    /// Number of hidden states (`emissions.len()`).
+    pub fn n_states(&self) -> usize {
         self.emissions.len()
     }
 
@@ -68,7 +69,7 @@ impl<E: Emission> HiddenMarkovModel<E> {
     }
 
     /// Sequence log-likelihood via log-space forward.
-    pub(crate) fn log_likelihood(
+    pub fn log_likelihood(
         &self,
         obs: &[E::Observation],
         session: &Session,
@@ -91,7 +92,7 @@ impl<E: Emission> HiddenMarkovModel<E> {
     }
 
     /// Viterbi state path.
-    pub(crate) fn decode(
+    pub fn decode(
         &self,
         obs: &[E::Observation],
         session: &Session,
@@ -107,7 +108,7 @@ impl<E: Emission> HiddenMarkovModel<E> {
     }
 
     /// Baum–Welch. Returns a fitted clone; `self` is unchanged (`fit` is `&self`).
-    pub(crate) fn fit(
+    pub fn fit(
         &self,
         obs: &[E::Observation],
         max_iter: usize,

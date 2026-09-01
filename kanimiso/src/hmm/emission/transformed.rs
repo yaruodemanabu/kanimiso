@@ -7,7 +7,7 @@ use signlred::{Issue, IssueCode, Result};
 
 /// How a [`Transformed`] observation is read from a base law.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Transform {
+pub enum Transform {
     /// Odds map `u = y / (1 − y)` on `y ∈ (0, 1)` with Jacobian `1/(1−y)²`.
     Unit,
     /// Beta-generated family `f ∝ f₀ F₀^{a−1} (1−F₀)^{b−1}`.
@@ -35,7 +35,7 @@ pub(crate) enum Transform {
 
 /// Base law plus one of the five generated-family transforms.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Transformed<E> {
+pub struct Transformed<E> {
     /// Underlying continuous emission.
     pub base: E,
     /// Transform applied to `log_prob`.
@@ -44,7 +44,7 @@ pub(crate) struct Transformed<E> {
 
 impl<E> Transformed<E> {
     /// Wrap `base` with `transform`.
-    pub(crate) fn new(base: E, transform: Transform) -> Self {
+    pub fn new(base: E, transform: Transform) -> Self {
         Self { base, transform }
     }
 }

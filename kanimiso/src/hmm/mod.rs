@@ -1,26 +1,23 @@
-//! Hidden Markov models.
+//! Hidden Markov models (AGENTS.md §5 / §8).
 //!
-//! The v0.2 core is [`HiddenMarkovModel`] plus [`Emission`]. The generated v0.1
-//! surface is re-exported from [`legacy`] until PR 8 deletes it (AGENTS.md §8).
-//! New names stay `pub(crate)` so this PR does not raise the R4 pub budget.
-
-#[path = "legacy.rs"]
-#[rustfmt::skip]
-mod legacy;
-pub use legacy::*;
+//! The public surface is [`HiddenMarkovModel<E>`] plus the [`Emission`]
+//! implementations. The generated v0.1 type family was deleted in PR 8;
+//! names live in `docs/dropped_v0_1.md`.
 
 mod baum_welch;
 mod diagnostics;
-pub(crate) mod emission;
+mod emission;
 mod forward_backward;
 mod model;
 mod viterbi;
 
-pub(crate) use emission::{
-    Categorical, CosinePower, Emission, Gaussian, Poisson, Transform, Transformed, TwoSidedPower,
+pub use emission::{
+    Categorical, CategoricalStats, CosinePower, CosineStats, Emission, Gaussian, GaussianStats,
+    Poisson, PoissonStats, Transform, Transformed, TspStats, TwoSidedPower,
 };
+pub use model::HiddenMarkovModel;
+
 pub(crate) use forward_backward::logsumexp;
-pub(crate) use model::HiddenMarkovModel;
 
 #[cfg(test)]
 mod tests {
@@ -71,7 +68,6 @@ mod tests {
                     .map(|a| a.first().map(|x| x.is_array()).unwrap_or(false))
                     .unwrap_or(false)
                 {
-                    // hmmlearn diag covars sometimes nest one extra level
                     row.as_array().unwrap().iter().map(json_f64).collect()
                 } else {
                     json_f64_row(row)
@@ -151,7 +147,6 @@ mod tests {
     #[test]
     fn hmmlearn_golden_loglik_and_viterbi() {
         // measured 2026-09-01 vs hmmlearn 0.3.3: all 5 cases ≤ 4e-8
-        // (R9: treat 1e-8 as the observed residual ceiling, tol = 4e-8).
         let mut worst = 0.0_f64;
         for case in load_cases() {
             let kind = case["kind"].as_str().unwrap();
@@ -231,7 +226,6 @@ mod tests {
         let log_emit = m.log_emit_seq(&obs);
         let brute = brute_loglik(&start, &trans, &log_emit);
         let got = m.log_likelihood(&obs, &session("bf")).unwrap().value;
-        // measured 2026-09-01: set after first run; 1e-12 is the R9 ceiling
         assert!((got - brute).abs() <= 1e-12, "forward {got} brute {brute}");
         let (vp, _) = {
             let (log_start, log_trans) = m.log_tables();
@@ -300,7 +294,6 @@ mod tests {
 
     #[test]
     fn log_emit_all_minus_1e4_is_finite() {
-        // AGENTS.md §4.3: v0.1 scaled-exp forward reports ScaleFactorZero.
         let start = vec![0.5, 0.5];
         let trans = vec![vec![0.5, 0.5], vec![0.5, 0.5]];
         let log_emit = vec![vec![-1.0e4, -1.0e4]; 12];

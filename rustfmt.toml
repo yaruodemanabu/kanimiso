@@ -1,2 +1,2 @@
-# Generated v0.1 files are not rustfmt-safe (OOM / tens-of-kLOC diffs).
-ignore = ["kanimiso/src/hmm/legacy.rs"]
+# Remaining generated v0.1 files are not rustfmt-safe (OOM / huge diffs).
+ignore = ["kanimiso/src/online.rs", "kanimiso/src/tslearn.rs"]

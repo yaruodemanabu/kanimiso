@@ -8,7 +8,7 @@ const LN_2PI: f64 = 1.8378770664093453;
 
 /// Diagonal-covariance Gaussian. Mean and variance are runtime vectors.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Gaussian {
+pub struct Gaussian {
     /// Coordinate-wise mean.
     pub mean: Vec<f64>,
     /// Coordinate-wise variance (must be `> 0` for a finite density).
@@ -17,18 +17,19 @@ pub(crate) struct Gaussian {
 
 impl Gaussian {
     /// Diagonal Gaussian with the given mean and variance.
-    pub(crate) fn new(mean: Vec<f64>, var: Vec<f64>) -> Self {
+    pub fn new(mean: Vec<f64>, var: Vec<f64>) -> Self {
         Self { mean, var }
     }
 
     /// Univariate `N(mean, var)`.
-    pub(crate) fn univariate(mean: f64, var: f64) -> Self {
+    pub fn univariate(mean: f64, var: f64) -> Self {
         Self::new(vec![mean], vec![var])
     }
 }
 
+/// Posterior-weighted sums for a diagonal-Gaussian M-step.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct GaussianStats {
+pub struct GaussianStats {
     mass: f64,
     sum_x: Vec<f64>,
     sum_x2: Vec<f64>,

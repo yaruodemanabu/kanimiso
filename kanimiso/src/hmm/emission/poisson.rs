@@ -7,20 +7,21 @@ use signlred::{Issue, IssueCode, Result};
 
 /// Poisson count emission with rate `λ > 0`.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Poisson {
+pub struct Poisson {
     /// Mean count.
     pub rate: f64,
 }
 
 impl Poisson {
     /// Poisson(`rate`). `rate ≤ 0` makes every `log_prob` `−∞`.
-    pub(crate) fn new(rate: f64) -> Self {
+    pub fn new(rate: f64) -> Self {
         Self { rate }
     }
 }
 
+/// Posterior-weighted counts for a Poisson M-step.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct PoissonStats {
+pub struct PoissonStats {
     mass: f64,
     weighted_count: f64,
 }
