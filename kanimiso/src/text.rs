@@ -497,8 +497,10 @@ mod tests {
             .value;
         assert_eq!(x.nrows(), 2);
         assert!(x.ncols() >= 3);
-        let mut tf = TfidfTransformer::new();
-        tf.fit_unsupervised(&x, &Session::new("tf", "fit")).unwrap();
+        let tf = TfidfTransformer::new()
+            .fit_unsupervised(&x, &Session::new("tf", "fit"))
+            .unwrap()
+            .value;
         let z = tf.transform(&x, &Session::new("tf", "t")).unwrap().value;
         assert_eq!(z.shape(), x.shape());
         let n0: f64 = (0..z.ncols()).map(|j| z.get(0, j) * z.get(0, j)).sum();

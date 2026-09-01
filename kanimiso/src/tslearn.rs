@@ -55038,9 +55038,10 @@ mod tests {
         assert_eq!(cnnp.len(), 6);
         let mut ximp = x.clone();
         ximp.set(0, 1, f64::NAN);
-        let mut imp = TimeSeriesImputer::new();
-        imp.fit_unsupervised(&ximp, &Session::new("ts", "imp"))
-            .unwrap();
+        let imp = TimeSeriesImputer::new()
+            .fit_unsupervised(&ximp, &Session::new("ts", "imp"))
+            .unwrap()
+            .value;
         let xi = imp
             .transform(&ximp, &Session::new("ts", "impt"))
             .unwrap()
@@ -55059,9 +55060,10 @@ mod tests {
             .unwrap()
             .value;
         assert!(cp.is_finite());
-        let mut c22t = Catch22Transformer::new();
-        c22t.fit_unsupervised(&x, &Session::new("ts", "c22t"))
-            .unwrap();
+        let c22t = Catch22Transformer::new()
+            .fit_unsupervised(&x, &Session::new("ts", "c22t"))
+            .unwrap()
+            .value;
         let zc = c22t
             .transform(&x, &Session::new("ts", "c22tt"))
             .unwrap()

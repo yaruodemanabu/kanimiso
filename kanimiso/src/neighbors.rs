@@ -1509,8 +1509,10 @@ mod tests {
             }
         });
         let y = Vector::from_iter((0..40).map(|i| if i < 20 { 0.0 } else { 1.0 }));
-        let mut nca = NeighborhoodComponentsAnalysis::new(2);
-        nca.fit(&x, &y, &Session::new("nca", "fit")).expect("nca");
+        let nca = NeighborhoodComponentsAnalysis::new(2)
+            .fit(&x, &y, &Session::new("nca", "fit"))
+            .expect("nca")
+            .value;
         let z = nca
             .transform(&x, &Session::new("nca", "t"))
             .expect("ncat")

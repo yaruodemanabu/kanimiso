@@ -19924,15 +19924,19 @@ impl FittedMiddleOutReconciler {
             .fit_series(&y, &Session::new("stl", "fit"))
             .expect("stl");
         assert_eq!(stl.value.trend.len(), 40);
-        let mut dt = Detrender::new();
-        dt.fit_series(&y, &Session::new("dt", "fit")).expect("dt");
+        let dt = Detrender::new()
+            .fit_series(&y, &Session::new("dt", "fit"))
+            .expect("dt")
+            .value;
         let dz = dt
             .transform(&y, &Session::new("dt", "t"))
             .expect("dtt")
             .value;
         assert!(dz.std() < y.std());
-        let mut ds = Deseasonalizer::new(4);
-        ds.fit_series(&y, &Session::new("ds", "fit")).expect("ds");
+        let ds = Deseasonalizer::new(4)
+            .fit_series(&y, &Session::new("ds", "fit"))
+            .expect("ds")
+            .value;
         assert_eq!(ds.means.len(), 4);
         let pt = PolynomialTrendForecaster::new(1)
             .fit_series(&y, &Session::new("pt", "fit"))
@@ -20016,17 +20020,20 @@ impl FittedMiddleOutReconciler {
             .expect("vmxf")
             .value;
         assert_eq!(vmf.shape(), (3, 2));
-        let mut bc = BoxCoxTransformer::new();
-        bc.fit_series(&ypos, &Session::new("bc", "fit"))
-            .expect("boxcox");
+        let bc = BoxCoxTransformer::new()
+            .fit_series(&ypos, &Session::new("bc", "fit"))
+            .expect("boxcox")
+            .value;
         let zt = bc
             .transform(&ypos, &Session::new("bc", "t"))
             .expect("bct")
             .value;
         assert_eq!(zt.len(), ypos.len());
         assert!(zt.as_slice().iter().all(|v| v.is_finite()));
-        let mut d1 = Differencer::new();
-        d1.fit_series(&y, &Session::new("d1", "fit")).expect("diff");
+        let d1 = Differencer::new()
+            .fit_series(&y, &Session::new("d1", "fit"))
+            .expect("diff")
+            .value;
         let dz = d1
             .transform(&y, &Session::new("d1", "t"))
             .expect("dt")
