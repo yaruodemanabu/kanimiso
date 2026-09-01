@@ -3,6 +3,7 @@
 //! Unlabeled rows are encoded as `NaN` or `−1` in `y`. Labeled rows are
 //! clamped after every iteration of propagation.
 
+use crate::classification::RidgeClassifier;
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::traits::{Fit, Predict};
@@ -355,6 +356,179 @@ impl LabelSpreading {
     }
 }
 
+/// Self-training: iteratively promote high-confidence unlabeled rows.
+///
+/// Unlabeled entries are `NaN` or `−1`. The base learner is a ridge
+/// classifier so perfect separation does not abort the outer loop.
+#[derive(Clone, Debug)]
+pub struct SelfTrainingClassifier {
+    /// Promote a row when `|decision|` exceeds this margin.
+    pub threshold: f64,
+    /// Maximum promotion rounds.
+    pub max_iter: usize,
+    /// Ridge penalty of the base classifier.
+    pub alpha: f64,
+}
+
+impl Default for SelfTrainingClassifier {
+    fn default() -> Self {
+        Self {
+            threshold: 0.75,
+            max_iter: 10,
+            alpha: 1.0,
+        }
+    }
+}
+
+impl SelfTrainingClassifier {
+    /// Default self-trainer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted self-training classifier.
+#[derive(Clone, Debug)]
+pub struct FittedSelfTraining {
+    inner: crate::classification::FittedRidgeClassifier,
+    /// How many originally unlabeled rows were promoted.
+    pub n_promoted: usize,
+    /// Rounds actually run.
+    pub n_iter: usize,
+}
+
+impl Predict for FittedSelfTraining {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
+
+impl Fit for SelfTrainingClassifier {
+    type Fitted = FittedSelfTraining;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedSelfTraining>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if y.len() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("self-training y length ≠ n")
+                    .build(),
+            );
+        }
+        let mut labeled: Vec<bool> = y.as_slice().iter().map(|&v| !is_unlabeled(v)).collect();
+        let mut y_cur = y.clone();
+        let n_lab0 = labeled.iter().filter(|b| **b).count();
+        if n_lab0 == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyClass)
+                    .message("self-training has no labeled seed rows")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "self-training classifier",
+                        "every label is NaN or −1",
+                        "label at least two classes before iterating",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedSelfTraining {
+                inner: crate::classification::FittedRidgeClassifier::from_penalized(
+                    crate::linear_model::FittedPenalized {
+                        coef: Vector::zeros(x.ncols()),
+                        intercept: 0.0,
+                        alpha: self.alpha,
+                        l1_ratio: 0.0,
+                    },
+                    Vec::new(),
+                ),
+                n_promoted: 0,
+                n_iter: 0,
+            });
+        }
+        let y_lab0 = Vector::from_iter(y.as_slice().iter().copied().filter(|v| !is_unlabeled(*v)));
+        inspect_classes(&mut ctx.report, &y_lab0, &ctx.policy);
+        let mut n_promoted = 0usize;
+        let mut n_iter = 0usize;
+        let mut last = None;
+        for it in 0..self.max_iter.max(1) {
+            n_iter = it + 1;
+            let idx: Vec<usize> = labeled
+                .iter()
+                .enumerate()
+                .filter_map(|(i, b)| if *b { Some(i) } else { None })
+                .collect();
+            let xt = Matrix::from_fn(idx.len(), x.ncols(), |r, c| x.get(idx[r], c));
+            let yt = Vector::from_iter(idx.iter().map(|&i| y_cur[i]));
+            let fitted = match RidgeClassifier::new(self.alpha).fit(
+                &xt,
+                &yt,
+                &session.child(format!("st_{it}")),
+            ) {
+                Ok(q) => q.value,
+                Err(e) => {
+                    ctx.push(e.primary);
+                    break;
+                }
+            };
+            last = Some(fitted.clone());
+            let mut added = 0usize;
+            if let Ok(s) = fitted.decision_function(x, &session.child("score")) {
+                for i in 0..x.nrows() {
+                    if labeled[i] {
+                        continue;
+                    }
+                    if s.value[i].abs() >= self.threshold {
+                        y_cur[i] = crate::classification::from_score(s.value[i], &fitted.classes);
+                        labeled[i] = true;
+                        added += 1;
+                        n_promoted += 1;
+                    }
+                }
+            }
+            ctx.session.step(it as u64, added as f64, None);
+            if added == 0 {
+                break;
+            }
+        }
+        let still_unlab = labeled.iter().filter(|b| !**b).count();
+        if still_unlab > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::WarmupIncomplete)
+                    .message(format!(
+                        "{still_unlab} rows stayed unlabeled after {n_iter} self-training rounds"
+                    ))
+                    .meaninglessness(Meaninglessness::new(
+                        "pseudo-labels",
+                        "those rows never crossed the confidence threshold",
+                        signlred::InterpretiveValue::Misleading,
+                        "the fitted classifier is identified on the promoted set only",
+                    ))
+                    .build(),
+            );
+        }
+        let inner = last.unwrap_or_else(|| {
+            crate::classification::FittedRidgeClassifier::from_penalized(
+                crate::linear_model::FittedPenalized {
+                    coef: Vector::zeros(x.ncols()),
+                    intercept: 0.0,
+                    alpha: self.alpha,
+                    l1_ratio: 0.0,
+                },
+                Vec::new(),
+            )
+        });
+        ctx.finish(FittedSelfTraining {
+            inner,
+            n_promoted,
+            n_iter,
+        })
+    }
+}
+
 impl Fit for LabelSpreading {
     type Fitted = FittedLabelGraph;
     fn fit(
@@ -420,6 +594,31 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(pred.len(), 5);
+    }
+
+    #[test]
+    fn self_training_promotes_unlabeled() {
+        let x = Matrix::from_fn(16, 1, |i, _| if i < 8 { -1.2 } else { 1.2 });
+        let y = Vector::from_iter((0..16).map(|i| {
+            if i == 3 || i == 12 {
+                f64::NAN
+            } else if i < 8 {
+                0.0
+            } else {
+                1.0
+            }
+        }));
+        let q = SelfTrainingClassifier {
+            threshold: 0.2,
+            max_iter: 5,
+            alpha: 0.5,
+        }
+        .fit(&x, &y, &Session::new("st", "fit"))
+        .expect("st");
+        assert!(q.value.n_iter >= 1);
+        let pred = q.value.predict(&x, &Session::new("st", "p")).unwrap().value;
+        assert!((pred[0] - 0.0).abs() < 0.5);
+        assert!((pred[15] - 1.0).abs() < 0.5);
     }
 
     #[test]

@@ -8,13 +8,15 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linalg::symmetric_eigen;
+use crate::linalg::{symmetric_eigen, thin_svd};
 use crate::rng::Rng;
 use crate::traits::{FitUnsupervised, PartialFit, Predict};
 use crate::validate::{inspect_identification, inspect_xy};
 use faer::Mat;
 use ojizou_san::{IncrementalExplain, Session};
-use signlred::{IncrementalQuality, Issue, IssueCode, Meaninglessness, Qualified, Result};
+use signlred::{
+    IncrementalQuality, Issue, IssueCode, Meaninglessness, Qualified, Result, Severity,
+};
 
 const COV_FLOOR: f64 = 1e-6;
 const EMPTY_RESEED_TOL: f64 = 1e-15;
@@ -1096,6 +1098,190 @@ impl FitUnsupervised for Dbscan {
     }
 }
 
+/// HDBSCAN-lite: mutual-reachability MST, then a single longest-edge split
+/// (Campello / McInnes extraction reduced to the dominant cut).
+///
+/// Core distance is the distance to the `min_samples`-th neighbour. Mutual
+/// reachability is \(\max(d_k(i), d_k(j), d(i,j))\). Components smaller than
+/// `min_cluster_size` are labelled noise (`-1`). Cluster count is **not**
+/// passed to [`inspect_identification`].
+#[derive(Clone, Debug)]
+pub struct Hdbscan {
+    /// Neighbours used for the core distance.
+    pub min_samples: usize,
+    /// Minimum component size to keep as a cluster.
+    pub min_cluster_size: usize,
+}
+
+impl Default for Hdbscan {
+    fn default() -> Self {
+        Self {
+            min_samples: 5,
+            min_cluster_size: 5,
+        }
+    }
+}
+
+impl Hdbscan {
+    /// HDBSCAN with the given core-distance and cluster-size floors.
+    pub fn new(min_samples: usize, min_cluster_size: usize) -> Self {
+        Self {
+            min_samples: min_samples.max(1),
+            min_cluster_size: min_cluster_size.max(1),
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedHdbscan>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted HDBSCAN partition.
+#[derive(Clone, Debug)]
+pub struct FittedHdbscan {
+    /// Cluster ids; noise is `-1.0`.
+    pub labels: Vector,
+    /// Number of non-noise clusters.
+    pub n_clusters: usize,
+}
+
+impl FitUnsupervised for Hdbscan {
+    type Fitted = FittedHdbscan;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedHdbscan>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), 1, &ctx.policy);
+        let n = x.nrows();
+        if n == 0 || x.ncols() == 0 {
+            return ctx.finish(FittedHdbscan {
+                labels: Vector::zeros(0),
+                n_clusters: 0,
+            });
+        }
+        if all_rows_identical(x, ctx.policy.near_zero_variance) && n > 1 {
+            ctx.push(degenerate_cluster_issue("HDBSCAN input rows are identical"));
+            return ctx.finish(FittedHdbscan {
+                labels: Vector::zeros(n),
+                n_clusters: 1,
+            });
+        }
+        let k = self.min_samples.max(1).min(n.saturating_sub(1).max(1));
+        let mut core = vec![0.0f64; n];
+        let mut dist = vec![vec![0.0f64; n]; n];
+        for i in 0..n {
+            let mut row = Vec::with_capacity(n);
+            for j in 0..n {
+                let d = sq_dist_rows(x, i, j).sqrt();
+                dist[i][j] = d;
+                if i != j {
+                    row.push(d);
+                }
+            }
+            row.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            core[i] = row.get(k.saturating_sub(1)).copied().unwrap_or(0.0);
+        }
+        let mut mrd = vec![vec![0.0f64; n]; n];
+        for i in 0..n {
+            for j in i..n {
+                let v = core[i].max(core[j]).max(dist[i][j]);
+                mrd[i][j] = v;
+                mrd[j][i] = v;
+            }
+        }
+        // Prim MST on mutual reachability.
+        let mut in_tree = vec![false; n];
+        let mut parent = vec![0usize; n];
+        let mut best = vec![f64::INFINITY; n];
+        best[0] = 0.0;
+        let mut edges: Vec<(usize, usize, f64)> = Vec::new();
+        for _ in 0..n {
+            let mut u = 0usize;
+            let mut bu = f64::INFINITY;
+            for i in 0..n {
+                if !in_tree[i] && best[i] < bu {
+                    bu = best[i];
+                    u = i;
+                }
+            }
+            in_tree[u] = true;
+            if bu.is_finite() && bu > 0.0 {
+                edges.push((parent[u], u, bu));
+            }
+            for v in 0..n {
+                if !in_tree[v] && mrd[u][v] < best[v] {
+                    best[v] = mrd[u][v];
+                    parent[v] = u;
+                }
+            }
+        }
+        // Remove the longest MST edge if both sides meet min_cluster_size.
+        edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        let min_c = self.min_cluster_size.max(1);
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for &(a, b, _) in &edges {
+            adj[a].push(b);
+            adj[b].push(a);
+        }
+        let mut labels = vec![-1i64; n];
+        let mut n_clusters = 0usize;
+        if let Some(&(a, b, _)) = edges.first() {
+            // Drop the longest edge and grow the two sides.
+            adj[a].retain(|&v| v != b);
+            adj[b].retain(|&v| v != a);
+            for (seed, cid) in [(a, 0i64), (b, 1i64)] {
+                let mut stack = vec![seed];
+                let mut comp = Vec::new();
+                let mut seen = vec![false; n];
+                seen[seed] = true;
+                while let Some(p) = stack.pop() {
+                    comp.push(p);
+                    for &q in &adj[p] {
+                        if !seen[q] {
+                            seen[q] = true;
+                            stack.push(q);
+                        }
+                    }
+                }
+                if comp.len() >= min_c {
+                    for i in comp {
+                        labels[i] = cid;
+                    }
+                    n_clusters += 1;
+                }
+            }
+        }
+        if n_clusters == 0 {
+            // Fallback: one cluster if the whole sample is large enough.
+            if n >= min_c {
+                for i in 0..n {
+                    labels[i] = 0;
+                }
+                n_clusters = 1;
+                ctx.push(
+                    Issue::builder(IssueCode::EmptyCluster)
+                        .message("HDBSCAN found no stable cut; the sample is one cluster")
+                        .build(),
+                );
+            } else {
+                ctx.push(degenerate_cluster_issue(
+                    "HDBSCAN produced only noise at this min_cluster_size",
+                ));
+            }
+        }
+        let lab = Vector::from_iter(labels.iter().map(|v| *v as f64));
+        push_if_nonfinite_vec(&mut ctx, &lab, "hdbscan labels");
+        ctx.finish(FittedHdbscan {
+            labels: lab,
+            n_clusters,
+        })
+    }
+}
+
 /// Hierarchical linkage rule on pairwise Euclidean distances.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Linkage {
@@ -1105,6 +1291,8 @@ pub enum Linkage {
     Complete,
     /// Minimum cross-pair distance (single / nearest neighbor).
     Single,
+    /// Variance-minimizing Ward merge (size-weighted squared mean gap).
+    Ward,
 }
 
 /// Agglomerative clustering on the full Euclidean distance matrix.
@@ -1137,6 +1325,51 @@ impl Agglomerative {
     /// Fit alias.
     pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedAgglomerative>> {
         self.fit_unsupervised(x, session)
+    }
+}
+
+/// Named sklearn `AgglomerativeClustering` (default Ward linkage).
+#[derive(Clone, Debug)]
+pub struct AgglomerativeClustering {
+    inner: Agglomerative,
+}
+
+impl Default for AgglomerativeClustering {
+    fn default() -> Self {
+        Self {
+            inner: Agglomerative {
+                n_clusters: 2,
+                linkage: Linkage::Ward,
+            },
+        }
+    }
+}
+
+impl AgglomerativeClustering {
+    /// Ward agglomeration into `n_clusters` groups.
+    pub fn new(n_clusters: usize) -> Self {
+        Self {
+            inner: Agglomerative {
+                n_clusters: n_clusters.max(1),
+                linkage: Linkage::Ward,
+            },
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedAgglomerative>> {
+        self.inner.fit(x, session)
+    }
+}
+
+impl FitUnsupervised for AgglomerativeClustering {
+    type Fitted = FittedAgglomerative;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedAgglomerative>> {
+        self.inner.fit_unsupervised(x, session)
     }
 }
 
@@ -1182,6 +1415,24 @@ fn cluster_link(a: &[usize], b: &[usize], dist: &Matrix, linkage: Linkage) -> f6
                 f64::INFINITY
             } else {
                 s / c
+            }
+        }
+        Linkage::Ward => {
+            let na = a.len() as f64;
+            let nb = b.len() as f64;
+            let mut s = 0.0;
+            let mut c = 0.0;
+            for &i in a {
+                for &j in b {
+                    s += dist.get(i, j);
+                    c += 1.0;
+                }
+            }
+            if c == 0.0 {
+                f64::INFINITY
+            } else {
+                let d = s / c;
+                (na * nb / (na + nb).max(1.0)) * d * d
             }
         }
     }
@@ -1566,6 +1817,193 @@ impl Predict for FittedGmm {
             labels[i] = b as f64;
         }
         ctx.finish(labels)
+    }
+}
+
+/// Variational / MAP diagonal Bayesian Gaussian mixture (sklearn
+/// `BayesianGaussianMixture`).
+///
+/// Weights have a Dirichlet prior; means shrink toward the data mean. This is
+/// a mean-field MAP-EM, not a full collapsed Gibbs sampler — recorded as a
+/// numerical compromise. Do not pass `n_components` as `p` to
+/// [`inspect_identification`]: a 2-component mixture on 40 rows is identified.
+#[derive(Clone, Debug)]
+pub struct BayesianGaussianMixture {
+    /// Number of mixture components.
+    pub n_components: usize,
+    /// Dirichlet concentration (`α₀`).
+    pub weight_concentration: f64,
+    /// EM iteration cap.
+    pub max_iter: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for BayesianGaussianMixture {
+    fn default() -> Self {
+        Self {
+            n_components: 2,
+            weight_concentration: 1.0,
+            max_iter: 80,
+            seed: 2,
+        }
+    }
+}
+
+impl BayesianGaussianMixture {
+    /// `k` components with `α₀ = 1`.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmm>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+impl FitUnsupervised for BayesianGaussianMixture {
+    type Fitted = FittedGmm;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (n, p) = x.shape();
+        let k = self.n_components.max(1).min(n.max(1));
+        if n == 0 || p == 0 {
+            return ctx.finish(FittedGmm {
+                labels: Vector::zeros(0),
+                weights: Vector::zeros(self.n_components),
+                means: Matrix::zeros(self.n_components, p),
+                covariances: Matrix::zeros(self.n_components, p),
+                loglik: f64::NAN,
+            });
+        }
+        if all_rows_identical(x, ctx.policy.near_zero_variance) {
+            ctx.push(degenerate_cluster_issue(
+                "Bayesian GMM data have zero spread; component covariances collapse",
+            ));
+        }
+        if k < self.n_components {
+            ctx.push(
+                Issue::builder(IssueCode::Overparameterized)
+                    .message("BayesianGaussianMixture n_components exceeds n; clamping")
+                    .build(),
+            );
+        }
+        ctx.push(
+            Issue::builder(IssueCode::JitterInjected)
+                .severity(Severity::Advisory)
+                .message("BayesianGaussianMixture uses MAP-EM, not a full variational posterior")
+                .build(),
+        );
+        let alpha0 = self.weight_concentration.max(1e-3);
+        let mut rng = Rng::new(self.seed | 5);
+        let mut means = kmeans_plus_plus(x, k, &mut rng);
+        let mut weights = Vector::filled(k, 1.0 / k as f64);
+        let mut vars = Matrix::zeros(k, p);
+        let mut prior_mean = Vector::zeros(p);
+        for j in 0..p {
+            let col = x.column(j);
+            prior_mean[j] = col.mean();
+            let v = col.std().max(COV_FLOOR);
+            for c in 0..k {
+                vars.set(c, j, v * v);
+            }
+        }
+        let mut loglik = f64::NEG_INFINITY;
+        let mut resp = vec![vec![0.0; k]; n];
+        for it in 0..self.max_iter.max(1) {
+            let mut ll = 0.0;
+            for i in 0..n {
+                let mut logp = vec![0.0; k];
+                for c in 0..k {
+                    let lw = if weights[c] > 0.0 {
+                        weights[c].ln()
+                    } else {
+                        f64::NEG_INFINITY
+                    };
+                    logp[c] = lw + diag_gauss_logpdf(x, i, &means, c, &vars);
+                }
+                let lse = logsumexp(&logp);
+                ll += lse;
+                for c in 0..k {
+                    resp[i][c] = if lse.is_finite() {
+                        (logp[c] - lse).exp()
+                    } else {
+                        1.0 / k as f64
+                    };
+                }
+            }
+            loglik = ll / n as f64;
+            ctx.session.step(it as u64, -loglik, None);
+            let mut nk = vec![0.0; k];
+            for i in 0..n {
+                for c in 0..k {
+                    nk[c] += resp[i][c];
+                }
+            }
+            let den = n as f64 + k as f64 * alpha0;
+            for c in 0..k {
+                weights[c] = (nk[c] + alpha0) / den;
+                if nk[c] <= 1e-8 {
+                    ctx.push(
+                        Issue::builder(IssueCode::MixtureWeightCollapsed)
+                            .severity(Severity::Warning)
+                            .message(format!("Bayesian GMM component {c} weight collapsed"))
+                            .metric("component", c as f64)
+                            .build(),
+                    );
+                    copy_row(&mut means, c, x, rng.below(n));
+                    continue;
+                }
+                let shrink = nk[c] / (nk[c] + 1.0);
+                for j in 0..p {
+                    let mut m = 0.0;
+                    for i in 0..n {
+                        m += resp[i][c] * x.get(i, j);
+                    }
+                    let mle = m / nk[c];
+                    means.set(c, j, shrink * mle + (1.0 - shrink) * prior_mean[j]);
+                }
+                for j in 0..p {
+                    let mut s = 0.0;
+                    for i in 0..n {
+                        let d = x.get(i, j) - means.get(c, j);
+                        s += resp[i][c] * d * d;
+                    }
+                    vars.set(c, j, (s / nk[c]).max(COV_FLOOR));
+                }
+            }
+            let wsum: f64 = (0..k).map(|c| weights[c]).sum();
+            if wsum > 0.0 {
+                for c in 0..k {
+                    weights[c] /= wsum;
+                }
+            }
+        }
+        let mut labels = Vector::zeros(n);
+        for i in 0..n {
+            let mut b = 0usize;
+            let mut bv = f64::NEG_INFINITY;
+            for c in 0..k {
+                if resp[i][c] > bv {
+                    bv = resp[i][c];
+                    b = c;
+                }
+            }
+            labels[i] = b as f64;
+        }
+        push_if_nonfinite_vec(&mut ctx, &labels, "bgmm labels");
+        ctx.finish(FittedGmm {
+            labels,
+            weights,
+            means,
+            covariances: vars,
+            loglik,
+        })
     }
 }
 
@@ -2195,6 +2633,248 @@ impl Optics {
     }
 }
 
+/// BIRCH: sequential clustering features, then optional k-means on CF centroids.
+///
+/// A leaf CF is \((N, LS, SS)\). Absorbing a point is allowed only when the
+/// resulting radius stays at or below `threshold`. Groups with \(n_g=1\) have
+/// an undefined radius and are kept as singleton CFs. Asking for more clusters
+/// than CFs is overparameterized.
+#[derive(Clone, Debug)]
+pub struct Birch {
+    /// Radius threshold \(T\).
+    pub threshold: f64,
+    /// Global clusters after the CF pass (`None` keeps every CF).
+    pub n_clusters: Option<usize>,
+}
+
+impl Default for Birch {
+    fn default() -> Self {
+        Self {
+            threshold: 0.5,
+            n_clusters: Some(3),
+        }
+    }
+}
+
+impl Birch {
+    /// BIRCH with radius `threshold` and optional global `k`.
+    pub fn new(threshold: f64, n_clusters: Option<usize>) -> Self {
+        Self {
+            threshold,
+            n_clusters,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ClusteringFeature {
+    n: f64,
+    ls: Vector,
+    ss: f64,
+}
+
+impl ClusteringFeature {
+    fn new(p: usize) -> Self {
+        Self {
+            n: 0.0,
+            ls: Vector::zeros(p),
+            ss: 0.0,
+        }
+    }
+
+    fn from_row(x: &Matrix, i: usize) -> Self {
+        let mut ls = Vector::zeros(x.ncols());
+        let mut ss = 0.0;
+        for j in 0..x.ncols() {
+            let v = x.get(i, j);
+            ls[j] = v;
+            ss += v * v;
+        }
+        Self { n: 1.0, ls, ss }
+    }
+
+    fn radius_after(&self, x: &Matrix, i: usize) -> f64 {
+        let n = self.n + 1.0;
+        let mut ss = self.ss;
+        let mut nrm = 0.0;
+        for j in 0..self.ls.len() {
+            let v = x.get(i, j);
+            ss += v * v;
+            let m = (self.ls[j] + v) / n;
+            nrm += m * m;
+        }
+        (ss / n - nrm).max(0.0).sqrt()
+    }
+
+    fn absorb(&mut self, x: &Matrix, i: usize) {
+        self.n += 1.0;
+        for j in 0..self.ls.len() {
+            let v = x.get(i, j);
+            self.ls[j] += v;
+            self.ss += v * v;
+        }
+    }
+
+    fn centroid(&self) -> Vector {
+        if self.n <= 0.0 {
+            self.ls.clone()
+        } else {
+            self.ls.scale(1.0 / self.n)
+        }
+    }
+
+    fn dist_row(&self, x: &Matrix, i: usize) -> f64 {
+        let c = self.centroid();
+        let mut s = 0.0;
+        for j in 0..c.len().min(x.ncols()) {
+            let d = x.get(i, j) - c[j];
+            s += d * d;
+        }
+        s.sqrt()
+    }
+}
+
+impl FitUnsupervised for Birch {
+    type Fitted = FittedBirch;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedBirch>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.nrows() == 0 || x.ncols() == 0 {
+            return ctx.finish(FittedBirch {
+                labels: Vector::zeros(x.nrows()),
+                centroids: Matrix::zeros(0, x.ncols()),
+                n_cf: 0,
+            });
+        }
+        if self.threshold < 0.0 || !self.threshold.is_finite() {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .message(format!(
+                        "BIRCH threshold={} is not a finite ≥0 radius",
+                        self.threshold
+                    ))
+                    .build(),
+            );
+        }
+        if all_rows_identical(x, ctx.policy.near_zero_variance) {
+            ctx.push(degenerate_cluster_issue(
+                "all observations are the same vector; BIRCH CFs collapse to one point",
+            ));
+        }
+        let mut cfs: Vec<ClusteringFeature> = Vec::new();
+        for i in 0..x.nrows() {
+            let mut best = None;
+            let mut best_d = f64::INFINITY;
+            for (k, cf) in cfs.iter().enumerate() {
+                let d = cf.dist_row(x, i);
+                if d < best_d {
+                    best_d = d;
+                    best = Some(k);
+                }
+            }
+            match best {
+                Some(k) if cfs[k].radius_after(x, i) <= self.threshold => {
+                    cfs[k].absorb(x, i);
+                }
+                _ => cfs.push(ClusteringFeature::from_row(x, i)),
+            }
+        }
+        if cfs.is_empty() {
+            cfs.push(ClusteringFeature::new(x.ncols()));
+        }
+        let n_cf = cfs.len();
+        if n_cf == 1 && x.nrows() > 1 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateClusters)
+                    .severity(signlred::Severity::Warning)
+                    .message("BIRCH produced a single CF; the threshold swallowed the whole sample")
+                    .meaninglessness(Meaninglessness::new(
+                        "BIRCH partition",
+                        "one micro-cluster is a constant assignment",
+                        signlred::InterpretiveValue::Misleading,
+                        "lower the threshold or skip the global k-means step",
+                    ))
+                    .build(),
+            );
+        }
+        let cf_cent = Matrix::from_fn(n_cf, x.ncols(), |i, j| cfs[i].centroid()[j]);
+        let k_req = self.n_clusters.unwrap_or(n_cf).max(1);
+        let k = k_req.min(n_cf);
+        if k < k_req {
+            ctx.push(
+                Issue::builder(IssueCode::Overparameterized)
+                    .message(format!(
+                        "requested {k_req} clusters but only {n_cf} CFs exist"
+                    ))
+                    .build(),
+            );
+        }
+        let centroids = if k == n_cf {
+            cf_cent.clone()
+        } else {
+            let mut km = KMeans {
+                k,
+                max_iter: 40,
+                seed: 3,
+                n_init: 2,
+            };
+            match km.fit(&cf_cent, &session.child("birch_kmeans")) {
+                Ok(q) => q.value.centroids,
+                Err(_) => cf_cent.clone(),
+            }
+        };
+        let (labels, _, _) = assign_lloyd(x, &centroids);
+        ctx.finish(FittedBirch {
+            labels,
+            centroids,
+            n_cf,
+        })
+    }
+}
+
+impl Birch {
+    /// Fit alias for [`FitUnsupervised::fit_unsupervised`].
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedBirch>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted BIRCH partition.
+#[derive(Clone, Debug)]
+pub struct FittedBirch {
+    /// Cluster id per row.
+    pub labels: Vector,
+    /// Global centroids (`k` × `p`).
+    pub centroids: Matrix,
+    /// Number of clustering features before the global k-means step.
+    pub n_cf: usize,
+}
+
+impl Predict for FittedBirch {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.ncols() != self.centroids.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message(format!(
+                        "predict X is n×{} but BIRCH centroids are k×{}",
+                        x.ncols(),
+                        self.centroids.ncols()
+                    ))
+                    .build(),
+            );
+        }
+        let (labels, _, _) = assign_lloyd(x, &self.centroids);
+        ctx.finish(labels)
+    }
+}
+
 /// Fitted OPTICS.
 #[derive(Clone, Debug)]
 pub struct FittedOptics {
@@ -2204,6 +2884,529 @@ pub struct FittedOptics {
     pub ordering: Vector,
     /// Reachability distances.
     pub reachability: Vector,
+}
+
+/// Bisecting k-means: recursively split the highest-SSE cluster with 2-means.
+#[derive(Clone, Debug)]
+pub struct BisectingKMeans {
+    /// Target number of clusters.
+    pub k: usize,
+    /// Lloyd iterations per bisection.
+    pub max_iter: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for BisectingKMeans {
+    fn default() -> Self {
+        Self {
+            k: 8,
+            max_iter: 50,
+            seed: 0,
+        }
+    }
+}
+
+impl BisectingKMeans {
+    /// Bisect until `k` clusters.
+    pub fn new(k: usize) -> Self {
+        Self {
+            k,
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKMeans>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+impl FitUnsupervised for BisectingKMeans {
+    type Fitted = FittedKMeans;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKMeans>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (n, p) = x.shape();
+        let want = self.k.max(1);
+        if n == 0 || p == 0 {
+            return ctx.finish(empty_kmeans(want, p, n));
+        }
+        if want > n {
+            ctx.push(
+                Issue::builder(IssueCode::Overparameterized)
+                    .message(format!("bisecting k={want} > n={n}"))
+                    .build(),
+            );
+        }
+        let k = want.min(n.max(1));
+        let mut rng = Rng::new(self.seed | 1);
+        let mut groups: Vec<Vec<usize>> = vec![(0..n).collect()];
+        let mut n_iter = 0usize;
+        while groups.len() < k {
+            let mut best = 0usize;
+            let mut best_sse = -1.0;
+            for (g, idx) in groups.iter().enumerate() {
+                if idx.len() < 2 {
+                    continue;
+                }
+                let mut mean = vec![0.0; p];
+                for &i in idx {
+                    for j in 0..p {
+                        mean[j] += x.get(i, j);
+                    }
+                }
+                let inv = 1.0 / idx.len() as f64;
+                for m in mean.iter_mut() {
+                    *m *= inv;
+                }
+                let mut sse = 0.0;
+                for &i in idx {
+                    for j in 0..p {
+                        let d = x.get(i, j) - mean[j];
+                        sse += d * d;
+                    }
+                }
+                if sse > best_sse {
+                    best_sse = sse;
+                    best = g;
+                }
+            }
+            if best_sse <= 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::EmptyCluster)
+                        .message("no cluster with ≥2 distinct points remains to bisect")
+                        .build(),
+                );
+                break;
+            }
+            let idx = groups[best].clone();
+            let sub = Matrix::from_fn(idx.len(), p, |i, j| x.get(idx[i], j));
+            let mut centers = kmeans_plus_plus(&sub, 2, &mut rng);
+            let mut last = Vector::zeros(idx.len());
+            for it in 0..self.max_iter.max(1) {
+                let (labels, counts, _) = assign_lloyd(&sub, &centers);
+                update_means(&sub, &labels, &mut centers, &counts);
+                reseed_empty(&mut ctx, &sub, &mut centers, &counts, &mut rng);
+                n_iter += 1;
+                let mut changed = false;
+                for i in 0..labels.len() {
+                    if (labels[i] - last[i]).abs() > 0.0 {
+                        changed = true;
+                    }
+                }
+                last = labels;
+                ctx.session.step(it as u64, 0.0, None);
+                if !changed && it > 0 {
+                    break;
+                }
+            }
+            let mut a = Vec::new();
+            let mut b = Vec::new();
+            for (i, &row) in idx.iter().enumerate() {
+                if last[i] < 0.5 {
+                    a.push(row);
+                } else {
+                    b.push(row);
+                }
+            }
+            if a.is_empty() || b.is_empty() {
+                ctx.push(
+                    Issue::builder(IssueCode::EmptyCluster)
+                        .message("a bisection produced an empty child")
+                        .build(),
+                );
+                break;
+            }
+            groups[best] = a;
+            groups.push(b);
+        }
+        let kk = groups.len();
+        let mut centroids = Matrix::zeros(kk, p);
+        let mut labels = Vector::zeros(n);
+        let mut counts = Vector::zeros(kk);
+        let mut inertia = 0.0;
+        for (c, idx) in groups.iter().enumerate() {
+            counts[c] = idx.len() as f64;
+            if idx.is_empty() {
+                continue;
+            }
+            for j in 0..p {
+                let mut s = 0.0;
+                for &i in idx {
+                    s += x.get(i, j);
+                }
+                centroids.set(c, j, s / idx.len() as f64);
+            }
+            for &i in idx {
+                labels[i] = c as f64;
+                inertia += sq_dist_rc(x, i, &centroids, c);
+            }
+        }
+        if kk < 2 && n > 1 && !all_rows_identical(x, ctx.policy.near_zero_variance) {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateClusters)
+                    .message("bisecting k-means collapsed to one cluster")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedKMeans {
+            labels,
+            centroids,
+            inertia,
+            n_iter,
+            counts,
+        })
+    }
+}
+
+/// Spectral co-clustering (Dhillon): normalize `A`, SVD, k-means on the
+/// stacked singular vectors (sklearn `SpectralCoclustering`).
+///
+/// `n_clusters` is not passed to [`inspect_identification`]. An all-zero
+/// table is vacuous.
+#[derive(Clone, Debug)]
+pub struct SpectralCoclustering {
+    /// Number of row/column clusters.
+    pub n_clusters: usize,
+    /// PRNG seed for the k-means stage.
+    pub seed: u64,
+}
+
+impl Default for SpectralCoclustering {
+    fn default() -> Self {
+        Self {
+            n_clusters: 2,
+            seed: 1,
+        }
+    }
+}
+
+impl SpectralCoclustering {
+    /// `k` co-clusters.
+    pub fn new(n_clusters: usize) -> Self {
+        Self {
+            n_clusters: n_clusters.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedCocluster>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+/// Fitted spectral co-clustering.
+#[derive(Clone, Debug)]
+pub struct FittedCocluster {
+    /// Row labels.
+    pub row_labels: Vector,
+    /// Column labels.
+    pub col_labels: Vector,
+}
+
+fn local_kmeans(x: &Matrix, k: usize, seed: u64) -> Vector {
+    let n = x.nrows();
+    let k = k.max(1).min(n.max(1));
+    if n == 0 {
+        return Vector::zeros(0);
+    }
+    let mut rng = Rng::new(seed | 11);
+    let mut cents = kmeans_plus_plus(x, k, &mut rng);
+    let mut labels = Vector::zeros(n);
+    for _ in 0..25 {
+        for i in 0..n {
+            let mut b = 0usize;
+            let mut bd = f64::INFINITY;
+            for c in 0..k {
+                let d = sq_dist_rc(x, i, &cents, c);
+                if d < bd {
+                    bd = d;
+                    b = c;
+                }
+            }
+            labels[i] = b as f64;
+        }
+        for c in 0..k {
+            let mut cnt = 0.0;
+            for j in 0..x.ncols() {
+                cents.set(c, j, 0.0);
+            }
+            for i in 0..n {
+                if labels[i] as usize == c {
+                    cnt += 1.0;
+                    for j in 0..x.ncols() {
+                        cents.set(c, j, cents.get(c, j) + x.get(i, j));
+                    }
+                }
+            }
+            if cnt > 0.0 {
+                for j in 0..x.ncols() {
+                    cents.set(c, j, cents.get(c, j) / cnt);
+                }
+            }
+        }
+    }
+    labels
+}
+
+impl FitUnsupervised for SpectralCoclustering {
+    type Fitted = FittedCocluster;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCocluster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (n, p) = x.shape();
+        if n == 0 || p == 0 {
+            return ctx.finish(FittedCocluster {
+                row_labels: Vector::zeros(n),
+                col_labels: Vector::zeros(p),
+            });
+        }
+        let mut energy = 0.0f64;
+        let mut neg = false;
+        for i in 0..n {
+            for j in 0..p {
+                let v = x.get(i, j);
+                energy = energy.max(v.abs());
+                if v < 0.0 {
+                    neg = true;
+                }
+            }
+        }
+        if energy <= ctx.policy.near_zero_variance {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("co-clustering table is the zero map")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "co-cluster labels",
+                        "a zero table has no row/column association to partition",
+                        "supply a non-negative contingency / count matrix",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedCocluster {
+                row_labels: Vector::zeros(n),
+                col_labels: Vector::zeros(p),
+            });
+        }
+        if neg {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message("SpectralCoclustering saw negative entries; treating them as 0")
+                    .build(),
+            );
+        }
+        let mut rsum = vec![0.0; n];
+        let mut csum = vec![0.0; p];
+        for i in 0..n {
+            for j in 0..p {
+                let v = x.get(i, j).max(0.0);
+                rsum[i] += v;
+                csum[j] += v;
+            }
+        }
+        let an = Matrix::from_fn(n, p, |i, j| {
+            let d = (rsum[i].max(1e-12) * csum[j].max(1e-12)).sqrt();
+            x.get(i, j).max(0.0) / d
+        });
+        let mut scratch = signlred::Report::new("coclust", "svd");
+        let Some(svd) = thin_svd(&mut scratch, &an, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::SvdDidNotConverge)
+                    .message("co-clustering SVD failed")
+                    .build(),
+            );
+            return ctx.finish(FittedCocluster {
+                row_labels: Vector::zeros(n),
+                col_labels: Vector::zeros(p),
+            });
+        };
+        let k = self.n_clusters.max(2);
+        let rkeep = svd.singular_values.len().min(k).max(1);
+        let zrow = Matrix::from_fn(n, rkeep, |i, c| svd.u[(i, c)]);
+        let zcol = Matrix::from_fn(p, rkeep, |j, c| svd.v[(j, c)]);
+        ctx.finish(FittedCocluster {
+            row_labels: local_kmeans(&zrow, k, self.seed),
+            col_labels: local_kmeans(&zcol, k, self.seed.wrapping_add(1)),
+        })
+    }
+}
+
+/// Spectral bi-clustering (sklearn `SpectralBiclustering`, Kluger-style).
+///
+/// Rows and columns are clustered independently in the SVD embedding.
+/// Cluster count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct SpectralBiclustering {
+    /// Number of row clusters.
+    pub n_clusters: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for SpectralBiclustering {
+    fn default() -> Self {
+        Self {
+            n_clusters: 2,
+            seed: 2,
+        }
+    }
+}
+
+impl SpectralBiclustering {
+    /// `k` row/column clusters.
+    pub fn new(n_clusters: usize) -> Self {
+        Self {
+            n_clusters: n_clusters.max(2),
+            ..Self::default()
+        }
+    }
+
+    /// Fit alias.
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedCocluster>> {
+        self.fit_unsupervised(x, session)
+    }
+}
+
+impl FitUnsupervised for SpectralBiclustering {
+    type Fitted = FittedCocluster;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedCocluster>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let (n, p) = x.shape();
+        if n == 0 || p == 0 {
+            return ctx.finish(FittedCocluster {
+                row_labels: Vector::zeros(n),
+                col_labels: Vector::zeros(p),
+            });
+        }
+        let mut rsum = vec![0.0; n];
+        let mut csum = vec![0.0; p];
+        let mut energy: f64 = 0.0;
+        for i in 0..n {
+            for j in 0..p {
+                let v = x.get(i, j).abs();
+                energy = energy.max(v);
+                rsum[i] += v;
+                csum[j] += v;
+            }
+        }
+        if energy <= ctx.policy.near_zero_variance {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("bi-clustering table is the zero map")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "bi-cluster labels",
+                        "a zero table has no row/column association to partition",
+                        "supply a non-zero matrix",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedCocluster {
+                row_labels: Vector::zeros(n),
+                col_labels: Vector::zeros(p),
+            });
+        }
+        let an = Matrix::from_fn(n, p, |i, j| {
+            x.get(i, j) / (rsum[i].max(1e-12) * csum[j].max(1e-12)).sqrt()
+        });
+        let mut scratch = signlred::Report::new("biclust", "svd");
+        let Some(svd) = thin_svd(&mut scratch, &an, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::SvdDidNotConverge)
+                    .message("bi-clustering SVD failed")
+                    .build(),
+            );
+            return ctx.finish(FittedCocluster {
+                row_labels: Vector::zeros(n),
+                col_labels: Vector::zeros(p),
+            });
+        };
+        let k = self.n_clusters.max(2);
+        let rkeep = svd.singular_values.len().min(k).max(1);
+        let zrow = Matrix::from_fn(n, rkeep, |i, c| svd.u[(i, c)]);
+        let zcol = Matrix::from_fn(p, rkeep, |j, c| svd.v[(j, c)]);
+        ctx.finish(FittedCocluster {
+            row_labels: local_kmeans(&zrow, k, self.seed),
+            col_labels: local_kmeans(&zcol, k, self.seed.wrapping_add(3)),
+        })
+    }
+}
+
+/// Quantile of pairwise Euclidean distances (sklearn `estimate_bandwidth`).
+///
+/// `quantile` is not identification `p`. Neighbor count is not `p`.
+pub fn estimate_bandwidth(
+    x: &Matrix,
+    quantile: f64,
+    session: &Session,
+) -> Result<Qualified<f64>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    let q = if quantile.is_finite() && quantile > 0.0 && quantile < 1.0 {
+        quantile
+    } else {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message(format!("estimate_bandwidth quantile={quantile} not in (0,1); using 0.3"))
+                .build(),
+        );
+        0.3
+    };
+    let n = x.nrows();
+    if n < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::InsufficientSample)
+                .severity(Severity::Warning)
+                .message("estimate_bandwidth needs at least two rows")
+                .build(),
+        );
+        return ctx.finish(f64::NAN);
+    }
+    let mut dists = Vec::with_capacity(n * (n - 1) / 2);
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let mut s = 0.0;
+            for k in 0..x.ncols() {
+                let d = x.get(i, k) - x.get(j, k);
+                s += d * d;
+            }
+            dists.push(s.sqrt());
+        }
+    }
+    dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pos = q * (dists.len().saturating_sub(1)) as f64;
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    let t = pos - lo as f64;
+    let bw = if dists.is_empty() {
+        f64::NAN
+    } else {
+        (1.0 - t) * dists[lo] + t * dists[hi.min(dists.len() - 1)]
+    };
+    if bw.is_finite() && bw <= 1e-18 {
+        ctx.push(
+            Issue::builder(IssueCode::NearZeroVariance)
+                .message("estimate_bandwidth collapsed to 0; every pair is coincident")
+                .build(),
+        );
+    }
+    ctx.finish(bw)
 }
 
 #[cfg(test)]
@@ -2249,6 +3452,10 @@ mod tests {
             .predict(&x, &Session::new("kmeans", "predict"))
             .expect("predict");
         assert_eq!(pred.value.len(), 40);
+        let bw = estimate_bandwidth(&x, 0.3, &Session::new("bw", "fit"))
+            .expect("bw")
+            .value;
+        assert!(bw.is_finite() && bw > 0.0);
     }
 
     #[test]
@@ -2273,5 +3480,81 @@ mod tests {
         let q = m.partial_fit(&x, None, &session).expect("pf");
         assert!(!q.value.narrative.is_empty());
         assert!(q.value.quality.effective_sample_size > 0.0);
+    }
+
+    #[test]
+    fn bisecting_kmeans_recovers_two_blobs() {
+        let x = two_blobs();
+        let q = BisectingKMeans::new(2)
+            .fit(&x, &Session::new("bisect", "fit"))
+            .expect("bisect");
+        assert_eq!(q.value.centroids.nrows(), 2);
+        let lab = q.value.labels.as_slice();
+        assert_ne!(lab[0], lab[20], "blobs must differ: {lab:?}");
+    }
+
+    #[test]
+    fn birch_separates_two_blobs() {
+        let x = two_blobs();
+        let q = Birch {
+            threshold: 1.5,
+            n_clusters: Some(2),
+        }
+        .fit(&x, &Session::new("birch", "fit"))
+        .expect("birch");
+        assert!(q.value.n_cf >= 2, "n_cf={}", q.value.n_cf);
+        let lab = q.value.labels.as_slice();
+        assert_ne!(lab[0], lab[20], "blobs must differ: {lab:?}");
+    }
+
+    #[test]
+    fn hdbscan_separates_two_blobs() {
+        let x = two_blobs();
+        let q = Hdbscan::new(5, 5)
+            .fit(&x, &Session::new("hdb", "fit"))
+            .expect("hdb");
+        assert!(q.value.n_clusters >= 1, "n={}", q.value.n_clusters);
+        let lab = q.value.labels.as_slice();
+        if q.value.n_clusters >= 2 {
+            assert_ne!(lab[0], lab[20], "blobs must differ: {lab:?}");
+        }
+    }
+
+    #[test]
+    fn bayesian_gmm_separates_two_blobs() {
+        let x = two_blobs();
+        let q = BayesianGaussianMixture::new(2)
+            .fit(&x, &Session::new("bgmm", "fit"))
+            .expect("bgmm");
+        let lab = q.value.labels.as_slice();
+        assert_ne!(lab[0], lab[20], "blobs must differ: {lab:?}");
+        assert_eq!(q.value.weights.len(), 2);
+    }
+
+    #[test]
+    fn spectral_coclustering_block_matrix() {
+        let x = Matrix::from_fn(12, 8, |i, j| {
+            if (i < 6 && j < 4) || (i >= 6 && j >= 4) {
+                2.0
+            } else {
+                0.1
+            }
+        });
+        let q = SpectralCoclustering::new(2)
+            .fit(&x, &Session::new("scc", "fit"))
+            .expect("scc");
+        assert_eq!(q.value.row_labels.len(), 12);
+        assert_eq!(q.value.col_labels.len(), 8);
+        assert_ne!(q.value.row_labels[0], q.value.row_labels[8]);
+        let bq = SpectralBiclustering::new(2)
+            .fit(&x, &Session::new("sbc", "fit"))
+            .expect("sbc");
+        assert_eq!(bq.value.row_labels.len(), 12);
+        assert_eq!(bq.value.col_labels.len(), 8);
+        let x2 = two_blobs();
+        let agg = AgglomerativeClustering::new(2)
+            .fit(&x2, &Session::new("aggc", "fit"))
+            .expect("aggc");
+        assert_eq!(agg.value.labels.len(), 40);
     }
 }

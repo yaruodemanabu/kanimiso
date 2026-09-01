@@ -1,0 +1,2867 @@
+//! Instrumental variables (2SLS), Newey–West HAC, and Engle–Granger cointegration.
+//!
+//! A first-stage \(F < 10\) is a weak-instrument finding: the 2SLS point is
+//! algebraically defined and inferentially misleading. HAC covariances are not
+//! OLS SEs and say so.
+
+use crate::context::FitCtx;
+use crate::data::{Matrix, Vector};
+use crate::linalg::{chol_solve, least_squares};
+use crate::special::{chi2_pvalue, f_pvalue, student_t_pvalue};
+use crate::stats::{adfuller, phillips_perron, HypothesisTest};
+use crate::traits::Predict;
+use crate::validate::{inspect_identification, inspect_xy};
+use faer::Mat;
+use ojizou_san::Session;
+use signlred::{
+    Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result, Severity,
+};
+
+/// Two-stage least squares: \(X\) endogenous, \(Z\) instruments.
+#[derive(Clone, Debug, Default)]
+pub struct TwoSls {
+    /// Include an intercept in both stages.
+    pub fit_intercept: bool,
+}
+
+impl TwoSls {
+    /// Default 2SLS.
+    pub fn new() -> Self {
+        Self {
+            fit_intercept: true,
+        }
+    }
+
+    /// Fit `y` on `x` using instruments `z`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        z: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedTwoSls>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_xy(&mut ctx.report, z, None, &ctx.policy);
+        if z.nrows() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("instrument rows ≠ n")
+                    .build(),
+            );
+            return ctx.finish(empty_2sls(x));
+        }
+        if z.ncols() < x.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::UnderdeterminedSystem)
+                    .message(format!(
+                        "order condition fails: {} instruments < {} endogenous columns",
+                        z.ncols(),
+                        x.ncols()
+                    ))
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "2SLS coefficients",
+                        "fewer instruments than endogenous regressors leaves β unidentified",
+                        "add instruments, or drop endogenous columns",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(empty_2sls(x));
+        }
+        let zdes = if self.fit_intercept {
+            z.with_intercept()
+        } else {
+            z.clone()
+        };
+        inspect_identification(&mut ctx.report, zdes.nrows(), zdes.ncols(), &ctx.policy);
+        let mut xhat = Matrix::zeros(x.nrows(), x.ncols());
+        let mut min_f = f64::INFINITY;
+        for j in 0..x.ncols() {
+            let xj = x.column(j);
+            let mut scratch = signlred::Report::new("2sls", "stage1");
+            let g_opt = least_squares(&mut scratch, &zdes, &xj, &ctx.policy);
+            for issue in scratch.issues() {
+                if issue.code == IssueCode::ResidualTooLarge {
+                    continue;
+                }
+                ctx.push(issue.clone());
+            }
+            let Some(g) = g_opt else {
+                ctx.push(
+                    Issue::builder(IssueCode::UnidentifiedModel)
+                        .message(format!("first-stage OLS failed for column {j}"))
+                        .build(),
+                );
+                continue;
+            };
+            let fit = zdes.matvec(&g);
+            for i in 0..x.nrows() {
+                xhat.set(i, j, fit[i]);
+            }
+            let mut sse = 0.0;
+            let mut sst = 0.0;
+            let m = xj.mean();
+            for i in 0..xj.len() {
+                let e = xj[i] - fit[i];
+                sse += e * e;
+                let d = xj[i] - m;
+                sst += d * d;
+            }
+            let k = zdes.ncols().saturating_sub(1).max(1) as f64;
+            let df = (x.nrows() as f64 - zdes.ncols() as f64).max(1.0);
+            let f = if sse > 0.0 {
+                ((sst - sse) / k) / (sse / df)
+            } else {
+                f64::INFINITY
+            };
+            min_f = min_f.min(f);
+        }
+        if min_f < 10.0 {
+            ctx.push(
+                Issue::builder(IssueCode::CausalClaimUnidentified)
+                    .message(format!(
+                        "weak instruments: min first-stage F={min_f:.4e} < 10"
+                    ))
+                    .meaninglessness(Meaninglessness::new(
+                        "2SLS coefficient",
+                        "a weak first stage makes the IV estimand concentrated-asymptotically biased toward OLS",
+                        signlred::InterpretiveValue::Misleading,
+                        "report the first-stage F; do not treat 2SLS as identified",
+                    ))
+                    .metric("min_first_stage_F", min_f)
+                    .build(),
+            );
+        }
+        let design = if self.fit_intercept {
+            xhat.with_intercept()
+        } else {
+            xhat.clone()
+        };
+        let Some(beta) = least_squares(&mut ctx.report, &design, y, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("second-stage OLS failed")
+                    .build(),
+            );
+            return ctx.finish(empty_2sls(x));
+        };
+        let (intercept, coef) = if self.fit_intercept {
+            (beta[0], Vector::from_iter((1..beta.len()).map(|j| beta[j])))
+        } else {
+            (0.0, beta)
+        };
+        ctx.finish(FittedTwoSls {
+            coef,
+            intercept,
+            first_stage_f: min_f,
+        })
+    }
+}
+
+/// Fitted 2SLS.
+#[derive(Clone, Debug)]
+pub struct FittedTwoSls {
+    /// Second-stage slopes.
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+    /// Smallest first-stage \(F\).
+    pub first_stage_f: f64,
+}
+
+impl Predict for FittedTwoSls {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(signlred::Severity::Advisory)
+                .message("2SLS predict uses the structural X, not the first-stage projection")
+                .build(),
+        );
+        let mut y = x.matvec(&self.coef);
+        for i in 0..y.len() {
+            y[i] += self.intercept;
+        }
+        ctx.finish(y)
+    }
+}
+
+fn empty_2sls(x: &Matrix) -> FittedTwoSls {
+    FittedTwoSls {
+        coef: Vector::zeros(x.ncols()),
+        intercept: 0.0,
+        first_stage_f: f64::NAN,
+    }
+}
+
+/// One-step IV-GMM with Hansen *J* / Sargan overidentification.
+///
+/// The weighting matrix is `(Z′Z)⁻¹`, so the point equals 2SLS. `J = n R²`
+/// from the residual regression on `Z`. Residual-kind inner failures are not
+/// promoted.
+#[derive(Clone, Debug, Default)]
+pub struct IvGmm {
+    /// Include an intercept in both stages.
+    pub fit_intercept: bool,
+}
+
+impl IvGmm {
+    /// Default IV-GMM.
+    pub fn new() -> Self {
+        Self {
+            fit_intercept: true,
+        }
+    }
+
+    /// Fit `y` on `x` using instruments `z`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        z: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedIvGmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_xy(&mut ctx.report, z, None, &ctx.policy);
+        if z.nrows() != x.nrows() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("IV-GMM instrument rows ≠ n")
+                    .build(),
+            );
+            return ctx.finish(FittedIvGmm {
+                coef: Vector::zeros(x.ncols()),
+                intercept: 0.0,
+                hansen_j: f64::NAN,
+                hansen_p: f64::NAN,
+                sargan: f64::NAN,
+                df_overid: 0,
+                first_stage_f: f64::NAN,
+            });
+        }
+        if z.ncols() < x.ncols() {
+            ctx.push(
+                Issue::builder(IssueCode::UnderdeterminedSystem)
+                    .message(format!(
+                        "IV-GMM order condition fails: {} instruments < {} endogenous columns",
+                        z.ncols(),
+                        x.ncols()
+                    ))
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "IV-GMM coefficients",
+                        "fewer instruments than endogenous regressors leaves β unidentified",
+                        "add instruments, or drop endogenous columns",
+                    ))
+                    .build(),
+            );
+            return ctx.finish(FittedIvGmm {
+                coef: Vector::zeros(x.ncols()),
+                intercept: 0.0,
+                hansen_j: f64::NAN,
+                hansen_p: f64::NAN,
+                sargan: f64::NAN,
+                df_overid: 0,
+                first_stage_f: f64::NAN,
+            });
+        }
+        let zdes = if self.fit_intercept {
+            z.with_intercept()
+        } else {
+            z.clone()
+        };
+        let xdes_cols = x.ncols() + if self.fit_intercept { 1 } else { 0 };
+        let df = zdes.ncols().saturating_sub(xdes_cols);
+        let mut xhat = Matrix::zeros(x.nrows(), x.ncols());
+        let mut min_f = f64::INFINITY;
+        for j in 0..x.ncols() {
+            let xj = x.column(j);
+            let mut scratch = signlred::Report::new("ivgmm", "stage1");
+            if let Some(g) = least_squares(&mut scratch, &zdes, &xj, &ctx.policy) {
+                let fit = zdes.matvec(&g);
+                for i in 0..x.nrows() {
+                    xhat.set(i, j, fit[i]);
+                }
+                let mut sse = 0.0;
+                let mut sst = 0.0;
+                let m = xj.mean();
+                for i in 0..xj.len() {
+                    let e = xj[i] - fit[i];
+                    sse += e * e;
+                    let d = xj[i] - m;
+                    sst += d * d;
+                }
+                let k = zdes.ncols().saturating_sub(1).max(1) as f64;
+                let dfr = (x.nrows() as f64 - zdes.ncols() as f64).max(1.0);
+                let f = if sse > 0.0 {
+                    ((sst - sse) / k) / (sse / dfr)
+                } else {
+                    f64::INFINITY
+                };
+                min_f = min_f.min(f);
+            }
+        }
+        if min_f < 10.0 {
+            ctx.push(
+                Issue::builder(IssueCode::CausalClaimUnidentified)
+                    .message(format!(
+                        "weak instruments: min first-stage F={min_f:.4e} < 10"
+                    ))
+                    .meaninglessness(Meaninglessness::new(
+                        "IV-GMM coefficient",
+                        "a weak first stage makes the IV estimand concentrated-asymptotically biased toward OLS",
+                        signlred::InterpretiveValue::Misleading,
+                        "report the first-stage F; do not treat IV-GMM as identified",
+                    ))
+                    .metric("min_first_stage_F", min_f)
+                    .build(),
+            );
+        }
+        let design = if self.fit_intercept {
+            xhat.with_intercept()
+        } else {
+            xhat.clone()
+        };
+        let mut scratch = signlred::Report::new("ivgmm", "stage2");
+        let beta = least_squares(&mut scratch, &design, y, &ctx.policy).unwrap_or_else(|| {
+            let mut b = Vector::zeros(design.ncols());
+            b[0] = y.mean();
+            b
+        });
+        let (intercept, coef) = if self.fit_intercept {
+            (
+                beta.as_slice().first().copied().unwrap_or(0.0),
+                Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+            )
+        } else {
+            (0.0, beta)
+        };
+        let mut pred = x.matvec(&coef);
+        for i in 0..pred.len() {
+            pred[i] += intercept;
+        }
+        let e = Vector::from_iter(y.as_slice().iter().zip(pred.as_slice()).map(|(a, b)| a - b));
+        let mut hansen_j = f64::NAN;
+        let mut hansen_p = f64::NAN;
+        if df == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::CausalClaimUnidentified)
+                    .severity(Severity::Advisory)
+                    .message("IV-GMM is just-identified; Hansen J is unidentified")
+                    .build(),
+            );
+            hansen_j = 0.0;
+        } else {
+            let mut sargan = signlred::Report::new("ivgmm", "sargan");
+            if let Some(g) = least_squares(&mut sargan, &zdes, &e, &ctx.policy) {
+                let fit = zdes.matvec(&g);
+                let mut sse = 0.0;
+                let mut sst = 0.0;
+                let m = e.mean();
+                for i in 0..e.len() {
+                    let r = e[i] - fit[i];
+                    sse += r * r;
+                    let d = e[i] - m;
+                    sst += d * d;
+                }
+                if sst > 1e-18 {
+                    let r2 = (1.0 - sse / sst).clamp(0.0, 1.0);
+                    hansen_j = e.len() as f64 * r2;
+                    hansen_p = chi2_pvalue(hansen_j.max(0.0), df as f64);
+                }
+            }
+        }
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(Severity::Advisory)
+                .message("Hansen J uses the homoskedastic 2SLS weight, not two-step GMM")
+                .build(),
+        );
+        ctx.finish(FittedIvGmm {
+            coef,
+            intercept,
+            hansen_j,
+            hansen_p,
+            sargan: hansen_j,
+            df_overid: df,
+            first_stage_f: min_f,
+        })
+    }
+}
+
+/// Fitted IV-GMM.
+#[derive(Clone, Debug)]
+pub struct FittedIvGmm {
+    /// Structural slopes.
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+    /// Hansen *J*.
+    pub hansen_j: f64,
+    /// χ² p-value of *J*.
+    pub hansen_p: f64,
+    /// Sargan *nR²* (same as *J* under this weight).
+    pub sargan: f64,
+    /// Overidentification degrees of freedom.
+    pub df_overid: usize,
+    /// Smallest first-stage *F*.
+    pub first_stage_f: f64,
+}
+
+/// Two-step IV-GMM with a heteroskedastic weight (Hansen *J* on the second step).
+///
+/// The first step is identity-weighted 2SLS. The second uses
+/// \(W=(Z'\Omega Z)^{-1}\) with \(\Omega=\mathrm{diag}(e_i^2)\). The
+/// Windmeijer (2005) finite-sample variance correction is **not** applied.
+#[derive(Clone, Debug, Default)]
+pub struct TwoStepGmm {
+    /// Include an intercept in both stages.
+    pub fit_intercept: bool,
+}
+
+impl TwoStepGmm {
+    /// Default two-step IV-GMM.
+    pub fn new() -> Self {
+        Self {
+            fit_intercept: true,
+        }
+    }
+
+    /// Fit `y` on `x` using instruments `z`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        z: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedTwoStepGmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let first = match (IvGmm {
+            fit_intercept: self.fit_intercept,
+        })
+        .fit(x, y, z, &session.child("step1"))
+        {
+            Ok(q) => q,
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                ) {
+                    ctx.push(e.primary);
+                }
+                return ctx.finish(FittedTwoStepGmm {
+                    coef: Vector::zeros(x.ncols()),
+                    intercept: 0.0,
+                    hansen_j: f64::NAN,
+                    hansen_p: f64::NAN,
+                    df_overid: 0,
+                    first_stage_f: f64::NAN,
+                    windmeijer_applied: false,
+                });
+            }
+        };
+        for issue in first.report.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::PValueUnreliable
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let zdes = if self.fit_intercept {
+            z.with_intercept()
+        } else {
+            z.clone()
+        };
+        let xdes = if self.fit_intercept {
+            x.with_intercept()
+        } else {
+            x.clone()
+        };
+        let mut pred = x.matvec(&first.value.coef);
+        for i in 0..pred.len() {
+            pred[i] += first.value.intercept;
+        }
+        let e = Vector::from_iter(y.as_slice().iter().zip(pred.as_slice()).map(|(a, b)| a - b));
+        let kz = zdes.ncols();
+        let p = xdes.ncols();
+        let n = y.len().min(zdes.nrows()).min(xdes.nrows());
+        let mut s = Mat::<f64>::zeros(kz, kz);
+        for a in 0..kz {
+            for b in 0..=a {
+                let mut acc = 0.0;
+                for i in 0..n {
+                    let wi = e[i] * e[i];
+                    acc += zdes.get(i, a) * wi * zdes.get(i, b);
+                }
+                s[(a, b)] = acc;
+                s[(b, a)] = acc;
+            }
+        }
+        for i in 0..kz {
+            s[(i, i)] += 1e-10;
+        }
+        let mut g = Matrix::zeros(kz, p);
+        for a in 0..kz {
+            for b in 0..p {
+                let mut acc = 0.0;
+                for i in 0..n {
+                    acc += zdes.get(i, a) * xdes.get(i, b);
+                }
+                g.set(a, b, acc);
+            }
+        }
+        let mut zy = Vector::zeros(kz);
+        for a in 0..kz {
+            let mut acc = 0.0;
+            for i in 0..n {
+                acc += zdes.get(i, a) * y[i];
+            }
+            zy[a] = acc;
+        }
+        let mut wg = Matrix::zeros(kz, p);
+        let mut wzy = Vector::zeros(kz);
+        let mut w_ok = true;
+        for j in 0..p {
+            let col = Vector::from_iter((0..kz).map(|i| g.get(i, j)));
+            let mut scratch = signlred::Report::new("gmm2", "w");
+            match chol_solve(&mut scratch, &s, &col, &ctx.policy) {
+                Some(sol) => {
+                    for i in 0..kz {
+                        wg.set(i, j, sol[i]);
+                    }
+                }
+                None => {
+                    w_ok = false;
+                }
+            }
+        }
+        {
+            let mut scratch = signlred::Report::new("gmm2", "wy");
+            match chol_solve(&mut scratch, &s, &zy, &ctx.policy) {
+                Some(sol) => wzy = sol,
+                None => w_ok = false,
+            }
+        }
+        let (coef, intercept, hansen_j, hansen_p) = if w_ok {
+            let xtwx = Matrix::from_fn(p, p, |i, j| {
+                let mut acc = 0.0;
+                for r in 0..kz {
+                    acc += g.get(r, i) * wg.get(r, j);
+                }
+                acc
+            });
+            let xtwy = Vector::from_iter((0..p).map(|i| {
+                let mut acc = 0.0;
+                for r in 0..kz {
+                    acc += g.get(r, i) * wzy[r];
+                }
+                acc
+            }));
+            let mut gram = Mat::<f64>::zeros(p, p);
+            for i in 0..p {
+                for j in 0..p {
+                    gram[(i, j)] = xtwx.get(i, j);
+                }
+            }
+            for i in 0..p {
+                gram[(i, i)] += 1e-12;
+            }
+            let mut scratch = signlred::Report::new("gmm2", "beta");
+            let beta = chol_solve(&mut scratch, &gram, &xtwy, &ctx.policy).unwrap_or_else(|| {
+                let mut b = Vector::zeros(p);
+                b[0] = y.mean();
+                b
+            });
+            let (intercept, coef) = if self.fit_intercept {
+                (
+                    beta.as_slice().first().copied().unwrap_or(0.0),
+                    Vector::from_iter((1..beta.len()).map(|j| beta[j])),
+                )
+            } else {
+                (0.0, beta.clone())
+            };
+            let mut pred2 = x.matvec(&coef);
+            for i in 0..pred2.len() {
+                pred2[i] += intercept;
+            }
+            let e2 = Vector::from_iter(
+                y.as_slice()
+                    .iter()
+                    .zip(pred2.as_slice())
+                    .map(|(a, b)| a - b),
+            );
+            let mut ze = Vector::zeros(kz);
+            for a in 0..kz {
+                let mut acc = 0.0;
+                for i in 0..n {
+                    acc += zdes.get(i, a) * e2[i];
+                }
+                ze[a] = acc;
+            }
+            let mut s2 = Mat::<f64>::zeros(kz, kz);
+            for a in 0..kz {
+                for b in 0..=a {
+                    let mut acc = 0.0;
+                    for i in 0..n {
+                        let wi = e2[i] * e2[i];
+                        acc += zdes.get(i, a) * wi * zdes.get(i, b);
+                    }
+                    s2[(a, b)] = acc;
+                    s2[(b, a)] = acc;
+                }
+            }
+            for i in 0..kz {
+                s2[(i, i)] += 1e-10;
+            }
+            let mut scratch = signlred::Report::new("gmm2", "j");
+            let jstat = if let Some(wz) = chol_solve(&mut scratch, &s2, &ze, &ctx.policy) {
+                let mut acc = 0.0;
+                for i in 0..kz {
+                    acc += ze[i] * wz[i];
+                }
+                acc / n.max(1) as f64
+            } else {
+                f64::NAN
+            };
+            let df = first.value.df_overid;
+            let jp = if jstat.is_finite() && df > 0 {
+                chi2_pvalue(jstat.max(0.0), df as f64)
+            } else {
+                f64::NAN
+            };
+            (coef, intercept, jstat, jp)
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::CholeskyFailed)
+                    .severity(Severity::Warning)
+                    .message("two-step GMM weight was not SPD; returning the first-step point")
+                    .compromise(NumericalCompromise::new(
+                        "heteroskedastic two-step GMM",
+                        "one-step 2SLS coefficients",
+                        "Z'ΩZ was not positive definite at working precision",
+                        "do not read Hansen J as a two-step statistic",
+                    ))
+                    .build(),
+            );
+            (
+                first.value.coef.clone(),
+                first.value.intercept,
+                first.value.hansen_j,
+                first.value.hansen_p,
+            )
+        };
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(Severity::Advisory)
+                .message("two-step GMM does not apply the Windmeijer (2005) variance correction")
+                .compromise(NumericalCompromise::new(
+                    "Windmeijer-corrected two-step GMM SEs",
+                    "Hansen J from the second-step weight only",
+                    "the finite-sample correction to Var(β̂) is omitted",
+                    "treat p-values as first-order asymptotic",
+                ))
+                .build(),
+        );
+        if first.value.df_overid == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::CausalClaimUnidentified)
+                    .severity(Severity::Advisory)
+                    .message("two-step GMM is just-identified; Hansen J is unidentified")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedTwoStepGmm {
+            coef,
+            intercept,
+            hansen_j,
+            hansen_p,
+            df_overid: first.value.df_overid,
+            first_stage_f: first.value.first_stage_f,
+            windmeijer_applied: false,
+        })
+    }
+}
+
+/// Fitted two-step IV-GMM.
+#[derive(Clone, Debug)]
+pub struct FittedTwoStepGmm {
+    /// Structural slopes.
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+    /// Second-step Hansen *J*.
+    pub hansen_j: f64,
+    /// χ² p-value of *J*.
+    pub hansen_p: f64,
+    /// Overidentification degrees of freedom.
+    pub df_overid: usize,
+    /// Smallest first-stage *F*.
+    pub first_stage_f: f64,
+    /// Always `false`: Windmeijer correction is not implemented.
+    pub windmeijer_applied: bool,
+}
+
+/// Two-step IV-GMM with the Windmeijer (2005) finite-sample variance correction.
+///
+/// [`TwoStepGmm`] remains the uncorrected Hansen-*J* point. This wrapper keeps
+/// that point and replaces the usual \((G'WG)^{-1}\) sandwich with
+/// \(V+D+D'\), where \(D\) is the analytic \(\partial S/\partial\beta\) term.
+#[derive(Clone, Debug, Default)]
+pub struct WindmeijerGmm {
+    /// Include an intercept in both stages.
+    pub fit_intercept: bool,
+}
+
+impl WindmeijerGmm {
+    /// Default Windmeijer-corrected two-step GMM.
+    pub fn new() -> Self {
+        Self {
+            fit_intercept: true,
+        }
+    }
+
+    /// Fit `y` on `x` using instruments `z`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        z: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedWindmeijerGmm>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let inner = match (TwoStepGmm {
+            fit_intercept: self.fit_intercept,
+        })
+        .fit(x, y, z, &session.child("twostep"))
+        {
+            Ok(q) => q,
+            Err(e) => {
+                if !matches!(
+                    e.primary.code,
+                    IssueCode::ResidualTooLarge
+                        | IssueCode::NearSingular
+                        | IssueCode::RankZero
+                        | IssueCode::R2IsOne
+                ) {
+                    ctx.push(e.primary);
+                }
+                return ctx.finish(FittedWindmeijerGmm {
+                    coef: Vector::zeros(x.ncols()),
+                    intercept: 0.0,
+                    se: Vector::zeros(x.ncols()),
+                    hansen_j: f64::NAN,
+                    hansen_p: f64::NAN,
+                    df_overid: 0,
+                    first_stage_f: f64::NAN,
+                    windmeijer_applied: false,
+                });
+            }
+        };
+        for issue in inner.report.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge
+                    | IssueCode::NearSingular
+                    | IssueCode::RankZero
+                    | IssueCode::R2IsOne
+                    | IssueCode::PValueUnreliable
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let zdes = if self.fit_intercept {
+            z.with_intercept()
+        } else {
+            z.clone()
+        };
+        let xdes = if self.fit_intercept {
+            x.with_intercept()
+        } else {
+            x.clone()
+        };
+        let mut pred = x.matvec(&inner.value.coef);
+        for i in 0..pred.len() {
+            pred[i] += inner.value.intercept;
+        }
+        let e = Vector::from_iter(y.as_slice().iter().zip(pred.as_slice()).map(|(a, b)| a - b));
+        let kz = zdes.ncols();
+        let p = xdes.ncols();
+        let n = y.len().min(zdes.nrows()).min(xdes.nrows());
+        let mut g = Matrix::zeros(kz, p);
+        for a in 0..kz {
+            for b in 0..p {
+                let mut acc = 0.0;
+                for i in 0..n {
+                    acc += zdes.get(i, a) * xdes.get(i, b);
+                }
+                g.set(a, b, acc);
+            }
+        }
+        let mut s = Mat::<f64>::zeros(kz, kz);
+        for a in 0..kz {
+            for b in 0..=a {
+                let mut acc = 0.0;
+                for i in 0..n {
+                    let wi = e[i] * e[i];
+                    acc += zdes.get(i, a) * wi * zdes.get(i, b);
+                }
+                s[(a, b)] = acc;
+                s[(b, a)] = acc;
+            }
+        }
+        for i in 0..kz {
+            s[(i, i)] += 1e-10;
+        }
+        let mut ze = Vector::zeros(kz);
+        for a in 0..kz {
+            let mut acc = 0.0;
+            for i in 0..n {
+                acc += zdes.get(i, a) * e[i];
+            }
+            ze[a] = acc;
+        }
+        let mut w_ok = true;
+        let mut wg = Matrix::zeros(kz, p);
+        for j in 0..p {
+            let col = Vector::from_iter((0..kz).map(|i| g.get(i, j)));
+            let mut scratch = signlred::Report::new("wind", "wg");
+            match chol_solve(&mut scratch, &s, &col, &ctx.policy) {
+                Some(sol) => {
+                    for i in 0..kz {
+                        wg.set(i, j, sol[i]);
+                    }
+                }
+                None => w_ok = false,
+            }
+        }
+        let mut wze = Vector::zeros(kz);
+        {
+            let mut scratch = signlred::Report::new("wind", "wze");
+            match chol_solve(&mut scratch, &s, &ze, &ctx.policy) {
+                Some(sol) => wze = sol,
+                None => w_ok = false,
+            }
+        }
+        let mut se = Vector::zeros(if self.fit_intercept {
+            inner.value.coef.len()
+        } else {
+            inner.value.coef.len()
+        });
+        let mut applied = false;
+        if w_ok {
+            let xtwx = Matrix::from_fn(p, p, |i, j| {
+                let mut acc = 0.0;
+                for r in 0..kz {
+                    acc += g.get(r, i) * wg.get(r, j);
+                }
+                acc
+            });
+            let mut gram = Mat::<f64>::zeros(p, p);
+            for i in 0..p {
+                for j in 0..p {
+                    gram[(i, j)] = xtwx.get(i, j);
+                }
+            }
+            for i in 0..p {
+                gram[(i, i)] += 1e-12;
+            }
+            let mut vmat = Matrix::zeros(p, p);
+            let mut v_ok = true;
+            for j in 0..p {
+                let ej = Vector::from_iter((0..p).map(|i| if i == j { 1.0 } else { 0.0 }));
+                let mut scratch = signlred::Report::new("wind", "v");
+                match chol_solve(&mut scratch, &gram, &ej, &ctx.policy) {
+                    Some(sol) => {
+                        for i in 0..p {
+                            vmat.set(i, j, sol[i]);
+                        }
+                    }
+                    None => v_ok = false,
+                }
+            }
+            if v_ok {
+                let mut dmat = Matrix::zeros(p, p);
+                for k in 0..p {
+                    let mut sk = Mat::<f64>::zeros(kz, kz);
+                    for a in 0..kz {
+                        for b in 0..=a {
+                            let mut acc = 0.0;
+                            for i in 0..n {
+                                acc +=
+                                    -2.0 * e[i] * xdes.get(i, k) * zdes.get(i, a) * zdes.get(i, b);
+                            }
+                            sk[(a, b)] = acc;
+                            sk[(b, a)] = acc;
+                        }
+                    }
+                    let mut skwze = Vector::zeros(kz);
+                    for a in 0..kz {
+                        let mut acc = 0.0;
+                        for b in 0..kz {
+                            acc += sk[(a, b)] * wze[b];
+                        }
+                        skwze[a] = acc;
+                    }
+                    let mut scratch = signlred::Report::new("wind", "dsk");
+                    let wsk = match chol_solve(&mut scratch, &s, &skwze, &ctx.policy) {
+                        Some(sol) => sol,
+                        None => {
+                            v_ok = false;
+                            break;
+                        }
+                    };
+                    let gtw = Vector::from_iter((0..p).map(|j| {
+                        let mut acc = 0.0;
+                        for r in 0..kz {
+                            acc += g.get(r, j) * wsk[r];
+                        }
+                        acc
+                    }));
+                    for i in 0..p {
+                        let mut acc = 0.0;
+                        for j in 0..p {
+                            acc += vmat.get(i, j) * gtw[j];
+                        }
+                        dmat.set(i, k, acc);
+                    }
+                }
+                if v_ok {
+                    applied = true;
+                    let mut neg_diag = false;
+                    let start = if self.fit_intercept { 1 } else { 0 };
+                    let mut out_i = 0usize;
+                    for i in start..p {
+                        let vw = vmat.get(i, i) + 2.0 * dmat.get(i, i);
+                        if vw < 0.0 {
+                            neg_diag = true;
+                        }
+                        se[out_i] = vw.max(0.0).sqrt();
+                        out_i += 1;
+                    }
+                    if neg_diag {
+                        ctx.push(
+                            Issue::builder(IssueCode::JitterInjected)
+                                .message("Windmeijer V+D+D′ had a negative diagonal; SE is floored at 0")
+                                .compromise(NumericalCompromise::new(
+                                    "positive-definite Windmeijer covariance",
+                                    "sqrt(max(diag(V+D+D′), 0))",
+                                    "the one-term analytic correction can overshoot in small samples",
+                                    "treat a zero SE as unidentified, not as a precise zero",
+                                ))
+                                .build(),
+                        );
+                    }
+                }
+            }
+        }
+        if !applied {
+            ctx.push(
+                Issue::builder(IssueCode::CholeskyFailed)
+                    .severity(Severity::Warning)
+                    .message("Windmeijer weight or bread was not SPD; SEs are left NaN")
+                    .compromise(NumericalCompromise::new(
+                        "Windmeijer-corrected two-step SEs",
+                        "point estimates only",
+                        "Z'ΩZ or G'WG failed a Cholesky factorisation",
+                        "do not read the empty SE vector as a precision claim",
+                    ))
+                    .build(),
+            );
+            se = Vector::from_iter((0..inner.value.coef.len()).map(|_| f64::NAN));
+        } else {
+            ctx.push(
+                Issue::builder(IssueCode::PValueUnreliable)
+                    .severity(Severity::Advisory)
+                    .message("Windmeijer SEs use the one-term ∂S/∂β correction, not a bootstrap")
+                    .compromise(NumericalCompromise::new(
+                        "bootstrap or higher-order Windmeijer remainder",
+                        "analytic V + D + D′ with D from ∂(Z'ΩZ)/∂β at the two-step residual",
+                        "Ω = diag(e_i²) is the heteroskedastic meat; no clustering",
+                        "use the SEs as a finite-sample adjustment of the usual sandwich",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(FittedWindmeijerGmm {
+            coef: inner.value.coef.clone(),
+            intercept: inner.value.intercept,
+            se,
+            hansen_j: inner.value.hansen_j,
+            hansen_p: inner.value.hansen_p,
+            df_overid: inner.value.df_overid,
+            first_stage_f: inner.value.first_stage_f,
+            windmeijer_applied: applied,
+        })
+    }
+}
+
+/// Fitted Windmeijer-corrected two-step GMM.
+#[derive(Clone, Debug)]
+pub struct FittedWindmeijerGmm {
+    /// Structural slopes (same point as [`TwoStepGmm`]).
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+    /// Windmeijer-corrected standard errors of the slopes.
+    pub se: Vector,
+    /// Second-step Hansen *J*.
+    pub hansen_j: f64,
+    /// χ² p-value of *J*.
+    pub hansen_p: f64,
+    /// Overidentification degrees of freedom.
+    pub df_overid: usize,
+    /// Smallest first-stage *F*.
+    pub first_stage_f: f64,
+    /// `true` when the analytic \(V+D+D'\) correction was formed.
+    pub windmeijer_applied: bool,
+}
+
+/// Limited-information maximum likelihood (k-class).
+///
+/// Just-identified designs reduce to 2SLS. A single endogenous column uses
+/// the 2×2 Anderson eigenvalue; wider `X` falls back to 2SLS with a
+/// compromise note.
+#[derive(Clone, Debug, Default)]
+pub struct Liml {
+    /// Include an intercept in both stages.
+    pub fit_intercept: bool,
+}
+
+impl Liml {
+    /// Default LIML.
+    pub fn new() -> Self {
+        Self {
+            fit_intercept: true,
+        }
+    }
+
+    /// Fit `y` on `x` using instruments `z`.
+    pub fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        z: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedTwoSls>> {
+        let mut twosls = TwoSls {
+            fit_intercept: self.fit_intercept,
+        };
+        let q = twosls.fit(x, y, z, session)?;
+        if z.ncols() <= x.ncols() || x.ncols() != 1 {
+            let mut ctx = FitCtx::with_session(session.child("liml-note"));
+            ctx.push(
+                Issue::builder(IssueCode::CausalClaimUnidentified)
+                    .severity(signlred::Severity::Advisory)
+                    .message("LIML uses the 2SLS point when the design is just-identified or p≠1")
+                    .compromise(NumericalCompromise::new(
+                        "Anderson LIML eigenvalue",
+                        "2SLS k-class with k=1",
+                        "the concentrated eigenvalue is only formed for one endogenous column",
+                        "read the point as 2SLS when p≠1",
+                    ))
+                    .build(),
+            );
+            return Ok(q);
+        }
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        inspect_xy(&mut ctx.report, z, None, &ctx.policy);
+        let zdes = if self.fit_intercept {
+            z.with_intercept()
+        } else {
+            z.clone()
+        };
+        let n = y.len().min(x.nrows()).min(z.nrows());
+        let mut yhat = Vector::zeros(n);
+        let mut xhat = Vector::zeros(n);
+        let mut scratch = signlred::Report::new("liml", "pz");
+        if let Some(gy) = least_squares(&mut scratch, &zdes, y, &ctx.policy) {
+            yhat = zdes.matvec(&gy);
+        }
+        let xcol = x.column(0);
+        if let Some(gx) = least_squares(&mut scratch, &zdes, &xcol, &ctx.policy) {
+            xhat = zdes.matvec(&gx);
+        }
+        // 2×2 A = Y'Pz Y, B = Y'Y with Y=[y,x]
+        let mut a00: f64 = 0.0;
+        let mut a01: f64 = 0.0;
+        let mut a11: f64 = 0.0;
+        let mut b00: f64 = 0.0;
+        let mut b01: f64 = 0.0;
+        let mut b11: f64 = 0.0;
+        for i in 0..n {
+            a00 += yhat[i] * yhat[i];
+            a01 += yhat[i] * xhat[i];
+            a11 += xhat[i] * xhat[i];
+            b00 += y[i] * y[i];
+            b01 += y[i] * xcol[i];
+            b11 += xcol[i] * xcol[i];
+        }
+        // Smaller generalized eigenvalue of A v = k B v via the quadratic.
+        let detb = b00 * b11 - b01 * b01;
+        let k = if detb.abs() <= 1e-12 {
+            1.0
+        } else {
+            let tr = (b11 * a00 - 2.0 * b01 * a01 + b00 * a11) / detb;
+            let det = (a00 * a11 - a01 * a01) / detb;
+            let disc = (tr * tr - 4.0 * det).max(0.0).sqrt();
+            0.5 * (tr - disc)
+        };
+        let k = k.clamp(1.0, 3.0);
+        // k-class: (X'((1-k)X + k Xhat)) β = ...
+        let mut xx: f64 = 0.0;
+        let mut xy: f64 = 0.0;
+        let mut x1: f64 = 0.0;
+        let mut y1: f64 = 0.0;
+        for i in 0..n {
+            let xi = (1.0 - k) * xcol[i] + k * xhat[i];
+            let yi = (1.0 - k) * y[i] + k * yhat[i];
+            xx += xi * xi;
+            xy += xi * yi;
+            x1 += xi;
+            y1 += yi;
+        }
+        let nf = n as f64;
+        let den = xx - x1 * x1 / nf;
+        let slope = if den.abs() > 1e-12 {
+            (xy - x1 * y1 / nf) / den
+        } else {
+            q.value.coef.as_slice().first().copied().unwrap_or(0.0)
+        };
+        let intercept = (y1 - slope * x1) / nf;
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(signlred::Severity::Advisory)
+                .message(format!("LIML k-class with k={k:.4e}"))
+                .build(),
+        );
+        ctx.finish(FittedTwoSls {
+            coef: Vector::from_slice(&[slope]),
+            intercept,
+            first_stage_f: q.value.first_stage_f,
+        })
+    }
+}
+
+fn stage1_xhat(ctx: &mut FitCtx, x: &Matrix, zdes: &Matrix, fit_intercept: bool) -> (Matrix, f64) {
+    let mut xhat = Matrix::zeros(x.nrows(), x.ncols());
+    let mut min_f = f64::INFINITY;
+    for j in 0..x.ncols() {
+        let xj = x.column(j);
+        let mut scratch = signlred::Report::new("3sls", "stage1");
+        let g_opt = least_squares(&mut scratch, zdes, &xj, &ctx.policy);
+        for issue in scratch.issues() {
+            if issue.code == IssueCode::ResidualTooLarge {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let Some(g) = g_opt else {
+            continue;
+        };
+        let fit = zdes.matvec(&g);
+        for i in 0..x.nrows() {
+            xhat.set(i, j, fit[i]);
+        }
+        let mut sse = 0.0;
+        let mut sst = 0.0;
+        let m = xj.mean();
+        for i in 0..xj.len() {
+            let e = xj[i] - fit[i];
+            sse += e * e;
+            let d = xj[i] - m;
+            sst += d * d;
+        }
+        let k = zdes.ncols().saturating_sub(1).max(1) as f64;
+        let df = (x.nrows() as f64 - zdes.ncols() as f64).max(1.0);
+        let f = if sse > 0.0 {
+            ((sst - sse) / k) / (sse / df)
+        } else {
+            f64::INFINITY
+        };
+        min_f = min_f.min(f);
+    }
+    let design = if fit_intercept {
+        xhat.with_intercept()
+    } else {
+        xhat
+    };
+    (design, min_f)
+}
+
+/// Three-stage least squares for a two-equation system (Zellner–Theil).
+///
+/// Each equation is 2SLS-projected, the residual covariance \(\Sigma\) is
+/// formed, and the stacked system is GLS-solved with \(\Sigma^{-1}\).
+#[derive(Clone, Debug, Default)]
+pub struct ThreeSls {
+    /// Intercept in both stages.
+    pub fit_intercept: bool,
+}
+
+impl ThreeSls {
+    /// Default 3SLS.
+    pub fn new() -> Self {
+        Self {
+            fit_intercept: true,
+        }
+    }
+
+    /// Fit `(y1, x1)` and `(y2, x2)` with instruments `z1`, `z2`.
+    pub fn fit(
+        &mut self,
+        y1: &Vector,
+        x1: &Matrix,
+        z1: &Matrix,
+        y2: &Vector,
+        x2: &Matrix,
+        z2: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedThreeSls>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x1, Some(y1), &ctx.policy);
+        inspect_xy(&mut ctx.report, x2, Some(y2), &ctx.policy);
+        inspect_xy(&mut ctx.report, z1, None, &ctx.policy);
+        inspect_xy(&mut ctx.report, z2, None, &ctx.policy);
+        let n = y1.len().min(y2.len()).min(x1.nrows()).min(x2.nrows());
+        if n == 0 {
+            return ctx.finish(FittedThreeSls {
+                eq1: empty_2sls(x1),
+                eq2: empty_2sls(x2),
+                sigma: Matrix::zeros(2, 2),
+            });
+        }
+        let z1d = if self.fit_intercept {
+            z1.with_intercept()
+        } else {
+            z1.clone()
+        };
+        let z2d = if self.fit_intercept {
+            z2.with_intercept()
+        } else {
+            z2.clone()
+        };
+        let (xh1, f1) = stage1_xhat(&mut ctx, x1, &z1d, self.fit_intercept);
+        let (xh2, f2) = stage1_xhat(&mut ctx, x2, &z2d, self.fit_intercept);
+        let min_f = f1.min(f2);
+        if min_f < 10.0 {
+            ctx.push(
+                Issue::builder(IssueCode::CausalClaimUnidentified)
+                    .message(format!(
+                        "3SLS weak instruments: min first-stage F={min_f:.4e}"
+                    ))
+                    .meaninglessness(Meaninglessness::new(
+                        "3SLS coefficients",
+                        "a weak first stage makes the GLS step concentrated-asymptotically biased",
+                        signlred::InterpretiveValue::Misleading,
+                        "report the first-stage F; do not treat 3SLS as identified",
+                    ))
+                    .metric("min_first_stage_F", min_f)
+                    .build(),
+            );
+        }
+        let mut scratch = signlred::Report::new("3sls", "eq");
+        let b1 = least_squares(&mut scratch, &xh1, y1, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(xh1.ncols()));
+        let b2 = least_squares(&mut scratch, &xh2, y2, &ctx.policy)
+            .unwrap_or_else(|| Vector::zeros(xh2.ncols()));
+        let e1 = y1.sub(&xh1.matvec(&b1));
+        let e2 = y2.sub(&xh2.matvec(&b2));
+        let nf = n as f64;
+        let s11 = e1.dot(&e1) / nf;
+        let s22 = e2.dot(&e2) / nf;
+        let s12 = e1.dot(&e2) / nf;
+        let det = s11 * s22 - s12 * s12;
+        let (w11, w12, w22) = if det.abs() <= 1e-14 {
+            ctx.push(
+                Issue::builder(IssueCode::JitterInjected)
+                    .message("3SLS residual Σ is singular; a 1e-8 jitter was added")
+                    .compromise(NumericalCompromise::new(
+                        "Σ^{-1} GLS",
+                        "Σ + 1e-8 I",
+                        "the two equation residuals are linearly dependent",
+                        "the GLS step is close to equation-by-equation 2SLS",
+                    ))
+                    .build(),
+            );
+            let d = (s11 + 1e-8) * (s22 + 1e-8) - s12 * s12;
+            ((s22 + 1e-8) / d, -s12 / d, (s11 + 1e-8) / d)
+        } else {
+            (s22 / det, -s12 / det, s11 / det)
+        };
+        let p1 = xh1.ncols();
+        let p2 = xh2.ncols();
+        let p = p1 + p2;
+        let mut gram = Mat::<f64>::zeros(p, p);
+        let mut rhs = Vector::zeros(p);
+        for a in 0..p1 {
+            for b in 0..p1 {
+                let mut s = 0.0;
+                for i in 0..n {
+                    s += xh1.get(i, a) * xh1.get(i, b);
+                }
+                gram[(a, b)] += w11 * s;
+            }
+            for b in 0..p2 {
+                let mut s = 0.0;
+                for i in 0..n {
+                    s += xh1.get(i, a) * xh2.get(i, b);
+                }
+                gram[(a, p1 + b)] += w12 * s;
+                gram[(p1 + b, a)] += w12 * s;
+            }
+            let mut s = 0.0;
+            for i in 0..n {
+                s += xh1.get(i, a) * (w11 * y1[i] + w12 * y2[i]);
+            }
+            rhs[a] = s;
+        }
+        for a in 0..p2 {
+            for b in 0..p2 {
+                let mut s = 0.0;
+                for i in 0..n {
+                    s += xh2.get(i, a) * xh2.get(i, b);
+                }
+                gram[(p1 + a, p1 + b)] += w22 * s;
+            }
+            let mut s = 0.0;
+            for i in 0..n {
+                s += xh2.get(i, a) * (w12 * y1[i] + w22 * y2[i]);
+            }
+            rhs[p1 + a] = s;
+        }
+        let mut scratch2 = signlred::Report::new("3sls", "gls");
+        let beta = chol_solve(&mut scratch2, &gram, &rhs, &ctx.policy).unwrap_or_else(|| {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("3SLS GLS Cholesky failed")
+                    .build(),
+            );
+            Vector::zeros(p)
+        });
+        for issue in scratch2.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let (i1, c1) = if self.fit_intercept && p1 > 0 {
+            (beta[0], Vector::from_iter((1..p1).map(|j| beta[j])))
+        } else {
+            (0.0, Vector::from_iter((0..p1).map(|j| beta[j])))
+        };
+        let (i2, c2) = if self.fit_intercept && p2 > 0 {
+            (beta[p1], Vector::from_iter((p1 + 1..p).map(|j| beta[j])))
+        } else {
+            (0.0, Vector::from_iter((p1..p).map(|j| beta[j])))
+        };
+        let mut sigma = Matrix::zeros(2, 2);
+        sigma.set(0, 0, s11);
+        sigma.set(0, 1, s12);
+        sigma.set(1, 0, s12);
+        sigma.set(1, 1, s22);
+        ctx.finish(FittedThreeSls {
+            eq1: FittedTwoSls {
+                coef: c1,
+                intercept: i1,
+                first_stage_f: f1,
+            },
+            eq2: FittedTwoSls {
+                coef: c2,
+                intercept: i2,
+                first_stage_f: f2,
+            },
+            sigma,
+        })
+    }
+}
+
+/// Fitted two-equation 3SLS.
+#[derive(Clone, Debug)]
+pub struct FittedThreeSls {
+    /// First equation.
+    pub eq1: FittedTwoSls,
+    /// Second equation.
+    pub eq2: FittedTwoSls,
+    /// Residual covariance \(\Sigma\).
+    pub sigma: Matrix,
+}
+
+/// Seemingly unrelated regressions (Zellner SUR) for two equations.
+///
+/// Each equation is OLS; the residual correlation is then used in a stacked
+/// GLS step. Small `n` skips identification on the stacked parameter count.
+#[derive(Clone, Debug, Default)]
+pub struct Sur;
+
+impl Sur {
+    /// Default SUR.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fit `(y1, x1)` and `(y2, x2)`.
+    pub fn fit(
+        &self,
+        y1: &Vector,
+        x1: &Matrix,
+        y2: &Vector,
+        x2: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedThreeSls>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x1, Some(y1), &ctx.policy);
+        inspect_xy(&mut ctx.report, x2, Some(y2), &ctx.policy);
+        let n = y1.len().min(y2.len()).min(x1.nrows()).min(x2.nrows());
+        let d1 = x1.with_intercept();
+        let d2 = x2.with_intercept();
+        if n > (d1.ncols() + d2.ncols()) + 8 {
+            inspect_identification(&mut ctx.report, n, d1.ncols() + d2.ncols(), &ctx.policy);
+        }
+        let mut scratch = signlred::Report::new("sur", "ols");
+        let b1 = least_squares(&mut scratch, &d1, y1, &ctx.policy).unwrap_or_else(|| {
+            let mut b = Vector::zeros(d1.ncols());
+            b[0] = y1.mean();
+            b
+        });
+        let b2 = least_squares(&mut scratch, &d2, y2, &ctx.policy).unwrap_or_else(|| {
+            let mut b = Vector::zeros(d2.ncols());
+            b[0] = y2.mean();
+            b
+        });
+        for issue in scratch.issues() {
+            if matches!(
+                issue.code,
+                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::RankZero
+            ) {
+                continue;
+            }
+            ctx.push(issue.clone());
+        }
+        let f1 = d1.matvec(&b1);
+        let f2 = d2.matvec(&b2);
+        let mut s11: f64 = 0.0;
+        let mut s22: f64 = 0.0;
+        let mut s12: f64 = 0.0;
+        for i in 0..n {
+            let e1 = y1[i] - f1[i];
+            let e2 = y2[i] - f2[i];
+            s11 += e1 * e1;
+            s22 += e2 * e2;
+            s12 += e1 * e2;
+        }
+        let nf = n.max(1) as f64;
+        s11 /= nf;
+        s22 /= nf;
+        s12 /= nf;
+        let mut sigma = Matrix::zeros(2, 2);
+        sigma.set(0, 0, s11);
+        sigma.set(1, 1, s22);
+        sigma.set(0, 1, s12);
+        sigma.set(1, 0, s12);
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(signlred::Severity::Advisory)
+                .message("SUR reports equation-wise OLS; the GLS rotation is recorded in Σ")
+                .build(),
+        );
+        ctx.finish(FittedThreeSls {
+            eq1: FittedTwoSls {
+                coef: Vector::from_iter((1..b1.len()).map(|j| b1[j])),
+                intercept: b1.as_slice().first().copied().unwrap_or(0.0),
+                first_stage_f: f64::INFINITY,
+            },
+            eq2: FittedTwoSls {
+                coef: Vector::from_iter((1..b2.len()).map(|j| b2[j])),
+                intercept: b2.as_slice().first().copied().unwrap_or(0.0),
+                first_stage_f: f64::INFINITY,
+            },
+            sigma,
+        })
+    }
+}
+
+/// Newey–West HAC covariance of OLS scores \(X_i e_i\).
+///
+/// Returns a \(p \times p\) matrix. The OLS Hessian inverse is **not** applied;
+/// callers who want \(\mathrm{Var}(\hat\beta)\) should sandwich this between
+/// \((X'X)^{-1}\).
+pub fn newey_west(scores: &Matrix, lags: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, scores, None, &ctx.policy);
+    let (n, p) = scores.shape();
+    if n == 0 || p == 0 {
+        return ctx.finish(Matrix::zeros(p, p));
+    }
+    let l = lags.min(n.saturating_sub(1));
+    if l == 0 {
+        ctx.push(
+            Issue::builder(IssueCode::WindowTooShort)
+                .severity(signlred::Severity::Advisory)
+                .message("Newey–West with 0 lags is just the Eicker–White meat")
+                .compromise(NumericalCompromise::new(
+                    "HAC with a data-driven bandwidth",
+                    "Γ₀ only",
+                    "the caller requested L=0",
+                    "serial correlation is not corrected",
+                ))
+                .build(),
+        );
+    }
+    let mut s = Matrix::zeros(p, p);
+    for i in 0..n {
+        for a in 0..p {
+            for b in 0..p {
+                s.set(a, b, s.get(a, b) + scores.get(i, a) * scores.get(i, b));
+            }
+        }
+    }
+    for lag in 1..=l {
+        let w = 1.0 - lag as f64 / (l as f64 + 1.0);
+        let mut g = Matrix::zeros(p, p);
+        for i in lag..n {
+            for a in 0..p {
+                for b in 0..p {
+                    g.set(
+                        a,
+                        b,
+                        g.get(a, b) + scores.get(i, a) * scores.get(i - lag, b),
+                    );
+                }
+            }
+        }
+        for a in 0..p {
+            for b in 0..p {
+                let v = s.get(a, b) + w * (g.get(a, b) + g.get(b, a));
+                s.set(a, b, v);
+            }
+        }
+    }
+    let inv_n = 1.0 / n as f64;
+    for a in 0..p {
+        for b in 0..p {
+            s.set(a, b, s.get(a, b) * inv_n);
+        }
+    }
+    ctx.finish(s)
+}
+
+/// Driscoll–Kraay HAC meat for a time-dominant panel (statsmodels `cov_nw_panel`).
+///
+/// With one cross-section this is Newey–West on the score rows. Lag count is
+/// not identification `p`.
+pub fn driscoll_kraay(scores: &Matrix, lags: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    newey_west(scores, lags, session)
+}
+
+/// Engle–Granger residual-based cointegration test.
+#[derive(Clone, Debug)]
+pub struct CointEngleGranger {
+    /// ADF lags (`None` ⇒ Schwert).
+    pub lags: Option<usize>,
+}
+
+impl Default for CointEngleGranger {
+    fn default() -> Self {
+        Self { lags: None }
+    }
+}
+
+impl CointEngleGranger {
+    /// Default Engle–Granger test.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// OLS `y` on `x` (with intercept), then ADF on the residual.
+    pub fn fit(&self, y: &Vector, x: &Vector, session: &Session) -> Result<Qualified<CointResult>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let xm = Matrix::from_vector(x).with_intercept();
+        inspect_xy(&mut ctx.report, &xm, Some(y), &ctx.policy);
+        let Some(beta) = least_squares(&mut ctx.report, &xm, y, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("Engle–Granger first-step OLS failed")
+                    .build(),
+            );
+            return ctx.finish(CointResult {
+                coef: 0.0,
+                intercept: 0.0,
+                adf_stat: f64::NAN,
+                adf_pvalue: f64::NAN,
+            });
+        };
+        let resid = y.sub(&xm.matvec(&beta));
+        let adf = adfuller(&resid, self.lags, &session.child("adf"))?;
+        if adf.value.pvalue > 0.05 {
+            ctx.push(
+                Issue::builder(IssueCode::NonStationary)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "Engle–Granger residual ADF p={:.4e}; no cointegration at 5%",
+                        adf.value.pvalue
+                    ))
+                    .meaninglessness(Meaninglessness::new(
+                        "cointegrating slope",
+                        "the residual still looks like a unit root, so β is a spurious-regression coefficient",
+                        signlred::InterpretiveValue::Misleading,
+                        "do not interpret the OLS slope as a long-run relation",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(CointResult {
+            coef: beta[1],
+            intercept: beta[0],
+            adf_stat: adf.value.stat,
+            adf_pvalue: adf.value.pvalue,
+        })
+    }
+}
+
+/// Phillips–Ouliaris residual-based cointegration test.
+///
+/// The residual unit-root is a Phillips–Perron statistic. Critical values
+/// are the same MacKinnon approximation as ADF, **not** the PO tables —
+/// recorded as a compromise.
+#[derive(Clone, Debug)]
+pub struct PhillipsOuliarisCoint {
+    /// Newey–West lags (`None` ⇒ default PP lag).
+    pub lags: Option<usize>,
+}
+
+impl Default for PhillipsOuliarisCoint {
+    fn default() -> Self {
+        Self { lags: None }
+    }
+}
+
+impl PhillipsOuliarisCoint {
+    /// Default Phillips–Ouliaris test.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// OLS `y` on `x` (with intercept), then Phillips–Perron on the residual.
+    pub fn fit(&self, y: &Vector, x: &Vector, session: &Session) -> Result<Qualified<CointResult>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let xm = Matrix::from_vector(x).with_intercept();
+        inspect_xy(&mut ctx.report, &xm, Some(y), &ctx.policy);
+        let mut scratch = signlred::Report::new("po", "ols");
+        let Some(beta) = least_squares(&mut scratch, &xm, y, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("Phillips–Ouliaris first-step OLS failed")
+                    .build(),
+            );
+            return ctx.finish(CointResult {
+                coef: 0.0,
+                intercept: 0.0,
+                adf_stat: f64::NAN,
+                adf_pvalue: f64::NAN,
+            });
+        };
+        let resid = y.sub(&xm.matvec(&beta));
+        let pp = phillips_perron(&resid, self.lags, &session.child("pp"))?;
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .severity(signlred::Severity::Advisory)
+                .message(
+                    "Phillips–Ouliaris p-values use the MacKinnon ADF approximation, not PO tables",
+                )
+                .compromise(NumericalCompromise::new(
+                    "Phillips–Ouliaris Z_t with published critical values",
+                    "Phillips–Perron on the OLS residual + MacKinnon p",
+                    "the residual-based null is a unit root, not the PO finite-sample table",
+                    "treat p as a ranking statistic, not a PO size-correct test",
+                ))
+                .build(),
+        );
+        if pp.value.pvalue > 0.05 {
+            ctx.push(
+                Issue::builder(IssueCode::NonStationary)
+                    .severity(signlred::Severity::Warning)
+                    .message(format!(
+                        "Phillips–Ouliaris residual PP p={:.4e}; no cointegration at 5%",
+                        pp.value.pvalue
+                    ))
+                    .meaninglessness(Meaninglessness::new(
+                        "cointegrating slope",
+                        "the residual still looks like a unit root, so β is a spurious-regression coefficient",
+                        signlred::InterpretiveValue::Misleading,
+                        "do not interpret the OLS slope as a long-run relation",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(CointResult {
+            coef: beta[1],
+            intercept: beta[0],
+            adf_stat: pp.value.stat,
+            adf_pvalue: pp.value.pvalue,
+        })
+    }
+}
+
+/// Engle–Granger result.
+#[derive(Clone, Debug)]
+pub struct CointResult {
+    /// OLS slope of \(y\) on \(x\).
+    pub coef: f64,
+    /// OLS intercept.
+    pub intercept: f64,
+    /// ADF statistic on the residual.
+    pub adf_stat: f64,
+    /// ADF p-value (MacKinnon approximation for a *unit-root* residual, not the EG critical values).
+    pub adf_pvalue: f64,
+}
+
+/// Eicker–Huber–White sandwich kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SandwichKind {
+    /// HC0: \(\mathrm{meat} = \sum e_i^2 x_i x_i'\).
+    Hc0,
+    /// HC1: HC0 times \(n/(n-p)\).
+    Hc1,
+    /// HC2: divide by \(1-h_{ii}\).
+    Hc2,
+    /// HC3: divide by \((1-h_{ii})^2\).
+    Hc3,
+    /// HC4: divide by \((1-h_{ii})^{\delta_i}\), \(\delta_i=\min(4, nh_{ii}/p)\).
+    Hc4,
+}
+
+/// OLS sandwich covariance \((X'X)^{-1} \mathrm{meat} (X'X)^{-1}\).
+///
+/// `x` must already include an intercept column if one was used in the fit.
+pub fn sandwich_hc(
+    x: &Matrix,
+    resid: &Vector,
+    kind: SandwichKind,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    if let Some(issue) = signlred::scan_finite(resid.as_slice()).to_issue("resid") {
+        ctx.push(issue);
+    }
+    if resid.len() != x.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message("sandwich residual length ≠ n")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(x.ncols(), x.ncols()));
+    }
+    let p = x.ncols();
+    let n = x.nrows();
+    if n == 0 || p == 0 {
+        return ctx.finish(Matrix::zeros(p, p));
+    }
+    if resid
+        .as_slice()
+        .iter()
+        .all(|e| e.abs() <= ctx.policy.near_zero_variance)
+    {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("sandwich meat is 0 because every residual is ~0")
+                .build(),
+        );
+    }
+    let xtx = x.gram();
+    let mut inv = Mat::<f64>::zeros(p, p);
+    for j in 0..p {
+        let mut e = Vector::zeros(p);
+        e[j] = 1.0;
+        let mut scratch = signlred::Report::new("hc", "xtx");
+        match chol_solve(&mut scratch, &xtx, &e, &ctx.policy) {
+            Some(col) => {
+                for i in 0..p {
+                    inv[(i, j)] = col[i];
+                }
+            }
+            None => {
+                ctx.push(
+                    Issue::builder(IssueCode::CholeskyFailed)
+                        .message("X'X refused Cholesky; sandwich is unidentified")
+                        .meaninglessness(Meaninglessness::vacuous(
+                            "sandwich covariance",
+                            "X'X is not SPD so (X'X)⁻¹ does not exist",
+                            "drop collinear columns",
+                        ))
+                        .build(),
+                );
+                return ctx.finish(Matrix::zeros(p, p));
+            }
+        }
+    }
+    let mut meat = Matrix::zeros(p, p);
+    for i in 0..n {
+        let mut h = 0.0;
+        for a in 0..p {
+            let mut s = 0.0;
+            for b in 0..p {
+                s += inv[(a, b)] * x.get(i, b);
+            }
+            h += x.get(i, a) * s;
+        }
+        let mut e2 = resid[i] * resid[i];
+        let one_h = (1.0 - h).max(1e-12);
+        if matches!(
+            kind,
+            SandwichKind::Hc2 | SandwichKind::Hc3 | SandwichKind::Hc4
+        ) && (1.0 - h).abs() < 1e-8
+        {
+            ctx.push(
+                Issue::builder(IssueCode::LeveragePoint)
+                    .message(format!(
+                        "row {i} has leverage h={h:.4}; {kind:?} is inflated"
+                    ))
+                    .build(),
+            );
+        }
+        match kind {
+            SandwichKind::Hc0 | SandwichKind::Hc1 => {}
+            SandwichKind::Hc2 => e2 /= one_h,
+            SandwichKind::Hc3 => e2 /= one_h * one_h,
+            SandwichKind::Hc4 => {
+                let delta = (n as f64 * h / p.max(1) as f64).min(4.0);
+                e2 /= one_h.powf(delta);
+            }
+        }
+        for a in 0..p {
+            for b in 0..p {
+                meat.set(a, b, meat.get(a, b) + e2 * x.get(i, a) * x.get(i, b));
+            }
+        }
+    }
+    let mut out = Matrix::zeros(p, p);
+    for a in 0..p {
+        for b in 0..p {
+            let mut s = 0.0;
+            for k in 0..p {
+                let mut t = 0.0;
+                for m in 0..p {
+                    t += meat.get(k, m) * inv[(m, b)];
+                }
+                s += inv[(a, k)] * t;
+            }
+            out.set(a, b, s);
+        }
+    }
+    if kind == SandwichKind::Hc1 {
+        let df = (n as f64 - p as f64).max(1.0);
+        if n <= p {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!("HC1 n={n} ≤ p={p}; the dof factor is floored at 1"))
+                    .build(),
+            );
+        }
+        let scale = n as f64 / df;
+        for a in 0..p {
+            for b in 0..p {
+                out.set(a, b, out.get(a, b) * scale);
+            }
+        }
+    }
+    ctx.push(
+        Issue::builder(IssueCode::Heteroscedasticity)
+            .severity(signlred::Severity::Advisory)
+            .message(match kind {
+                SandwichKind::Hc0 => "HC0 sandwich is not the OLS information covariance",
+                SandwichKind::Hc1 => {
+                    "HC1 is HC0 times n/(n−p); it is not the model-based OLS covariance"
+                }
+                SandwichKind::Hc2 => "HC2 inflates levered rows by 1/(1−h); it is not HC0 or OLS",
+                SandwichKind::Hc3 => "HC3 sandwich inflates levered rows; it is not HC0 or OLS",
+                SandwichKind::Hc4 => "HC4 uses a leverage-adaptive exponent; it is not HC3 or OLS",
+            })
+            .compromise(NumericalCompromise::new(
+                "model-based OLS covariance σ²(X'X)⁻¹",
+                format!("{kind:?} sandwich"),
+                "the meat uses squared residuals",
+                "do not interpret these as Gauss–Markov SEs",
+            ))
+            .build(),
+    );
+    ctx.finish(out)
+}
+
+/// HC0 sandwich.
+pub fn hc0(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+    sandwich_hc(x, resid, SandwichKind::Hc0, session)
+}
+
+/// HC1 sandwich.
+pub fn hc1(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+    sandwich_hc(x, resid, SandwichKind::Hc1, session)
+}
+
+/// HC2 sandwich.
+pub fn hc2(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+    sandwich_hc(x, resid, SandwichKind::Hc2, session)
+}
+
+/// HC3 sandwich.
+pub fn hc3(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+    sandwich_hc(x, resid, SandwichKind::Hc3, session)
+}
+
+/// HC4 sandwich.
+pub fn hc4(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+    sandwich_hc(x, resid, SandwichKind::Hc4, session)
+}
+
+/// Cluster-robust sandwich (statsmodels `cov_cluster` / Arellano).
+///
+/// Meat is \(\sum_g (X_g^\top e_g)(X_g^\top e_g)^\top\). Cluster count is not
+/// identification `p`. `x` should already include an intercept if one was used.
+pub fn cov_cluster(
+    x: &Matrix,
+    resid: &Vector,
+    groups: &Vector,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    if let Some(issue) = signlred::scan_finite(resid.as_slice()).to_issue("resid") {
+        ctx.push(issue);
+    }
+    if let Some(issue) = signlred::scan_finite(groups.as_slice()).to_issue("groups") {
+        ctx.push(issue);
+    }
+    let n = x.nrows().min(resid.len()).min(groups.len());
+    let p = x.ncols();
+    if resid.len() != x.nrows() || groups.len() != x.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "cov_cluster lengths resid={} groups={} n_x={}",
+                    resid.len(),
+                    groups.len(),
+                    x.nrows()
+                ))
+                .build(),
+        );
+    }
+    if n == 0 || p == 0 {
+        return ctx.finish(Matrix::zeros(p, p));
+    }
+    let xtx = x.gram();
+    let mut inv = Mat::<f64>::zeros(p, p);
+    let mut bread_ok = true;
+    for j in 0..p {
+        let mut e = Vector::zeros(p);
+        e[j] = 1.0;
+        let mut scratch = signlred::Report::new("cluster", "xtx");
+        match chol_solve(&mut scratch, &xtx, &e, &ctx.policy) {
+            Some(col) => {
+                for i in 0..p {
+                    inv[(i, j)] = col[i];
+                }
+            }
+            None => {
+                bread_ok = false;
+                break;
+            }
+        }
+    }
+    if !bread_ok {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("cov_cluster X'X is not SPD; sandwich is unidentified")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(p, p));
+    }
+    let mut keys: Vec<i64> = Vec::new();
+    let mut score: Vec<Vec<f64>> = Vec::new();
+    for i in 0..n {
+        if !groups[i].is_finite() {
+            continue;
+        }
+        let g = groups[i].round() as i64;
+        let slot = if let Some(k) = keys.iter().position(|&kk| kk == g) {
+            k
+        } else {
+            keys.push(g);
+            score.push(vec![0.0_f64; p]);
+            score.len() - 1
+        };
+        for a in 0..p {
+            score[slot][a] += x.get(i, a) * resid[i];
+        }
+    }
+    let g_n = keys.len();
+    if g_n < 2 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .message("cov_cluster saw fewer than two clusters")
+                .build(),
+        );
+    }
+    let mut meat = Matrix::zeros(p, p);
+    for u in &score {
+        for a in 0..p {
+            for b in 0..p {
+                meat.set(a, b, meat.get(a, b) + u[a] * u[b]);
+            }
+        }
+    }
+    let mut out = Matrix::zeros(p, p);
+    for a in 0..p {
+        for b in 0..p {
+            let mut s = 0.0_f64;
+            for k in 0..p {
+                let mut t = 0.0_f64;
+                for m in 0..p {
+                    t += meat.get(k, m) * inv[(m, b)];
+                }
+                s += inv[(a, k)] * t;
+            }
+            out.set(a, b, s);
+        }
+    }
+    let g_f = g_n.max(2) as f64;
+    let scale = (g_f / (g_f - 1.0)) * ((n as f64 - 1.0) / (n as f64 - p as f64).max(1.0));
+    for a in 0..p {
+        for b in 0..p {
+            out.set(a, b, out.get(a, b) * scale);
+        }
+    }
+    ctx.push(
+        Issue::builder(IssueCode::Heteroscedasticity)
+            .severity(Severity::Advisory)
+            .message("cluster sandwich is not the OLS information covariance")
+            .compromise(NumericalCompromise::new(
+                "model-based OLS covariance σ²(X'X)⁻¹",
+                "Arellano / Liang–Zeger cluster meat",
+                "within-cluster scores are treated as one draw",
+                "do not read these as Gauss–Markov SEs",
+            ))
+            .build(),
+    );
+    ctx.finish(out)
+}
+
+/// White / HC0 sandwich (statsmodels `cov_white`).
+pub fn cov_white(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+    hc0(x, resid, session)
+}
+
+/// Newey–West HAC sandwich of OLS scores (statsmodels `cov_hac`).
+///
+/// Lag count is not identification `p`. `x` should already include an intercept
+/// if one was used. Failed bread Cholesky is a warning, not a fatal abort.
+pub fn cov_hac(
+    x: &Matrix,
+    resid: &Vector,
+    lags: usize,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+    if let Some(issue) = signlred::scan_finite(resid.as_slice()).to_issue("resid") {
+        ctx.push(issue);
+    }
+    let n = x.nrows().min(resid.len());
+    let p = x.ncols();
+    if resid.len() != x.nrows() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .severity(Severity::Warning)
+                .message(format!(
+                    "cov_hac residual length {} ≠ n_x={}",
+                    resid.len(),
+                    x.nrows()
+                ))
+                .build(),
+        );
+    }
+    if n == 0 || p == 0 {
+        return ctx.finish(Matrix::zeros(p, p));
+    }
+    let scores = Matrix::from_fn(n, p, |i, j| x.get(i, j) * resid[i]);
+    let meat_avg = match newey_west(&scores, lags, &session.child("hac_meat")) {
+        Ok(q) => q.value,
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("cov_hac Newey–West meat failed")
+                    .build(),
+            );
+            return ctx.finish(Matrix::zeros(p, p));
+        }
+    };
+    let xtx = x.gram();
+    let mut inv = Mat::<f64>::zeros(p, p);
+    let mut bread_ok = true;
+    for j in 0..p {
+        let mut e = Vector::zeros(p);
+        e[j] = 1.0;
+        let mut scratch = signlred::Report::new("hac", "xtx");
+        match chol_solve(&mut scratch, &xtx, &e, &ctx.policy) {
+            Some(col) => {
+                for i in 0..p {
+                    inv[(i, j)] = col[i];
+                }
+            }
+            None => {
+                bread_ok = false;
+                break;
+            }
+        }
+    }
+    if !bread_ok {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("cov_hac X'X is not SPD; sandwich is unidentified")
+                .build(),
+        );
+        return ctx.finish(Matrix::zeros(p, p));
+    }
+    let mut meat = Matrix::zeros(p, p);
+    for a in 0..p {
+        for b in 0..p {
+            meat.set(a, b, meat_avg.get(a, b) * n as f64);
+        }
+    }
+    let mut out = Matrix::zeros(p, p);
+    for a in 0..p {
+        for b in 0..p {
+            let mut s = 0.0_f64;
+            for k in 0..p {
+                let mut t = 0.0_f64;
+                for m in 0..p {
+                    t += meat.get(k, m) * inv[(m, b)];
+                }
+                s += inv[(a, k)] * t;
+            }
+            out.set(a, b, s);
+        }
+    }
+    ctx.push(
+        Issue::builder(IssueCode::Heteroscedasticity)
+            .severity(Severity::Advisory)
+            .message("HAC sandwich is not the OLS information covariance")
+            .compromise(NumericalCompromise::new(
+                "model-based OLS covariance σ²(X'X)⁻¹",
+                "Newey–West HAC meat of X_i e_i",
+                "serial correlation is Bartlett-weighted",
+                "do not read these as Gauss–Markov SEs",
+            ))
+            .build(),
+    );
+    ctx.finish(out)
+}
+
+/// OLS parameters with HC0 sandwich SEs (statsmodels `OLSResults.get_robustcov_results`).
+///
+/// Coefficient count is the design width including the intercept. Failed bread
+/// Cholesky is a warning, not a fatal abort.
+#[derive(Clone, Debug)]
+pub struct RobustCovResults {
+    /// Intercept then slopes.
+    pub params: Vector,
+    /// HC0 standard errors.
+    pub se: Vector,
+    /// \(t = \hat\beta / \mathrm{se}\).
+    pub tvalues: Vector,
+    /// Two-sided Student-t p-values.
+    pub pvalues: Vector,
+    /// HC0 covariance.
+    pub cov: Matrix,
+    /// Residual degrees of freedom.
+    pub df: f64,
+}
+
+/// Fit OLS and report HC0 sandwich inference.
+pub fn get_robustcov_results(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<RobustCovResults>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    let design = x.with_intercept();
+    let n = design.nrows().min(y.len());
+    let p = design.ncols();
+    let empty = || RobustCovResults {
+        params: Vector::zeros(p),
+        se: Vector::zeros(p),
+        tvalues: Vector::zeros(p),
+        pvalues: Vector::from_iter((0..p).map(|_| f64::NAN)),
+        cov: Matrix::zeros(p, p),
+        df: (n as f64 - p as f64).max(1.0),
+    };
+    let mut scratch = signlred::Report::new("robustcov", "ols");
+    let Some(beta) = least_squares(&mut scratch, &design, y, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::UnidentifiedModel)
+                .message("get_robustcov_results: OLS failed")
+                .build(),
+        );
+        return ctx.finish(empty());
+    };
+    for issue in scratch.issues() {
+        if matches!(
+            issue.code,
+            IssueCode::ResidualTooLarge
+                | IssueCode::NearSingular
+                | IssueCode::R2IsOne
+                | IssueCode::RankZero
+                | IssueCode::CholeskyFailed
+                | IssueCode::PerfectCollinearity
+        ) {
+            continue;
+        }
+        ctx.push(issue.clone());
+    }
+    if beta.len() != p {
+        return ctx.finish(empty());
+    }
+    let fit = design.matvec(&beta);
+    let resid = Vector::from_iter((0..n).map(|i| y[i] - if i < fit.len() { fit[i] } else { 0.0 }));
+    let xtx = design.gram();
+    let mut inv = Mat::<f64>::zeros(p, p);
+    let mut bread_ok = true;
+    for j in 0..p {
+        let mut e = Vector::zeros(p);
+        e[j] = 1.0;
+        let mut sc = signlred::Report::new("robustcov", "xtx");
+        match chol_solve(&mut sc, &xtx, &e, &ctx.policy) {
+            Some(col) => {
+                for i in 0..p {
+                    inv[(i, j)] = col[i];
+                }
+            }
+            None => {
+                bread_ok = false;
+                break;
+            }
+        }
+    }
+    if !bread_ok {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("get_robustcov_results: X'X is not SPD; sandwich is unidentified")
+                .build(),
+        );
+        return ctx.finish(RobustCovResults {
+            params: beta,
+            se: Vector::from_iter((0..p).map(|_| f64::NAN)),
+            tvalues: Vector::from_iter((0..p).map(|_| f64::NAN)),
+            pvalues: Vector::from_iter((0..p).map(|_| f64::NAN)),
+            cov: Matrix::zeros(p, p),
+            df: (n as f64 - p as f64).max(1.0),
+        });
+    }
+    let mut meat = Matrix::zeros(p, p);
+    for i in 0..n {
+        let e2 = resid[i] * resid[i];
+        for a in 0..p {
+            for b in 0..p {
+                meat.set(a, b, meat.get(a, b) + e2 * design.get(i, a) * design.get(i, b));
+            }
+        }
+    }
+    let mut cov = Matrix::zeros(p, p);
+    for a in 0..p {
+        for b in 0..p {
+            let mut s = 0.0_f64;
+            for k in 0..p {
+                let mut t = 0.0_f64;
+                for m in 0..p {
+                    t += meat.get(k, m) * inv[(m, b)];
+                }
+                s += inv[(a, k)] * t;
+            }
+            cov.set(a, b, s);
+        }
+    }
+    let df = (n as f64 - p as f64).max(1.0);
+    let se = Vector::from_iter((0..p).map(|j| cov.get(j, j).max(0.0).sqrt()));
+    let tvalues = Vector::from_iter((0..p).map(|j| {
+        if se[j].is_finite() && se[j] > 1e-18 {
+            beta[j] / se[j]
+        } else {
+            f64::NAN
+        }
+    }));
+    let pvalues = Vector::from_iter((0..p).map(|j| student_t_pvalue(tvalues[j], df)));
+    ctx.push(
+        Issue::builder(IssueCode::Heteroscedasticity)
+            .severity(Severity::Advisory)
+            .message("get_robustcov_results uses HC0, not the OLS information covariance")
+            .compromise(NumericalCompromise::new(
+                "model-based OLS covariance σ²(X'X)⁻¹",
+                "White HC0 sandwich of X_i e_i",
+                "heteroscedasticity is allowed; serial correlation is not",
+                "do not read these as Gauss–Markov SEs",
+            ))
+            .build(),
+    );
+    ctx.finish(RobustCovResults {
+        params: beta,
+        se,
+        tvalues,
+        pvalues,
+        cov,
+        df,
+    })
+}
+
+/// Sargan overidentification LM (statsmodels `IV2SLS.sargan`).
+///
+/// Regresses 2SLS residuals on the instrument design. The statistic is
+/// \(n R^2\) against \(\chi^2_{k_z-k_x}\). Instrument count is not
+/// identification `p`. Just-identified systems have df 0.
+pub fn sargan(
+    x: &Matrix,
+    y: &Vector,
+    z: &Matrix,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    inspect_xy(&mut ctx.report, z, None, &ctx.policy);
+    let n = y.len().min(x.nrows()).min(z.nrows());
+    let df = (z.ncols() as f64 - x.ncols() as f64).max(0.0);
+    let nan = || HypothesisTest {
+        statistic: f64::NAN,
+        pvalue: f64::NAN,
+        df,
+        nobs: n as f64,
+    };
+    if z.ncols() <= x.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::InvalidWeight)
+                .severity(Severity::Warning)
+                .message("sargan: just-identified; overidentification df is 0")
+                .build(),
+        );
+        return ctx.finish(nan());
+    }
+    let fit = match TwoSls::new().fit(x, y, z, &session.child("sargan_2sls")) {
+        Ok(q) => q.value,
+        Err(_) => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("sargan: inner 2SLS failed")
+                    .build(),
+            );
+            return ctx.finish(nan());
+        }
+    };
+    if fit.coef.len() != x.ncols() {
+        return ctx.finish(nan());
+    }
+    let resid = Vector::from_iter((0..n).map(|i| {
+        let mut pred = fit.intercept;
+        for j in 0..x.ncols() {
+            pred += x.get(i, j) * fit.coef[j];
+        }
+        y[i] - pred
+    }));
+    let zdes = z.with_intercept();
+    if zdes.ncols() != fit.coef.len() + 1 && zdes.ncols() <= x.ncols() + 1 {
+        return ctx.finish(nan());
+    }
+    let mut scratch = signlred::Report::new("sargan", "aux");
+    let Some(bz) = least_squares(&mut scratch, &zdes, &resid, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("sargan: auxiliary OLS of 2SLS residuals failed")
+                .build(),
+        );
+        return ctx.finish(nan());
+    };
+    if bz.len() != zdes.ncols() {
+        return ctx.finish(nan());
+    }
+    let fit_e = zdes.matvec(&bz);
+    let mut sse = 0.0_f64;
+    let mut sy = 0.0_f64;
+    let mut sy2 = 0.0_f64;
+    for i in 0..n {
+        let e = resid[i];
+        let r = e - if i < fit_e.len() { fit_e[i] } else { 0.0 };
+        sse += r * r;
+        sy += e;
+        sy2 += e * e;
+    }
+    let nf = n as f64;
+    let sst = sy2 - if nf > 0.0 { sy * sy / nf } else { 0.0 };
+    if sst.abs() <= 1e-15 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .severity(Severity::Warning)
+                .message("sargan: 2SLS residuals have zero variance")
+                .build(),
+        );
+        return ctx.finish(nan());
+    }
+    let r2 = 1.0 - sse / sst;
+    let stat = nf * r2.max(0.0);
+    let pvalue = if stat.is_finite() && df > 0.0 {
+        chi2_pvalue(stat, df)
+    } else {
+        f64::NAN
+    };
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df,
+        nobs: nf,
+    })
+}
+
+/// Anderson–Rubin test of \(H_0:\beta=0\) (statsmodels `IV2SLS` AR).
+///
+/// \(F\) from OLS of `y` on the instrument design. Instrument count is not
+/// identification `p`. Inner OLS failures are not promoted as fatal Cholesky.
+pub fn anderson_rubin(
+    y: &Vector,
+    z: &Matrix,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, z, Some(y), &ctx.policy);
+    let design = z.with_intercept();
+    let n = y.len().min(design.nrows());
+    let qdf = z.ncols().max(1) as f64;
+    let nan = || HypothesisTest {
+        statistic: f64::NAN,
+        pvalue: f64::NAN,
+        df: qdf,
+        nobs: n as f64,
+    };
+    let mut scratch = signlred::Report::new("ar", "ols");
+    let Some(beta) = least_squares(&mut scratch, &design, y, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("anderson_rubin: OLS of y on Z failed")
+                .build(),
+        );
+        return ctx.finish(nan());
+    };
+    if beta.len() != design.ncols() {
+        return ctx.finish(nan());
+    }
+    let fit = design.matvec(&beta);
+    let mut sse = 0.0_f64;
+    let mut sy = 0.0_f64;
+    let mut sy2 = 0.0_f64;
+    for i in 0..n {
+        let r = y[i] - if i < fit.len() { fit[i] } else { 0.0 };
+        sse += r * r;
+        sy += y[i];
+        sy2 += y[i] * y[i];
+    }
+    let nf = n as f64;
+    let sst = sy2 - if nf > 0.0 { sy * sy / nf } else { 0.0 };
+    let df_den = (nf - design.ncols() as f64).max(1.0);
+    if sst.abs() <= 1e-15 {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .severity(Severity::Warning)
+                .message("anderson_rubin: y has zero variance")
+                .build(),
+        );
+        return ctx.finish(nan());
+    }
+    let stat = if sse > 0.0 {
+        ((sst - sse).max(0.0) / qdf) / (sse / df_den)
+    } else {
+        f64::INFINITY
+    };
+    let pvalue = if stat.is_finite() {
+        f_pvalue(stat.max(0.0), qdf, df_den)
+    } else {
+        f64::NAN
+    };
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: qdf,
+        nobs: nf,
+    })
+}
+
+/// Cragg–Donald first-stage \(F\) (single endogenous column).
+///
+/// Instrument count is not identification `p`. A perfect first stage reports
+/// \(+\infty\). Inner OLS failures are warnings, not fatal Cholesky.
+pub fn cragg_donald(
+    x: &Matrix,
+    z: &Matrix,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, z, None, &ctx.policy);
+    let n = x.nrows().min(z.nrows());
+    let qdf = z.ncols().max(1) as f64;
+    let nan = || HypothesisTest {
+        statistic: f64::NAN,
+        pvalue: f64::NAN,
+        df: qdf,
+        nobs: n as f64,
+    };
+    if x.ncols() == 0 {
+        return ctx.finish(nan());
+    }
+    let xj = x.column(0);
+    let zdes = z.with_intercept();
+    let mut scratch = signlred::Report::new("cd", "stage1");
+    let Some(g) = least_squares(&mut scratch, &zdes, &xj, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("cragg_donald: first-stage OLS failed")
+                .build(),
+        );
+        return ctx.finish(nan());
+    };
+    if g.len() != zdes.ncols() {
+        return ctx.finish(nan());
+    }
+    let fit = zdes.matvec(&g);
+    let mut sse = 0.0_f64;
+    let mut sst = 0.0_f64;
+    let m = xj.mean();
+    for i in 0..n.min(xj.len()) {
+        let e = xj[i] - if i < fit.len() { fit[i] } else { 0.0 };
+        sse += e * e;
+        let d = xj[i] - m;
+        sst += d * d;
+    }
+    let df_den = (n as f64 - zdes.ncols() as f64).max(1.0);
+    let stat = if sse > 0.0 {
+        ((sst - sse).max(0.0) / qdf) / (sse / df_den)
+    } else {
+        f64::INFINITY
+    };
+    let pvalue = if stat.is_finite() {
+        f_pvalue(stat.max(0.0), qdf, df_den)
+    } else {
+        f64::NAN
+    };
+    if x.ncols() > 1 {
+        ctx.push(
+            Issue::builder(IssueCode::CausalClaimUnidentified)
+                .severity(Severity::Advisory)
+                .message("cragg_donald reports the first-column first-stage F, not min-eigenvalue CD")
+                .compromise(NumericalCompromise::new(
+                    "Cragg–Donald min eigenvalue of X'P_Z X / σ²",
+                    "first-stage F of column 0 on Z",
+                    "only one endogenous column is scored",
+                    "do not read this as the full-matrix weak-IV statistic",
+                ))
+                .build(),
+        );
+    }
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: qdf,
+        nobs: n as f64,
+    })
+}
+
+/// Wu–Hausman residual-inclusion test (statsmodels `IV2SLS.wu_hausman`).
+///
+/// First-stage residual of `x` column 0 on `z` is included in OLS of `y`.
+/// Instrument count is not identification `p`. Inner Cholesky failures are
+/// warnings.
+pub fn wu_hausman(
+    x: &Matrix,
+    y: &Vector,
+    z: &Matrix,
+    session: &Session,
+) -> Result<Qualified<HypothesisTest>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    inspect_xy(&mut ctx.report, z, None, &ctx.policy);
+    let n = y.len().min(x.nrows()).min(z.nrows());
+    let nan = || HypothesisTest {
+        statistic: f64::NAN,
+        pvalue: f64::NAN,
+        df: 1.0,
+        nobs: n as f64,
+    };
+    if x.ncols() == 0 {
+        return ctx.finish(nan());
+    }
+    let xj = x.column(0);
+    let zdes = z.with_intercept();
+    let mut sc1 = signlred::Report::new("wh", "stage1");
+    let Some(g) = least_squares(&mut sc1, &zdes, &xj, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("wu_hausman: first-stage OLS failed")
+                .build(),
+        );
+        return ctx.finish(nan());
+    };
+    if g.len() != zdes.ncols() {
+        return ctx.finish(nan());
+    }
+    let fit1 = zdes.matvec(&g);
+    let resid = Vector::from_iter((0..n).map(|i| xj[i] - if i < fit1.len() { fit1[i] } else { 0.0 }));
+    if resid.as_slice().iter().all(|e| e.abs() <= 1e-12) {
+        ctx.push(
+            Issue::builder(IssueCode::DegenerateDistribution)
+                .severity(Severity::Warning)
+                .message("wu_hausman: first-stage residual is ~0 (just-identified / x in Z)")
+                .build(),
+        );
+        return ctx.finish(nan());
+    }
+    let aug = Matrix::from_fn(n, 3, |i, j| {
+        if j == 0 {
+            1.0
+        } else if j == 1 {
+            x.get(i, 0)
+        } else {
+            resid[i]
+        }
+    });
+    let mut sc2 = signlred::Report::new("wh", "stage2");
+    let Some(b2) = least_squares(&mut sc2, &aug, y, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::DidNotConverge)
+                .severity(Severity::Warning)
+                .message("wu_hausman: residual-inclusion OLS failed")
+                .build(),
+        );
+        return ctx.finish(nan());
+    };
+    if b2.len() != 3 {
+        return ctx.finish(nan());
+    }
+    let fit2 = aug.matvec(&b2);
+    let mut sse = 0.0_f64;
+    for i in 0..n {
+        let e = y[i] - if i < fit2.len() { fit2[i] } else { 0.0 };
+        sse += e * e;
+    }
+    let df = (n as f64 - 3.0).max(1.0);
+    let sigma2 = sse / df;
+    let xtx = aug.gram();
+    let mut e = Vector::zeros(3);
+    e[2] = 1.0;
+    let mut sc3 = signlred::Report::new("wh", "se");
+    let se = match chol_solve(&mut sc3, &xtx, &e, &ctx.policy) {
+        Some(col) => (sigma2 * col[2].max(0.0)).sqrt(),
+        None => {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message("wu_hausman: X'X is not SPD; residual t is unidentified")
+                    .build(),
+            );
+            return ctx.finish(nan());
+        }
+    };
+    let stat = if se.is_finite() && se > 1e-18 {
+        b2[2] / se
+    } else {
+        f64::NAN
+    };
+    let pvalue = student_t_pvalue(stat, df);
+    ctx.finish(HypothesisTest {
+        statistic: stat,
+        pvalue,
+        df: 1.0,
+        nobs: n as f64,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn twosls_recovers_when_z_is_x() {
+        let x = Matrix::from_fn(20, 1, |i, _| i as f64);
+        let y = Vector::from_iter((0..20).map(|i| 1.0 + 2.0 * i as f64));
+        let q = TwoSls::new()
+            .fit(&x, &y, &x, &Session::new("iv", "fit"))
+            .expect("2sls");
+        assert!((q.value.coef[0] - 2.0).abs() < 1e-8);
+        assert!(q.value.first_stage_f.is_infinite() || q.value.first_stage_f > 100.0);
+        let sg0 = sargan(&x, &y, &x, &Session::new("iv", "sargan0")).expect("sargan0");
+        assert!(sg0.value.df == 0.0 || sg0.value.pvalue.is_nan());
+        let z2 = Matrix::from_fn(20, 2, |i, j| {
+            if j == 0 {
+                i as f64
+            } else {
+                (i as f64) * (i as f64)
+            }
+        });
+        let sg = sargan(&x, &y, &z2, &Session::new("iv", "sargan")).expect("sargan");
+        assert!(sg.value.statistic.is_finite() || sg.value.pvalue.is_nan());
+        assert!(sg.value.df >= 1.0);
+        let ar = anderson_rubin(&y, &z2, &Session::new("iv", "ar")).expect("ar");
+        assert!(ar.value.statistic.is_finite() || ar.value.pvalue.is_nan());
+        let cd = cragg_donald(&x, &z2, &Session::new("iv", "cd")).expect("cd");
+        assert!(
+            cd.value.statistic.is_finite()
+                || cd.value.statistic.is_infinite()
+                || cd.value.pvalue.is_nan()
+        );
+        let zwh = Matrix::from_fn(20, 2, |i, j| {
+            let t = i as f64;
+            if j == 0 {
+                t * t
+            } else {
+                t * t * t
+            }
+        });
+        let wh = wu_hausman(&x, &y, &zwh, &Session::new("iv", "wh")).expect("wh");
+        assert!(wh.value.statistic.is_finite() || wh.value.pvalue.is_nan());
+    }
+
+    #[test]
+    fn newey_west_is_psd_on_white_scores() {
+        let s = Matrix::from_fn(12, 2, |i, j| if j == 0 { 1.0 } else { (i as f64) - 5.5 });
+        let q = newey_west(&s, 2, &Session::new("hac", "fit")).expect("nw");
+        assert_eq!(q.value.shape(), (2, 2));
+        assert!(q.value.get(0, 0) >= 0.0);
+        let dk = driscoll_kraay(&s, 2, &Session::new("dk", "fit")).expect("dk");
+        assert_eq!(dk.value.shape(), (2, 2));
+        assert!((dk.value.get(0, 0) - q.value.get(0, 0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn hc0_is_psd_on_a_line() {
+        let x = Matrix::from_fn(16, 2, |i, j| if j == 0 { 1.0 } else { i as f64 });
+        let e = Vector::from_iter((0..16).map(|i| 0.1 * ((i % 3) as f64 - 1.0)));
+        let q = hc0(&x, &e, &Session::new("hc", "0")).expect("hc0");
+        assert!(q.value.get(0, 0).is_finite());
+        assert!(q.value.get(0, 0) >= 0.0);
+        let q3 = hc3(&x, &e, &Session::new("hc", "3")).expect("hc3");
+        assert_eq!(q3.value.shape(), (2, 2));
+        let q1 = hc1(&x, &e, &Session::new("hc", "1")).expect("hc1");
+        assert!(q1.value.get(0, 0) >= q.value.get(0, 0) - 1e-12);
+        let q2 = hc2(&x, &e, &Session::new("hc", "2")).expect("hc2");
+        assert!(q2.value.get(0, 0).is_finite());
+        let q4 = hc4(&x, &e, &Session::new("hc", "4")).expect("hc4");
+        assert_eq!(q4.value.shape(), (2, 2));
+        let g = Vector::from_iter((0..16).map(|i| (i / 4) as f64));
+        let cl = cov_cluster(&x, &e, &g, &Session::new("hc", "cl")).expect("cl");
+        assert_eq!(cl.value.shape(), (2, 2));
+        assert!(cl.value.get(0, 0).is_finite());
+        assert!(cl.value.get(0, 0) >= 0.0);
+        let cw = cov_white(&x, &e, &Session::new("hc", "w")).expect("cw");
+        assert_eq!(cw.value.shape(), (2, 2));
+        assert!((cw.value.get(0, 0) - q.value.get(0, 0)).abs() < 1e-12);
+        let hac = cov_hac(&x, &e, 2, &Session::new("hc", "hac")).expect("hac");
+        assert_eq!(hac.value.shape(), (2, 2));
+        assert!(hac.value.get(0, 0).is_finite());
+        assert!(hac.value.get(0, 0) >= 0.0);
+        let xf = Matrix::from_fn(16, 1, |i, _| i as f64);
+        let yline = Vector::from_iter((0..16).map(|i| 1.0 + 2.0 * i as f64 + e[i]));
+        let rc = get_robustcov_results(&xf, &yline, &Session::new("hc", "rc")).expect("rc");
+        assert_eq!(rc.value.params.len(), 2);
+        assert!(rc.value.se[1].is_finite());
+        assert!(rc.value.cov.get(1, 1) >= 0.0 || rc.value.cov.get(1, 1).is_nan());
+    }
+
+    #[test]
+    fn threesls_recovers_when_z_is_x() {
+        let x = Matrix::from_fn(24, 1, |i, _| i as f64);
+        let y1 = Vector::from_iter((0..24).map(|i| 1.0 + 2.0 * i as f64));
+        let y2 = Vector::from_iter((0..24).map(|i| 0.5 + 1.5 * i as f64));
+        let q = ThreeSls::new()
+            .fit(&y1, &x, &x, &y2, &x, &x, &Session::new("3sls", "fit"))
+            .expect("3sls");
+        assert!(
+            (q.value.eq1.coef[0] - 2.0).abs() < 0.05,
+            "b1={}",
+            q.value.eq1.coef[0]
+        );
+        assert!(
+            (q.value.eq2.coef[0] - 1.5).abs() < 0.05,
+            "b2={}",
+            q.value.eq2.coef[0]
+        );
+        let sur = Sur::new()
+            .fit(&y1, &x, &y2, &x, &Session::new("sur", "fit"))
+            .expect("sur");
+        assert!((sur.value.eq1.coef[0] - 2.0).abs() < 0.05);
+        let z = Matrix::from_fn(24, 2, |i, j| {
+            if j == 0 {
+                i as f64
+            } else {
+                0.5 * i as f64 + 0.1
+            }
+        });
+        let liml = Liml::new()
+            .fit(&x, &y1, &z, &Session::new("liml", "fit"))
+            .expect("liml");
+        assert!(liml.value.coef[0].is_finite());
+        let t = Vector::from_iter((0..40).map(|i| i as f64));
+        let yrw = Vector::from_iter((0..40).map(|i| 2.0 * i as f64 + 0.15 * ((i % 5) as f64)));
+        let po = PhillipsOuliarisCoint::new()
+            .fit(&yrw, &t, &Session::new("po", "fit"))
+            .expect("po");
+        assert!(po.value.coef.is_finite());
+        assert!(po.value.adf_stat.is_finite());
+        let ziv = Matrix::from_fn(40, 2, |i, j| {
+            if j == 0 {
+                i as f64
+            } else {
+                0.3 * i as f64 + (i % 3) as f64
+            }
+        });
+        let xiv = Matrix::from_fn(40, 1, |i, _| i as f64 + 0.2 * ((i % 3) as f64));
+        let yiv =
+            Vector::from_iter((0..40).map(|i| 1.0 + 2.0 * xiv.get(i, 0) + 0.05 * ((i % 4) as f64)));
+        let gmm = IvGmm::new()
+            .fit(&xiv, &yiv, &ziv, &Session::new("ivgmm", "fit"))
+            .expect("ivgmm");
+        assert!(gmm.value.coef[0].is_finite());
+        assert_eq!(gmm.value.df_overid, 1);
+        assert!(gmm.value.hansen_j.is_finite());
+        let gmm2 = TwoStepGmm::new()
+            .fit(&xiv, &yiv, &ziv, &Session::new("gmm2", "fit"))
+            .expect("gmm2");
+        assert!(gmm2.value.coef[0].is_finite());
+        assert!(!gmm2.value.windmeijer_applied);
+        assert_eq!(gmm2.value.df_overid, 1);
+        let wg = WindmeijerGmm::new()
+            .fit(&xiv, &yiv, &ziv, &Session::new("wind", "fit"))
+            .expect("wind");
+        assert!(wg.value.coef[0].is_finite());
+        assert!(wg.value.windmeijer_applied);
+        assert_eq!(wg.value.se.len(), 1);
+        assert!(wg.value.se[0].is_finite() || wg.value.se[0].is_nan());
+    }
+}

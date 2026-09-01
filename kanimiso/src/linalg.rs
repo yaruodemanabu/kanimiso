@@ -125,9 +125,6 @@ pub fn least_squares(
 
     let svd = thin_svd(report, x, policy)?;
     let kappa = svd.condition_number();
-    if let Some(issue) = condition_issue(kappa, policy) {
-        report.push_with_policy(policy.clone(), issue);
-    }
     let rank = svd.rank(policy.rank_tol_relative);
 
     if rank == 0 {
@@ -168,6 +165,11 @@ pub fn least_squares(
                 .metric("rank", rank as f64)
                 .build(),
         );
+    } else if let Some(issue) = condition_issue(kappa, policy) {
+        // Full numerical rank: κ documents ill-conditioning. Do not emit
+        // RankZero/NearSingular from an infinite κ when rank < p — that is
+        // already recorded as RankDeficient + PseudoinverseUsed.
+        report.push_with_policy(policy.clone(), issue);
     }
 
     let hint = classify_condition_number(kappa, policy);

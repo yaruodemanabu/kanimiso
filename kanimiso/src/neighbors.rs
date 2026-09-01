@@ -6,10 +6,10 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::traits::{Fit, FitUnsupervised, Predict};
+use crate::traits::{Fit, FitUnsupervised, Predict, Transform};
 use crate::validate::{inspect_classes, inspect_identification, inspect_xy};
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Meaninglessness, Qualified, Result};
+use signlred::{Issue, IssueCode, Meaninglessness, Qualified, Result, Severity};
 
 fn labels_of(y: &Vector) -> Vec<i64> {
     y.as_slice()
@@ -105,6 +105,254 @@ fn predict_shape_guard(ctx: &mut FitCtx, x: &Matrix, n_features: usize) {
                 ))
                 .build(),
         );
+    }
+}
+
+/// Unsupervised k-nearest-neighbor graph (sklearn `NearestNeighbors`).
+///
+/// Neighbor count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct NearestNeighbors {
+    /// Neighbors returned by [`FittedNearestNeighbors::kneighbors`].
+    pub n_neighbors: usize,
+}
+
+impl Default for NearestNeighbors {
+    fn default() -> Self {
+        Self { n_neighbors: 5 }
+    }
+}
+
+impl NearestNeighbors {
+    /// Graph with `k` neighbors.
+    pub fn new(k: usize) -> Self {
+        Self { n_neighbors: k }
+    }
+}
+
+/// Fitted neighbor graph (stores the training set).
+#[derive(Clone, Debug)]
+pub struct FittedNearestNeighbors {
+    /// Training features.
+    pub x_train: Matrix,
+    /// Neighbors requested.
+    pub n_neighbors: usize,
+}
+
+/// Distances and indices from [`FittedNearestNeighbors::kneighbors`].
+#[derive(Clone, Debug)]
+pub struct NeighborGraph {
+    /// `n_query × k` Euclidean distances.
+    pub distances: Matrix,
+    /// Row indices into the training set.
+    pub indices: Vec<Vec<usize>>,
+}
+
+impl FittedNearestNeighbors {
+    /// k-NN of each query row.
+    pub fn kneighbors(
+        &self,
+        query: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<NeighborGraph>> {
+        let mut ctx = FitCtx::with_session(session.child("kneighbors"));
+        predict_shape_guard(&mut ctx, query, self.x_train.ncols());
+        let k = self.n_neighbors.max(1).min(self.x_train.nrows().max(1));
+        if self.n_neighbors == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message("n_neighbors=0; using 1")
+                    .build(),
+            );
+        }
+        if self.x_train.nrows() == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .message("NearestNeighbors has an empty training set")
+                    .build(),
+            );
+            return ctx.finish(NeighborGraph {
+                distances: Matrix::zeros(query.nrows(), 0),
+                indices: vec![Vec::new(); query.nrows()],
+            });
+        }
+        let mut distances = Matrix::zeros(query.nrows(), k);
+        let mut indices = Vec::with_capacity(query.nrows());
+        for i in 0..query.nrows() {
+            let order = knn_order(&self.x_train, query, i);
+            let mut idx = Vec::with_capacity(k);
+            for (t, &(d2, j)) in order.iter().take(k).enumerate() {
+                distances.set(i, t, d2.max(0.0).sqrt());
+                idx.push(j);
+            }
+            indices.push(idx);
+        }
+        ctx.finish(NeighborGraph { distances, indices })
+    }
+}
+
+/// k-NN graph transformer (sklearn `KNeighborsTransformer`).
+///
+/// Neighbor count is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct KNeighborsTransformer {
+    /// Neighbors marked as 1 in the graph.
+    pub n_neighbors: usize,
+}
+
+impl Default for KNeighborsTransformer {
+    fn default() -> Self {
+        Self { n_neighbors: 5 }
+    }
+}
+
+impl KNeighborsTransformer {
+    /// Graph with `k` neighbors.
+    pub fn new(k: usize) -> Self {
+        Self {
+            n_neighbors: k.max(1),
+        }
+    }
+}
+
+/// Fitted k-NN graph transformer.
+#[derive(Clone, Debug)]
+pub struct FittedKNeighborsTransformer {
+    inner: FittedNearestNeighbors,
+}
+
+impl FitUnsupervised for KNeighborsTransformer {
+    type Fitted = FittedKNeighborsTransformer;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedKNeighborsTransformer>> {
+        let mut nn = NearestNeighbors::new(self.n_neighbors.max(1));
+        let q = nn.fit_unsupervised(x, session)?;
+        Ok(q.map(|inner| FittedKNeighborsTransformer { inner }))
+    }
+}
+
+impl Transform for FittedKNeighborsTransformer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let g = match self.inner.kneighbors(x, session) {
+            Ok(q) => q.value,
+            Err(e) => {
+                ctx.push(e.primary);
+                return ctx.finish(Matrix::zeros(x.nrows(), self.inner.x_train.nrows()));
+            }
+        };
+        let n_ref = self.inner.x_train.nrows();
+        let mut out = Matrix::zeros(x.nrows(), n_ref);
+        for i in 0..x.nrows() {
+            if let Some(idx) = g.indices.get(i) {
+                for &j in idx {
+                    if j < n_ref {
+                        out.set(i, j, 1.0);
+                    }
+                }
+            }
+        }
+        ctx.finish(out)
+    }
+}
+
+/// Radius-neighbor graph transformer (sklearn `RadiusNeighborsTransformer`).
+///
+/// Radius is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RadiusNeighborsTransformer {
+    /// Neighbor radius (Euclidean).
+    pub radius: f64,
+}
+
+impl Default for RadiusNeighborsTransformer {
+    fn default() -> Self {
+        Self { radius: 1.0 }
+    }
+}
+
+impl RadiusNeighborsTransformer {
+    /// Graph with radius `radius`.
+    pub fn new(radius: f64) -> Self {
+        Self { radius }
+    }
+}
+
+/// Fitted radius-neighbor graph.
+#[derive(Clone, Debug)]
+pub struct FittedRadiusNeighborsTransformer {
+    x_train: Matrix,
+    radius: f64,
+}
+
+impl FitUnsupervised for RadiusNeighborsTransformer {
+    type Fitted = FittedRadiusNeighborsTransformer;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedRadiusNeighborsTransformer>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let mut radius = self.radius;
+        if !radius.is_finite() || radius < 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .severity(Severity::Warning)
+                    .message(format!("radius={radius} is not a non-negative finite; using 1"))
+                    .build(),
+            );
+            radius = 1.0;
+        }
+        ctx.finish(FittedRadiusNeighborsTransformer {
+            x_train: x.clone(),
+            radius,
+        })
+    }
+}
+
+impl Transform for FittedRadiusNeighborsTransformer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let n_ref = self.x_train.nrows();
+        let r2 = self.radius * self.radius;
+        let out = Matrix::from_fn(x.nrows(), n_ref, |i, j| {
+            if sq_dist_row(&self.x_train, j, x, i) <= r2 {
+                1.0
+            } else {
+                0.0
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
+impl FitUnsupervised for NearestNeighbors {
+    type Fitted = FittedNearestNeighbors;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedNearestNeighbors>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.nrows() == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .message("NearestNeighbors fit on an empty design")
+                    .build(),
+            );
+        }
+        ctx.finish(FittedNearestNeighbors {
+            x_train: x.clone(),
+            n_neighbors: self.n_neighbors.max(1),
+        })
     }
 }
 
@@ -442,6 +690,119 @@ impl Fit for RadiusNeighborsClassifier {
             classes,
             radius: self.radius,
             fallback,
+        })
+    }
+}
+
+/// Radius-neighbors regressor (mean of responses inside a Euclidean ball).
+#[derive(Clone, Debug)]
+pub struct RadiusNeighborsRegressor {
+    /// Inclusive radius (Euclidean).
+    pub radius: f64,
+}
+
+impl Default for RadiusNeighborsRegressor {
+    fn default() -> Self {
+        Self { radius: 1.0 }
+    }
+}
+
+impl RadiusNeighborsRegressor {
+    /// Regressor with the given radius.
+    pub fn new(radius: f64) -> Self {
+        Self { radius }
+    }
+}
+
+/// Fitted radius-neighbors regressor.
+#[derive(Clone, Debug)]
+pub struct FittedRadiusNeighborsReg {
+    /// Training features.
+    pub x_train: Matrix,
+    /// Training response.
+    pub y_train: Vector,
+    /// Ball radius.
+    pub radius: f64,
+    /// Global mean used when a query has an empty neighborhood.
+    pub fallback: f64,
+}
+
+impl Predict for FittedRadiusNeighborsReg {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        predict_shape_guard(&mut ctx, x, self.x_train.ncols());
+        let r2 = (self.radius.max(0.0)).powi(2);
+        let mut empty = 0usize;
+        let mut out = Vector::zeros(x.nrows());
+        for i in 0..x.nrows() {
+            let mut s = 0.0;
+            let mut hit = 0.0;
+            for t in 0..self.x_train.nrows() {
+                if sq_dist_row(&self.x_train, t, x, i) <= r2 {
+                    s += self.y_train[t];
+                    hit += 1.0;
+                }
+            }
+            if hit == 0.0 {
+                empty += 1;
+                out[i] = self.fallback;
+            } else {
+                out[i] = s / hit;
+            }
+        }
+        if empty > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::InsufficientSample)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "{empty} / {} queries have an empty radius neighborhood",
+                        x.nrows()
+                    ))
+                    .build(),
+            );
+        }
+        if empty == x.nrows() && x.nrows() > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("every query had an empty neighborhood")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "radius-neighbors regression",
+                        "the radius isolated every query from the training set",
+                        "increase the radius or rescale features",
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(out)
+    }
+}
+
+impl Fit for RadiusNeighborsRegressor {
+    type Fitted = FittedRadiusNeighborsReg;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedRadiusNeighborsReg>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        if !self.radius.is_finite() || self.radius < 0.0 {
+            ctx.push(
+                Issue::builder(IssueCode::InvalidWeight)
+                    .message(format!(
+                        "radius={} is not a finite non-negative number",
+                        self.radius
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(FittedRadiusNeighborsReg {
+            x_train: x.clone(),
+            y_train: y.clone(),
+            radius: self.radius,
+            fallback: y.mean(),
         })
     }
 }
@@ -824,6 +1185,191 @@ impl Fit for NearestCentroid {
     }
 }
 
+/// Neighbourhood components analysis (Goldberger et al.): a linear map
+/// trained to raise leave-one-out softmax k-NN accuracy.
+///
+/// Do not pass `n_components` as `p` to identification — a 2-d embedding of
+/// 40 labelled rows is identified. Single-class `y` is vacuous via
+/// [`inspect_classes`].
+#[derive(Clone, Debug)]
+pub struct NeighborhoodComponentsAnalysis {
+    /// Embedding dimension.
+    pub n_components: usize,
+    /// Gradient steps.
+    pub max_iter: usize,
+    components: Matrix,
+    fitted: bool,
+}
+
+impl Default for NeighborhoodComponentsAnalysis {
+    fn default() -> Self {
+        Self {
+            n_components: 2,
+            max_iter: 40,
+            components: Matrix::zeros(0, 0),
+            fitted: false,
+        }
+    }
+}
+
+impl NeighborhoodComponentsAnalysis {
+    /// Embed into `n_components` dimensions.
+    pub fn new(n_components: usize) -> Self {
+        Self {
+            n_components: n_components.max(1),
+            ..Self::default()
+        }
+    }
+}
+
+impl Fit for NeighborhoodComponentsAnalysis {
+    type Fitted = Self;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        if counts.len() < 2 {
+            self.fitted = true;
+            self.components = Matrix::zeros(x.ncols(), self.n_components.max(1));
+            return ctx.finish(self.clone());
+        }
+        let (n, p) = x.shape();
+        let k = self.n_components.max(1).min(p.max(1));
+        if k < self.n_components {
+            ctx.push(
+                Issue::builder(IssueCode::ComponentsExceedRank)
+                    .message(format!(
+                        "NCA requested {} components, using {k}",
+                        self.n_components
+                    ))
+                    .build(),
+            );
+        }
+        let mut a = Matrix::zeros(p, k);
+        for j in 0..k.min(p) {
+            a.set(j, j, 1.0);
+        }
+        let labs: Vec<i64> = y.as_slice().iter().map(|&v| v.round() as i64).collect();
+        let lr = 0.05;
+        for it in 0..self.max_iter.max(1) {
+            let z = Matrix::from_fn(n, k, |i, c| {
+                let mut s = 0.0;
+                for j in 0..p.min(a.nrows()) {
+                    s += x.get(i, j) * a.get(j, c);
+                }
+                s
+            });
+            let mut grad = Matrix::zeros(p, k);
+            let mut obj = 0.0;
+            for i in 0..n {
+                let mut logits = vec![0.0; n];
+                let mut m = f64::NEG_INFINITY;
+                for j in 0..n {
+                    if i == j {
+                        logits[j] = f64::NEG_INFINITY;
+                        continue;
+                    }
+                    let mut d2 = 0.0;
+                    for c in 0..k {
+                        let d = z.get(i, c) - z.get(j, c);
+                        d2 += d * d;
+                    }
+                    logits[j] = -d2;
+                    if logits[j] > m {
+                        m = logits[j];
+                    }
+                }
+                let mut den = 0.0;
+                let mut pij = vec![0.0; n];
+                for j in 0..n {
+                    if i == j {
+                        continue;
+                    }
+                    let e = (logits[j] - m).exp();
+                    pij[j] = e;
+                    den += e;
+                }
+                if den <= 1e-18 {
+                    continue;
+                }
+                for j in 0..n {
+                    pij[j] /= den;
+                }
+                let mut pi = 0.0;
+                for j in 0..n {
+                    if labs[j] == labs[i] {
+                        pi += pij[j];
+                    }
+                }
+                obj += pi;
+                for j in 0..n {
+                    if i == j {
+                        continue;
+                    }
+                    let same = if labs[j] == labs[i] { 1.0 } else { 0.0 };
+                    let gij = pij[j] * (same - pi);
+                    for c in 0..k {
+                        let dz = z.get(i, c) - z.get(j, c);
+                        for u in 0..p {
+                            grad.set(
+                                u,
+                                c,
+                                grad.get(u, c) + 2.0 * gij * dz * (x.get(i, u) - x.get(j, u)),
+                            );
+                        }
+                    }
+                }
+            }
+            ctx.session.step(it as u64, -obj, None);
+            for u in 0..p {
+                for c in 0..k {
+                    a.set(u, c, a.get(u, c) + lr * grad.get(u, c) / n as f64);
+                }
+            }
+        }
+        if !obj_is_ok(&a) {
+            ctx.push(
+                Issue::builder(IssueCode::NonFiniteOutput)
+                    .message("NCA components contain NaN/Inf")
+                    .build(),
+            );
+        }
+        self.components = a;
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+fn obj_is_ok(a: &Matrix) -> bool {
+    for i in 0..a.nrows() {
+        for j in 0..a.ncols() {
+            if !a.get(i, j).is_finite() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+impl Transform for NeighborhoodComponentsAnalysis {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), self.n_components.max(1)));
+        }
+        let k = self.components.ncols();
+        let z = Matrix::from_fn(x.nrows(), k, |i, c| {
+            let mut s = 0.0;
+            for j in 0..x.ncols().min(self.components.nrows()) {
+                s += x.get(i, j) * self.components.get(j, c);
+            }
+            s
+        });
+        ctx.finish(z)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -933,5 +1479,79 @@ mod tests {
             .unwrap()
             .value[0];
         assert!(l0 > lf, "log-density at 0 ({l0}) should exceed far ({lf})");
+    }
+
+    #[test]
+    fn radius_regressor_recovers_a_line() {
+        let x = Matrix::from_fn(16, 1, |i, _| i as f64);
+        let y = Vector::from_iter((0..16).map(|i| 2.0 * i as f64));
+        let q = RadiusNeighborsRegressor { radius: 2.5 }
+            .fit(&x, &y, &Session::new("rnr", "fit"))
+            .expect("rnr");
+        let pred = q
+            .value
+            .predict(&x, &Session::new("rnr", "p"))
+            .unwrap()
+            .value;
+        assert!((pred[8] - 16.0).abs() < 3.0, "pred8={}", pred[8]);
+    }
+
+    #[test]
+    fn nca_embeds_two_blobs() {
+        let x = Matrix::from_fn(40, 2, |i, j| {
+            if i < 20 {
+                -3.0 + 0.05 * i as f64 + 0.02 * j as f64
+            } else {
+                3.0 + 0.05 * (i as f64 - 20.0) + 0.02 * j as f64
+            }
+        });
+        let y = Vector::from_iter((0..40).map(|i| if i < 20 { 0.0 } else { 1.0 }));
+        let mut nca = NeighborhoodComponentsAnalysis::new(2);
+        nca.fit(&x, &y, &Session::new("nca", "fit")).expect("nca");
+        let z = nca
+            .transform(&x, &Session::new("nca", "t"))
+            .expect("ncat")
+            .value;
+        assert_eq!(z.shape(), (40, 2));
+        assert!(z.get(0, 0).is_finite());
+    }
+
+    #[test]
+    fn nearest_neighbors_graph() {
+        let x = Matrix::from_fn(8, 1, |i, _| i as f64);
+        let q = NearestNeighbors::new(2)
+            .fit_unsupervised(&x, &Session::new("nn", "fit"))
+            .expect("nn");
+        let g = q
+            .value
+            .kneighbors(&x, &Session::new("nn", "k"))
+            .expect("k")
+            .value;
+        assert_eq!(g.distances.ncols(), 2);
+        assert_eq!(g.indices.len(), 8);
+        assert_eq!(g.indices[0][0], 0);
+        assert!(g.distances.get(0, 0).abs() < 1e-12);
+        let knnt = KNeighborsTransformer::new(2)
+            .fit_unsupervised(&x, &Session::new("knntr", "fit"))
+            .expect("knntr");
+        let graph = knnt
+            .value
+            .transform(&x, &Session::new("knntr", "t"))
+            .expect("knntrt")
+            .value;
+        assert_eq!(graph.shape(), (8, 8));
+        assert!((graph.get(0, 0) - 1.0).abs() < 1e-12);
+        let rnt = RadiusNeighborsTransformer::new(1.5)
+            .fit_unsupervised(&x, &Session::new("rnt", "fit"))
+            .expect("rnt");
+        let rg = rnt
+            .value
+            .transform(&x, &Session::new("rnt", "t"))
+            .expect("rntt")
+            .value;
+        assert_eq!(rg.shape(), (8, 8));
+        assert!((rg.get(0, 0) - 1.0).abs() < 1e-12);
+        assert!((rg.get(0, 1) - 1.0).abs() < 1e-12);
+        assert!(rg.get(0, 7).abs() < 1e-12);
     }
 }

@@ -161,12 +161,18 @@ pub enum RankHint {
     Zero,
 }
 
-/// Classify `κ = σ_max / σ_min` (pass `+∞` when `σ_min == 0`).
+/// Classify `κ = σ_max / σ_min` (pass `+∞` when `σ_min == 0` but `σ_max > 0`).
+///
+/// Infinite `κ` is **near-singular / rank-deficient**, not the zero map:
+/// `σ_min = 0` with `σ_max > 0` still has a well-defined column space. Callers
+/// that observe `σ_max ≈ 0` must emit [`IssueCode::RankZero`] themselves.
+/// `κ` that is NaN is treated as rank-zero because no singular-value ratio is
+/// defined.
 pub fn classify_condition_number(kappa: f64, policy: &Policy) -> RankHint {
-    if !kappa.is_finite() || kappa.is_infinite() {
+    if kappa.is_nan() {
         return RankHint::Zero;
     }
-    if kappa >= policy.condition_number_error {
+    if kappa.is_infinite() || kappa >= policy.condition_number_error {
         RankHint::NearSingular
     } else if kappa >= policy.condition_number_warn {
         RankHint::Ill
@@ -199,12 +205,12 @@ pub fn condition_issue(kappa: f64, policy: &Policy) -> Option<Issue> {
         ),
         RankHint::Zero => Some(
             Issue::builder(IssueCode::RankZero)
-                .message("condition number is non-finite; every singular value is ~0")
-                .metric("condition_number", f64::INFINITY)
+                .message("condition number is NaN; the singular-value ratio is undefined")
+                .metric("condition_number", f64::NAN)
                 .meaninglessness(Meaninglessness::vacuous(
                     "linear solve / inverse",
-                    "the operator is the zero map at working precision",
-                    "stop; do not invert or interpret coefficients",
+                    "κ = σ_max/σ_min is not a number, so no column space can be trusted",
+                    "stop; inspect the factorization before inverting",
                 ))
                 .build(),
         ),
@@ -302,5 +308,17 @@ mod tests {
         let st = slice_stats(&[2.0, 2.0, 2.0]);
         assert!(st.is_constant(0.0));
         assert_eq!(st.std(), 0.0);
+    }
+
+    #[test]
+    fn infinite_kappa_is_near_singular_not_the_zero_map() {
+        let p = Policy::default();
+        assert_eq!(
+            classify_condition_number(f64::INFINITY, &p),
+            RankHint::NearSingular
+        );
+        let issue = condition_issue(f64::INFINITY, &p).expect("inf kappa");
+        assert_eq!(issue.code, IssueCode::NearSingular);
+        assert_eq!(classify_condition_number(f64::NAN, &p), RankHint::Zero);
     }
 }

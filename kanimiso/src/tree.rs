@@ -8,7 +8,7 @@
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::rng::Rng;
-use crate::traits::{Fit, FitUnsupervised, Predict};
+use crate::traits::{Fit, FitUnsupervised, Predict, Transform};
 use crate::validate::{inspect_classes, inspect_xy};
 use ojizou_san::Session;
 use signlred::{Issue, IssueCode, Meaninglessness, Qualified, Result};
@@ -132,6 +132,25 @@ fn labels_of(y: &Vector) -> Vec<i64> {
 
 fn unit_weights(n: usize) -> Vec<f64> {
     vec![1.0; n]
+}
+
+fn weighted_bootstrap(w: &[f64], rng: &mut Rng) -> Vec<usize> {
+    let n = w.len();
+    let mut cdf = vec![0.0; n];
+    let mut acc = 0.0;
+    for i in 0..n {
+        acc += w[i].max(0.0);
+        cdf[i] = acc;
+    }
+    if acc <= 0.0 || n == 0 {
+        return (0..n).collect();
+    }
+    (0..n)
+        .map(|_| {
+            let u = rng.uniform() * acc;
+            cdf.iter().position(|&c| c >= u).unwrap_or(n - 1)
+        })
+        .collect()
 }
 
 /// Classification tree node.
@@ -1293,6 +1312,202 @@ impl Fit for ExtraTreesClassifier {
     }
 }
 
+/// Single extremely randomized Gini tree (sklearn `ExtraTreeClassifier`).
+///
+/// This is [`ExtraTreesClassifier`] with one tree. Feature subsample size is
+/// not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ExtraTreeClassifier {
+    /// Maximum tree depth.
+    pub max_depth: usize,
+    /// Minimum samples required to attempt a split.
+    pub min_samples_split: usize,
+    /// Feature subsample size (`None` ⇒ \(\sqrt{p}\)).
+    pub max_features: Option<usize>,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for ExtraTreeClassifier {
+    fn default() -> Self {
+        Self {
+            max_depth: 8,
+            min_samples_split: 2,
+            max_features: None,
+            seed: 0,
+        }
+    }
+}
+
+impl ExtraTreeClassifier {
+    /// Default single extra-tree classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for ExtraTreeClassifier {
+    type Fitted = FittedForestClassifier;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedForestClassifier>> {
+        ExtraTreesClassifier {
+            n_estimators: 1,
+            max_depth: self.max_depth,
+            min_samples_split: self.min_samples_split,
+            max_features: self.max_features,
+            seed: self.seed,
+        }
+        .fit(x, y, session)
+    }
+}
+
+/// Extremely randomized MSE trees (random thresholds, full sample).
+#[derive(Clone, Debug)]
+pub struct ExtraTreesRegressor {
+    /// Number of trees.
+    pub n_estimators: usize,
+    /// Maximum tree depth.
+    pub max_depth: usize,
+    /// Minimum samples required to attempt a split.
+    pub min_samples_split: usize,
+    /// Feature subsample size (`None` ⇒ all features).
+    pub max_features: Option<usize>,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for ExtraTreesRegressor {
+    fn default() -> Self {
+        Self {
+            n_estimators: 20,
+            max_depth: 8,
+            min_samples_split: 2,
+            max_features: None,
+            seed: 0,
+        }
+    }
+}
+
+impl ExtraTreesRegressor {
+    /// Default extra-trees regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for ExtraTreesRegressor {
+    type Fitted = FittedForestRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedForestRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let ys = y.as_slice().to_vec();
+        let w = unit_weights(x.nrows());
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        let n_est = self.n_estimators.max(1);
+        let idx: Vec<usize> = (0..x.nrows()).collect();
+        for t in 0..n_est {
+            let mut trng = Rng::new(rng.next_u64());
+            trees.push(grow_reg(
+                x,
+                &ys,
+                &idx,
+                &w,
+                0,
+                self.max_depth,
+                self.min_samples_split,
+                self.max_features,
+                true,
+                &mut trng,
+                ctx.policy.near_zero_variance,
+            ));
+            ctx.session.step(t as u64, 0.0, None);
+        }
+        let fitted = FittedForestRegressor {
+            trees,
+            n_features: x.ncols(),
+        };
+        let pred = {
+            let mut out = Vector::zeros(x.nrows());
+            if !fitted.trees.is_empty() {
+                let inv = 1.0 / fitted.trees.len() as f64;
+                for i in 0..x.nrows() {
+                    let mut s = 0.0;
+                    for t in &fitted.trees {
+                        s += predict_reg_one(t, x, i);
+                    }
+                    out[i] = s * inv;
+                }
+            }
+            out
+        };
+        diagnose_constant_predictions(&mut ctx, &pred, y);
+        ctx.finish(fitted)
+    }
+}
+
+/// Single extremely randomized MSE tree (sklearn `ExtraTreeRegressor`).
+///
+/// This is [`ExtraTreesRegressor`] with one tree. Feature subsample size is
+/// not identification `p`.
+#[derive(Clone, Debug)]
+pub struct ExtraTreeRegressor {
+    /// Maximum tree depth.
+    pub max_depth: usize,
+    /// Minimum samples required to attempt a split.
+    pub min_samples_split: usize,
+    /// Feature subsample size (`None` ⇒ all features).
+    pub max_features: Option<usize>,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for ExtraTreeRegressor {
+    fn default() -> Self {
+        Self {
+            max_depth: 8,
+            min_samples_split: 2,
+            max_features: None,
+            seed: 0,
+        }
+    }
+}
+
+impl ExtraTreeRegressor {
+    /// Default single extra-tree regressor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for ExtraTreeRegressor {
+    type Fitted = FittedForestRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedForestRegressor>> {
+        ExtraTreesRegressor {
+            n_estimators: 1,
+            max_depth: self.max_depth,
+            min_samples_split: self.min_samples_split,
+            max_features: self.max_features,
+            seed: self.seed,
+        }
+        .fit(x, y, session)
+    }
+}
+
 /// Friedman gradient boosting for squared error.
 #[derive(Clone, Debug)]
 pub struct GradientBoostingRegressor {
@@ -1914,6 +2129,197 @@ impl Fit for AdaBoostClassifier {
     }
 }
 
+/// AdaBoost.R2 regressor (Drucker 1997).
+#[derive(Clone, Debug)]
+pub struct AdaBoostRegressor {
+    /// Number of weak learners.
+    pub n_estimators: usize,
+    /// Shrinkage on \(\ln(1/\beta)\).
+    pub learning_rate: f64,
+    /// Weak-learner depth.
+    pub max_depth: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for AdaBoostRegressor {
+    fn default() -> Self {
+        Self {
+            n_estimators: 30,
+            learning_rate: 1.0,
+            max_depth: 3,
+            seed: 0,
+        }
+    }
+}
+
+impl AdaBoostRegressor {
+    /// Default AdaBoost.R2.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted AdaBoost.R2 model.
+#[derive(Clone, Debug)]
+pub struct FittedAdaBoostRegressor {
+    trees: Vec<RegNode>,
+    /// Stage weights \(\ln(1/\beta_m)\).
+    pub alphas: Vec<f64>,
+    /// Training feature count.
+    pub n_features: usize,
+}
+
+impl FittedAdaBoostRegressor {
+    fn predict_vec(&self, x: &Matrix) -> Vector {
+        Vector::from_iter((0..x.nrows()).map(|i| {
+            let mut pairs: Vec<(f64, f64)> = self
+                .trees
+                .iter()
+                .zip(&self.alphas)
+                .map(|(t, a)| (predict_reg_one(t, x, i), *a))
+                .collect();
+            if pairs.is_empty() {
+                return 0.0;
+            }
+            pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let tot: f64 = pairs.iter().map(|(_, a)| *a).sum();
+            let mut acc = 0.0;
+            for (v, a) in pairs {
+                acc += a;
+                if acc >= 0.5 * tot {
+                    return v;
+                }
+            }
+            0.0
+        }))
+    }
+}
+
+impl Predict for FittedAdaBoostRegressor {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        predict_shape_guard(&mut ctx, x, self.n_features);
+        ctx.finish(self.predict_vec(x))
+    }
+}
+
+impl Fit for AdaBoostRegressor {
+    type Fitted = FittedAdaBoostRegressor;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedAdaBoostRegressor>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        let n = x.nrows();
+        if n == 0 || ctx.report.contains(IssueCode::ConstantTarget) {
+            return ctx.finish(FittedAdaBoostRegressor {
+                trees: Vec::new(),
+                alphas: Vec::new(),
+                n_features: x.ncols(),
+            });
+        }
+        let ys = y.as_slice().to_vec();
+        let mut w = vec![1.0 / n as f64; n];
+        let mut rng = Rng::new(self.seed);
+        let mut trees = Vec::new();
+        let mut alphas = Vec::new();
+        for m in 0..self.n_estimators.max(1) {
+            let mut trng = Rng::new(rng.next_u64());
+            let sample = weighted_bootstrap(&w, &mut trng);
+            let unit = vec![1.0; n];
+            let tree = grow_reg(
+                x,
+                &ys,
+                &sample,
+                &unit,
+                0,
+                self.max_depth,
+                2,
+                None,
+                false,
+                &mut trng,
+                ctx.policy.near_zero_variance,
+            );
+            let pred = predict_reg_vec(&tree, x);
+            let mut max_e = 0.0;
+            let mut err = vec![0.0; n];
+            for i in 0..n {
+                err[i] = (ys[i] - pred[i]).abs();
+                if err[i] > max_e {
+                    max_e = err[i];
+                }
+            }
+            if max_e <= ctx.policy.near_zero_variance {
+                ctx.session.step(m as u64, 0.0, Some(f64::INFINITY));
+                trees.push(tree);
+                alphas.push(1.0);
+                break;
+            }
+            let mut lbar = 0.0;
+            for i in 0..n {
+                lbar += w[i] * (err[i] / max_e);
+            }
+            if lbar >= 0.5 {
+                if trees.is_empty() {
+                    ctx.push(
+                        Issue::builder(IssueCode::MeaninglessFit)
+                            .message(format!(
+                                "AdaBoost.R2 stage {m} has weighted loss {lbar:.4} ≥ 1/2; β is undefined"
+                            ))
+                            .meaninglessness(Meaninglessness::vacuous(
+                                "AdaBoost.R2 stage weight",
+                                "the weak learner is not better than the median-absolute-error null",
+                                "use deeper trees or a smoother target",
+                            ))
+                            .build(),
+                    );
+                } else {
+                    ctx.push(
+                        Issue::builder(IssueCode::DidNotConverge)
+                            .message(format!(
+                                "AdaBoost.R2 stopped at stage {m}: weighted loss {lbar:.4} ≥ 1/2"
+                            ))
+                            .build(),
+                    );
+                }
+                break;
+            }
+            let beta = (lbar / (1.0 - lbar).max(1e-15)).max(1e-12);
+            let alpha = self.learning_rate * (1.0 / beta).ln();
+            for i in 0..n {
+                w[i] *= beta.powf(1.0 - err[i] / max_e);
+            }
+            let z: f64 = w.iter().sum::<f64>().max(1e-15);
+            for wi in &mut w {
+                *wi /= z;
+            }
+            ctx.session.step(m as u64, lbar, Some(alpha));
+            trees.push(tree);
+            alphas.push(alpha);
+        }
+        if trees.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::UnidentifiedModel)
+                    .message("AdaBoost.R2 produced no usable weak learners")
+                    .build(),
+            );
+        }
+        let fitted = FittedAdaBoostRegressor {
+            trees,
+            alphas,
+            n_features: x.ncols(),
+        };
+        let pred = fitted.predict_vec(x);
+        diagnose_constant_predictions(&mut ctx, &pred, y);
+        ctx.finish(fitted)
+    }
+}
+
 /// Isolation Forest (Liu, Ting, Zhou): random-split path-length anomaly scores.
 ///
 /// The later `anomaly` module reuses [`FittedIsolationForest`] scores.
@@ -2047,6 +2453,138 @@ impl FitUnsupervised for IsolationForest {
     }
 }
 
+fn iso_leaf_code(node: &IsoNode, x: &Matrix, i: usize) -> u64 {
+    match node {
+        IsoNode::External { size, depth } => (*depth as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(*size as u64),
+        IsoNode::Internal {
+            feature,
+            threshold,
+            left,
+            right,
+        } => {
+            let bit = if x.get(i, *feature) <= *threshold {
+                1
+            } else {
+                2
+            };
+            iso_leaf_code(if bit == 1 { left } else { right }, x, i)
+                .wrapping_mul(3)
+                .wrapping_add(*feature as u64 + bit)
+        }
+    }
+}
+
+/// Completely-random tree leaf embedding (sklearn `RandomTreesEmbedding`).
+///
+/// Tree count and hash width are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RandomTreesEmbedding {
+    /// Number of random trees.
+    pub n_estimators: usize,
+    /// Hashed leaf-code width.
+    pub n_components: usize,
+    /// PRNG seed.
+    pub seed: u64,
+}
+
+impl Default for RandomTreesEmbedding {
+    fn default() -> Self {
+        Self {
+            n_estimators: 8,
+            n_components: 8,
+            seed: 0,
+        }
+    }
+}
+
+impl RandomTreesEmbedding {
+    /// Embedding with `n_estimators` trees and `n_components` hash bins.
+    pub fn new(n_estimators: usize, n_components: usize) -> Self {
+        Self {
+            n_estimators,
+            n_components,
+            ..Self::default()
+        }
+    }
+}
+
+/// Fitted random-tree leaf embedding.
+#[derive(Clone, Debug)]
+pub struct FittedRandomTreesEmbedding {
+    trees: Vec<IsoNode>,
+    n_components: usize,
+    n_features: usize,
+}
+
+impl FitUnsupervised for RandomTreesEmbedding {
+    type Fitted = FittedRandomTreesEmbedding;
+    fn fit_unsupervised(
+        &mut self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedRandomTreesEmbedding>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let n = x.nrows();
+        let n_est = self.n_estimators.max(1);
+        let n_comp = self.n_components.max(1);
+        if n == 0 || x.ncols() == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .severity(signlred::Severity::Warning)
+                    .message("RandomTreesEmbedding received an empty design")
+                    .build(),
+            );
+            return ctx.finish(FittedRandomTreesEmbedding {
+                trees: Vec::new(),
+                n_components: n_comp,
+                n_features: x.ncols(),
+            });
+        }
+        let max_depth = (n as f64).log2().ceil().max(1.0) as usize;
+        let mut rng = Rng::new(self.seed ^ 0xA11CE);
+        let mut trees = Vec::with_capacity(n_est);
+        for t in 0..n_est {
+            let mut trng = Rng::new(rng.next_u64());
+            let idx: Vec<usize> = (0..n).collect();
+            trees.push(grow_iso(x, &idx, 0, max_depth.max(2), &mut trng));
+            ctx.session.step(t as u64, 0.0, None);
+        }
+        ctx.finish(FittedRandomTreesEmbedding {
+            trees,
+            n_components: n_comp,
+            n_features: x.ncols(),
+        })
+    }
+}
+
+impl Transform for FittedRandomTreesEmbedding {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        if x.ncols() != self.n_features {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .severity(signlred::Severity::Warning)
+                    .message("RandomTreesEmbedding column count changed")
+                    .build(),
+            );
+        }
+        let m = self.n_components.max(1);
+        let mut out = Matrix::zeros(x.nrows(), m);
+        for i in 0..x.nrows() {
+            for (t, tree) in self.trees.iter().enumerate() {
+                let code = iso_leaf_code(tree, x, i).wrapping_add(t as u64);
+                let bin = (code as usize) % m;
+                out.set(i, bin, out.get(i, bin) + 1.0);
+            }
+        }
+        ctx.finish(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2147,6 +2685,19 @@ mod tests {
             .value;
         assert!(accuracy(&p, &y) > 0.8);
 
+        let etc = ExtraTreeClassifier {
+            seed: 5,
+            ..ExtraTreeClassifier::default()
+        }
+        .fit(&x, &y, &Session::new("extra_tree", "fit"))
+        .expect("etc");
+        let p1 = etc
+            .value
+            .predict(&x, &Session::new("extra_tree", "predict"))
+            .unwrap()
+            .value;
+        assert_eq!(p1.len(), y.len());
+
         let gbc = GradientBoostingClassifier {
             n_estimators: 20,
             learning_rate: 0.2,
@@ -2231,6 +2782,17 @@ mod tests {
             s_out[0],
             mean_in
         );
+        let emb = RandomTreesEmbedding::new(4, 6)
+            .fit_unsupervised(&x, &Session::new("rte", "fit"))
+            .expect("rte");
+        let z = emb
+            .value
+            .transform(&x, &Session::new("rte", "t"))
+            .unwrap()
+            .value;
+        assert_eq!(z.nrows(), x.nrows());
+        assert_eq!(z.ncols(), 6);
+        assert!(z.get(0, 0).is_finite());
     }
 
     #[test]
@@ -2245,6 +2807,18 @@ mod tests {
         }
         .fit(&x, &y, &Session::new("gbr", "fit"))
         .expect("gbr");
+        let etr = ExtraTreeRegressor {
+            seed: 3,
+            ..ExtraTreeRegressor::default()
+        }
+        .fit(&x, &y, &Session::new("etr", "fit"))
+        .expect("etr");
+        let etp = etr
+            .value
+            .predict(&x, &Session::new("etr", "predict"))
+            .unwrap()
+            .value;
+        assert_eq!(etp.len(), y.len());
         let pred = q
             .value
             .predict(&x, &Session::new("gbr", "predict"))
@@ -2257,6 +2831,34 @@ mod tests {
         }
         assert!(
             sse / (y.len() as f64) < 0.5,
+            "mse={}",
+            sse / (y.len() as f64)
+        );
+    }
+
+    #[test]
+    fn adaboost_r2_fits_a_line() {
+        let x = Matrix::from_fn(16, 1, |i, _| i as f64);
+        let y = Vector::from_iter((0..16).map(|i| 0.4 * i as f64 + 0.1 * ((i % 3) as f64)));
+        let q = AdaBoostRegressor {
+            n_estimators: 25,
+            max_depth: 4,
+            ..AdaBoostRegressor::default()
+        }
+        .fit(&x, &y, &Session::new("abr", "fit"))
+        .expect("abr");
+        let pred = q
+            .value
+            .predict(&x, &Session::new("abr", "p"))
+            .unwrap()
+            .value;
+        let mut sse = 0.0;
+        for i in 0..y.len() {
+            let e = pred[i] - y[i];
+            sse += e * e;
+        }
+        assert!(
+            sse / (y.len() as f64) < 1.0,
             "mse={}",
             sse / (y.len() as f64)
         );

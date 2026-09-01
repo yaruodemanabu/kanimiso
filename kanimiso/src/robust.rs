@@ -8,7 +8,9 @@ use crate::rng::Rng;
 use crate::traits::{Fit, Predict};
 use crate::validate::{inspect_identification, inspect_xy};
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result};
+use signlred::{
+    Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result, Severity,
+};
 
 /// RANSAC wrapper around OLS.
 #[derive(Clone, Debug)]
@@ -641,6 +643,145 @@ impl Fit for GammaRegressor {
     }
 }
 
+/// Inverse-Gaussian GLM with a log link (sklearn `TweedieRegressor(power=3)` / statsmodels `GLM`).
+///
+/// Variance \(\mu^3\). The IRLS working weight is \(1/\mu\).
+#[derive(Clone, Debug)]
+pub struct InverseGaussianRegressor {
+    /// ℓ₂ penalty.
+    pub alpha: f64,
+    /// Max IRLS iterations.
+    pub max_iter: usize,
+    /// Intercept.
+    pub fit_intercept: bool,
+}
+
+impl Default for InverseGaussianRegressor {
+    fn default() -> Self {
+        Self {
+            alpha: 0.0,
+            max_iter: 40,
+            fit_intercept: true,
+        }
+    }
+}
+
+impl InverseGaussianRegressor {
+    /// Default inverse-Gaussian GLM.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for InverseGaussianRegressor {
+    type Fitted = FittedLinear;
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedLinear>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        for (i, &yi) in y.as_slice().iter().enumerate() {
+            if yi <= 0.0 {
+                ctx.push(
+                    Issue::builder(IssueCode::NonPositiveSeries)
+                        .message(format!("InverseGaussian y[{i}]={yi} is not positive"))
+                        .build(),
+                );
+                break;
+            }
+        }
+        let design = if self.fit_intercept {
+            x.with_intercept()
+        } else {
+            x.clone()
+        };
+        let mut beta = Vector::zeros(design.ncols());
+        beta[0] = y.mean().max(1e-6).ln();
+        for it in 0..self.max_iter {
+            let mut xs = Matrix::zeros(design.nrows(), design.ncols());
+            let mut z = Vector::zeros(y.len());
+            for i in 0..y.len() {
+                let mut eta = 0.0;
+                for j in 0..design.ncols() {
+                    eta += design.get(i, j) * beta[j];
+                }
+                let mu = eta.exp().max(1e-12);
+                let w = (1.0 / mu).sqrt();
+                z[i] = (eta + (y[i] - mu) / mu) * w;
+                for j in 0..design.ncols() {
+                    xs.set(i, j, design.get(i, j) * w);
+                }
+            }
+            let mut scratch = signlred::Report::new("inverse_gaussian", "irls");
+            let next_opt = if self.alpha > 0.0 {
+                ridge_solve(&mut scratch, &xs, &z, self.alpha, &ctx.policy)
+            } else {
+                least_squares(&mut scratch, &xs, &z, &ctx.policy)
+            };
+            let Some(next) = next_opt else {
+                break;
+            };
+            let d = next.sub(&beta).norm();
+            beta = next;
+            ctx.session.step(it as u64, d, None);
+            if d < 1e-8 {
+                ctx.session.converged("InverseGaussian IRLS", it as u64);
+                break;
+            }
+        }
+        let intercept = if self.fit_intercept {
+            beta.as_slice().first().copied().unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        let coef = if self.fit_intercept && beta.len() > 1 {
+            Vector::from_iter((1..beta.len()).map(|i| beta[i]))
+        } else if self.fit_intercept {
+            Vector::zeros(0)
+        } else {
+            beta.clone()
+        };
+        let fitted = Vector::from_iter((0..y.len()).map(|i| {
+            let mut eta = 0.0;
+            for j in 0..design.ncols() {
+                eta += design.get(i, j) * beta.as_slice().get(j).copied().unwrap_or(0.0);
+            }
+            eta.exp().max(1e-12)
+        }));
+        let resid = Vector::from_iter((0..y.len()).map(|i| y[i] - fitted[i]));
+        let n = y.len();
+        let p = beta.len();
+        ctx.finish(FittedLinear {
+            coef,
+            intercept,
+            beta,
+            n,
+            p,
+            df_resid: (n as f64 - p as f64).max(1.0),
+            r2: f64::NAN,
+            adj_r2: f64::NAN,
+            sigma2: f64::NAN,
+            se: Vector::zeros(p),
+            t_values: Vector::zeros(p),
+            p_values: Vector::filled(p, f64::NAN),
+            aic: f64::NAN,
+            bic: f64::NAN,
+            f_stat: f64::NAN,
+            f_pvalue: f64::NAN,
+            durbin_watson: f64::NAN,
+            loglik: f64::NAN,
+            fitted,
+            resid,
+            leverage: Vector::zeros(n),
+            cooks: Vector::zeros(n),
+            used_intercept: self.fit_intercept,
+        })
+    }
+}
+
 /// Orthogonal matching pursuit.
 #[derive(Clone, Debug)]
 pub struct OrthogonalMatchingPursuit {
@@ -753,6 +894,414 @@ impl Predict for FittedOmp {
     }
 }
 
+/// Huber M-estimator (statsmodels `RLM`) via IRLS on a scratch report.
+///
+/// Inner weighted OLS issues that would abort a valid M-step
+/// (`NearSingular`, `ResidualTooLarge`) are not promoted.
+#[derive(Clone, Debug)]
+pub struct Rlm {
+    /// Huber cutoff in residual MAD units.
+    pub k: f64,
+    /// IRLS iteration cap.
+    pub max_iter: usize,
+}
+
+impl Default for Rlm {
+    fn default() -> Self {
+        Self {
+            k: 1.345,
+            max_iter: 40,
+        }
+    }
+}
+
+impl Rlm {
+    /// Default Huber RLM.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Fitted robust slopes.
+#[derive(Clone, Debug)]
+pub struct FittedRlm {
+    /// Slopes.
+    pub coef: Vector,
+    /// Intercept.
+    pub intercept: f64,
+}
+
+impl Fit for Rlm {
+    type Fitted = FittedRlm;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
+        let k = if self.k.is_finite() && self.k > 0.0 {
+            self.k
+        } else {
+            1.345
+        };
+        rlm_irls(x, y, session, "rlm", self.max_iter, move |u| {
+            let a = u.abs();
+            if a <= k {
+                1.0
+            } else if a > 0.0 {
+                k / a
+            } else {
+                1.0
+            }
+        })
+    }
+}
+
+impl Predict for FittedRlm {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let mut y = if x.ncols() == self.coef.len() {
+            x.matvec(&self.coef)
+        } else {
+            Vector::zeros(x.nrows())
+        };
+        for i in 0..y.len() {
+            y[i] += self.intercept;
+        }
+        ctx.finish(y)
+    }
+}
+
+fn rlm_irls(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+    name: &str,
+    max_iter: usize,
+    weight_at: impl Fn(f64) -> f64,
+) -> Result<Qualified<FittedRlm>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+    if ctx.report.contains(IssueCode::ConstantTarget) {
+        return ctx.finish(FittedRlm {
+            coef: Vector::zeros(x.ncols()),
+            intercept: y.mean(),
+        });
+    }
+    let design = x.with_intercept();
+    let mut scratch = signlred::Report::new(name, "ols");
+    let Some(mut beta) = least_squares(&mut scratch, &design, y, &ctx.policy) else {
+        ctx.push(
+            Issue::builder(IssueCode::UnidentifiedModel)
+                .message(format!("{name} seed OLS failed"))
+                .build(),
+        );
+        return ctx.finish(FittedRlm {
+            coef: Vector::zeros(x.ncols()),
+            intercept: y.mean(),
+        });
+    };
+    for it in 0..max_iter.max(1) {
+        let pred = design.matvec(&beta);
+        let resid = y.sub(&pred);
+        let mut abs: Vec<f64> = resid.as_slice().iter().map(|v| v.abs()).collect();
+        abs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mad = if abs.is_empty() {
+            1.0
+        } else {
+            abs[abs.len() / 2].max(1e-12)
+        };
+        let scale = (mad / 0.6745).max(1e-12);
+        let mut xs = Matrix::zeros(design.nrows(), design.ncols());
+        let mut ys = Vector::zeros(y.len());
+        let mut wsum = 0.0_f64;
+        for i in 0..y.len() {
+            let u = resid[i] / scale;
+            let w = weight_at(u).max(0.0);
+            wsum += w;
+            let sw = w.sqrt();
+            ys[i] = y[i] * sw;
+            for j in 0..design.ncols() {
+                xs.set(i, j, design.get(i, j) * sw);
+            }
+        }
+        if wsum <= 1e-12 {
+            ctx.push(
+                Issue::builder(IssueCode::DegenerateDistribution)
+                    .message(format!("{name} IRLS weights collapsed"))
+                    .build(),
+            );
+            break;
+        }
+        let mut step_rep = signlred::Report::new(name, "irls");
+        let Some(next) = least_squares(&mut step_rep, &xs, &ys, &ctx.policy) else {
+            ctx.push(
+                Issue::builder(IssueCode::DidNotConverge)
+                    .severity(Severity::Warning)
+                    .message(format!("{name} IRLS step failed; keeping the previous β"))
+                    .build(),
+            );
+            break;
+        };
+        let d = next.sub(&beta).norm();
+        beta = next;
+        ctx.session.step(it as u64, d, None);
+        if d < 1e-8 {
+            break;
+        }
+    }
+    let intercept = beta.as_slice().first().copied().unwrap_or(0.0);
+    let coef = Vector::from_iter((1..beta.len()).map(|j| beta[j]));
+    ctx.finish(FittedRlm { coef, intercept })
+}
+
+/// Huber *T* M-estimator (statsmodels `robust.norms.HuberT`).
+///
+/// Cutoff \(k\) is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct HuberT {
+    /// Huber cutoff in residual MAD units.
+    pub k: f64,
+    /// IRLS iteration cap.
+    pub max_iter: usize,
+}
+
+impl Default for HuberT {
+    fn default() -> Self {
+        Self {
+            k: 1.345,
+            max_iter: 40,
+        }
+    }
+}
+
+impl HuberT {
+    /// Default Huber *T*.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for HuberT {
+    type Fitted = FittedRlm;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
+        let k = if self.k.is_finite() && self.k > 0.0 {
+            self.k
+        } else {
+            1.345
+        };
+        rlm_irls(x, y, session, "hubert", self.max_iter, move |u| {
+            let a = u.abs();
+            if a <= k {
+                1.0
+            } else if a > 0.0 {
+                k / a
+            } else {
+                1.0
+            }
+        })
+    }
+}
+
+/// Tukey biweight M-estimator (statsmodels `robust.norms.TukeyBiweight`).
+///
+/// Tuning \(c\) is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct TukeyBiweight {
+    /// Rejection cutoff in residual MAD units.
+    pub c: f64,
+    /// IRLS iteration cap.
+    pub max_iter: usize,
+}
+
+impl Default for TukeyBiweight {
+    fn default() -> Self {
+        Self {
+            c: 4.685,
+            max_iter: 40,
+        }
+    }
+}
+
+impl TukeyBiweight {
+    /// Default Tukey biweight.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for TukeyBiweight {
+    type Fitted = FittedRlm;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
+        let c = if self.c.is_finite() && self.c > 0.0 {
+            self.c
+        } else {
+            4.685
+        };
+        rlm_irls(x, y, session, "tukeybw", self.max_iter, move |u| {
+            let a = u.abs();
+            if a < c {
+                let z = 1.0 - (u / c) * (u / c);
+                z * z
+            } else {
+                0.0
+            }
+        })
+    }
+}
+
+/// Hampel three-part M-estimator (statsmodels `robust.norms.Hampel`).
+///
+/// Knots \((a,b,c)\) are not identification `p`.
+#[derive(Clone, Debug)]
+pub struct Hampel {
+    /// First knot (full efficiency).
+    pub a: f64,
+    /// Second knot (linear taper start).
+    pub b: f64,
+    /// Third knot (rejection).
+    pub c: f64,
+    /// IRLS iteration cap.
+    pub max_iter: usize,
+}
+
+impl Default for Hampel {
+    fn default() -> Self {
+        Self {
+            a: 2.0,
+            b: 4.0,
+            c: 8.0,
+            max_iter: 40,
+        }
+    }
+}
+
+impl Hampel {
+    /// Default Hampel knots.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for Hampel {
+    type Fitted = FittedRlm;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
+        let a = if self.a.is_finite() && self.a > 0.0 {
+            self.a
+        } else {
+            2.0
+        };
+        let b = if self.b.is_finite() && self.b > a {
+            self.b
+        } else {
+            a + 2.0
+        };
+        let c = if self.c.is_finite() && self.c > b {
+            self.c
+        } else {
+            b + 4.0
+        };
+        rlm_irls(x, y, session, "hampel", self.max_iter, move |u| {
+            let z = u.abs();
+            if z <= a {
+                1.0
+            } else if z <= b {
+                a / z
+            } else if z <= c {
+                a * (c - z) / ((c - b) * z)
+            } else {
+                0.0
+            }
+        })
+    }
+}
+
+/// Andrew sine-wave M-estimator (statsmodels `robust.norms.AndrewWave`).
+///
+/// Tuning \(a\) is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct AndrewWave {
+    /// Sine period scale.
+    pub a: f64,
+    /// IRLS iteration cap.
+    pub max_iter: usize,
+}
+
+impl Default for AndrewWave {
+    fn default() -> Self {
+        Self {
+            a: 1.339,
+            max_iter: 40,
+        }
+    }
+}
+
+impl AndrewWave {
+    /// Default Andrew wave.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for AndrewWave {
+    type Fitted = FittedRlm;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
+        let a = if self.a.is_finite() && self.a > 0.0 {
+            self.a
+        } else {
+            1.339
+        };
+        rlm_irls(x, y, session, "andrew", self.max_iter, move |u| {
+            let bound = std::f64::consts::PI * a;
+            if u.abs() <= 1e-15 {
+                1.0
+            } else if u.abs() <= bound {
+                let z = u / a;
+                z.sin() / z
+            } else {
+                0.0
+            }
+        })
+    }
+}
+
+/// Ramsay *E* (exponential) M-estimator (statsmodels `robust.norms.RamsayE`).
+///
+/// Decay \(a\) is not identification `p`.
+#[derive(Clone, Debug)]
+pub struct RamsayE {
+    /// Exponential decay.
+    pub a: f64,
+    /// IRLS iteration cap.
+    pub max_iter: usize,
+}
+
+impl Default for RamsayE {
+    fn default() -> Self {
+        Self {
+            a: 0.3,
+            max_iter: 40,
+        }
+    }
+}
+
+impl RamsayE {
+    /// Default Ramsay *E*.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for RamsayE {
+    type Fitted = FittedRlm;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
+        let a = if self.a.is_finite() && self.a > 0.0 {
+            self.a
+        } else {
+            0.3
+        };
+        rlm_irls(x, y, session, "ramsaye", self.max_iter, move |u| {
+            (-a * u.abs()).exp()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,5 +1348,41 @@ mod tests {
             .fit(&x, &y, &Session::new("omp", "fit"))
             .expect("omp");
         assert_eq!(q.value.support, vec![1]);
+    }
+
+    #[test]
+    fn rlm_recovers_a_line_with_an_outlier() {
+        let x = Matrix::from_fn(16, 1, |i, _| i as f64);
+        let mut y = Vector::from_iter((0..16).map(|i| 2.0 * i as f64));
+        y[15] = 400.0;
+        let q = Rlm::new()
+            .fit(&x, &y, &Session::new("rlm", "fit"))
+            .expect("rlm");
+        assert!((q.value.coef[0] - 2.0).abs() < 0.3, "b={}", q.value.coef[0]);
+        let yp = Vector::from_iter((0..16).map(|i| (1.0 + 0.15 * i as f64).exp()));
+        let ig = InverseGaussianRegressor::new()
+            .fit(&x, &yp, &Session::new("ig", "fit"))
+            .expect("ig");
+        assert!(ig.value.coef.as_slice().iter().all(|v| v.is_finite()));
+        let ht = HuberT::new()
+            .fit(&x, &y, &Session::new("ht", "fit"))
+            .expect("hubert");
+        assert!((ht.value.coef[0] - 2.0).abs() < 0.3, "ht={}", ht.value.coef[0]);
+        let tb = TukeyBiweight::new()
+            .fit(&x, &y, &Session::new("tb", "fit"))
+            .expect("tukeybw");
+        assert!((tb.value.coef[0] - 2.0).abs() < 0.35, "tb={}", tb.value.coef[0]);
+        let hp = Hampel::new()
+            .fit(&x, &y, &Session::new("hp", "fit"))
+            .expect("hampel");
+        assert!((hp.value.coef[0] - 2.0).abs() < 0.35, "hp={}", hp.value.coef[0]);
+        let aw = AndrewWave::new()
+            .fit(&x, &y, &Session::new("aw", "fit"))
+            .expect("andrew");
+        assert!((aw.value.coef[0] - 2.0).abs() < 0.4, "aw={}", aw.value.coef[0]);
+        let re = RamsayE::new()
+            .fit(&x, &y, &Session::new("re", "fit"))
+            .expect("ramsaye");
+        assert!((re.value.coef[0] - 2.0).abs() < 0.4, "re={}", re.value.coef[0]);
     }
 }

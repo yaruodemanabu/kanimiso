@@ -7,14 +7,16 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
+use crate::linalg::ridge_solve;
 use crate::special::norm_cdf;
-use crate::traits::{FitSeries, FitUnsupervised, PartialFit, Transform};
-use crate::validate::inspect_classes;
+use crate::traits::{Fit, FitSeries, FitUnsupervised, PartialFit, Transform};
+use crate::validate::{inspect_classes, inspect_xy};
 use ojizou_san::{IncrementalExplain, Session};
 use signlred::{
     slice_stats, IncrementalQuality, Issue, IssueCode, Meaninglessness, Qualified, Result,
-    SliceStats,
+    Severity, SliceStats,
 };
+use std::collections::BTreeMap;
 
 /// Column-wise mean / std scaler (sklearn `StandardScaler`).
 #[derive(Clone, Debug)]
@@ -870,6 +872,130 @@ impl Transform for KnnImputer {
     }
 }
 
+/// sklearn `KNNImputer` spelling of [`KnnImputer`].
+pub type KNNImputer = KnnImputer;
+
+/// MICE-style iterative imputation (sklearn `IterativeImputer`).
+///
+/// Missing entries are initialized at the column mean of the observed cells.
+/// Each column is then ridge-regressed on the others using the current fill,
+/// and the missing cells are overwritten. An all-missing column is
+/// [`IssueCode::ImputationUndefined`].
+#[derive(Clone, Debug)]
+pub struct IterativeImputer {
+    /// Ridge penalty on each conditional model.
+    pub alpha: f64,
+    /// Outer cycles over columns.
+    pub max_iter: usize,
+    train: Matrix,
+    fitted: bool,
+}
+
+impl Default for IterativeImputer {
+    fn default() -> Self {
+        Self {
+            alpha: 1e-3,
+            max_iter: 8,
+            train: Matrix::zeros(0, 0),
+            fitted: false,
+        }
+    }
+}
+
+impl IterativeImputer {
+    /// Default iterative imputer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl FitUnsupervised for IterativeImputer {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_columns_for_preprocess(&mut ctx, x);
+        let (n, p) = x.shape();
+        let mut filled = x.clone();
+        let mut means = vec![0.0f64; p];
+        for j in 0..p {
+            let col: Vec<f64> = (0..n).map(|i| x.get(i, j)).collect();
+            let st = slice_stats(&col);
+            means[j] = if st.count > 0 { st.mean } else { 0.0 };
+            for i in 0..n {
+                if !filled.get(i, j).is_finite() {
+                    filled.set(i, j, means[j]);
+                }
+            }
+        }
+        for it in 0..self.max_iter.max(1) {
+            let mut moved: f64 = 0.0;
+            for j in 0..p {
+                let miss: Vec<usize> = (0..n).filter(|&i| !x.get(i, j).is_finite()).collect();
+                if miss.is_empty() {
+                    continue;
+                }
+                let others: Vec<usize> = (0..p).filter(|&k| k != j).collect();
+                if others.is_empty() {
+                    continue;
+                }
+                let z = Matrix::from_fn(n, others.len(), |i, t| filled.get(i, others[t]));
+                let yj = filled.column(j);
+                let mut scratch = signlred::Report::new("iterimp", "ridge");
+                let Some(beta) =
+                    ridge_solve(&mut scratch, &z, &yj, self.alpha.max(0.0), &ctx.policy)
+                else {
+                    continue;
+                };
+                for issue in scratch.issues() {
+                    if matches!(
+                        issue.code,
+                        IssueCode::ResidualTooLarge
+                            | IssueCode::NearSingular
+                            | IssueCode::R2IsOne
+                            | IssueCode::InvalidWeight
+                    ) {
+                        continue;
+                    }
+                    ctx.push(issue.clone());
+                }
+                for &i in &miss {
+                    let mut pred = 0.0;
+                    for t in 0..others.len() {
+                        pred += z.get(i, t) * beta[t];
+                    }
+                    let old = filled.get(i, j);
+                    moved = moved.max((pred - old).abs());
+                    filled.set(i, j, pred);
+                }
+            }
+            ctx.session.step(it as u64, moved, None);
+            if moved < 1e-8 {
+                ctx.session.converged("iterative imputer", it as u64);
+                break;
+            }
+        }
+        self.train = filled;
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for IterativeImputer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(x.clone());
+        }
+        // Re-run a single conditional pass using the fitted complete matrix as the donor.
+        let mut tmp = self.clone();
+        match tmp.fit_unsupervised(x, &session.child("refit")) {
+            Ok(q) => ctx.finish(q.value.train),
+            Err(_) => ctx.finish(self.train.clone()),
+        }
+    }
+}
+
 /// Polynomial / interaction expansion.
 #[derive(Clone, Debug)]
 pub struct PolynomialFeatures {
@@ -1329,6 +1455,336 @@ impl Transform for Binarizer {
     }
 }
 
+/// Mean target encoding of rounded categorical columns (sklearn `TargetEncoder`).
+///
+/// The encoding uses the full `y`. That is [`IssueCode::TargetLeakageSuspected`]
+/// unless the caller refits inside each training fold.
+#[derive(Clone, Debug)]
+pub struct TargetEncoder {
+    /// Additive smoothing toward the global mean.
+    pub smooth: f64,
+    tables: Vec<BTreeMap<i64, f64>>,
+    global: f64,
+    fitted: bool,
+}
+
+impl Default for TargetEncoder {
+    fn default() -> Self {
+        Self {
+            smooth: 1.0,
+            tables: Vec::new(),
+            global: 0.0,
+            fitted: false,
+        }
+    }
+}
+
+impl TargetEncoder {
+    /// Encoder with unit smoothing.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Fit for TargetEncoder {
+    type Fitted = Self;
+    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        self.global = y.mean();
+        self.tables = vec![BTreeMap::new(); x.ncols()];
+        let smooth = self.smooth.max(0.0);
+        for j in 0..x.ncols() {
+            let mut acc: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
+            for i in 0..x.nrows().min(y.len()) {
+                let key = x.get(i, j).round() as i64;
+                let e = acc.entry(key).or_insert((0.0, 0.0));
+                e.0 += y[i];
+                e.1 += 1.0;
+            }
+            self.tables[j] = acc
+                .into_iter()
+                .map(|(k, (s, c))| (k, (s + smooth * self.global) / (c + smooth)))
+                .collect();
+        }
+        ctx.push(
+            Issue::builder(IssueCode::TargetLeakageSuspected)
+                .message("TargetEncoder used the full y; refit inside each training fold")
+                .build(),
+        );
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for TargetEncoder {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_columns_for_preprocess(&mut ctx, x);
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(x.clone());
+        }
+        if x.ncols() != self.tables.len() {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("TargetEncoder column count ≠ fitted p")
+                    .build(),
+            );
+        }
+        let out = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            if j >= self.tables.len() {
+                return self.global;
+            }
+            let key = x.get(i, j).round() as i64;
+            self.tables[j].get(&key).copied().unwrap_or(self.global)
+        });
+        ctx.finish(out)
+    }
+}
+
+/// B-spline basis expansion (sklearn `SplineTransformer`).
+#[derive(Clone, Debug)]
+pub struct SplineTransformer {
+    /// Number of knots including the endpoints.
+    pub n_knots: usize,
+    /// Spline degree.
+    pub degree: usize,
+    knots: Vec<Vec<f64>>,
+    n_features_in: usize,
+    fitted: bool,
+}
+
+impl Default for SplineTransformer {
+    fn default() -> Self {
+        Self {
+            n_knots: 5,
+            degree: 3,
+            knots: Vec::new(),
+            n_features_in: 0,
+            fitted: false,
+        }
+    }
+}
+
+impl SplineTransformer {
+    /// Cubic B-splines with `n_knots` knots per feature.
+    pub fn new(n_knots: usize) -> Self {
+        Self {
+            n_knots: n_knots.max(2),
+            ..Self::default()
+        }
+    }
+
+    fn n_basis(&self) -> usize {
+        self.n_knots.max(2) + self.degree.saturating_sub(1)
+    }
+}
+
+fn padded_knots(lo: f64, hi: f64, n_knots: usize, degree: usize) -> Vec<f64> {
+    let n_knots = n_knots.max(2);
+    let span = (hi - lo).max(1e-12);
+    let mut interior = Vec::with_capacity(n_knots);
+    for i in 0..n_knots {
+        interior.push(lo + span * (i as f64) / (n_knots - 1) as f64);
+    }
+    let mut knots = Vec::with_capacity(n_knots + 2 * degree);
+    for _ in 0..degree {
+        knots.push(lo);
+    }
+    knots.extend(interior);
+    for _ in 0..degree {
+        knots.push(hi);
+    }
+    knots
+}
+
+fn cox_de_boor(x: f64, knots: &[f64], degree: usize, i: usize) -> f64 {
+    if i + 1 >= knots.len() {
+        return 0.0;
+    }
+    if degree == 0 {
+        let last = i + 2 >= knots.len();
+        if (x >= knots[i] && x < knots[i + 1]) || (last && (x - knots[i + 1]).abs() <= 1e-15) {
+            return 1.0;
+        }
+        return 0.0;
+    }
+    let mut left = 0.0;
+    let den_l = knots[i + degree] - knots[i];
+    if den_l.abs() > 1e-15 {
+        left = (x - knots[i]) / den_l * cox_de_boor(x, knots, degree - 1, i);
+    }
+    let mut right = 0.0;
+    if i + degree + 1 < knots.len() {
+        let den_r = knots[i + degree + 1] - knots[i + 1];
+        if den_r.abs() > 1e-15 {
+            right = (knots[i + degree + 1] - x) / den_r * cox_de_boor(x, knots, degree - 1, i + 1);
+        }
+    }
+    left + right
+}
+
+impl FitUnsupervised for SplineTransformer {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_columns_for_preprocess(&mut ctx, x);
+        self.n_features_in = x.ncols();
+        self.knots.clear();
+        for j in 0..x.ncols() {
+            let col = x.column(j);
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
+            for &v in col.as_slice() {
+                if v.is_finite() {
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+            }
+            if !lo.is_finite()
+                || !hi.is_finite()
+                || (hi - lo).abs() <= ctx.policy.near_zero_variance
+            {
+                ctx.push(
+                    Issue::builder(IssueCode::NearZeroVariance)
+                        .message(format!("SplineTransformer column {j} has no span"))
+                        .build(),
+                );
+                lo = 0.0;
+                hi = 1.0;
+            }
+            self.knots
+                .push(padded_knots(lo, hi, self.n_knots.max(2), self.degree));
+        }
+        let p_out = self.n_basis().saturating_mul(x.ncols());
+        if p_out > x.nrows() && x.nrows() > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::PolynomialExplosion)
+                    .message(format!("spline map sends n={} to p={p_out}", x.nrows()))
+                    .build(),
+            );
+        }
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for SplineTransformer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
+            return ctx.finish(x.clone());
+        }
+        if x.ncols() != self.n_features_in {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("SplineTransformer column count ≠ fitted p")
+                    .build(),
+            );
+        }
+        let nb = self.n_basis();
+        let p_out = nb.saturating_mul(self.knots.len());
+        let out = Matrix::from_fn(x.nrows(), p_out, |i, k| {
+            let feat = k / nb;
+            let basis = k % nb;
+            if feat >= x.ncols() || feat >= self.knots.len() {
+                return 0.0;
+            }
+            cox_de_boor(x.get(i, feat), &self.knots[feat], self.degree, basis)
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Named elementwise map (sklearn `FunctionTransformer`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElementwiseFn {
+    /// Identity.
+    Identity,
+    /// `ln(1+x)` (requires `x > -1`).
+    Log1p,
+    /// `√x` (requires `x ≥ 0`).
+    Sqrt,
+    /// Absolute value.
+    Abs,
+}
+
+/// Stateless elementwise transformer.
+#[derive(Clone, Debug)]
+pub struct FunctionTransformer {
+    /// Map applied independently to every entry.
+    pub func: ElementwiseFn,
+}
+
+impl Default for FunctionTransformer {
+    fn default() -> Self {
+        Self {
+            func: ElementwiseFn::Identity,
+        }
+    }
+}
+
+impl FunctionTransformer {
+    /// Transformer for the given map.
+    pub fn new(func: ElementwiseFn) -> Self {
+        Self { func }
+    }
+}
+
+impl FitUnsupervised for FunctionTransformer {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_columns_for_preprocess(&mut ctx, x);
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for FunctionTransformer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        inspect_columns_for_preprocess(&mut ctx, x);
+        let mut bad = 0usize;
+        let out = Matrix::from_fn(x.nrows(), x.ncols(), |i, j| {
+            let v = x.get(i, j);
+            match self.func {
+                ElementwiseFn::Identity => v,
+                ElementwiseFn::Log1p => {
+                    if v <= -1.0 {
+                        bad += 1;
+                        f64::NAN
+                    } else {
+                        (1.0 + v).ln()
+                    }
+                }
+                ElementwiseFn::Sqrt => {
+                    if v < 0.0 {
+                        bad += 1;
+                        f64::NAN
+                    } else {
+                        v.sqrt()
+                    }
+                }
+                ElementwiseFn::Abs => v.abs(),
+            }
+        });
+        if bad > 0 {
+            ctx.push(
+                Issue::builder(IssueCode::NonPositiveSeries)
+                    .severity(Severity::Warning)
+                    .message(format!(
+                        "FunctionTransformer::{:?} is undefined on {bad} entries",
+                        self.func
+                    ))
+                    .build(),
+            );
+        }
+        ctx.finish(out)
+    }
+}
+
 fn inspect_columns_for_preprocess(ctx: &mut FitCtx, x: &Matrix) {
     let (n, p) = x.shape();
     ctx.report.set_sample_shape(n, p);
@@ -1743,10 +2199,287 @@ fn finish_explain(ctx: FitCtx, expl: IncrementalExplain) -> Result<Qualified<Inc
     ctx.finish(expl)
 }
 
+/// One-hot / label-indicator map (sklearn `LabelBinarizer`).
+#[derive(Clone, Debug, Default)]
+pub struct LabelBinarizer {
+    classes: Vec<i64>,
+    fitted: bool,
+}
+
+impl LabelBinarizer {
+    /// Empty binarizer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sorted class ids.
+    pub fn classes(&self) -> &[i64] {
+        &self.classes
+    }
+}
+
+impl FitSeries for LabelBinarizer {
+    type Fitted = Self;
+    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
+        self.classes = counts.into_iter().map(|(k, _)| k).collect();
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for LabelBinarizer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), 0));
+        }
+        let k = self.classes.len();
+        if k == 0 {
+            return ctx.finish(Matrix::zeros(x.nrows(), 0));
+        }
+        let out = Matrix::from_fn(x.nrows(), k, |i, c| {
+            let lab = x.get(i, 0).round() as i64;
+            if self.classes[c] == lab {
+                1.0
+            } else {
+                0.0
+            }
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Multi-label indicator map (sklearn `MultiLabelBinarizer`).
+///
+/// Each finite non-negative entry of the training matrix is a class id.
+/// Negative / NaN entries are padding. A matrix with no usable labels is
+/// vacuous.
+#[derive(Clone, Debug, Default)]
+pub struct MultiLabelBinarizer {
+    classes: Vec<i64>,
+    fitted: bool,
+}
+
+impl MultiLabelBinarizer {
+    /// Empty binarizer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sorted class ids.
+    pub fn classes(&self) -> &[i64] {
+        &self.classes
+    }
+}
+
+impl FitUnsupervised for MultiLabelBinarizer {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+        let mut set = BTreeMap::<i64, u64>::new();
+        for i in 0..x.nrows() {
+            for j in 0..x.ncols() {
+                let v = x.get(i, j);
+                if v.is_finite() && v >= 0.0 {
+                    *set.entry(v.round() as i64).or_insert(0) += 1;
+                }
+            }
+        }
+        self.classes = set.keys().copied().collect();
+        if self.classes.is_empty() {
+            ctx.push(
+                Issue::builder(IssueCode::MeaninglessFit)
+                    .message("MultiLabelBinarizer saw no non-negative finite labels")
+                    .meaninglessness(Meaninglessness::vacuous(
+                        "multi-label indicators",
+                        "an empty label alphabet cannot be binarized",
+                        "supply at least one non-negative class id",
+                    ))
+                    .build(),
+            );
+        }
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for MultiLabelBinarizer {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(Matrix::zeros(x.nrows(), 0));
+        }
+        let k = self.classes.len();
+        let out = Matrix::from_fn(x.nrows(), k, |i, c| {
+            let want = self.classes[c];
+            for j in 0..x.ncols() {
+                let v = x.get(i, j);
+                if v.is_finite() && v >= 0.0 && v.round() as i64 == want {
+                    return 1.0;
+                }
+            }
+            0.0
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Center a kernel Gram matrix (sklearn `KernelCenterer`).
+///
+/// `K ← (I − 11ᵀ/n) K (I − 11ᵀ/n)`. Do not treat `n` as a parameter count.
+#[derive(Clone, Debug)]
+pub struct KernelCenterer {
+    row_mean: Vector,
+    all_mean: f64,
+    fitted: bool,
+}
+
+impl Default for KernelCenterer {
+    fn default() -> Self {
+        Self {
+            row_mean: Vector::zeros(0),
+            all_mean: 0.0,
+            fitted: false,
+        }
+    }
+}
+
+impl KernelCenterer {
+    /// Empty centerer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl FitUnsupervised for KernelCenterer {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, k: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        inspect_xy(&mut ctx.report, k, None, &ctx.policy);
+        if k.nrows() == 0 || k.ncols() == 0 {
+            self.fitted = true;
+            self.row_mean = Vector::zeros(0);
+            self.all_mean = 0.0;
+            return ctx.finish(self.clone());
+        }
+        let n = k.nrows();
+        let mut row_mean = Vector::zeros(n);
+        let mut tot = 0.0;
+        let mut cnt = 0.0;
+        for i in 0..n {
+            let mut s = 0.0;
+            let mut c = 0.0;
+            for j in 0..k.ncols() {
+                let v = k.get(i, j);
+                if v.is_finite() {
+                    s += v;
+                    c += 1.0;
+                    tot += v;
+                    cnt += 1.0;
+                }
+            }
+            row_mean[i] = if c > 0.0 { s / c } else { 0.0 };
+        }
+        self.row_mean = row_mean;
+        self.all_mean = if cnt > 0.0 { tot / cnt } else { 0.0 };
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for KernelCenterer {
+    fn transform(&self, k: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+            return ctx.finish(k.clone());
+        }
+        let out = Matrix::from_fn(k.nrows(), k.ncols(), |i, j| {
+            let rm = if i < self.row_mean.len() {
+                self.row_mean[i]
+            } else {
+                0.0
+            };
+            let cm = if j < self.row_mean.len() {
+                self.row_mean[j]
+            } else {
+                rm
+            };
+            k.get(i, j) - rm - cm + self.all_mean
+        });
+        ctx.finish(out)
+    }
+}
+
+/// Missing-value indicator (sklearn `MissingIndicator`).
+///
+/// Non-finite entries become 1. All-missing columns are valid indicators
+/// (every row is 1) and must not raise [`IssueCode::ImputationUndefined`].
+#[derive(Clone, Debug, Default)]
+pub struct MissingIndicator {
+    fitted: bool,
+    n_features: usize,
+}
+
+impl MissingIndicator {
+    /// Empty indicator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl FitUnsupervised for MissingIndicator {
+    type Fitted = Self;
+    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut ctx = FitCtx::with_session(session.clone());
+        let (n, p) = x.shape();
+        ctx.report.set_sample_shape(n, p);
+        if n == 0 || p == 0 {
+            ctx.push(
+                Issue::builder(IssueCode::EmptyMatrix)
+                    .message(format!("MissingIndicator design is {n}×{p}"))
+                    .build(),
+            );
+        }
+        self.n_features = p;
+        self.fitted = true;
+        ctx.finish(self.clone())
+    }
+}
+
+impl Transform for MissingIndicator {
+    fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+        let mut ctx = FitCtx::with_session(session.child("transform"));
+        if !self.fitted {
+            ctx.push(Issue::builder(IssueCode::StaleState).build());
+        }
+        let p = x.ncols();
+        if self.fitted && p != self.n_features {
+            ctx.push(
+                Issue::builder(IssueCode::DimensionMismatch)
+                    .message("MissingIndicator column count changed")
+                    .build(),
+            );
+        }
+        ctx.finish(Matrix::from_fn(x.nrows(), p, |i, j| {
+            if x.get(i, j).is_finite() {
+                0.0
+            } else {
+                1.0
+            }
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::traits::{FitUnsupervised, Transform};
+    use crate::traits::{FitSeries, FitUnsupervised, Transform};
     use ojizou_san::Session;
     use signlred::IssueCode;
 
@@ -1782,5 +2515,94 @@ mod tests {
             .fit_unsupervised(&x, &session)
             .unwrap_err();
         assert_eq!(err.primary().code, IssueCode::ImputationUndefined);
+    }
+
+    #[test]
+    fn target_spline_and_function() {
+        let x = Matrix::from_fn(20, 1, |i, _| (i / 5) as f64);
+        let y = Vector::from_iter((0..20).map(|i| if i < 10 { 0.0 } else { 2.0 }));
+        let mut te = TargetEncoder::new();
+        te.fit(&x, &y, &Session::new("te", "fit")).unwrap();
+        let z = te.transform(&x, &Session::new("te", "t")).unwrap().value;
+        assert!(z.get(0, 0) < z.get(19, 0));
+        let mut sp = SplineTransformer::new(4);
+        sp.fit_unsupervised(&x, &Session::new("sp", "fit")).unwrap();
+        let b = sp.transform(&x, &Session::new("sp", "t")).unwrap().value;
+        assert!(b.ncols() > 1);
+        let mut ft = FunctionTransformer::new(ElementwiseFn::Log1p);
+        ft.fit_unsupervised(&x, &Session::new("ft", "fit")).unwrap();
+        let w = ft.transform(&x, &Session::new("ft", "t")).unwrap().value;
+        assert!((w.get(0, 0) - 0.0).abs() < 1e-12);
+        let mut xm = Matrix::from_fn(20, 2, |i, j| if j == 0 { i as f64 } else { 2.0 * i as f64 });
+        xm.set(3, 1, f64::NAN);
+        xm.set(7, 0, f64::NAN);
+        let mut ii = IterativeImputer::new();
+        ii.fit_unsupervised(&xm, &Session::new("ii", "fit"))
+            .unwrap();
+        let filled = ii.transform(&xm, &Session::new("ii", "t")).unwrap().value;
+        for i in 0..filled.nrows() {
+            for j in 0..filled.ncols() {
+                assert!(filled.get(i, j).is_finite(), "imputed ({i},{j})");
+            }
+        }
+        let yb = Vector::from_iter((0..20).map(|i| if i < 10 { 0.0 } else { 1.0 }));
+        let mut lb = LabelBinarizer::new();
+        lb.fit_series(&yb, &Session::new("lb", "fit")).unwrap();
+        let oh = lb
+            .transform(&Matrix::from_vector(&yb), &Session::new("lb", "t"))
+            .unwrap()
+            .value;
+        assert_eq!(oh.ncols(), 2);
+        assert!((oh.get(0, 0) - 1.0).abs() < 1e-12);
+        assert!((oh.get(15, 1) - 1.0).abs() < 1e-12);
+        let labs = Matrix::from_fn(4, 2, |i, j| match (i, j) {
+            (0, 0) => 0.0,
+            (0, 1) => 2.0,
+            (1, 0) => 1.0,
+            (1, 1) => -1.0,
+            (2, 0) => 0.0,
+            (2, 1) => 1.0,
+            (3, 0) => 2.0,
+            _ => 1.0,
+        });
+        let mut mlb = MultiLabelBinarizer::new();
+        mlb.fit_unsupervised(&labs, &Session::new("mlb", "fit"))
+            .unwrap();
+        assert_eq!(mlb.classes(), &[0, 1, 2]);
+        let bin = mlb
+            .transform(&labs, &Session::new("mlb", "t"))
+            .unwrap()
+            .value;
+        assert_eq!(bin.shape(), (4, 3));
+        assert!((bin.get(0, 0) - 1.0).abs() < 1e-12);
+        assert!((bin.get(0, 2) - 1.0).abs() < 1e-12);
+        let gram = Matrix::from_fn(6, 6, |i, j| (i as f64 - j as f64).abs());
+        let mut kc = KernelCenterer::new();
+        kc.fit_unsupervised(&gram, &Session::new("kc", "fit"))
+            .unwrap();
+        let ck = kc.transform(&gram, &Session::new("kc", "t")).unwrap().value;
+        let mut mean = 0.0;
+        for i in 0..6 {
+            for j in 0..6 {
+                mean += ck.get(i, j);
+            }
+        }
+        assert!(mean.abs() < 1e-8, "centered gram mean={mean}");
+        let mut mi = MissingIndicator::new();
+        mi.fit_unsupervised(&xm, &Session::new("mi", "fit"))
+            .unwrap();
+        let ind = mi.transform(&xm, &Session::new("mi", "t")).unwrap().value;
+        assert_eq!(ind.shape(), xm.shape());
+        assert!((ind.get(3, 1) - 1.0).abs() < 1e-12);
+        assert!((ind.get(0, 0) - 0.0).abs() < 1e-12);
+        let mut knn: KNNImputer = KnnImputer::new(3);
+        knn.fit_unsupervised(&xm, &Session::new("knn", "fit"))
+            .unwrap();
+        let kn = knn
+            .transform(&xm, &Session::new("knn", "t"))
+            .unwrap()
+            .value;
+        assert!(kn.get(3, 1).is_finite());
+        assert!(kn.get(7, 0).is_finite());
     }
 }
