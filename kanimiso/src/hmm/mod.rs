@@ -16,7 +16,9 @@ mod forward_backward;
 mod model;
 mod viterbi;
 
-pub(crate) use emission::{Categorical, Emission, Gaussian, Poisson};
+pub(crate) use emission::{
+    Categorical, CosinePower, Emission, Gaussian, Poisson, Transform, Transformed, TwoSidedPower,
+};
 pub(crate) use forward_backward::logsumexp;
 pub(crate) use model::HiddenMarkovModel;
 
