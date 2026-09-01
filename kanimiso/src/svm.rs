@@ -1,10 +1,12 @@
 //! Support-vector machines: primal SGD (Pegasos / ε-insensitive) and dual SMO.
 //!
-//! Linear models use Pegasos-style primal SGD. Kernel `Svc` / `Svr` run SMO
-//! (or SMO-lite dual coordinate descent) on the Gram matrix so the dual is
-//! actually optimized for small `n`. Quality gates cover `KernelNotPd`,
-//! `DidNotConverge`, and a `PerfectSeparation`-like diagnosis when every slack
-//! is zero and `‖w‖` diverges.
+//! Solvers live in this crate on [`faer`]. Do **not** add linfa, smartcore,
+//! libsvm, or any other packaged SVM crate. Linear models use Pegasos-style
+//! primal SGD. Kernel `Svc` / `Svr` run SMO (or SMO-lite dual coordinate
+//! descent) on a Gram matrix from **coronel** (AGENTS.md D4), then the dual
+//! QP is solved here. Quality gates cover `KernelNotPd`, `DidNotConverge`,
+//! and a `PerfectSeparation`-like diagnosis when every slack is zero and
+//! `‖w‖` diverges.
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};

@@ -1,0 +1,12 @@
+[package]
+name = "oldwood"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "CART / isolation-tree core on faer. Impurity, split search, and grow. Forests and boosting live in mayoi-no-mori."
+keywords = ["decision-tree", "cart", "machine-learning", "faer"]
+categories = ["science", "algorithms", "mathematics"]
+
+[dependencies]
+faer = { workspace = true }

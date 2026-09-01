@@ -13,6 +13,8 @@ categories = ["science", "algorithms", "mathematics"]
 faer = { workspace = true }
 signlred = { workspace = true }
 ojizou-san = { workspace = true }
+oldwood = { workspace = true }
+mayoi-no-mori = { workspace = true }
 wormhole = { workspace = true }
 coronel = { workspace = true }
 jelly-wave = { workspace = true }

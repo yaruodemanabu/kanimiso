@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["signlred", "ojizou-san", "kanimiso"]
-default-members = ["signlred", "ojizou-san", "kanimiso"]
+members = ["signlred", "ojizou-san", "oldwood", "mayoi-no-mori", "kanimiso"]
+default-members = ["signlred", "ojizou-san", "oldwood", "mayoi-no-mori", "kanimiso"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,9 +12,14 @@ authors = ["kanimiso contributors"]
 repository = "https://github.com/yaruodemanabu/kanimiso"
 
 [workspace.dependencies]
+# One faer version for the whole graph (AGENTS.md D6). Classical ML
+# (SVM, trees, linear models) is implemented on faer — do not add
+# linfa / smartcore / libsvm / rustlearn.
 faer = { version = "0.24.4", default-features = true }
 signlred = { path = "signlred", version = "0.1.0" }
 ojizou-san = { path = "ojizou-san", version = "0.1.0" }
+oldwood = { path = "oldwood", version = "0.1.0" }
+mayoi-no-mori = { path = "mayoi-no-mori", version = "0.1.0" }
 # Rev-pinned (AGENTS.md §3.2). Do not use branch = "main".
 wormhole = { git = "https://github.com/yaruodemanabu/wormhole", rev = "7c338c01aecc447511ea76132b35e86b024d33f4" }
 coronel = { git = "https://github.com/yaruodemanabu/wormhole", rev = "7c338c01aecc447511ea76132b35e86b024d33f4" }

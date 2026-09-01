@@ -53,6 +53,24 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  tree-crates:
+    name: oldwood + mayoi-no-mori
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+      - name: rustfmt new tree crates (not --all; online.rs / tslearn.rs stay unformatted)
+        run: cargo fmt -p oldwood -p mayoi-no-mori -- --check
+      - run: cargo clippy -p oldwood -p mayoi-no-mori --all-targets --all-features -- -D warnings
+      - run: cargo test -p oldwood -p mayoi-no-mori --all-features
+      - run: cargo test -p oldwood -p mayoi-no-mori --doc
+      - run: cargo doc -p oldwood -p mayoi-no-mori --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   special-oracle:
     name: special.rs scipy golden
     runs-on: ubuntu-latest

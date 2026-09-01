@@ -60,7 +60,7 @@ related: ["[[kanimiso]]", "[[wormhole]]", "[[signlred]]", "[[ojizou_san]]", "[[i
 
 ---
 
-## 1. 採用決定（D1–D10、adopted default）
+## 1. 採用決定（D1–D11、adopted default）
 
 | # | 決定 | 補足 |
 |---|---|---|
@@ -74,6 +74,7 @@ related: ["[[kanimiso]]", "[[wormhole]]", "[[signlred]]", "[[ojizou_san]]", "[[i
 | D8 | 数値しきい値は `signlred::Policy` に集約（`log_prob_floor`、`max_difference_order`、`underflow_guard` 等を追加）。floor / clamp / jitter / ridge は `NumericalCompromise` 記録必須。密度を計算してから `ln` を取らない | `Policy` は既に条件数・残差・VIF 等を持つ。別構造体を作らない |
 | D9 | HMM は `Emission` trait を持つ**単一の** `HiddenMarkovModel<E>`。forward–backward / Viterbi / Baum–Welch は各 1 実装。分布族は 1 ファイル 1 族 | §5 |
 | D10 | `coverage::inventory()` に `status: verified / experimental / generated / stub` を追加し、README の主張を `verified` の集合に連動させる | 「六つの Python ライブラリ相当」表記は alpha.1 まで撤回 |
+| D11 | 古典 ML（SVM、線形、木）は **linfa / smartcore / libsvm / rustlearn 等の第三者 ML ソルバを使わず** `faer` 上に実装する。**自分で作っている上流は使う**：距離・カーネル・DTW・OT は D4 どおり `wormhole` / `coronel` / `jelly-wave`（SVM の Gram は coronel、DTW は jelly-wave）。木の核（CART 成長・不純度・分割）は workspace クレート `oldwood`、ランダムフォレスト・ExtraTrees・勾配ブースティング・AdaBoost・Isolation Forest 等の拡張は `mayoi-no-mori`。kanimiso は `FitCtx` / `Qualified` の薄ラッパ | 2026-09-01 ユーザー決定（「colonel とか jelly-wave みたいな自作は使え」）。ヒストグラム GB（`histgb.rs`）はビン分割が別核なので当面 kanimiso に残す |
 
 ---
 

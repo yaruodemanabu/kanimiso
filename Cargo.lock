@@ -535,7 +535,9 @@ dependencies = [
  "coronel",
  "faer",
  "jelly-wave",
+ "mayoi-no-mori",
  "ojizou-san",
+ "oldwood",
  "proptest",
  "serde_json",
  "signlred",
@@ -592,6 +594,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
+]
+
+[[package]]
+name = "mayoi-no-mori"
+version = "0.1.0"
+dependencies = [
+ "faer",
+ "oldwood",
 ]
 
 [[package]]
@@ -745,6 +755,13 @@ name = "ojizou-san"
 version = "0.1.0"
 dependencies = [
  "signlred",
+]
+
+[[package]]
+name = "oldwood"
+version = "0.1.0"
+dependencies = [
+ "faer",
 ]
 
 [[package]]

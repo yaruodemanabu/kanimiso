@@ -1,0 +1,16 @@
+[package]
+name = "mayoi-no-mori"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Tree ensembles on oldwood + faer: random forests, extra-trees, boosting, isolation forests."
+keywords = ["random-forest", "boosting", "isolation-forest", "machine-learning", "faer"]
+categories = ["science", "algorithms", "mathematics"]
+
+[lib]
+name = "mayoi_no_mori"
+
+[dependencies]
+faer = { workspace = true }
+oldwood = { workspace = true }

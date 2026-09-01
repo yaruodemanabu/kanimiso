@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 冗長性 lint（R1 / R4 / R5 / R7 / R10）+ スタック拡張 + faer 単一版。全て ratchet 予算。
 set -uo pipefail
-SRC="kanimiso/src signlred/src ojizou-san/src"
+SRC="kanimiso/src signlred/src ojizou-san/src oldwood/src mayoi-no-mori/src"
 ALLOW=scripts/lint_allowlist.txt        # 固有名詞の数値（Exp3, Ucb1, Catch22, X13, 2Sls, Chi2, F1, R2 …）を 1 行 1 固定文字列
 [ -f "$ALLOW" ] || : > "$ALLOW"
 
@@ -9,7 +9,7 @@ ALLOW=scripts/lint_allowlist.txt        # 固有名詞の数値（Exp3, Ucb1, Ca
 MAX_R1_NUMERAL_IDENTS=915      # 目標 0  （Garch11 のような「パラメータ値」は allowlist に入れない）
 MAX_R4_PUB_ITEMS=254           # 目標 1000; PR 11 measured after Fit::fit(&self)
 MAX_R5_FILES_OVER_3000=12      # 目標 0
-MAX_R7_DENSITY_FLOORS=159      # 目標 0
+MAX_R7_DENSITY_FLOORS=156      # 目標 0; clamps moved into mayoi named constants
 MAX_R10_DISTINCT_FROM=741      # 目標 0
 ALLOW_RUST_MIN_STACK=0         # generated HMM gone; no stack hack
 # ------------------------------------------------------------------------------
