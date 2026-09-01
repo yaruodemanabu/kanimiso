@@ -10,7 +10,7 @@ use signlred::{
 
 /// Thin SVD factors used by PCA / ridge / pseudoinverse.
 #[derive(Clone, Debug)]
-pub struct ThinSvd {
+pub(crate) struct ThinSvd {
     /// Left singular vectors (n × r).
     pub u: Mat<f64>,
     /// Singular values, nonincreasing, length r.
@@ -21,7 +21,7 @@ pub struct ThinSvd {
 
 impl ThinSvd {
     /// Numerical rank at `tol * σ_max`.
-    pub fn rank(&self, rel_tol: f64) -> usize {
+    pub(crate) fn rank(&self, rel_tol: f64) -> usize {
         let max = self.singular_values.first().copied().unwrap_or(0.0);
         if max <= 0.0 {
             return 0;
@@ -33,7 +33,7 @@ impl ThinSvd {
     }
 
     /// κ = σ_max / σ_min (∞ if rank 0).
-    pub fn condition_number(&self) -> f64 {
+    pub(crate) fn condition_number(&self) -> f64 {
         let max = self.singular_values.first().copied().unwrap_or(0.0);
         let min = self.singular_values.last().copied().unwrap_or(0.0);
         if max <= 0.0 || min <= 0.0 {
@@ -45,7 +45,7 @@ impl ThinSvd {
 }
 
 /// Compute the thin SVD of `x`, recording non-convergence.
-pub fn thin_svd(report: &mut Report, x: &Matrix, policy: &Policy) -> Option<ThinSvd> {
+pub(crate) fn thin_svd(report: &mut Report, x: &Matrix, policy: &Policy) -> Option<ThinSvd> {
     match x.inner().thin_svd() {
         Ok(svd) => {
             let u = svd.U().to_owned();
@@ -81,7 +81,7 @@ pub fn thin_svd(report: &mut Report, x: &Matrix, policy: &Policy) -> Option<Thin
 }
 
 /// Least-squares `min ‖Xβ − y‖₂` with rank / condition diagnostics.
-pub fn least_squares(
+pub(crate) fn least_squares(
     report: &mut Report,
     x: &Matrix,
     y: &Vector,
@@ -245,7 +245,7 @@ fn svd_solve(svd: &ThinSvd, y: &Vector, rank: usize) -> Vector {
 }
 
 /// Ridge: `(XᵀX + λI)β = Xᵀy`. Falls back to SVD if Cholesky fails.
-pub fn ridge_solve(
+pub(crate) fn ridge_solve(
     report: &mut Report,
     x: &Matrix,
     y: &Vector,
@@ -378,7 +378,7 @@ fn svd_ridge(
 }
 
 /// Symmetric eigendecomposition of a p×p matrix (lower triangle read).
-pub fn symmetric_eigen(
+pub(crate) fn symmetric_eigen(
     report: &mut Report,
     a: &Mat<f64>,
     policy: &Policy,
@@ -411,7 +411,7 @@ pub fn symmetric_eigen(
 }
 
 /// SPD solve `A x = b` via Cholesky; records failure.
-pub fn chol_solve(
+pub(crate) fn chol_solve(
     report: &mut Report,
     a: &Mat<f64>,
     b: &Vector,

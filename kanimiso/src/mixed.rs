@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 /// Random-intercept / random-slope linear mixed model.
 #[derive(Clone, Debug)]
-pub struct MixedLM {
+pub(crate) struct MixedLM {
     /// Include a global intercept in the within design.
     pub fit_intercept: bool,
     /// If true, estimate a random coefficient on every column of `X` (Swamy).
@@ -43,13 +43,13 @@ impl Default for MixedLM {
 
 impl MixedLM {
     /// Default random-intercept model.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit `y | groups` with a random intercept per group.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -571,7 +571,7 @@ impl MixedLM {
 
 /// Fitted random-intercept / random-slope model.
 #[derive(Clone, Debug)]
-pub struct FittedMixed {
+pub(crate) struct FittedMixed {
     /// Fixed slopes (within OLS, or Swamy mean of group slopes).
     pub coef: Vector,
     /// Grand mean (intercept-only) or Swamy mean intercept (random slopes).

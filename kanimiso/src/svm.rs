@@ -25,7 +25,7 @@ pub use coronel::Kernel as CoronelKernel;
 
 /// Kernel used by dual SVM / SVR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kernel {
+pub(crate) enum Kernel {
     /// Inner product \(\langle x, z\rangle\).
     Linear,
     /// RBF \(k(x,z)=\exp(-\gamma\|x-z\|_2^2)\).
@@ -174,7 +174,7 @@ fn linear_decision(x: &Matrix, i: usize, w: &Vector, b: f64) -> f64 {
 
 /// Linear support-vector classifier (Pegasos / primal SGD hinge).
 #[derive(Clone, Debug)]
-pub struct LinearSvc {
+pub(crate) struct LinearSvc {
     /// Inverse regularization \(C > 0\) (\(\lambda = 1/C\)).
     pub c: f64,
     /// Number of full-data epochs.
@@ -195,14 +195,14 @@ impl Default for LinearSvc {
 
 impl LinearSvc {
     /// Default Pegasos linear SVC.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted linear SVC / one-class hyperplane.
 #[derive(Clone, Debug)]
-pub struct FittedLinearSvc {
+pub(crate) struct FittedLinearSvc {
     /// Slope weights.
     pub coef: Vector,
     /// Intercept.
@@ -236,12 +236,7 @@ impl Predict for FittedLinearSvc {
 
 impl Fit for LinearSvc {
     type Fitted = FittedLinearSvc;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedLinearSvc>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLinearSvc>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -361,7 +356,7 @@ impl Fit for LinearSvc {
 
 /// Linear ε-insensitive SVR (primal SGD).
 #[derive(Clone, Debug)]
-pub struct LinearSvr {
+pub(crate) struct LinearSvr {
     /// Inverse regularization \(C > 0\).
     pub c: f64,
     /// Number of epochs.
@@ -385,14 +380,14 @@ impl Default for LinearSvr {
 
 impl LinearSvr {
     /// Default linear SVR.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted linear SVR.
 #[derive(Clone, Debug)]
-pub struct FittedLinearSvr {
+pub(crate) struct FittedLinearSvr {
     /// Slope weights.
     pub coef: Vector,
     /// Intercept.
@@ -414,12 +409,7 @@ impl Predict for FittedLinearSvr {
 
 impl Fit for LinearSvr {
     type Fitted = FittedLinearSvr;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedLinearSvr>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLinearSvr>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
@@ -498,7 +488,7 @@ impl Fit for LinearSvr {
 
 /// Kernel C-SVC (SMO on the dual).
 #[derive(Clone, Debug)]
-pub struct Svc {
+pub(crate) struct Svc {
     /// Box constraint \(C > 0\).
     pub c: f64,
     /// RBF length-scale parameter (ignored for [`Kernel::Linear`]).
@@ -522,14 +512,14 @@ impl Default for Svc {
 
 impl Svc {
     /// Default RBF SVC.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted kernel SVC.
 #[derive(Clone, Debug)]
-pub struct FittedSvc {
+pub(crate) struct FittedSvc {
     /// Support-vector features.
     pub x_train: Matrix,
     /// Dual coefficients \(\alpha_i\).
@@ -570,7 +560,11 @@ impl FittedSvc {
     }
 
     /// Signed decision scores \(f(x)=\sum_i \alpha_i y_i K(x_i,x)+b\).
-    pub fn decision_function(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn decision_function(
+        &self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("decision_function"));
         predict_shape_guard(&mut ctx, x, self.x_train.ncols());
         ctx.finish(Vector::from_iter(
@@ -847,7 +841,7 @@ fn nu_smo_fit(
 
 impl Fit for Svc {
     type Fitted = FittedSvc;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSvc>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSvc>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -911,7 +905,7 @@ impl Fit for Svc {
 
 /// Kernel ε-SVR (dual coordinate / SMO-lite).
 #[derive(Clone, Debug)]
-pub struct Svr {
+pub(crate) struct Svr {
     /// Box constraint \(C > 0\).
     pub c: f64,
     /// RBF \(\gamma\).
@@ -938,14 +932,14 @@ impl Default for Svr {
 
 impl Svr {
     /// Default RBF SVR.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted kernel SVR.
 #[derive(Clone, Debug)]
-pub struct FittedSvr {
+pub(crate) struct FittedSvr {
     /// Training features.
     pub x_train: Matrix,
     /// Dual coefficients \(\alpha_i - \alpha_i^\star \in [-C, C]\).
@@ -981,7 +975,7 @@ impl Predict for FittedSvr {
 
 impl Fit for Svr {
     type Fitted = FittedSvr;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSvr>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSvr>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
@@ -1063,7 +1057,7 @@ impl Fit for Svr {
 
 /// One-class SVM: hypersphere (SVDD-lite) or linear halfspace.
 #[derive(Clone, Debug)]
-pub struct OneClassSvm {
+pub(crate) struct OneClassSvm {
     /// Expected outlier fraction \(\nu \in (0,1]\).
     pub nu: f64,
     /// If true, fit a linear halfspace; otherwise a Euclidean hypersphere.
@@ -1090,14 +1084,14 @@ impl Default for OneClassSvm {
 
 impl OneClassSvm {
     /// Default hypersphere one-class SVM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted one-class model.
 #[derive(Clone, Debug)]
-pub struct FittedOneClassSvm {
+pub(crate) struct FittedOneClassSvm {
     /// Sphere centre (hypersphere mode) or weight vector (linear mode).
     pub center: Vector,
     /// Radius (hypersphere) or offset \(\rho\) (linear).
@@ -1121,7 +1115,7 @@ impl FittedOneClassSvm {
     }
 
     /// Decision scores (positive ⇒ outside / outlier).
-    pub fn score_samples(&self, x: &Matrix) -> Vector {
+    pub(crate) fn score_samples(&self, x: &Matrix) -> Vector {
         Vector::from_iter((0..x.nrows()).map(|i| self.score_row(x, i)))
     }
 
@@ -1165,7 +1159,7 @@ fn quantile(mut xs: Vec<f64>, q: f64) -> f64 {
 impl FitUnsupervised for OneClassSvm {
     type Fitted = FittedOneClassSvm;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedOneClassSvm>> {
@@ -1279,7 +1273,7 @@ fn chang_lin_c(nu: f64, n: usize) -> f64 {
 /// This is **not** the ν-dual (`0 ≤ α_i ≤ 1/n`, `∑α_i ≥ ν`) solved from
 /// scratch. The box constraint is rewritten and the C-SVM SMO path is reused.
 #[derive(Clone, Debug)]
-pub struct NuSvc {
+pub(crate) struct NuSvc {
     /// Fraction of support vectors / margin errors, \(\nu \in (0, 1]\).
     pub nu: f64,
     /// RBF \(\gamma\).
@@ -1303,14 +1297,14 @@ impl Default for NuSvc {
 
 impl NuSvc {
     /// Default ν-SVC (`ν = 0.5`).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for NuSvc {
     type Fitted = FittedSvc;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSvc>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSvc>> {
         let mut ctx = FitCtx::with_session(session.clone());
         if !self.nu.is_finite() || self.nu <= 0.0 || self.nu > 1.0 {
             ctx.push(
@@ -1353,7 +1347,7 @@ impl Fit for NuSvc {
 
 /// ν-SVR via Chang–Lin \(C = 1/(\nu n)\).
 #[derive(Clone, Debug)]
-pub struct NuSvr {
+pub(crate) struct NuSvr {
     /// \(\nu \in (0, 1]\).
     pub nu: f64,
     /// RBF \(\gamma\).
@@ -1380,14 +1374,14 @@ impl Default for NuSvr {
 
 impl NuSvr {
     /// Default ν-SVR.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for NuSvr {
     type Fitted = FittedSvr;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSvr>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSvr>> {
         let mut ctx = FitCtx::with_session(session.clone());
         if !self.nu.is_finite() || self.nu <= 0.0 || self.nu > 1.0 {
             ctx.push(
@@ -1432,7 +1426,7 @@ impl Fit for NuSvr {
 /// Same-class SMO pairs keep both equalities. [`NuSvc`] remains the Chang–Lin
 /// C-reduction and records that compromise.
 #[derive(Clone, Debug)]
-pub struct NuSvcSmo {
+pub(crate) struct NuSvcSmo {
     /// Fraction of margin errors / SVs, \(\nu \in (0, 1]\).
     pub nu: f64,
     /// RBF \(\gamma\).
@@ -1456,14 +1450,14 @@ impl Default for NuSvcSmo {
 
 impl NuSvcSmo {
     /// Default true ν-SVC (`ν = 0.5`).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for NuSvcSmo {
     type Fitted = FittedSvc;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSvc>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSvc>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -1737,7 +1731,7 @@ fn nu_svr_smo_fit(
 ///
 /// [`NuSvr`] remains the Chang–Lin C-reduction and records that compromise.
 #[derive(Clone, Debug)]
-pub struct NuSvrSmo {
+pub(crate) struct NuSvrSmo {
     /// Tube-error fraction \(\nu \in (0, 1]\).
     pub nu: f64,
     /// RBF \(\gamma\).
@@ -1761,14 +1755,14 @@ impl Default for NuSvrSmo {
 
 impl NuSvrSmo {
     /// Default true ν-SVR (`ν = 0.5`).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for NuSvrSmo {
     type Fitted = FittedSvr;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSvr>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSvr>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
@@ -1857,7 +1851,7 @@ impl Fit for NuSvrSmo {
 /// Primal step: if \(w^\top x < \rho\) the point is a margin violator and \(w\)
 /// is pulled toward \(x\); \(\rho\) tracks a ν-quantile of the scores.
 #[derive(Clone, Debug)]
-pub struct SgdOneClassSvm {
+pub(crate) struct SgdOneClassSvm {
     /// Learning rate.
     pub learning_rate: f64,
     /// ν-style quantile of the score used as the offset.
@@ -1885,23 +1879,24 @@ impl Default for SgdOneClassSvm {
 
 impl SgdOneClassSvm {
     /// Default one-class SGD.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fitted weight vector.
-    pub fn coef(&self) -> &Vector {
+    pub(crate) fn coef(&self) -> &Vector {
         &self.w
     }
 }
 
 impl FitUnsupervised for SgdOneClassSvm {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
-        let q = self.partial_fit(x, None, session)?;
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
+        let q = this.partial_fit(x, None, session)?;
         let _ = q;
         let ctx = FitCtx::with_session(session.child("fit"));
-        ctx.finish(self.clone())
+        ctx.finish(this)
     }
 }
 

@@ -7,7 +7,7 @@ ALLOW=scripts/lint_allowlist.txt        # 固有名詞の数値（Exp3, Ucb1, Ca
 
 # ---- 予算（下げるのみ。初期値 = 2026-09-01 実測）-----------------------------
 MAX_R1_NUMERAL_IDENTS=915      # 目標 0  （Garch11 のような「パラメータ値」は allowlist に入れない）
-MAX_R4_PUB_ITEMS=5804          # 目標 1000
+MAX_R4_PUB_ITEMS=254           # 目標 1000; PR 11 measured after Fit::fit(&self)
 MAX_R5_FILES_OVER_3000=12      # 目標 0
 MAX_R7_DENSITY_FLOORS=159      # 目標 0
 MAX_R10_DISTINCT_FROM=741      # 目標 0

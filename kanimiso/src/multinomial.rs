@@ -15,7 +15,7 @@ use signlred::{
 
 /// Softmax multinomial logistic.
 #[derive(Clone, Debug)]
-pub struct MultinomialLogistic {
+pub(crate) struct MultinomialLogistic {
     /// ℓ₂ penalty on every non-reference coefficient block.
     pub c_inv: f64,
     /// Max Fisher-scoring iterations.
@@ -39,14 +39,14 @@ impl Default for MultinomialLogistic {
 
 impl MultinomialLogistic {
     /// Lightly ridge-regularized multinomial logistic.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted softmax model (reference = last class).
 #[derive(Clone, Debug)]
-pub struct FittedMultinomial {
+pub(crate) struct FittedMultinomial {
     /// Sorted class labels.
     pub classes: Vec<i64>,
     /// `(K−1) × p_design` coefficients (row k vs the reference).
@@ -57,7 +57,7 @@ pub struct FittedMultinomial {
 
 impl FittedMultinomial {
     /// Softmax probabilities, rows sum to 1.
-    pub fn predict_proba(&self, x: &Matrix) -> Matrix {
+    pub(crate) fn predict_proba(&self, x: &Matrix) -> Matrix {
         let design = if self.used_intercept {
             x.with_intercept()
         } else {
@@ -94,7 +94,7 @@ impl FittedMultinomial {
 impl Fit for MultinomialLogistic {
     type Fitted = FittedMultinomial;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -267,7 +267,7 @@ impl Predict for FittedMultinomial {
 ///
 /// Records that IIA is assumed and not tested.
 #[derive(Clone, Debug)]
-pub struct MnLogit {
+pub(crate) struct MnLogit {
     /// ℓ₂ penalty on every non-reference coefficient block.
     pub c_inv: f64,
     /// Max Fisher-scoring iterations.
@@ -291,7 +291,7 @@ impl Default for MnLogit {
 
 impl MnLogit {
     /// Default MNLogit.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -299,7 +299,7 @@ impl MnLogit {
 impl Fit for MnLogit {
     type Fitted = FittedMultinomial;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,

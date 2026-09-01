@@ -112,7 +112,7 @@ fn predict_shape_guard(ctx: &mut FitCtx, x: &Matrix, n_features: usize) {
 ///
 /// Neighbor count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct NearestNeighbors {
+pub(crate) struct NearestNeighbors {
     /// Neighbors returned by [`FittedNearestNeighbors::kneighbors`].
     pub n_neighbors: usize,
 }
@@ -125,14 +125,14 @@ impl Default for NearestNeighbors {
 
 impl NearestNeighbors {
     /// Graph with `k` neighbors.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self { n_neighbors: k }
     }
 }
 
 /// Fitted neighbor graph (stores the training set).
 #[derive(Clone, Debug)]
-pub struct FittedNearestNeighbors {
+pub(crate) struct FittedNearestNeighbors {
     /// Training features.
     pub x_train: Matrix,
     /// Neighbors requested.
@@ -141,7 +141,7 @@ pub struct FittedNearestNeighbors {
 
 /// Distances and indices from [`FittedNearestNeighbors::kneighbors`].
 #[derive(Clone, Debug)]
-pub struct NeighborGraph {
+pub(crate) struct NeighborGraph {
     /// `n_query × k` Euclidean distances.
     pub distances: Matrix,
     /// Row indices into the training set.
@@ -150,7 +150,7 @@ pub struct NeighborGraph {
 
 impl FittedNearestNeighbors {
     /// k-NN of each query row.
-    pub fn kneighbors(
+    pub(crate) fn kneighbors(
         &self,
         query: &Matrix,
         session: &Session,
@@ -196,7 +196,7 @@ impl FittedNearestNeighbors {
 ///
 /// Neighbor count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct KNeighborsTransformer {
+pub(crate) struct KNeighborsTransformer {
     /// Neighbors marked as 1 in the graph.
     pub n_neighbors: usize,
 }
@@ -209,7 +209,7 @@ impl Default for KNeighborsTransformer {
 
 impl KNeighborsTransformer {
     /// Graph with `k` neighbors.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             n_neighbors: k.max(1),
         }
@@ -218,14 +218,14 @@ impl KNeighborsTransformer {
 
 /// Fitted k-NN graph transformer.
 #[derive(Clone, Debug)]
-pub struct FittedKNeighborsTransformer {
+pub(crate) struct FittedKNeighborsTransformer {
     inner: FittedNearestNeighbors,
 }
 
 impl FitUnsupervised for KNeighborsTransformer {
     type Fitted = FittedKNeighborsTransformer;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedKNeighborsTransformer>> {
@@ -265,7 +265,7 @@ impl Transform for FittedKNeighborsTransformer {
 ///
 /// Radius is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RadiusNeighborsTransformer {
+pub(crate) struct RadiusNeighborsTransformer {
     /// Neighbor radius (Euclidean).
     pub radius: f64,
 }
@@ -278,14 +278,14 @@ impl Default for RadiusNeighborsTransformer {
 
 impl RadiusNeighborsTransformer {
     /// Graph with radius `radius`.
-    pub fn new(radius: f64) -> Self {
+    pub(crate) fn new(radius: f64) -> Self {
         Self { radius }
     }
 }
 
 /// Fitted radius-neighbor graph.
 #[derive(Clone, Debug)]
-pub struct FittedRadiusNeighborsTransformer {
+pub(crate) struct FittedRadiusNeighborsTransformer {
     x_train: Matrix,
     radius: f64,
 }
@@ -293,7 +293,7 @@ pub struct FittedRadiusNeighborsTransformer {
 impl FitUnsupervised for RadiusNeighborsTransformer {
     type Fitted = FittedRadiusNeighborsTransformer;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedRadiusNeighborsTransformer>> {
@@ -304,7 +304,9 @@ impl FitUnsupervised for RadiusNeighborsTransformer {
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
                     .severity(Severity::Warning)
-                    .message(format!("radius={radius} is not a non-negative finite; using 1"))
+                    .message(format!(
+                        "radius={radius} is not a non-negative finite; using 1"
+                    ))
                     .build(),
             );
             radius = 1.0;
@@ -336,7 +338,7 @@ impl Transform for FittedRadiusNeighborsTransformer {
 impl FitUnsupervised for NearestNeighbors {
     type Fitted = FittedNearestNeighbors;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedNearestNeighbors>> {
@@ -358,7 +360,7 @@ impl FitUnsupervised for NearestNeighbors {
 
 /// k-nearest-neighbor classifier (majority vote, Euclidean).
 #[derive(Clone, Debug)]
-pub struct KNeighborsClassifier {
+pub(crate) struct KNeighborsClassifier {
     /// Number of neighbors.
     pub k: usize,
 }
@@ -371,14 +373,14 @@ impl Default for KNeighborsClassifier {
 
 impl KNeighborsClassifier {
     /// Classifier with `k` neighbors.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self { k }
     }
 }
 
 /// Fitted k-NN classifier (stores the training set).
 #[derive(Clone, Debug)]
-pub struct FittedKnnClassifier {
+pub(crate) struct FittedKnnClassifier {
     /// Training features.
     pub x_train: Matrix,
     /// Training labels (rounded).
@@ -428,7 +430,7 @@ impl Predict for FittedKnnClassifier {
 impl Fit for KNeighborsClassifier {
     type Fitted = FittedKnnClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -487,7 +489,7 @@ impl Fit for KNeighborsClassifier {
 
 /// k-nearest-neighbor regressor (mean of neighbors).
 #[derive(Clone, Debug)]
-pub struct KNeighborsRegressor {
+pub(crate) struct KNeighborsRegressor {
     /// Number of neighbors.
     pub k: usize,
 }
@@ -500,14 +502,14 @@ impl Default for KNeighborsRegressor {
 
 impl KNeighborsRegressor {
     /// Regressor with `k` neighbors.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self { k }
     }
 }
 
 /// Fitted k-NN regressor.
 #[derive(Clone, Debug)]
-pub struct FittedKnnRegressor {
+pub(crate) struct FittedKnnRegressor {
     /// Training features.
     pub x_train: Matrix,
     /// Training response.
@@ -546,7 +548,7 @@ impl Predict for FittedKnnRegressor {
 impl Fit for KNeighborsRegressor {
     type Fitted = FittedKnnRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -570,7 +572,7 @@ impl Fit for KNeighborsRegressor {
 
 /// Radius-neighbors classifier (majority vote inside a Euclidean ball).
 #[derive(Clone, Debug)]
-pub struct RadiusNeighborsClassifier {
+pub(crate) struct RadiusNeighborsClassifier {
     /// Inclusive radius (Euclidean).
     pub radius: f64,
 }
@@ -583,14 +585,14 @@ impl Default for RadiusNeighborsClassifier {
 
 impl RadiusNeighborsClassifier {
     /// Classifier with the given radius.
-    pub fn new(radius: f64) -> Self {
+    pub(crate) fn new(radius: f64) -> Self {
         Self { radius }
     }
 }
 
 /// Fitted radius-neighbors classifier.
 #[derive(Clone, Debug)]
-pub struct FittedRadiusNeighbors {
+pub(crate) struct FittedRadiusNeighbors {
     /// Training features.
     pub x_train: Matrix,
     /// Training labels.
@@ -660,7 +662,7 @@ impl Predict for FittedRadiusNeighbors {
 impl Fit for RadiusNeighborsClassifier {
     type Fitted = FittedRadiusNeighbors;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -696,7 +698,7 @@ impl Fit for RadiusNeighborsClassifier {
 
 /// Radius-neighbors regressor (mean of responses inside a Euclidean ball).
 #[derive(Clone, Debug)]
-pub struct RadiusNeighborsRegressor {
+pub(crate) struct RadiusNeighborsRegressor {
     /// Inclusive radius (Euclidean).
     pub radius: f64,
 }
@@ -709,14 +711,14 @@ impl Default for RadiusNeighborsRegressor {
 
 impl RadiusNeighborsRegressor {
     /// Regressor with the given radius.
-    pub fn new(radius: f64) -> Self {
+    pub(crate) fn new(radius: f64) -> Self {
         Self { radius }
     }
 }
 
 /// Fitted radius-neighbors regressor.
 #[derive(Clone, Debug)]
-pub struct FittedRadiusNeighborsReg {
+pub(crate) struct FittedRadiusNeighborsReg {
     /// Training features.
     pub x_train: Matrix,
     /// Training response.
@@ -781,7 +783,7 @@ impl Predict for FittedRadiusNeighborsReg {
 impl Fit for RadiusNeighborsRegressor {
     type Fitted = FittedRadiusNeighborsReg;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -809,7 +811,7 @@ impl Fit for RadiusNeighborsRegressor {
 
 /// Local outlier factor (Breunig et al.).
 #[derive(Clone, Debug)]
-pub struct LocalOutlierFactor {
+pub(crate) struct LocalOutlierFactor {
     /// Neighborhood size.
     pub k: usize,
 }
@@ -822,14 +824,14 @@ impl Default for LocalOutlierFactor {
 
 impl LocalOutlierFactor {
     /// LOF with `k` neighbors.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self { k }
     }
 }
 
 /// Fitted LOF model (novelty scores against the training cloud).
 #[derive(Clone, Debug)]
-pub struct FittedLof {
+pub(crate) struct FittedLof {
     /// Training features.
     pub x_train: Matrix,
     /// Neighbor count actually used (`min(k, n-1)`).
@@ -858,7 +860,7 @@ fn lof_neighbors(x: &Matrix, i: usize, k: usize) -> (Vec<usize>, f64) {
 impl FittedLof {
     /// LOF scores for the rows of `x` (higher = more outlying). Training-row
     /// queries use the stored densities; novel rows are scored against the cloud.
-    pub fn score_samples(&self, x: &Matrix) -> Vector {
+    pub(crate) fn score_samples(&self, x: &Matrix) -> Vector {
         let same = x.nrows() == self.x_train.nrows()
             && x.ncols() == self.x_train.ncols()
             && (0..x.nrows()).all(|i| {
@@ -924,7 +926,7 @@ impl Predict for FittedLof {
 
 impl FitUnsupervised for LocalOutlierFactor {
     type Fitted = FittedLof;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedLof>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedLof>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let n = x.nrows();
@@ -988,7 +990,7 @@ impl FitUnsupervised for LocalOutlierFactor {
 
 /// Gaussian kernel density estimator.
 #[derive(Clone, Debug)]
-pub struct KernelDensity {
+pub(crate) struct KernelDensity {
     /// Bandwidth \(h > 0\).
     pub bandwidth: f64,
 }
@@ -1001,14 +1003,14 @@ impl Default for KernelDensity {
 
 impl KernelDensity {
     /// Gaussian KDE with the given bandwidth.
-    pub fn new(bandwidth: f64) -> Self {
+    pub(crate) fn new(bandwidth: f64) -> Self {
         Self { bandwidth }
     }
 }
 
 /// Fitted Gaussian KDE.
 #[derive(Clone, Debug)]
-pub struct FittedKde {
+pub(crate) struct FittedKde {
     /// Training features.
     pub x_train: Matrix,
     /// Bandwidth.
@@ -1017,7 +1019,7 @@ pub struct FittedKde {
 
 impl FittedKde {
     /// Log-density of each row of `x`.
-    pub fn log_density(&self, x: &Matrix) -> Vector {
+    pub(crate) fn log_density(&self, x: &Matrix) -> Vector {
         let n = self.x_train.nrows();
         let p = self.x_train.ncols() as f64;
         let h = self.bandwidth.max(1e-15);
@@ -1047,7 +1049,7 @@ impl Predict for FittedKde {
 
 impl FitUnsupervised for KernelDensity {
     type Fitted = FittedKde;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKde>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKde>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         if !self.bandwidth.is_finite() || self.bandwidth <= 0.0 {
@@ -1076,18 +1078,18 @@ impl FitUnsupervised for KernelDensity {
 
 /// Nearest-centroid (Rocchio) classifier.
 #[derive(Clone, Debug, Default)]
-pub struct NearestCentroid;
+pub(crate) struct NearestCentroid;
 
 impl NearestCentroid {
     /// Default nearest-centroid classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
 
 /// Fitted class centroids.
 #[derive(Clone, Debug)]
-pub struct FittedNearestCentroid {
+pub(crate) struct FittedNearestCentroid {
     /// Sorted unique labels.
     pub classes: Vec<i64>,
     /// Centroid matrix (`K × p`).
@@ -1128,7 +1130,7 @@ impl Predict for FittedNearestCentroid {
 impl Fit for NearestCentroid {
     type Fitted = FittedNearestCentroid;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -1192,7 +1194,7 @@ impl Fit for NearestCentroid {
 /// 40 labelled rows is identified. Single-class `y` is vacuous via
 /// [`inspect_classes`].
 #[derive(Clone, Debug)]
-pub struct NeighborhoodComponentsAnalysis {
+pub(crate) struct NeighborhoodComponentsAnalysis {
     /// Embedding dimension.
     pub n_components: usize,
     /// Gradient steps.
@@ -1214,7 +1216,7 @@ impl Default for NeighborhoodComponentsAnalysis {
 
 impl NeighborhoodComponentsAnalysis {
     /// Embed into `n_components` dimensions.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(1),
             ..Self::default()
@@ -1224,23 +1226,24 @@ impl NeighborhoodComponentsAnalysis {
 
 impl Fit for NeighborhoodComponentsAnalysis {
     type Fitted = Self;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
         if counts.len() < 2 {
-            self.fitted = true;
-            self.components = Matrix::zeros(x.ncols(), self.n_components.max(1));
-            return ctx.finish(self.clone());
+            this.fitted = true;
+            this.components = Matrix::zeros(x.ncols(), this.n_components.max(1));
+            return ctx.finish(this.clone());
         }
         let (n, p) = x.shape();
-        let k = self.n_components.max(1).min(p.max(1));
-        if k < self.n_components {
+        let k = this.n_components.max(1).min(p.max(1));
+        if k < this.n_components {
             ctx.push(
                 Issue::builder(IssueCode::ComponentsExceedRank)
                     .message(format!(
                         "NCA requested {} components, using {k}",
-                        self.n_components
+                        this.n_components
                     ))
                     .build(),
             );
@@ -1251,7 +1254,7 @@ impl Fit for NeighborhoodComponentsAnalysis {
         }
         let labs: Vec<i64> = y.as_slice().iter().map(|&v| v.round() as i64).collect();
         let lr = 0.05;
-        for it in 0..self.max_iter.max(1) {
+        for it in 0..this.max_iter.max(1) {
             let z = Matrix::from_fn(n, k, |i, c| {
                 let mut s = 0.0;
                 for j in 0..p.min(a.nrows()) {
@@ -1334,9 +1337,9 @@ impl Fit for NeighborhoodComponentsAnalysis {
                     .build(),
             );
         }
-        self.components = a;
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.components = a;
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 

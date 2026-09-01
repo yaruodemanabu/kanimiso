@@ -15,15 +15,15 @@ use crate::validate::{inspect_classes, inspect_xy};
 use ojizou_san::Session;
 use signlred::{Issue, IssueCode, Qualified, Result};
 
-pub use crate::glm::{FittedGlm, ProbitRegression, SgdClassifier, SgdLoss};
-pub use crate::histgb::{FittedHistGbc, HistGradientBoostingClassifier};
-pub use crate::linear_model::{FittedLogistic, LogisticRegression};
-pub use crate::naive_bayes::{
+pub(crate) use crate::glm::{FittedGlm, ProbitRegression, SgdClassifier, SgdLoss};
+pub(crate) use crate::histgb::{FittedHistGbc, HistGradientBoostingClassifier};
+pub(crate) use crate::linear_model::{FittedLogistic, LogisticRegression};
+pub(crate) use crate::naive_bayes::{
     BernoulliNB, CategoricalNB, ComplementNB, FittedBernoulliNB, FittedCategoricalNB,
     FittedDiscreteNB, FittedGaussianNB, GaussianNB, MultinomialNB,
 };
-pub use crate::svm::{FittedLinearSvc, FittedSvc, LinearSvc, Svc};
-pub use crate::tree::{
+pub(crate) use crate::svm::{FittedLinearSvc, FittedSvc, LinearSvc, Svc};
+pub(crate) use crate::tree::{
     AdaBoostClassifier, AdaBoostRegressor, DecisionTreeClassifier, ExtraTreesClassifier,
     FittedAdaBoost, FittedAdaBoostRegressor, FittedForestClassifier, FittedGbc,
     FittedTreeClassifier, GradientBoostingClassifier, RandomForestClassifier,
@@ -61,7 +61,7 @@ pub(crate) fn from_score(s: f64, classes: &[i64]) -> f64 {
 
 /// Ridge classifier: sign of a ridge regressor on `±1` labels.
 #[derive(Clone, Debug)]
-pub struct RidgeClassifier {
+pub(crate) struct RidgeClassifier {
     /// ℓ₂ penalty.
     pub alpha: f64,
 }
@@ -74,14 +74,14 @@ impl Default for RidgeClassifier {
 
 impl RidgeClassifier {
     /// Ridge classifier with the given `α`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self { alpha }
     }
 }
 
 /// Fitted ridge classifier.
 #[derive(Clone, Debug)]
-pub struct FittedRidgeClassifier {
+pub(crate) struct FittedRidgeClassifier {
     pub(crate) inner: FittedPenalized,
     /// Training classes (sorted).
     pub classes: Vec<i64>,
@@ -94,7 +94,11 @@ impl FittedRidgeClassifier {
     }
 
     /// Decision scores (ridge prediction on the `±1` scale).
-    pub fn decision_function(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn decision_function(
+        &self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<Vector>> {
         self.inner.predict(x, session)
     }
 }
@@ -119,7 +123,7 @@ impl Predict for FittedRidgeClassifier {
 impl Fit for RidgeClassifier {
     type Fitted = FittedRidgeClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -149,7 +153,7 @@ impl Fit for RidgeClassifier {
 ///
 /// The Huber threshold is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct HuberClassifier {
+pub(crate) struct HuberClassifier {
     /// Huber threshold on the residual / scale.
     pub epsilon: f64,
     /// IRLS iteration cap.
@@ -167,14 +171,14 @@ impl Default for HuberClassifier {
 
 impl HuberClassifier {
     /// Default Huber classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted Huber classifier.
 #[derive(Clone, Debug)]
-pub struct FittedHuberClassifier {
+pub(crate) struct FittedHuberClassifier {
     coef: Vector,
     intercept: f64,
     /// Training classes (sorted).
@@ -184,7 +188,7 @@ pub struct FittedHuberClassifier {
 impl Fit for HuberClassifier {
     type Fitted = FittedHuberClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -274,7 +278,7 @@ impl Predict for FittedHuberClassifier {
 /// Fold fits that abort are skipped. A grid with no finite score is
 /// unidentified.
 #[derive(Clone, Debug)]
-pub struct RidgeClassifierCV {
+pub(crate) struct RidgeClassifierCV {
     /// Candidate ℓ₂ penalties.
     pub alphas: Vec<f64>,
     /// CV splitter.
@@ -292,7 +296,7 @@ impl Default for RidgeClassifierCV {
 
 impl RidgeClassifierCV {
     /// Grid over the given `alpha` values.
-    pub fn new(alphas: Vec<f64>) -> Self {
+    pub(crate) fn new(alphas: Vec<f64>) -> Self {
         Self {
             alphas,
             cv: KFold::new(3),
@@ -302,7 +306,7 @@ impl RidgeClassifierCV {
 
 /// Selected ridge classifier and the CV scores that justified it.
 #[derive(Clone, Debug)]
-pub struct FittedRidgeClassifierCV {
+pub(crate) struct FittedRidgeClassifierCV {
     /// Penalty with the highest mean fold accuracy.
     pub best_alpha: f64,
     /// Mean CV accuracy of `best_alpha`.
@@ -316,7 +320,7 @@ pub struct FittedRidgeClassifierCV {
 impl Fit for RidgeClassifierCV {
     type Fitted = FittedRidgeClassifierCV;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -408,7 +412,7 @@ impl Predict for FittedRidgeClassifierCV {
 
 /// Batch perceptron (Rosenblatt) on `±1` labels.
 #[derive(Clone, Debug)]
-pub struct Perceptron {
+pub(crate) struct Perceptron {
     /// Learning rate.
     pub eta0: f64,
     /// Passes over the data.
@@ -429,14 +433,14 @@ impl Default for Perceptron {
 
 impl Perceptron {
     /// Default perceptron.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted linear classifier (`w, b`).
 #[derive(Clone, Debug)]
-pub struct FittedLinearClassifier {
+pub(crate) struct FittedLinearClassifier {
     /// Slopes.
     pub coef: Vector,
     /// Intercept.
@@ -468,7 +472,7 @@ impl Predict for FittedLinearClassifier {
 impl Fit for Perceptron {
     type Fitted = FittedLinearClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -525,7 +529,7 @@ impl Fit for Perceptron {
 
 /// Batch passive-aggressive classifier (PA-I).
 #[derive(Clone, Debug)]
-pub struct PassiveAggressive {
+pub(crate) struct PassiveAggressive {
     /// Aggressiveness `C` (step-size cap).
     pub c: f64,
     /// Passes over the data.
@@ -546,7 +550,7 @@ impl Default for PassiveAggressive {
 
 impl PassiveAggressive {
     /// PA-I with aggressiveness `c`.
-    pub fn new(c: f64) -> Self {
+    pub(crate) fn new(c: f64) -> Self {
         Self {
             c,
             ..Self::default()
@@ -557,7 +561,7 @@ impl PassiveAggressive {
 impl Fit for PassiveAggressive {
     type Fitted = FittedLinearClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -604,13 +608,13 @@ impl Fit for PassiveAggressive {
 
 /// sklearn `PassiveAggressiveClassifier` name for [`PassiveAggressive`].
 #[derive(Clone, Debug, Default)]
-pub struct PassiveAggressiveClassifier {
+pub(crate) struct PassiveAggressiveClassifier {
     inner: PassiveAggressive,
 }
 
 impl PassiveAggressiveClassifier {
     /// PA-I with aggressiveness `c`.
-    pub fn new(c: f64) -> Self {
+    pub(crate) fn new(c: f64) -> Self {
         Self {
             inner: PassiveAggressive::new(c),
         }
@@ -620,7 +624,7 @@ impl PassiveAggressiveClassifier {
 impl Fit for PassiveAggressiveClassifier {
     type Fitted = FittedLinearClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -631,18 +635,18 @@ impl Fit for PassiveAggressiveClassifier {
 
 /// Dummy classifier: always predict the most frequent training label.
 #[derive(Clone, Debug, Default)]
-pub struct DummyClassifier {}
+pub(crate) struct DummyClassifier {}
 
 impl DummyClassifier {
     /// Most-frequent dummy.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {}
     }
 }
 
 /// Fitted dummy classifier.
 #[derive(Clone, Debug)]
-pub struct FittedDummyClassifier {
+pub(crate) struct FittedDummyClassifier {
     /// Majority label.
     pub label: f64,
     /// Training classes.
@@ -660,7 +664,7 @@ impl Predict for FittedDummyClassifier {
 impl Fit for DummyClassifier {
     type Fitted = FittedDummyClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -685,20 +689,20 @@ impl Fit for DummyClassifier {
 /// `scores` are the uncalibrated decision values. A single class makes \(A, B\)
 /// unidentified.
 #[derive(Clone, Debug, Default)]
-pub struct PlattCalibrator {
+pub(crate) struct PlattCalibrator {
     /// Max IRLS iterations.
     pub max_iter: usize,
 }
 
 impl PlattCalibrator {
     /// Default Platt calibrator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { max_iter: 40 }
     }
 
     /// Fit \(A, B\) on `(scores, labels)`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         scores: &Vector,
         y: &Vector,
         session: &Session,
@@ -720,7 +724,7 @@ impl PlattCalibrator {
 
 /// Fitted Platt map.
 #[derive(Clone, Debug)]
-pub struct FittedPlatt {
+pub(crate) struct FittedPlatt {
     /// Slope on the score.
     pub a: f64,
     /// Intercept.
@@ -731,7 +735,7 @@ pub struct FittedPlatt {
 
 /// Calibration map used by [`CalibratedClassifierCV`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CalibrationMethod {
+pub(crate) enum CalibrationMethod {
     /// Platt logistic map on OOF scores.
     Platt,
     /// Isotonic regression on OOF scores.
@@ -740,7 +744,7 @@ pub enum CalibrationMethod {
 
 /// K-fold OOF calibration of a ridge classifier (sklearn `CalibratedClassifierCV`).
 #[derive(Clone, Debug)]
-pub struct CalibratedClassifierCV {
+pub(crate) struct CalibratedClassifierCV {
     /// How to map scores to probabilities.
     pub method: CalibrationMethod,
     /// Number of stratified folds for OOF scores.
@@ -761,14 +765,14 @@ impl Default for CalibratedClassifierCV {
 
 impl CalibratedClassifierCV {
     /// Platt-calibrated ridge classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted calibrated classifier.
 #[derive(Clone, Debug)]
-pub struct FittedCalibrated {
+pub(crate) struct FittedCalibrated {
     /// Base classifier refit on the full sample.
     pub base: FittedRidgeClassifier,
     platt: Option<FittedPlatt>,
@@ -779,7 +783,7 @@ pub struct FittedCalibrated {
 
 impl FittedCalibrated {
     /// Calibrated \(P(\text{last class})\).
-    pub fn predict_proba(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_proba(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let scores = self.base.decision_function(x, &session.child("score"))?;
         if let Some(p) = &self.platt {
             return p.predict_proba(&scores.value, session);
@@ -818,7 +822,7 @@ impl Predict for FittedCalibrated {
 impl Fit for CalibratedClassifierCV {
     type Fitted = FittedCalibrated;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -935,7 +939,11 @@ impl Fit for CalibratedClassifierCV {
 
 impl FittedPlatt {
     /// Calibrated \(P(\text{last class} \mid s)\).
-    pub fn predict_proba(&self, scores: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_proba(
+        &self,
+        scores: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("predict"));
         let out = Vector::from_iter(scores.as_slice().iter().map(|&s| {
             let z = self.a * s + self.b;

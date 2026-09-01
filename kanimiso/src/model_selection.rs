@@ -21,7 +21,7 @@ use signlred::{Issue, IssueCode, NumericalCompromise, Qualified, Result, Severit
 
 /// Row indices of one train / test fold.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Split {
+pub(crate) struct Split {
     /// Training row indices.
     pub train: Vec<usize>,
     /// Held-out row indices.
@@ -29,7 +29,7 @@ pub struct Split {
 }
 
 /// Copy the listed rows of `x`.
-pub fn take_rows(x: &Matrix, idx: &[usize]) -> Matrix {
+pub(crate) fn take_rows(x: &Matrix, idx: &[usize]) -> Matrix {
     if idx.is_empty() {
         return Matrix::zeros(0, x.ncols());
     }
@@ -44,7 +44,7 @@ pub fn take_rows(x: &Matrix, idx: &[usize]) -> Matrix {
 }
 
 /// Copy the listed entries of `y`.
-pub fn take_vec(y: &Vector, idx: &[usize]) -> Vector {
+pub(crate) fn take_vec(y: &Vector, idx: &[usize]) -> Vector {
     Vector::from_iter(
         idx.iter()
             .map(|&i| if i < y.len() { y[i] } else { f64::NAN }),
@@ -59,7 +59,7 @@ fn labels_of(y: &Vector) -> Vec<i64> {
 }
 
 /// Shuffle-split `X, y` into train and test sets.
-pub fn train_test_split(
+pub(crate) fn train_test_split(
     x: &Matrix,
     y: &Vector,
     test_size: f64,
@@ -113,7 +113,7 @@ pub fn train_test_split(
 
 /// K-fold splitter (contiguous after an optional shuffle).
 #[derive(Clone, Debug)]
-pub struct KFold {
+pub(crate) struct KFold {
     /// Number of folds (≥ 2).
     pub n_splits: usize,
     /// If true, shuffle rows with `seed` before slicing.
@@ -134,7 +134,7 @@ impl Default for KFold {
 
 impl KFold {
     /// `k` contiguous folds, no shuffle.
-    pub fn new(n_splits: usize) -> Self {
+    pub(crate) fn new(n_splits: usize) -> Self {
         Self {
             n_splits,
             ..Self::default()
@@ -142,7 +142,7 @@ impl KFold {
     }
 
     /// Materialize train/test index pairs for `n` rows.
-    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let k = self.n_splits.max(2);
         if self.n_splits < 2 {
@@ -183,7 +183,7 @@ impl KFold {
 
 /// Repeated K-fold: `n_repeats` shuffled K-fold partitions.
 #[derive(Clone, Debug)]
-pub struct RepeatedKFold {
+pub(crate) struct RepeatedKFold {
     /// Folds per repeat.
     pub n_splits: usize,
     /// Independent shuffles.
@@ -204,7 +204,7 @@ impl Default for RepeatedKFold {
 
 impl RepeatedKFold {
     /// `n_splits` folds, `n_repeats` times.
-    pub fn new(n_splits: usize, n_repeats: usize) -> Self {
+    pub(crate) fn new(n_splits: usize, n_repeats: usize) -> Self {
         Self {
             n_splits,
             n_repeats,
@@ -213,7 +213,7 @@ impl RepeatedKFold {
     }
 
     /// Materialize all train/test index pairs.
-    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let k = self.n_splits.max(2);
         let r = self.n_repeats.max(1);
@@ -251,7 +251,7 @@ impl RepeatedKFold {
 
 /// Independent random train/test draws (sklearn `ShuffleSplit`).
 #[derive(Clone, Debug)]
-pub struct ShuffleSplit {
+pub(crate) struct ShuffleSplit {
     /// Number of splits.
     pub n_splits: usize,
     /// Test fraction.
@@ -272,7 +272,7 @@ impl Default for ShuffleSplit {
 
 impl ShuffleSplit {
     /// `n_splits` random partitions.
-    pub fn new(n_splits: usize) -> Self {
+    pub(crate) fn new(n_splits: usize) -> Self {
         Self {
             n_splits,
             ..Self::default()
@@ -280,7 +280,7 @@ impl ShuffleSplit {
     }
 
     /// Materialize train/test index pairs for `n` rows.
-    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let k = self.n_splits.max(1);
         if self.n_splits < 1 {
@@ -327,7 +327,7 @@ impl ShuffleSplit {
 
 /// Stratified random train/test draws (sklearn `StratifiedShuffleSplit`).
 #[derive(Clone, Debug)]
-pub struct StratifiedShuffleSplit {
+pub(crate) struct StratifiedShuffleSplit {
     /// Number of splits.
     pub n_splits: usize,
     /// Test fraction.
@@ -348,7 +348,7 @@ impl Default for StratifiedShuffleSplit {
 
 impl StratifiedShuffleSplit {
     /// `n_splits` stratified random partitions.
-    pub fn new(n_splits: usize) -> Self {
+    pub(crate) fn new(n_splits: usize) -> Self {
         Self {
             n_splits,
             ..Self::default()
@@ -356,7 +356,7 @@ impl StratifiedShuffleSplit {
     }
 
     /// Materialize train/test index pairs that preserve class proportions of `y`.
-    pub fn split(&self, y: &Vector, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(&self, y: &Vector, session: &Session) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         crate::validate::inspect_classes(&mut ctx.report, y, &ctx.policy);
         let labs = labels_of(y);
@@ -415,7 +415,7 @@ impl StratifiedShuffleSplit {
 
 /// Repeated stratified K-fold.
 #[derive(Clone, Debug)]
-pub struct RepeatedStratifiedKFold {
+pub(crate) struct RepeatedStratifiedKFold {
     /// Folds per repeat.
     pub n_splits: usize,
     /// Independent shuffles.
@@ -436,7 +436,7 @@ impl Default for RepeatedStratifiedKFold {
 
 impl RepeatedStratifiedKFold {
     /// `n_splits` folds, `n_repeats` times.
-    pub fn new(n_splits: usize, n_repeats: usize) -> Self {
+    pub(crate) fn new(n_splits: usize, n_repeats: usize) -> Self {
         Self {
             n_splits,
             n_repeats,
@@ -445,7 +445,7 @@ impl RepeatedStratifiedKFold {
     }
 
     /// Materialize all stratified train/test index pairs.
-    pub fn split(&self, y: &Vector, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(&self, y: &Vector, session: &Session) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let k = self.n_splits.max(2);
         let r = self.n_repeats.max(1);
@@ -475,7 +475,7 @@ impl RepeatedStratifiedKFold {
 
 /// Stratified K-fold: each class is split independently so fold prevalences match.
 #[derive(Clone, Debug)]
-pub struct StratifiedKFold {
+pub(crate) struct StratifiedKFold {
     /// Number of folds.
     pub n_splits: usize,
     /// Shuffle within each class.
@@ -496,7 +496,7 @@ impl Default for StratifiedKFold {
 
 impl StratifiedKFold {
     /// `k` stratified folds.
-    pub fn new(n_splits: usize) -> Self {
+    pub(crate) fn new(n_splits: usize) -> Self {
         Self {
             n_splits,
             ..Self::default()
@@ -504,7 +504,7 @@ impl StratifiedKFold {
     }
 
     /// Materialize folds that preserve class proportions of `y`.
-    pub fn split(&self, y: &Vector, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(&self, y: &Vector, session: &Session) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         crate::validate::inspect_classes(&mut ctx.report, y, &ctx.policy);
         let labs = labels_of(y);
@@ -563,7 +563,7 @@ impl StratifiedKFold {
 
 /// Expanding-window time-series split (sktime / sklearn `TimeSeriesSplit`).
 #[derive(Clone, Debug)]
-pub struct TimeSeriesSplit {
+pub(crate) struct TimeSeriesSplit {
     /// Number of splits.
     pub n_splits: usize,
     /// Optional fixed test-block length; default is `n / (n_splits+1)`.
@@ -581,7 +581,7 @@ impl Default for TimeSeriesSplit {
 
 impl TimeSeriesSplit {
     /// Expanding window with `k` test blocks.
-    pub fn new(n_splits: usize) -> Self {
+    pub(crate) fn new(n_splits: usize) -> Self {
         Self {
             n_splits,
             test_size: None,
@@ -589,7 +589,7 @@ impl TimeSeriesSplit {
     }
 
     /// Materialize temporally ordered folds for `n` rows.
-    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let k = self.n_splits.max(1);
         if n < k + 1 {
@@ -632,7 +632,7 @@ impl TimeSeriesSplit {
 ///
 /// `scorer(x_train, y_train, x_test, y_test, session)` should return a
 /// finite skill score (higher is better).
-pub fn cross_val_score<F>(
+pub(crate) fn cross_val_score<F>(
     x: &Matrix,
     y: &Vector,
     folds: &[Split],
@@ -662,7 +662,7 @@ where
 }
 
 /// K-fold R² of [`LinearRegression`] (sklearn `cross_val_score` on OLS).
-pub fn cross_val_score_linear(
+pub(crate) fn cross_val_score_linear(
     x: &Matrix,
     y: &Vector,
     splitter: &KFold,
@@ -687,7 +687,7 @@ pub fn cross_val_score_linear(
 /// Each fold's predictions come from a model that did not see those rows.
 /// Scoring against the full `y` after this map is still a leakage risk if
 /// a later selector treats the OOF vector as a feature — that is recorded.
-pub fn cross_val_predict(
+pub(crate) fn cross_val_predict(
     x: &Matrix,
     y: &Vector,
     splitter: &KFold,
@@ -738,7 +738,7 @@ pub fn cross_val_predict(
 ///
 /// Each point is a Ridge(α=10⁻³) diagnostic, not a generic estimator protocol.
 #[derive(Clone, Debug)]
-pub struct LearningCurve {
+pub(crate) struct LearningCurve {
     /// Absolute training sizes used.
     pub train_sizes: Vec<usize>,
     /// Mean in-sample R².
@@ -748,7 +748,7 @@ pub struct LearningCurve {
 }
 
 /// Learning curve of a lightly-penalized ridge over `train_sizes` fractions.
-pub fn learning_curve(
+pub(crate) fn learning_curve(
     x: &Matrix,
     y: &Vector,
     train_sizes: &[f64],
@@ -842,7 +842,7 @@ pub fn learning_curve(
 
 /// Ridge validation curve over a grid of `alpha` (sklearn `validation_curve`).
 #[derive(Clone, Debug)]
-pub struct ValidationCurve {
+pub(crate) struct ValidationCurve {
     /// Penalty values.
     pub param_values: Vector,
     /// Mean in-sample R².
@@ -852,7 +852,7 @@ pub struct ValidationCurve {
 }
 
 /// Sklearn `validation_curve` for Ridge `alpha`.
-pub fn validation_curve(
+pub(crate) fn validation_curve(
     x: &Matrix,
     y: &Vector,
     alphas: &[f64],
@@ -863,7 +863,7 @@ pub fn validation_curve(
 }
 
 /// Validation curve of Ridge over `alphas`.
-pub fn validation_curve_ridge(
+pub(crate) fn validation_curve_ridge(
     x: &Matrix,
     y: &Vector,
     alphas: &[f64],
@@ -939,7 +939,7 @@ pub fn validation_curve_ridge(
 
 /// Column-wise permutation importance (mean and std of R² drop).
 #[derive(Clone, Debug)]
-pub struct PermutationImportance {
+pub(crate) struct PermutationImportance {
     /// Mean R² drop per column.
     pub importances_mean: Vector,
     /// Sample std of the drop over repeats.
@@ -949,7 +949,7 @@ pub struct PermutationImportance {
 /// Permute each column of a full-sample Ridge fit and record the R² drop.
 ///
 /// The baseline uses the full `y` ([`IssueCode::TargetLeakageSuspected`]).
-pub fn permutation_importance(
+pub(crate) fn permutation_importance(
     x: &Matrix,
     y: &Vector,
     n_repeats: usize,
@@ -1039,7 +1039,7 @@ pub fn permutation_importance(
 
 /// One-way partial dependence of a full-sample Ridge (sklearn `partial_dependence`).
 #[derive(Clone, Debug)]
-pub struct PartialDependence {
+pub(crate) struct PartialDependence {
     /// Grid of the chosen column.
     pub grid: Vector,
     /// Mean prediction at each grid value.
@@ -1047,7 +1047,7 @@ pub struct PartialDependence {
 }
 
 /// Average Ridge prediction after pinning `feature` to each `grid` value.
-pub fn partial_dependence(
+pub(crate) fn partial_dependence(
     x: &Matrix,
     y: &Vector,
     feature: usize,
@@ -1110,7 +1110,7 @@ pub fn partial_dependence(
 /// Grid length is not identification `p`. Inner Ridge residual issues are not
 /// promoted.
 #[derive(Clone, Debug)]
-pub struct IceResult {
+pub(crate) struct IceResult {
     /// Grid of the chosen column.
     pub grid: Vector,
     /// Per-row predictions (`n` × `n_grid`).
@@ -1120,7 +1120,7 @@ pub struct IceResult {
 }
 
 /// ICE curves: pin `feature` to each grid value and predict every row.
-pub fn individual_conditional_expectation(
+pub(crate) fn individual_conditional_expectation(
     x: &Matrix,
     y: &Vector,
     feature: usize,
@@ -1198,7 +1198,7 @@ pub fn individual_conditional_expectation(
 ///
 /// Lives here (not `linear_model`) to avoid a module cycle.
 #[derive(Clone, Debug)]
-pub struct GridSearchCV {
+pub(crate) struct GridSearchCV {
     /// Candidate penalties.
     pub alphas: Vec<f64>,
     /// `0` ⇒ Ridge, `1` ⇒ Lasso.
@@ -1219,7 +1219,7 @@ impl Default for GridSearchCV {
 
 impl GridSearchCV {
     /// Grid over the given `alpha` values (Ridge unless `l1_ratio` is set).
-    pub fn new(alphas: Vec<f64>) -> Self {
+    pub(crate) fn new(alphas: Vec<f64>) -> Self {
         Self {
             alphas,
             l1_ratio: 0.0,
@@ -1230,7 +1230,7 @@ impl GridSearchCV {
 
 /// Selected linear model and the CV scores that justified it.
 #[derive(Clone, Debug)]
-pub struct FittedGridSearchCV {
+pub(crate) struct FittedGridSearchCV {
     /// Penalty with the highest mean fold R².
     pub best_alpha: f64,
     /// Mean CV R² of `best_alpha`.
@@ -1244,7 +1244,7 @@ pub struct FittedGridSearchCV {
 impl Fit for GridSearchCV {
     type Fitted = FittedGridSearchCV;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -1325,7 +1325,7 @@ impl Fit for GridSearchCV {
 
 /// Randomized search over a log-uniform Ridge `alpha` range.
 #[derive(Clone, Debug)]
-pub struct RandomizedSearchCV {
+pub(crate) struct RandomizedSearchCV {
     /// Number of random `alpha` draws.
     pub n_iter: usize,
     /// Inclusive log10 lower bound.
@@ -1352,7 +1352,7 @@ impl Default for RandomizedSearchCV {
 
 impl RandomizedSearchCV {
     /// `n_iter` log-uniform Ridge penalties.
-    pub fn new(n_iter: usize) -> Self {
+    pub(crate) fn new(n_iter: usize) -> Self {
         Self {
             n_iter: n_iter.max(1),
             ..Self::default()
@@ -1363,7 +1363,7 @@ impl RandomizedSearchCV {
 impl Fit for RandomizedSearchCV {
     type Fitted = FittedGridSearchCV;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -1419,7 +1419,7 @@ impl Fit for RandomizedSearchCV {
 /// Resource is a growing training prefix. Candidate count is not identification
 /// `p`. Inner Ridge residual issues are not promoted.
 #[derive(Clone, Debug)]
-pub struct HalvingGridSearchCV {
+pub(crate) struct HalvingGridSearchCV {
     /// Candidate penalties.
     pub alphas: Vec<f64>,
     /// Reduction factor \(\eta \ge 2\).
@@ -1440,7 +1440,7 @@ impl Default for HalvingGridSearchCV {
 
 impl HalvingGridSearchCV {
     /// Halving search over the given `alpha` values.
-    pub fn new(alphas: Vec<f64>) -> Self {
+    pub(crate) fn new(alphas: Vec<f64>) -> Self {
         Self {
             alphas,
             ..Self::default()
@@ -1480,7 +1480,7 @@ fn score_ridge_prefix(
 impl Fit for HalvingGridSearchCV {
     type Fitted = FittedGridSearchCV;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -1567,7 +1567,7 @@ impl Fit for HalvingGridSearchCV {
 
 /// Successive-halving randomized search over a log-uniform Ridge `alpha`.
 #[derive(Clone, Debug)]
-pub struct HalvingRandomSearchCV {
+pub(crate) struct HalvingRandomSearchCV {
     /// Number of random `alpha` draws at the first rung.
     pub n_candidates: usize,
     /// Inclusive log10 lower bound.
@@ -1594,7 +1594,7 @@ impl Default for HalvingRandomSearchCV {
 
 impl HalvingRandomSearchCV {
     /// `n_candidates` log-uniform Ridge penalties.
-    pub fn new(n_candidates: usize) -> Self {
+    pub(crate) fn new(n_candidates: usize) -> Self {
         Self {
             n_candidates: n_candidates.max(2),
             ..Self::default()
@@ -1605,7 +1605,7 @@ impl HalvingRandomSearchCV {
 impl Fit for HalvingRandomSearchCV {
     type Fitted = FittedGridSearchCV;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -1658,7 +1658,7 @@ impl Fit for HalvingRandomSearchCV {
 
 /// Discrete grid search over Ridge `alpha` using K-fold R².
 #[derive(Clone, Debug)]
-pub struct GridSearchRidge {
+pub(crate) struct GridSearchRidge {
     /// Candidate ℓ₂ penalties.
     pub alphas: Vec<f64>,
     /// CV splitter.
@@ -1676,7 +1676,7 @@ impl Default for GridSearchRidge {
 
 impl GridSearchRidge {
     /// Grid over the given `alpha` values.
-    pub fn new(alphas: Vec<f64>) -> Self {
+    pub(crate) fn new(alphas: Vec<f64>) -> Self {
         Self {
             alphas,
             cv: KFold::new(3),
@@ -1686,7 +1686,7 @@ impl GridSearchRidge {
 
 /// Selected Ridge model and the CV scores that justified it.
 #[derive(Clone, Debug)]
-pub struct FittedGridSearchRidge {
+pub(crate) struct FittedGridSearchRidge {
     /// Penalty with the highest mean fold R².
     pub best_alpha: f64,
     /// Mean CV R² of `best_alpha`.
@@ -1700,7 +1700,7 @@ pub struct FittedGridSearchRidge {
 impl Fit for GridSearchRidge {
     type Fitted = FittedGridSearchRidge;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -1772,7 +1772,7 @@ impl Fit for GridSearchRidge {
 
 /// Ridge with a K-fold R² grid over `alpha` (sklearn `RidgeCV`).
 #[derive(Clone, Debug)]
-pub struct RidgeCV {
+pub(crate) struct RidgeCV {
     /// Candidate ℓ₂ penalties.
     pub alphas: Vec<f64>,
     /// CV splitter.
@@ -1790,7 +1790,7 @@ impl Default for RidgeCV {
 
 impl RidgeCV {
     /// Grid over the given `alpha` values.
-    pub fn new(alphas: Vec<f64>) -> Self {
+    pub(crate) fn new(alphas: Vec<f64>) -> Self {
         Self {
             alphas,
             cv: KFold::new(3),
@@ -1801,7 +1801,7 @@ impl RidgeCV {
 impl Fit for RidgeCV {
     type Fitted = FittedGridSearchRidge;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -1816,7 +1816,7 @@ impl Fit for RidgeCV {
 
 /// Lasso with a K-fold R² grid over `alpha` (sklearn `LassoCV`).
 #[derive(Clone, Debug)]
-pub struct LassoCV {
+pub(crate) struct LassoCV {
     /// Candidate ℓ₁ penalties.
     pub alphas: Vec<f64>,
     /// CV splitter.
@@ -1834,7 +1834,7 @@ impl Default for LassoCV {
 
 impl LassoCV {
     /// Grid over the given `alpha` values.
-    pub fn new(alphas: Vec<f64>) -> Self {
+    pub(crate) fn new(alphas: Vec<f64>) -> Self {
         Self {
             alphas,
             cv: KFold::new(3),
@@ -1844,7 +1844,7 @@ impl LassoCV {
 
 /// Selected Lasso and the CV scores that justified it.
 #[derive(Clone, Debug)]
-pub struct FittedLassoCV {
+pub(crate) struct FittedLassoCV {
     /// Penalty with the highest mean fold R².
     pub best_alpha: f64,
     /// Mean CV R² of `best_alpha`.
@@ -1857,12 +1857,7 @@ pub struct FittedLassoCV {
 
 impl Fit for LassoCV {
     type Fitted = FittedLassoCV;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedLassoCV>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLassoCV>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let folds = match self.cv.split(x.nrows(), &session.child("cv")) {
@@ -1930,7 +1925,7 @@ impl Fit for LassoCV {
 
 /// Elastic-net with a K-fold R² grid over `alpha` × `l1_ratio`.
 #[derive(Clone, Debug)]
-pub struct ElasticNetCV {
+pub(crate) struct ElasticNetCV {
     /// Candidate combined penalties.
     pub alphas: Vec<f64>,
     /// Candidate ℓ1 mixing weights.
@@ -1951,7 +1946,7 @@ impl Default for ElasticNetCV {
 
 impl ElasticNetCV {
     /// Grid over the given `alpha` values at `l1_ratio = 0.5`.
-    pub fn new(alphas: Vec<f64>) -> Self {
+    pub(crate) fn new(alphas: Vec<f64>) -> Self {
         Self {
             alphas,
             ..Self::default()
@@ -1961,7 +1956,7 @@ impl ElasticNetCV {
 
 /// Selected elastic-net and the CV scores that justified it.
 #[derive(Clone, Debug)]
-pub struct FittedElasticNetCV {
+pub(crate) struct FittedElasticNetCV {
     /// Penalty with the highest mean fold R².
     pub best_alpha: f64,
     /// Mixing weight of the winner.
@@ -1977,7 +1972,7 @@ pub struct FittedElasticNetCV {
 impl Fit for ElasticNetCV {
     type Fitted = FittedElasticNetCV;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -2069,7 +2064,7 @@ impl Fit for ElasticNetCV {
 /// Logistic regression with a K-fold accuracy grid over `c_inv` (sklearn
 /// `LogisticRegressionCV`).
 #[derive(Clone, Debug)]
-pub struct LogisticRegressionCV {
+pub(crate) struct LogisticRegressionCV {
     /// Candidate inverse-`C` penalties (`0` is unregularized MLE).
     pub cs_inv: Vec<f64>,
     /// CV splitter.
@@ -2087,7 +2082,7 @@ impl Default for LogisticRegressionCV {
 
 impl LogisticRegressionCV {
     /// Grid over the given `c_inv` values.
-    pub fn new(cs_inv: Vec<f64>) -> Self {
+    pub(crate) fn new(cs_inv: Vec<f64>) -> Self {
         Self {
             cs_inv,
             cv: KFold::new(3),
@@ -2097,7 +2092,7 @@ impl LogisticRegressionCV {
 
 /// Selected logistic and the CV scores that justified it.
 #[derive(Clone, Debug)]
-pub struct FittedLogisticRegressionCV {
+pub(crate) struct FittedLogisticRegressionCV {
     /// Winning `c_inv`.
     pub best_c_inv: f64,
     /// Mean CV accuracy.
@@ -2111,7 +2106,7 @@ pub struct FittedLogisticRegressionCV {
 impl Fit for LogisticRegressionCV {
     type Fitted = FittedLogisticRegressionCV;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -2204,7 +2199,7 @@ impl Predict for FittedLogisticRegressionCV {
 
 /// OMP with a K-fold R² grid over `n_nonzero` (sklearn `OrthogonalMatchingPursuitCV`).
 #[derive(Clone, Debug)]
-pub struct OrthogonalMatchingPursuitCV {
+pub(crate) struct OrthogonalMatchingPursuitCV {
     /// Candidate support sizes.
     pub n_nonzero: Vec<usize>,
     /// CV splitter.
@@ -2222,7 +2217,7 @@ impl Default for OrthogonalMatchingPursuitCV {
 
 impl OrthogonalMatchingPursuitCV {
     /// Grid over the given support sizes.
-    pub fn new(n_nonzero: Vec<usize>) -> Self {
+    pub(crate) fn new(n_nonzero: Vec<usize>) -> Self {
         Self {
             n_nonzero,
             cv: KFold::new(3),
@@ -2232,7 +2227,7 @@ impl OrthogonalMatchingPursuitCV {
 
 /// Selected OMP and the CV scores that justified it.
 #[derive(Clone, Debug)]
-pub struct FittedOmpCV {
+pub(crate) struct FittedOmpCV {
     /// Winning support size.
     pub best_n_nonzero: usize,
     /// Mean CV R².
@@ -2243,7 +2238,7 @@ pub struct FittedOmpCV {
 
 impl Fit for OrthogonalMatchingPursuitCV {
     type Fitted = FittedOmpCV;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedOmpCV>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedOmpCV>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let folds = match self.cv.split(x.nrows(), &session.child("cv")) {
@@ -2313,7 +2308,7 @@ impl Fit for OrthogonalMatchingPursuitCV {
 ///
 /// `Y` is a matrix; this is not the [`Fit`] trait.
 #[derive(Clone, Debug)]
-pub struct MultiTaskElasticNetCV {
+pub(crate) struct MultiTaskElasticNetCV {
     /// Candidate combined penalties.
     pub alphas: Vec<f64>,
     /// Mixing weight.
@@ -2334,7 +2329,7 @@ impl Default for MultiTaskElasticNetCV {
 
 impl MultiTaskElasticNetCV {
     /// Grid over the given `alpha` values.
-    pub fn new(alphas: Vec<f64>) -> Self {
+    pub(crate) fn new(alphas: Vec<f64>) -> Self {
         Self {
             alphas,
             ..Self::default()
@@ -2342,8 +2337,8 @@ impl MultiTaskElasticNetCV {
     }
 
     /// Fit on a multi-column `Y`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Matrix,
         session: &Session,
@@ -2429,7 +2424,7 @@ impl MultiTaskElasticNetCV {
 
 /// Selected multi-task elastic-net.
 #[derive(Clone, Debug)]
-pub struct FittedMultiTaskElasticNetCV {
+pub(crate) struct FittedMultiTaskElasticNetCV {
     /// Winning `alpha`.
     pub best_alpha: f64,
     /// Mean CV R² across outputs.
@@ -2440,7 +2435,7 @@ pub struct FittedMultiTaskElasticNetCV {
 
 /// LARS with a K-fold R² grid over `n_nonzero` (sklearn `LarsCV`).
 #[derive(Clone, Debug)]
-pub struct LarsCV {
+pub(crate) struct LarsCV {
     /// Candidate active-set sizes.
     pub n_nonzero: Vec<usize>,
     /// CV splitter.
@@ -2458,7 +2453,7 @@ impl Default for LarsCV {
 
 impl LarsCV {
     /// Grid over the given support sizes.
-    pub fn new(n_nonzero: Vec<usize>) -> Self {
+    pub(crate) fn new(n_nonzero: Vec<usize>) -> Self {
         Self {
             n_nonzero,
             cv: KFold::new(3),
@@ -2468,7 +2463,7 @@ impl LarsCV {
 
 /// Selected LARS and the CV score that justified it.
 #[derive(Clone, Debug)]
-pub struct FittedLarsCV {
+pub(crate) struct FittedLarsCV {
     /// Winning support size.
     pub best_n_nonzero: usize,
     /// Mean CV R².
@@ -2479,12 +2474,7 @@ pub struct FittedLarsCV {
 
 impl Fit for LarsCV {
     type Fitted = FittedLarsCV;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedLarsCV>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLarsCV>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let folds = match self.cv.split(x.nrows(), &session.child("cv")) {
@@ -2555,7 +2545,7 @@ impl Fit for LarsCV {
 
 /// LassoLars with a K-fold R² grid over `alpha` (sklearn `LassoLarsCV`).
 #[derive(Clone, Debug)]
-pub struct LassoLarsCV {
+pub(crate) struct LassoLarsCV {
     /// Candidate correlation floors.
     pub alphas: Vec<f64>,
     /// CV splitter.
@@ -2573,7 +2563,7 @@ impl Default for LassoLarsCV {
 
 impl LassoLarsCV {
     /// Grid over the given `alpha` values.
-    pub fn new(alphas: Vec<f64>) -> Self {
+    pub(crate) fn new(alphas: Vec<f64>) -> Self {
         Self {
             alphas,
             cv: KFold::new(3),
@@ -2583,7 +2573,7 @@ impl LassoLarsCV {
 
 /// Selected LassoLars.
 #[derive(Clone, Debug)]
-pub struct FittedLassoLarsCV {
+pub(crate) struct FittedLassoLarsCV {
     /// Winning `alpha`.
     pub best_alpha: f64,
     /// Mean CV R².
@@ -2595,7 +2585,7 @@ pub struct FittedLassoLarsCV {
 impl Fit for LassoLarsCV {
     type Fitted = FittedLassoLarsCV;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -2665,7 +2655,7 @@ impl Fit for LassoLarsCV {
 
 /// Multi-task lasso with a K-fold R² grid over `alpha`.
 #[derive(Clone, Debug)]
-pub struct MultiTaskLassoCV {
+pub(crate) struct MultiTaskLassoCV {
     /// Candidate group penalties.
     pub alphas: Vec<f64>,
     /// CV splitter.
@@ -2683,7 +2673,7 @@ impl Default for MultiTaskLassoCV {
 
 impl MultiTaskLassoCV {
     /// Grid over the given `alpha` values.
-    pub fn new(alphas: Vec<f64>) -> Self {
+    pub(crate) fn new(alphas: Vec<f64>) -> Self {
         Self {
             alphas,
             ..Self::default()
@@ -2691,8 +2681,8 @@ impl MultiTaskLassoCV {
     }
 
     /// Fit on a multi-column `Y`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Matrix,
         session: &Session,
@@ -2774,16 +2764,16 @@ impl MultiTaskLassoCV {
 
 /// Leave-one-out: each row is a singleton test fold.
 #[derive(Clone, Debug, Default)]
-pub struct LeaveOneOut;
+pub(crate) struct LeaveOneOut;
 
 impl LeaveOneOut {
     /// Default LOO splitter.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Materialize `n` folds.
-    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         if n < 2 {
             ctx.push(
@@ -2813,7 +2803,7 @@ impl LeaveOneOut {
 
 /// Group k-fold: every group id appears in exactly one test fold.
 #[derive(Clone, Debug)]
-pub struct GroupKFold {
+pub(crate) struct GroupKFold {
     /// Number of folds.
     pub n_splits: usize,
 }
@@ -2826,12 +2816,16 @@ impl Default for GroupKFold {
 
 impl GroupKFold {
     /// `k` group folds.
-    pub fn new(n_splits: usize) -> Self {
+    pub(crate) fn new(n_splits: usize) -> Self {
         Self { n_splits }
     }
 
     /// Split `n` rows whose group labels are `groups`.
-    pub fn split(&self, groups: &Vector, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(
+        &self,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let n = groups.len();
         let mut ids: Vec<i64> = Vec::new();
@@ -2891,7 +2885,7 @@ impl GroupKFold {
 
 /// Random train/test draws that keep groups intact (sklearn `GroupShuffleSplit`).
 #[derive(Clone, Debug)]
-pub struct GroupShuffleSplit {
+pub(crate) struct GroupShuffleSplit {
     /// Number of splits.
     pub n_splits: usize,
     /// Test fraction of **groups**.
@@ -2912,7 +2906,7 @@ impl Default for GroupShuffleSplit {
 
 impl GroupShuffleSplit {
     /// `n_splits` group-wise random partitions.
-    pub fn new(n_splits: usize) -> Self {
+    pub(crate) fn new(n_splits: usize) -> Self {
         Self {
             n_splits,
             ..Self::default()
@@ -2920,7 +2914,11 @@ impl GroupShuffleSplit {
     }
 
     /// Split rows whose group labels are `groups`.
-    pub fn split(&self, groups: &Vector, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(
+        &self,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let n = groups.len();
         let mut ids: Vec<i64> = Vec::new();
@@ -2988,7 +2986,7 @@ impl GroupShuffleSplit {
 /// Train is `[t, t+window)`, test is `[t+window, t+window+fh)`. Window length
 /// is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SlidingWindowSplitter {
+pub(crate) struct SlidingWindowSplitter {
     /// Training window length.
     pub window_length: usize,
     /// Forecast horizon (test length).
@@ -3009,7 +3007,7 @@ impl Default for SlidingWindowSplitter {
 
 impl SlidingWindowSplitter {
     /// Window `window_length`, horizon `fh`.
-    pub fn new(window_length: usize, fh: usize) -> Self {
+    pub(crate) fn new(window_length: usize, fh: usize) -> Self {
         Self {
             window_length,
             fh,
@@ -3018,7 +3016,7 @@ impl SlidingWindowSplitter {
     }
 
     /// Materialize causal sliding windows for `n` rows.
-    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let w = self.window_length.max(1);
         let h = self.fh.max(1);
@@ -3061,7 +3059,7 @@ impl SlidingWindowSplitter {
 /// Train is `[0, t)`, test is `[t, t+fh)`. Initial window length is not
 /// identification `p`.
 #[derive(Clone, Debug)]
-pub struct ExpandingWindowSplitter {
+pub(crate) struct ExpandingWindowSplitter {
     /// First training length.
     pub initial_window: usize,
     /// Forecast horizon (test length).
@@ -3082,7 +3080,7 @@ impl Default for ExpandingWindowSplitter {
 
 impl ExpandingWindowSplitter {
     /// Expanding window starting at `initial_window` with horizon `fh`.
-    pub fn new(initial_window: usize, fh: usize) -> Self {
+    pub(crate) fn new(initial_window: usize, fh: usize) -> Self {
         Self {
             initial_window,
             fh,
@@ -3091,7 +3089,7 @@ impl ExpandingWindowSplitter {
     }
 
     /// Materialize causal expanding windows for `n` rows.
-    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let w0 = self.initial_window.max(2);
         let h = self.fh.max(1);
@@ -3172,7 +3170,7 @@ fn combinations_limited(n: usize, p: usize, limit: usize) -> Vec<Vec<usize>> {
 /// Combination count is not identification `p`. More than 128 folds are
 /// truncated and recorded.
 #[derive(Clone, Debug)]
-pub struct LeavePOut {
+pub(crate) struct LeavePOut {
     /// Test-set cardinality.
     pub p: usize,
 }
@@ -3185,12 +3183,12 @@ impl Default for LeavePOut {
 
 impl LeavePOut {
     /// Leave-`p`-out splitter.
-    pub fn new(p: usize) -> Self {
+    pub(crate) fn new(p: usize) -> Self {
         Self { p }
     }
 
     /// Materialize leave-`p`-out folds for `n` rows.
-    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let p = self.p.max(1);
         if self.p == 0 || self.p >= n {
@@ -3242,19 +3240,19 @@ impl LeavePOut {
 /// A value of `-1` keeps the row in every training set. Other integers are
 /// test-fold labels. Fold-id cardinality is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct PredefinedSplit {
+pub(crate) struct PredefinedSplit {
     /// Per-row test-fold id (`-1` = always train).
     pub test_fold: Vector,
 }
 
 impl PredefinedSplit {
     /// Splitter from a fold-id vector.
-    pub fn new(test_fold: Vector) -> Self {
+    pub(crate) fn new(test_fold: Vector) -> Self {
         Self { test_fold }
     }
 
     /// Materialize one fold per distinct non-negative id.
-    pub fn split(&self, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(&self, session: &Session) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let n = self.test_fold.len();
         let mut ids: Vec<i64> = Vec::new();
@@ -3302,7 +3300,7 @@ impl PredefinedSplit {
 ///
 /// `test_size` in `(0, 1)` is a fraction; otherwise it is a row count.
 #[derive(Clone, Debug)]
-pub struct TemporalTrainTestSplitter {
+pub(crate) struct TemporalTrainTestSplitter {
     /// Test length or fraction.
     pub test_size: f64,
 }
@@ -3315,12 +3313,12 @@ impl Default for TemporalTrainTestSplitter {
 
 impl TemporalTrainTestSplitter {
     /// Causal splitter with the given test size.
-    pub fn new(test_size: f64) -> Self {
+    pub(crate) fn new(test_size: f64) -> Self {
         Self { test_size }
     }
 
     /// One expanding-origin hold-out on `n` rows.
-    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         if n < 2 {
             ctx.push(
@@ -3359,16 +3357,20 @@ impl TemporalTrainTestSplitter {
 ///
 /// Group count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct LeaveOneGroupOut;
+pub(crate) struct LeaveOneGroupOut;
 
 impl LeaveOneGroupOut {
     /// Default LOGO splitter.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// One test fold per distinct group id.
-    pub fn split(&self, groups: &Vector, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(
+        &self,
+        groups: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let n = groups.len();
         let mut ids: Vec<i64> = Vec::new();
@@ -3412,7 +3414,7 @@ impl LeaveOneGroupOut {
 /// Whole groups stay together; folds are filled to balance the majority
 /// class of each group. Group count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct StratifiedGroupKFold {
+pub(crate) struct StratifiedGroupKFold {
     /// Number of folds.
     pub n_splits: usize,
 }
@@ -3425,12 +3427,12 @@ impl Default for StratifiedGroupKFold {
 
 impl StratifiedGroupKFold {
     /// `k` stratified group folds.
-    pub fn new(n_splits: usize) -> Self {
+    pub(crate) fn new(n_splits: usize) -> Self {
         Self { n_splits }
     }
 
     /// Split using labels `y` and group ids `groups`.
-    pub fn split(
+    pub(crate) fn split(
         &self,
         y: &Vector,
         groups: &Vector,
@@ -3547,7 +3549,7 @@ impl StratifiedGroupKFold {
 /// Observed score, permutation scores, and a Monte Carlo *p* (sklearn
 /// `permutation_test_score`).
 #[derive(Clone, Debug)]
-pub struct PermutationTestScore {
+pub(crate) struct PermutationTestScore {
     /// Mean KFold Ridge \(R^2\) on the true labels.
     pub score: f64,
     /// The same score after each label permutation.
@@ -3560,7 +3562,7 @@ pub struct PermutationTestScore {
 ///
 /// Inner residual / rank failures are not promoted. The Monte Carlo *p* is
 /// recorded as unreliable (it is not an exact permutation tail).
-pub fn permutation_test_score(
+pub(crate) fn permutation_test_score(
     x: &Matrix,
     y: &Vector,
     n_permutations: usize,
@@ -3672,7 +3674,7 @@ pub fn permutation_test_score(
 /// Train is `[0, cutoff)`, test is `[cutoff, cutoff+fh)`. Cutoff count is not
 /// identification `p`.
 #[derive(Clone, Debug)]
-pub struct CutoffSplitter {
+pub(crate) struct CutoffSplitter {
     /// Forecast horizon.
     pub fh: usize,
     /// Inclusive origins at which the test window starts.
@@ -3681,12 +3683,12 @@ pub struct CutoffSplitter {
 
 impl CutoffSplitter {
     /// Splitter with horizon `fh` at the given cutoffs.
-    pub fn new(fh: usize, cutoffs: Vec<usize>) -> Self {
+    pub(crate) fn new(fh: usize, cutoffs: Vec<usize>) -> Self {
         Self { fh, cutoffs }
     }
 
     /// Materialize one fold per cutoff that fits in `n`.
-    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let h = self.fh.max(1);
         if self.fh == 0 {
@@ -3728,7 +3730,7 @@ impl CutoffSplitter {
 
 /// Single causal window (sktime `SingleWindowSplitter`).
 #[derive(Clone, Debug)]
-pub struct SingleWindowSplitter {
+pub(crate) struct SingleWindowSplitter {
     /// Training window length.
     pub window_length: usize,
     /// Forecast horizon.
@@ -3746,12 +3748,12 @@ impl Default for SingleWindowSplitter {
 
 impl SingleWindowSplitter {
     /// One window of length `window_length` and horizon `fh`.
-    pub fn new(window_length: usize, fh: usize) -> Self {
+    pub(crate) fn new(window_length: usize, fh: usize) -> Self {
         Self { window_length, fh }
     }
 
     /// The last admissible causal window on `n` rows.
-    pub fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
+    pub(crate) fn split(&self, n: usize, session: &Session) -> Result<Qualified<Vec<Split>>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let w = self.window_length.max(1);
         let h = self.fh.max(1);
@@ -3790,7 +3792,7 @@ impl SingleWindowSplitter {
 /// a function of the evaluation rows, so a subsequent supervised fit on the
 /// result is not an honest out-of-sample protocol. Always recorded:
 /// [`IssueCode::TargetLeakageSuspected`].
-pub fn fit_transform_full(x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn fit_transform_full(x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, None, &ctx.policy);
     ctx.push(
@@ -3830,7 +3832,7 @@ pub fn fit_transform_full(x: &Matrix, session: &Session) -> Result<Qualified<Mat
 ///
 /// Grid size is not identification `p`. Inner Cholesky failures are skipped.
 #[derive(Clone, Debug)]
-pub struct KernelRidgeCV {
+pub(crate) struct KernelRidgeCV {
     /// Candidate ridge penalties.
     pub alphas: Vec<f64>,
     /// RBF length scale.
@@ -3848,7 +3850,7 @@ impl Default for KernelRidgeCV {
 
 impl KernelRidgeCV {
     /// Grid `alphas` at RBF `gamma`.
-    pub fn new(alphas: Vec<f64>, gamma: f64) -> Self {
+    pub(crate) fn new(alphas: Vec<f64>, gamma: f64) -> Self {
         Self {
             alphas,
             gamma: if gamma.is_finite() && gamma > 0.0 {
@@ -3862,7 +3864,7 @@ impl KernelRidgeCV {
 
 /// Fitted kernel-ridge CV.
 #[derive(Clone, Debug)]
-pub struct FittedKernelRidgeCV {
+pub(crate) struct FittedKernelRidgeCV {
     /// Chosen α.
     pub best_alpha: f64,
     /// Held-out \(R^2\) at `best_alpha`.
@@ -3874,7 +3876,7 @@ pub struct FittedKernelRidgeCV {
 impl Fit for KernelRidgeCV {
     type Fitted = FittedKernelRidgeCV;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,

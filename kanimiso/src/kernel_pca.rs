@@ -16,7 +16,7 @@ use signlred::{Issue, IssueCode, NumericalCompromise, Qualified, Result};
 
 /// RBF kernel PCA.
 #[derive(Clone, Debug)]
-pub struct KernelPca {
+pub(crate) struct KernelPca {
     /// Number of components.
     pub n_components: usize,
     /// RBF length-scale \(\gamma = 1/(2\ell^2)\).
@@ -34,7 +34,7 @@ impl Default for KernelPca {
 
 impl KernelPca {
     /// Keep `k` kernel components.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components,
             ..Self::default()
@@ -42,14 +42,14 @@ impl KernelPca {
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKernelPca>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKernelPca>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Fitted kernel PCA.
 #[derive(Clone, Debug)]
-pub struct FittedKernelPca {
+pub(crate) struct FittedKernelPca {
     x_train: Matrix,
     /// Eigenvectors of the centred Gram (`n` × `k`).
     alphas: Matrix,
@@ -97,7 +97,7 @@ fn center_gram(k: &Mat<f64>) -> (Mat<f64>, Vector, f64) {
 impl FitUnsupervised for KernelPca {
     type Fitted = FittedKernelPca;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedKernelPca>> {

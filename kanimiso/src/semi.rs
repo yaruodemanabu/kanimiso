@@ -134,7 +134,7 @@ fn argmax_labels(f: &Matrix, classes: &[i64]) -> Vector {
 
 /// Hard-clamp label propagation on a row-stochastic RBF graph.
 #[derive(Clone, Debug)]
-pub struct LabelPropagation {
+pub(crate) struct LabelPropagation {
     /// RBF `γ`.
     pub gamma: f64,
     /// Propagation iterations.
@@ -155,14 +155,14 @@ impl Default for LabelPropagation {
 
 impl LabelPropagation {
     /// Default label propagation.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted graph label model.
 #[derive(Clone, Debug)]
-pub struct FittedLabelGraph {
+pub(crate) struct FittedLabelGraph {
     /// Soft labels (`n × K`).
     pub distributions: Matrix,
     /// Hard labels (labeled rows stay clamped).
@@ -305,7 +305,7 @@ fn fit_graph(
 impl Fit for LabelPropagation {
     type Fitted = FittedLabelGraph;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -327,7 +327,7 @@ impl Fit for LabelPropagation {
 
 /// Soft label spreading: `F ← α S F + (1−α) Y` (Zhou et al.).
 #[derive(Clone, Debug)]
-pub struct LabelSpreading {
+pub(crate) struct LabelSpreading {
     /// RBF `γ`.
     pub gamma: f64,
     /// Clamping factor `α ∈ [0, 1)`.
@@ -351,7 +351,7 @@ impl Default for LabelSpreading {
 
 impl LabelSpreading {
     /// Default label spreading.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -361,7 +361,7 @@ impl LabelSpreading {
 /// Unlabeled entries are `NaN` or `−1`. The base learner is a ridge
 /// classifier so perfect separation does not abort the outer loop.
 #[derive(Clone, Debug)]
-pub struct SelfTrainingClassifier {
+pub(crate) struct SelfTrainingClassifier {
     /// Promote a row when `|decision|` exceeds this margin.
     pub threshold: f64,
     /// Maximum promotion rounds.
@@ -382,14 +382,14 @@ impl Default for SelfTrainingClassifier {
 
 impl SelfTrainingClassifier {
     /// Default self-trainer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted self-training classifier.
 #[derive(Clone, Debug)]
-pub struct FittedSelfTraining {
+pub(crate) struct FittedSelfTraining {
     inner: crate::classification::FittedRidgeClassifier,
     /// How many originally unlabeled rows were promoted.
     pub n_promoted: usize,
@@ -407,7 +407,7 @@ impl Predict for FittedSelfTraining {
 impl Fit for SelfTrainingClassifier {
     type Fitted = FittedSelfTraining;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -532,7 +532,7 @@ impl Fit for SelfTrainingClassifier {
 impl Fit for LabelSpreading {
     type Fitted = FittedLabelGraph;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,

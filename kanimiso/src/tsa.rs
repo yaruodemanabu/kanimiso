@@ -15,7 +15,7 @@ use crate::data::{Matrix, Vector};
 use crate::linalg::{chol_solve, least_squares, ridge_solve, thin_svd};
 use crate::rng::Rng;
 
-pub use crate::filters::{
+pub(crate) use crate::filters::{
     bk_filter, cf_filter, lfilter, miso_lfilter, FittedLocalLinearTrend, LocalLinearTrend,
 };
 use crate::stats::{HypothesisTest, KpssResult};
@@ -32,14 +32,14 @@ use signlred::{
 ///
 /// Horizon length is not identification `p`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ForecastingHorizon {
+pub(crate) struct ForecastingHorizon {
     /// 1-based relative steps.
     pub steps: Vec<usize>,
 }
 
 impl ForecastingHorizon {
     /// Steps `1, …, h`.
-    pub fn relative(h: usize) -> Self {
+    pub(crate) fn relative(h: usize) -> Self {
         let n = h.max(1);
         Self {
             steps: (1..=n).collect(),
@@ -47,12 +47,12 @@ impl ForecastingHorizon {
     }
 
     /// Number of forecast steps.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.steps.len()
     }
 
     /// Whether the horizon is empty.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.steps.is_empty()
     }
 }
@@ -60,7 +60,7 @@ impl ForecastingHorizon {
 /// Causal train/test cut of a series (sktime `temporal_train_test_split`).
 ///
 /// Split sizes are not identification `p`.
-pub fn temporal_train_test_split(
+pub(crate) fn temporal_train_test_split(
     y: &Vector,
     test_size: f64,
     session: &Session,
@@ -99,7 +99,7 @@ pub fn temporal_train_test_split(
 }
 
 /// Sample autocorrelation `ρ_0, …, ρ_{nlags}` (biased, mean-corrected).
-pub fn acf(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn acf(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     if nlags + 1 > y.len() && !y.is_empty() {
@@ -132,7 +132,7 @@ pub fn acf(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vect
 /// (statsmodels `acovf`).
 ///
 /// Lag count is not identification `p`.
-pub fn acovf(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn acovf(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     if nlags + 1 > y.len() && !y.is_empty() {
@@ -183,7 +183,7 @@ pub fn acovf(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Ve
 ///
 /// `φ_{kk}` is the last coefficient of the order-`k` Toeplitz system
 /// `R φ = r`. This is the Durbin–Levinson / Yule–Walker PACF.
-pub fn pacf(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn pacf(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     let rho = acf_raw(y.as_slice(), nlags);
@@ -223,7 +223,7 @@ pub fn pacf(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vec
 /// Cross-covariance \(\gamma_{xy}(0),\ldots,\gamma_{xy}(\mathrm{nlags})\) (statsmodels `ccovf`).
 ///
 /// Lag count is not identification `p`.
-pub fn ccovf(x: &Vector, y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn ccovf(x: &Vector, y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, x);
     inspect_univariate(&mut ctx, y);
@@ -258,7 +258,7 @@ pub fn ccovf(x: &Vector, y: &Vector, nlags: usize, session: &Session) -> Result<
 ///
 /// \(\varphi_{kk}\) is the last slope of \(y_t\) on \(y_{t-1},\ldots,y_{t-k}\).
 /// Lag count is not identification `p`.
-pub fn pacf_ols(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn pacf_ols(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     let mut out = Vector::zeros(nlags + 1);
@@ -288,7 +288,7 @@ pub fn pacf_ols(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified
 }
 
 /// Additive seasonal decomposition (trend moving average + seasonal averages).
-pub fn seasonal_decompose(
+pub(crate) fn seasonal_decompose(
     y: &Vector,
     period: usize,
     session: &Session,
@@ -297,7 +297,7 @@ pub fn seasonal_decompose(
 }
 
 /// STL-like decomposition: centered moving-average trend plus seasonal means.
-pub fn stl_like(
+pub(crate) fn stl_like(
     y: &Vector,
     period: usize,
     session: &Session,
@@ -307,7 +307,7 @@ pub fn stl_like(
 
 /// Additive classical seasonal decomposition result.
 #[derive(Clone, Debug)]
-pub struct SeasonalDecomposition {
+pub(crate) struct SeasonalDecomposition {
     /// Original series.
     pub observed: Vector,
     /// Moving-average trend (endpoints linearly extended).
@@ -322,7 +322,7 @@ pub struct SeasonalDecomposition {
 
 /// Holt–Winters additive (or multiplicative) seasonal exponential smoothing.
 #[derive(Clone, Debug)]
-pub struct HoltWinters {
+pub(crate) struct HoltWinters {
     /// Seasonal period `s`.
     pub period: usize,
     /// Level smoothing; `None` selects by in-sample SSE grid search.
@@ -349,7 +349,7 @@ impl Default for HoltWinters {
 
 impl HoltWinters {
     /// Additive Holt–Winters with period `period`.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period,
             ..Self::default()
@@ -359,7 +359,7 @@ impl HoltWinters {
 
 /// Fitted Holt–Winters state used for forecasting.
 #[derive(Clone, Debug)]
-pub struct FittedHoltWinters {
+pub(crate) struct FittedHoltWinters {
     /// Level smoothing used.
     pub alpha: f64,
     /// Trend smoothing used.
@@ -386,7 +386,7 @@ pub struct FittedHoltWinters {
 
 impl FittedHoltWinters {
     /// `h`-step additive / multiplicative Holt–Winters forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         if h == 0 {
             return ctx.finish(Vector::zeros(0));
@@ -419,7 +419,7 @@ impl FittedHoltWinters {
 impl FitSeries for HoltWinters {
     type Fitted = FittedHoltWinters;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedHoltWinters>> {
@@ -482,21 +482,21 @@ impl FitSeries for HoltWinters {
 
 /// Simple exponential smoothing (sktime / statsmodels `SimpleExpSmoothing`).
 #[derive(Clone, Debug, Default)]
-pub struct SimpleExpSmoothing {
+pub(crate) struct SimpleExpSmoothing {
     /// Level smoothing; `None` selects by in-sample SSE.
     pub alpha: Option<f64>,
 }
 
 impl SimpleExpSmoothing {
     /// SES with optional `alpha`.
-    pub fn new(alpha: Option<f64>) -> Self {
+    pub(crate) fn new(alpha: Option<f64>) -> Self {
         Self { alpha }
     }
 }
 
 /// Fitted SES state.
 #[derive(Clone, Debug)]
-pub struct FittedSimpleExpSmoothing {
+pub(crate) struct FittedSimpleExpSmoothing {
     /// Level smoothing used.
     pub alpha: f64,
     /// Terminal level.
@@ -511,7 +511,7 @@ pub struct FittedSimpleExpSmoothing {
 
 impl FittedSimpleExpSmoothing {
     /// Flat forecast at the terminal level.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(Vector::from_iter((0..h).map(|_| self.level)))
     }
@@ -520,7 +520,7 @@ impl FittedSimpleExpSmoothing {
 impl FitSeries for SimpleExpSmoothing {
     type Fitted = FittedSimpleExpSmoothing;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedSimpleExpSmoothing>> {
@@ -595,7 +595,7 @@ fn ses_run(y: &[f64], alpha: f64) -> (Vector, f64, f64) {
 
 /// Holt linear trend (level + slope, no season).
 #[derive(Clone, Debug, Default)]
-pub struct Holt {
+pub(crate) struct Holt {
     /// Level smoothing; `None` selects by SSE.
     pub alpha: Option<f64>,
     /// Trend smoothing.
@@ -604,14 +604,14 @@ pub struct Holt {
 
 impl Holt {
     /// Holt with optional smoothing constants.
-    pub fn new(alpha: Option<f64>, beta: Option<f64>) -> Self {
+    pub(crate) fn new(alpha: Option<f64>, beta: Option<f64>) -> Self {
         Self { alpha, beta }
     }
 }
 
 /// Fitted Holt state.
 #[derive(Clone, Debug)]
-pub struct FittedHolt {
+pub(crate) struct FittedHolt {
     /// Level smoothing used.
     pub alpha: f64,
     /// Trend smoothing used.
@@ -630,7 +630,7 @@ pub struct FittedHolt {
 
 impl FittedHolt {
     /// Linear-trend forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(Vector::from_iter(
             (1..=h).map(|k| self.level + k as f64 * self.trend),
@@ -640,7 +640,7 @@ impl FittedHolt {
 
 impl FitSeries for Holt {
     type Fitted = FittedHolt;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedHolt>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedHolt>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 3 {
@@ -727,25 +727,25 @@ fn holt_run(y: &[f64], alpha: f64, beta: f64) -> (Vector, f64, f64, f64) {
 
 /// Local-level Kalman wrapper (statsmodels `UnobservedComponents` local level).
 #[derive(Clone, Debug, Default)]
-pub struct LocalLevel;
+pub(crate) struct LocalLevel;
 
 impl LocalLevel {
     /// Default local level.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
 
 impl FitSeries for LocalLevel {
     type Fitted = KalmanLevelFit;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<KalmanLevelFit>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<KalmanLevelFit>> {
         kalman_level(y, session)
     }
 }
 
 /// ARIMA(p, d, q) identified by Hannan–Rissanen (OLS on lagged y and residual MA).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Arima {
+pub(crate) struct Arima {
     /// Autoregressive order.
     pub p: usize,
     /// Regular differences.
@@ -762,14 +762,14 @@ impl Default for Arima {
 
 impl Arima {
     /// Construct `ARIMA(p,d,q)`.
-    pub fn new(p: usize, d: usize, q: usize) -> Self {
+    pub(crate) fn new(p: usize, d: usize, q: usize) -> Self {
         Self { p, d, q }
     }
 }
 
 /// Fitted Hannan–Rissanen ARIMA.
 #[derive(Clone, Debug)]
-pub struct FittedArima {
+pub(crate) struct FittedArima {
     /// Specification.
     pub spec: Arima,
     /// AR coefficients `φ_1 … φ_p`.
@@ -792,7 +792,7 @@ pub struct FittedArima {
 
 impl FittedArima {
     /// `h`-step forecast on the original scale (undifferenced).
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         if h == 0 {
             return ctx.finish(Vector::zeros(0));
@@ -813,7 +813,7 @@ impl FittedArima {
 
 impl FitSeries for Arima {
     type Fitted = FittedArima;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedArima>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedArima>> {
         fit_arima(self, y, session)
     }
 }
@@ -822,7 +822,7 @@ impl FitSeries for Arima {
 ///
 /// Daily / weekly / monthly window lengths are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Har {
+pub(crate) struct Har {
     /// Daily lookback (typically 1).
     pub daily: usize,
     /// Weekly lookback (typically 5).
@@ -843,14 +843,14 @@ impl Default for Har {
 
 impl Har {
     /// Corsi (1, 5, 22) windows.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted HAR-RV coefficients and the trailing window used to recurse.
 #[derive(Clone, Debug)]
-pub struct FittedHar {
+pub(crate) struct FittedHar {
     /// Intercept.
     pub intercept: f64,
     /// Daily lag coefficient.
@@ -871,7 +871,7 @@ pub struct FittedHar {
 
 impl FittedHar {
     /// Recurse the HAR equation `h` steps, feeding forecasts back into the windows.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let mut hist: Vec<f64> = self.history.as_slice().to_vec();
         let mut out = Vector::zeros(h);
@@ -900,7 +900,7 @@ impl FittedHar {
 
 impl FitSeries for Har {
     type Fitted = FittedHar;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedHar>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedHar>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let daily = self.daily.max(1);
@@ -1056,7 +1056,7 @@ fn arma_companion_step(
 /// Hannan–Rissanen [`Arima`] remains the CSS/OLS path. This refines \(\phi,\theta\)
 /// on the concentrated Kalman likelihood. A diffuse \(P_0\) is recorded.
 #[derive(Clone, Debug)]
-pub struct ArimaKalman {
+pub(crate) struct ArimaKalman {
     /// Autoregressive order.
     pub p: usize,
     /// Regular differences.
@@ -1073,14 +1073,14 @@ impl Default for ArimaKalman {
 
 impl ArimaKalman {
     /// `ARIMA(p,d,q)` Kalman MLE.
-    pub fn new(p: usize, d: usize, q: usize) -> Self {
+    pub(crate) fn new(p: usize, d: usize, q: usize) -> Self {
         Self { p, d, q }
     }
 }
 
 /// Fitted Kalman ARIMA.
 #[derive(Clone, Debug)]
-pub struct FittedArimaKalman {
+pub(crate) struct FittedArimaKalman {
     /// Specification.
     pub spec: Arima,
     /// AR coefficients.
@@ -1103,7 +1103,7 @@ pub struct FittedArimaKalman {
 
 impl FittedArimaKalman {
     /// `h`-step forecast on the original scale.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         if h == 0 {
             return ctx.finish(Vector::zeros(0));
@@ -1131,7 +1131,7 @@ impl FittedArimaKalman {
 impl FitSeries for ArimaKalman {
     type Fitted = FittedArimaKalman;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedArimaKalman>> {
@@ -1242,7 +1242,7 @@ impl FitSeries for ArimaKalman {
 
 /// Small \((p,d,q)\) AIC grid over Hannan–Rissanen [`Arima`].
 #[derive(Clone, Debug)]
-pub struct AutoArima {
+pub(crate) struct AutoArima {
     /// Max AR order.
     pub max_p: usize,
     /// Max regular differences.
@@ -1263,14 +1263,14 @@ impl Default for AutoArima {
 
 impl AutoArima {
     /// Default auto-ARIMA grid.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Selected ARIMA and the AIC grid that justified it.
 #[derive(Clone, Debug)]
-pub struct FittedAutoArima {
+pub(crate) struct FittedAutoArima {
     /// Winning specification.
     pub spec: Arima,
     /// AIC of the winner.
@@ -1283,7 +1283,7 @@ pub struct FittedAutoArima {
 
 impl FitSeries for AutoArima {
     type Fitted = FittedAutoArima;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedAutoArima>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedAutoArima>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let mut scores = Vec::new();
@@ -1375,7 +1375,7 @@ impl FitSeries for AutoArima {
 /// Candidate count is not identification `p`. Inner residual-kind failures are
 /// not promoted.
 #[derive(Clone, Debug)]
-pub struct ForecastingGridSearchCV {
+pub(crate) struct ForecastingGridSearchCV {
     /// Hold-out horizon used to score candidates.
     pub fh: usize,
 }
@@ -1388,14 +1388,14 @@ impl Default for ForecastingGridSearchCV {
 
 impl ForecastingGridSearchCV {
     /// Grid search with hold-out horizon `fh`.
-    pub fn new(fh: usize) -> Self {
+    pub(crate) fn new(fh: usize) -> Self {
         Self { fh: fh.max(1) }
     }
 }
 
 /// Selected SES or ARIMA member and the hold-out scores.
 #[derive(Clone, Debug)]
-pub struct FittedForecastingGridSearch {
+pub(crate) struct FittedForecastingGridSearch {
     /// Winning specification label.
     pub best_name: String,
     /// Hold-out MAE of the winner.
@@ -1410,7 +1410,7 @@ pub struct FittedForecastingGridSearch {
 
 impl FittedForecastingGridSearch {
     /// `h`-step forecast from the winning member (refit on the full series).
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         if let Some(s) = &self.ses {
             return s.forecast(h, session);
         }
@@ -1437,7 +1437,7 @@ fn holdout_mae(actual: &[f64], pred: &[f64]) -> f64 {
 impl FitSeries for ForecastingGridSearchCV {
     type Fitted = FittedForecastingGridSearch;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedForecastingGridSearch>> {
@@ -1556,7 +1556,7 @@ impl FitSeries for ForecastingGridSearchCV {
 
 /// Average of Holt–Winters and ARIMA(1,0,1) forecasts (sktime `EnsembleForecaster`).
 #[derive(Clone, Debug)]
-pub struct EnsembleForecaster {
+pub(crate) struct EnsembleForecaster {
     /// Holt–Winters seasonal period.
     pub period: usize,
 }
@@ -1569,7 +1569,7 @@ impl Default for EnsembleForecaster {
 
 impl EnsembleForecaster {
     /// Ensemble with Holt–Winters period `period`.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(2),
         }
@@ -1578,7 +1578,7 @@ impl EnsembleForecaster {
 
 /// Fitted two-model ensemble.
 #[derive(Clone, Debug)]
-pub struct FittedEnsembleForecaster {
+pub(crate) struct FittedEnsembleForecaster {
     /// Holt–Winters member (if it identified).
     pub hw: Option<FittedHoltWinters>,
     /// ARIMA member (if it identified).
@@ -1587,7 +1587,7 @@ pub struct FittedEnsembleForecaster {
 
 impl FittedEnsembleForecaster {
     /// Average the available member forecasts.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         if h == 0 {
             return ctx.finish(Vector::zeros(0));
@@ -1639,7 +1639,7 @@ impl FittedEnsembleForecaster {
 impl FitSeries for EnsembleForecaster {
     type Fitted = FittedEnsembleForecaster;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedEnsembleForecaster>> {
@@ -1698,7 +1698,7 @@ impl FitSeries for EnsembleForecaster {
 /// The ARIMA step runs on a scratch report so a short residual series does not
 /// hide a valid exog slope behind [`IssueCode::ShortSeriesForArima`].
 #[derive(Clone, Debug)]
-pub struct Sarimax {
+pub(crate) struct Sarimax {
     /// Non-seasonal \((p,d,q)\).
     pub order: (usize, usize, usize),
 }
@@ -1711,13 +1711,13 @@ impl Default for Sarimax {
 
 impl Sarimax {
     /// `SARIMAX(p,d,q)` without seasonal terms.
-    pub fn new(p: usize, d: usize, q: usize) -> Self {
+    pub(crate) fn new(p: usize, d: usize, q: usize) -> Self {
         Self { order: (p, d, q) }
     }
 
     /// Fit `y` on exog `x`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         y: &Vector,
         x: &Matrix,
         session: &Session,
@@ -1800,7 +1800,7 @@ impl Sarimax {
 
 /// Fitted SARIMAX.
 #[derive(Clone, Debug)]
-pub struct FittedSarimax {
+pub(crate) struct FittedSarimax {
     /// Exog slopes.
     pub coef: Vector,
     /// Intercept.
@@ -1811,7 +1811,7 @@ pub struct FittedSarimax {
 
 impl FittedSarimax {
     /// Forecast `h` steps using future exog `x_future` (`h × p`).
-    pub fn forecast(
+    pub(crate) fn forecast(
         &self,
         h: usize,
         x_future: &Matrix,
@@ -1847,21 +1847,21 @@ impl FittedSarimax {
 
 /// Log-then-ARIMA pipeline (sktime `ForecastingPipeline` lite).
 #[derive(Clone, Debug, Default)]
-pub struct ForecastingPipeline {
+pub(crate) struct ForecastingPipeline {
     /// Apply `log` before the inner ARIMA (requires `y > 0`).
     pub log: bool,
 }
 
 impl ForecastingPipeline {
     /// Log + ARIMA(1,0,1) pipeline.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { log: true }
     }
 }
 
 /// Fitted forecasting pipeline.
 #[derive(Clone, Debug)]
-pub struct FittedForecastingPipeline {
+pub(crate) struct FittedForecastingPipeline {
     /// Whether the log map was applied.
     pub log: bool,
     /// Inner ARIMA.
@@ -1870,7 +1870,7 @@ pub struct FittedForecastingPipeline {
 
 impl FittedForecastingPipeline {
     /// Forecast and invert the log if it was used.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let q = self.inner.forecast(h, session)?;
         let ctx = FitCtx::with_session(session.child("pipeline-inv"));
         let y = if self.log {
@@ -1885,7 +1885,7 @@ impl FittedForecastingPipeline {
 impl FitSeries for ForecastingPipeline {
     type Fitted = FittedForecastingPipeline;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedForecastingPipeline>> {
@@ -1942,7 +1942,7 @@ impl FitSeries for ForecastingPipeline {
 
 /// TBATS-lite: optional log, Fourier seasonal terms, linear trend, AR(1) errors.
 #[derive(Clone, Debug)]
-pub struct Tbats {
+pub(crate) struct Tbats {
     /// Seasonal period.
     pub period: usize,
     /// Fourier harmonics.
@@ -1963,7 +1963,7 @@ impl Default for Tbats {
 
 impl Tbats {
     /// TBATS with the given period.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(2),
             ..Self::default()
@@ -1973,7 +1973,7 @@ impl Tbats {
 
 /// Fitted TBATS-lite.
 #[derive(Clone, Debug)]
-pub struct FittedTbats {
+pub(crate) struct FittedTbats {
     /// OLS coefficients on `[1, t, sin, cos, …]`.
     pub coef: Vector,
     /// AR(1) residual coefficient.
@@ -2013,7 +2013,7 @@ impl FittedTbats {
     }
 
     /// `h`-step forecast on the original scale.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         let p = self.coef.len();
         let mut e = self.last_resid;
@@ -2038,7 +2038,7 @@ impl FittedTbats {
 
 impl FitSeries for Tbats {
     type Fitted = FittedTbats;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedTbats>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedTbats>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let period = self.period.max(2);
@@ -2167,7 +2167,7 @@ fn arma11_from_resid(e: &[f64]) -> (f64, f64) {
 /// Harmonic count is not identification `p`. λ is chosen by profile Gaussian
 /// likelihood including the Box–Cox Jacobian.
 #[derive(Clone, Debug)]
-pub struct TbatsFull {
+pub(crate) struct TbatsFull {
     /// Seasonal period.
     pub period: usize,
     /// Fourier harmonics.
@@ -2185,7 +2185,7 @@ impl Default for TbatsFull {
 
 impl TbatsFull {
     /// TBATS with the given period.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(2),
             ..Self::default()
@@ -2195,7 +2195,7 @@ impl TbatsFull {
 
 /// Fitted Box–Cox + Fourier + ARMA(1,1) TBATS.
 #[derive(Clone, Debug)]
-pub struct FittedTbatsFull {
+pub(crate) struct FittedTbatsFull {
     /// OLS coefficients on `[1, t, sin, cos, …]`.
     pub coef: Vector,
     /// AR(1) residual coefficient.
@@ -2239,7 +2239,7 @@ impl FittedTbatsFull {
     }
 
     /// `h`-step forecast on the original scale.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let p = self.coef.len();
         let mut e = self.last_resid;
@@ -2262,7 +2262,7 @@ impl FittedTbatsFull {
 
 impl FitSeries for TbatsFull {
     type Fitted = FittedTbatsFull;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedTbatsFull>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedTbatsFull>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let period = self.period.max(2);
@@ -2372,11 +2372,11 @@ impl FitSeries for TbatsFull {
 
 /// Log-target ARIMA (sktime `TransformedTargetForecaster`).
 #[derive(Clone, Debug, Default)]
-pub struct TransformedTargetForecaster;
+pub(crate) struct TransformedTargetForecaster;
 
 impl TransformedTargetForecaster {
     /// Default log-target forecaster.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
@@ -2384,7 +2384,7 @@ impl TransformedTargetForecaster {
 impl FitSeries for TransformedTargetForecaster {
     type Fitted = FittedForecastingPipeline;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedForecastingPipeline>> {
@@ -2394,7 +2394,7 @@ impl FitSeries for TransformedTargetForecaster {
 
 /// Seasonal ARIMA: apply seasonal differences, then [`Arima`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Sarima {
+pub(crate) struct Sarima {
     /// Non-seasonal `(p,d,q)`.
     pub order: (usize, usize, usize),
     /// Seasonal `(P,D,Q)`.
@@ -2415,7 +2415,7 @@ impl Default for Sarima {
 
 impl Sarima {
     /// Construct a seasonal ARIMA specification.
-    pub fn new(
+    pub(crate) fn new(
         order: (usize, usize, usize),
         seasonal_order: (usize, usize, usize),
         period: usize,
@@ -2430,7 +2430,7 @@ impl Sarima {
 
 /// Fitted SARIMA (seasonal differences + inner ARIMA).
 #[derive(Clone, Debug)]
-pub struct FittedSarima {
+pub(crate) struct FittedSarima {
     /// Specification.
     pub spec: Sarima,
     /// ARIMA fitted on the seasonally differenced series.
@@ -2441,7 +2441,7 @@ pub struct FittedSarima {
 
 impl FittedSarima {
     /// Forecast on the original scale.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let q = self.inner.forecast(h, session)?;
         let ctx = FitCtx::with_session(session.child("sarima-undiff"));
         let mut cur = q.value.as_slice().to_vec();
@@ -2467,7 +2467,7 @@ impl FittedSarima {
 
 impl FitSeries for Sarima {
     type Fitted = FittedSarima;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedSarima>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedSarima>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let period = self.period.max(1);
@@ -2521,7 +2521,7 @@ impl FitSeries for Sarima {
 
 /// Vector autoregression of order `lags` (each equation is OLS on stacked lags).
 #[derive(Clone, Debug)]
-pub struct Var {
+pub(crate) struct Var {
     /// VAR order.
     pub lags: usize,
 }
@@ -2534,12 +2534,12 @@ impl Default for Var {
 
 impl Var {
     /// VAR(`lags`).
-    pub fn new(lags: usize) -> Self {
+    pub(crate) fn new(lags: usize) -> Self {
         Self { lags }
     }
 
     /// Fit on an `n × k` series matrix (columns are variables).
-    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedVar>> {
+    pub(crate) fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedVar>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, y, None, &ctx.policy);
         let (n, k) = y.shape();
@@ -2605,7 +2605,7 @@ impl Var {
 
 /// Fitted VAR.
 #[derive(Clone, Debug)]
-pub struct FittedVar {
+pub(crate) struct FittedVar {
     /// VAR order.
     pub lags: usize,
     /// Number of series.
@@ -2622,7 +2622,7 @@ pub struct FittedVar {
 
 impl FittedVar {
     /// Iterate the companion form `h` steps.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let mut hist = self.last.clone();
         let mut out = Matrix::zeros(h, self.k);
@@ -2661,7 +2661,7 @@ impl FittedVar {
     ///
     /// Orthogonalisation is the residual Cholesky, not a structural SVAR.
     /// Lag count is not an identification `p` for this post-estimation map.
-    pub fn impulse_response(
+    pub(crate) fn impulse_response(
         &self,
         horizon: usize,
         session: &Session,
@@ -2772,7 +2772,7 @@ impl FittedVar {
 
 /// Cholesky IRF and FEVD of a fitted VAR (statsmodels `VARResults.irf` / `fevd`).
 #[derive(Clone, Debug)]
-pub struct VarImpulseResponse {
+pub(crate) struct VarImpulseResponse {
     /// Orthogonal MA matrices \(\Theta_h=\Psi_h P\) (`horizon+1` of them, each \(k\times k\)).
     pub irf: Vec<Matrix>,
     /// Forecast-error variance shares at each horizon (rows sum to 1).
@@ -2786,7 +2786,7 @@ pub struct VarImpulseResponse {
 /// This is the named SVAR surface around [`FittedVar::impulse_response`]. The
 /// `A0` factor is not estimated; it is the residual Cholesky.
 #[derive(Clone, Debug)]
-pub struct Svar {
+pub(crate) struct Svar {
     /// VAR order.
     pub lags: usize,
 }
@@ -2799,12 +2799,12 @@ impl Default for Svar {
 
 impl Svar {
     /// SVAR(`lags`).
-    pub fn new(lags: usize) -> Self {
+    pub(crate) fn new(lags: usize) -> Self {
         Self { lags }
     }
 
     /// Fit the reduced-form VAR and keep it as a recursive SVAR.
-    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedSvar>> {
+    pub(crate) fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedSvar>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let q = match Var::new(self.lags).fit(y, &session.child("var")) {
             Ok(q) => q,
@@ -2860,14 +2860,14 @@ impl Svar {
 
 /// Fitted recursive SVAR.
 #[derive(Clone, Debug)]
-pub struct FittedSvar {
+pub(crate) struct FittedSvar {
     /// Reduced-form VAR.
     pub reduced: FittedVar,
 }
 
 impl FittedSvar {
     /// Structural IRF / FEVD via the residual Cholesky.
-    pub fn structural_irf(
+    pub(crate) fn structural_irf(
         &self,
         horizon: usize,
         session: &Session,
@@ -2941,7 +2941,7 @@ fn irf_from_impact(psi: &[Matrix], impact: &Matrix, sigma: Matrix) -> VarImpulse
 /// recursive identification; free A and B without extra restrictions are not
 /// jointly identified.
 #[derive(Clone, Debug)]
-pub struct SvarAb {
+pub(crate) struct SvarAb {
     /// VAR order.
     pub lags: usize,
 }
@@ -2954,12 +2954,12 @@ impl Default for SvarAb {
 
 impl SvarAb {
     /// A/B SVAR(`lags`).
-    pub fn new(lags: usize) -> Self {
+    pub(crate) fn new(lags: usize) -> Self {
         Self { lags }
     }
 
     /// Fit the reduced-form VAR and estimate recursive A, B from residuals.
-    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedSvarAb>> {
+    pub(crate) fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedSvarAb>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let q = match Var::new(self.lags).fit(y, &session.child("var")) {
             Ok(q) => q,
@@ -3065,7 +3065,7 @@ impl SvarAb {
 
 /// Fitted recursive A/B SVAR.
 #[derive(Clone, Debug)]
-pub struct FittedSvarAb {
+pub(crate) struct FittedSvarAb {
     /// Reduced-form VAR.
     pub reduced: FittedVar,
     /// Estimated contemporaneous \(A\) (unit lower triangular).
@@ -3076,7 +3076,7 @@ pub struct FittedSvarAb {
 
 impl FittedSvarAb {
     /// Structural IRF / FEVD via \(P = A^{-1} B\).
-    pub fn structural_irf(
+    pub(crate) fn structural_irf(
         &self,
         horizon: usize,
         session: &Session,
@@ -3195,7 +3195,7 @@ fn invert_square(a: &Matrix) -> Option<Matrix> {
 /// \(P\) is estimated from the reduced-form VAR, not assumed Cholesky of \(\Sigma_u\).
 /// Lag count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct BlanchardQuah {
+pub(crate) struct BlanchardQuah {
     /// VAR order.
     pub lags: usize,
 }
@@ -3208,12 +3208,12 @@ impl Default for BlanchardQuah {
 
 impl BlanchardQuah {
     /// Blanchard–Quah SVAR(`lags`).
-    pub fn new(lags: usize) -> Self {
+    pub(crate) fn new(lags: usize) -> Self {
         Self { lags }
     }
 
     /// Fit the reduced-form VAR and the long-run impact \(P\).
-    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedBlanchardQuah>> {
+    pub(crate) fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedBlanchardQuah>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let q = match Var::new(self.lags).fit(y, &session.child("var")) {
             Ok(q) => q,
@@ -3356,7 +3356,7 @@ impl BlanchardQuah {
 
 /// Fitted Blanchard–Quah SVAR.
 #[derive(Clone, Debug)]
-pub struct FittedBlanchardQuah {
+pub(crate) struct FittedBlanchardQuah {
     /// Reduced-form VAR.
     pub reduced: FittedVar,
     /// Long-run impact \(C(1)\).
@@ -3367,7 +3367,7 @@ pub struct FittedBlanchardQuah {
 
 impl FittedBlanchardQuah {
     /// Structural IRF / FEVD via the Blanchard–Quah \(P\).
-    pub fn structural_irf(
+    pub(crate) fn structural_irf(
         &self,
         horizon: usize,
         session: &Session,
@@ -3426,7 +3426,7 @@ fn cholesky_lower(a: &Matrix) -> Option<Matrix> {
 /// exogenous width is included in the equation parameter count only when
 /// `n_eff` is large enough that the usual OLS gate is meaningful.
 #[derive(Clone, Debug)]
-pub struct Varmax {
+pub(crate) struct Varmax {
     /// VAR order.
     pub lags: usize,
 }
@@ -3439,12 +3439,12 @@ impl Default for Varmax {
 
 impl Varmax {
     /// VARMAX(`lags`).
-    pub fn new(lags: usize) -> Self {
+    pub(crate) fn new(lags: usize) -> Self {
         Self { lags: lags.max(1) }
     }
 
     /// Fit `Y` on its lags and exogenous `X`.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Matrix,
         x: &Matrix,
@@ -3511,7 +3511,7 @@ impl Varmax {
 
 /// Fitted VARMAX.
 #[derive(Clone, Debug)]
-pub struct FittedVarmax {
+pub(crate) struct FittedVarmax {
     /// VAR order.
     pub lags: usize,
     /// Number of series.
@@ -3530,7 +3530,7 @@ pub struct FittedVarmax {
 
 impl FittedVarmax {
     /// Forecast with a future exogenous path.
-    pub fn forecast(&self, x_future: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn forecast(&self, x_future: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         let h = x_future.nrows();
         let mut hist = self.last_y.clone();
@@ -3575,7 +3575,7 @@ impl FittedVarmax {
 ///
 /// Factor count is not passed as identification `p`.
 #[derive(Clone, Debug)]
-pub struct DynamicFactor {
+pub(crate) struct DynamicFactor {
     /// Number of latent factors.
     pub n_factors: usize,
 }
@@ -3588,14 +3588,14 @@ impl Default for DynamicFactor {
 
 impl DynamicFactor {
     /// `r` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
         }
     }
 
     /// Fit on an `n × k` panel of series.
-    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedDynamicFactor>> {
+    pub(crate) fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedDynamicFactor>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, y, None, &ctx.policy);
         let (n, k) = y.shape();
@@ -3664,7 +3664,7 @@ impl DynamicFactor {
 
 /// Fitted dynamic-factor model.
 #[derive(Clone, Debug)]
-pub struct FittedDynamicFactor {
+pub(crate) struct FittedDynamicFactor {
     /// Series loadings (`k` × `r`).
     pub loadings: Matrix,
     /// VAR on the factors.
@@ -3675,7 +3675,7 @@ pub struct FittedDynamicFactor {
 
 impl FittedDynamicFactor {
     /// `h`-step factor forecast mapped back to the series.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
         let f = self.var.forecast(h, session)?;
         let mut ctx = FitCtx::with_session(session.child("dfm-map"));
         let k = self.loadings.nrows();
@@ -3697,7 +3697,7 @@ impl FittedDynamicFactor {
 
 /// Simple / Holt (linear trend) exponential smoothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SmoothingKind {
+pub(crate) enum SmoothingKind {
     /// Simple exponential smoothing (level only).
     Simple,
     /// Holt linear trend.
@@ -3706,7 +3706,7 @@ pub enum SmoothingKind {
 
 /// Exponential smoothing specification.
 #[derive(Clone, Debug)]
-pub struct ExponentialSmoothing {
+pub(crate) struct ExponentialSmoothing {
     /// Simple vs Holt.
     pub kind: SmoothingKind,
     /// Level constant; `None` grid-searches.
@@ -3727,12 +3727,12 @@ impl Default for ExponentialSmoothing {
 
 impl ExponentialSmoothing {
     /// Simple exponential smoothing.
-    pub fn simple() -> Self {
+    pub(crate) fn simple() -> Self {
         Self::default()
     }
 
     /// Holt linear trend.
-    pub fn holt() -> Self {
+    pub(crate) fn holt() -> Self {
         Self {
             kind: SmoothingKind::Holt,
             alpha: None,
@@ -3743,7 +3743,7 @@ impl ExponentialSmoothing {
 
 /// Fitted exponential-smoothing state.
 #[derive(Clone, Debug)]
-pub struct FittedEsm {
+pub(crate) struct FittedEsm {
     /// Kind.
     pub kind: SmoothingKind,
     /// Level smoothing.
@@ -3760,7 +3760,7 @@ pub struct FittedEsm {
 
 impl FittedEsm {
     /// Forecast `h` steps (SES is flat; Holt adds `h · trend`).
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let out = Vector::from_iter((1..=h).map(|k| match self.kind {
             SmoothingKind::Simple => self.level,
@@ -3772,7 +3772,7 @@ impl FittedEsm {
 
 impl FitSeries for ExponentialSmoothing {
     type Fitted = FittedEsm;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedEsm>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedEsm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 2 {
@@ -3798,11 +3798,11 @@ impl FitSeries for ExponentialSmoothing {
 
 /// Last-value (random-walk) forecaster.
 #[derive(Clone, Debug, Default)]
-pub struct Naive;
+pub(crate) struct Naive;
 
 /// Fitted naive forecaster.
 #[derive(Clone, Debug)]
-pub struct FittedNaive {
+pub(crate) struct FittedNaive {
     /// Last observed value.
     pub last: f64,
     /// Training length.
@@ -3811,7 +3811,7 @@ pub struct FittedNaive {
 
 impl FittedNaive {
     /// Repeat the last value `h` times.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(Vector::filled(h, self.last))
     }
@@ -3819,7 +3819,7 @@ impl FittedNaive {
 
 impl FitSeries for Naive {
     type Fitted = FittedNaive;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedNaive>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedNaive>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.is_empty() {
@@ -3839,7 +3839,7 @@ impl FitSeries for Naive {
 ///
 /// Bootstrap count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct BaggingForecaster {
+pub(crate) struct BaggingForecaster {
     /// Number of residual-bootstrap paths.
     pub n_estimators: usize,
     /// PRNG seed.
@@ -3857,7 +3857,7 @@ impl Default for BaggingForecaster {
 
 impl BaggingForecaster {
     /// `n_estimators` bootstrap paths.
-    pub fn new(n_estimators: usize) -> Self {
+    pub(crate) fn new(n_estimators: usize) -> Self {
         Self {
             n_estimators: n_estimators.max(1),
             ..Self::default()
@@ -3867,7 +3867,7 @@ impl BaggingForecaster {
 
 /// Fitted residual-bootstrap bagging forecaster.
 #[derive(Clone, Debug)]
-pub struct FittedBaggingForecaster {
+pub(crate) struct FittedBaggingForecaster {
     /// Last observed level.
     pub last: f64,
     residuals: Vector,
@@ -3877,7 +3877,7 @@ pub struct FittedBaggingForecaster {
 
 impl FittedBaggingForecaster {
     /// Average of residual-bootstrap random-walk paths.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         if h == 0 {
             return ctx.finish(Vector::zeros(0));
@@ -3914,7 +3914,7 @@ impl FittedBaggingForecaster {
 impl FitSeries for BaggingForecaster {
     type Fitted = FittedBaggingForecaster;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedBaggingForecaster>> {
@@ -3948,7 +3948,7 @@ impl FitSeries for BaggingForecaster {
 ///
 /// Coverage is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct NaiveConformal {
+pub(crate) struct NaiveConformal {
     /// Nominal coverage in (0, 1).
     pub coverage: f64,
 }
@@ -3961,14 +3961,14 @@ impl Default for NaiveConformal {
 
 impl NaiveConformal {
     /// Nominal coverage `coverage`.
-    pub fn new(coverage: f64) -> Self {
+    pub(crate) fn new(coverage: f64) -> Self {
         Self { coverage }
     }
 }
 
 /// Fitted last-value conformal interval.
 #[derive(Clone, Debug)]
-pub struct FittedNaiveConformal {
+pub(crate) struct FittedNaiveConformal {
     /// Last observed level.
     pub last: f64,
     /// Half-width from residual quantiles.
@@ -3979,13 +3979,13 @@ pub struct FittedNaiveConformal {
 
 impl FittedNaiveConformal {
     /// Repeat the last value.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(Vector::filled(h, self.last))
     }
 
     /// Columns `[lower, mid, upper]` for `h` steps.
-    pub fn interval(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn interval(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("interval"));
         let w = self.half_width.max(0.0);
         ctx.finish(Matrix::from_fn(h, 3, |_, j| match j {
@@ -3999,7 +3999,7 @@ impl FittedNaiveConformal {
 impl FitSeries for NaiveConformal {
     type Fitted = FittedNaiveConformal;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedNaiveConformal>> {
@@ -4049,11 +4049,11 @@ impl FitSeries for NaiveConformal {
 ///
 /// Member count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct StackingForecaster;
+pub(crate) struct StackingForecaster;
 
 /// Fitted last-value / drift stack.
 #[derive(Clone, Debug)]
-pub struct FittedStackingForecaster {
+pub(crate) struct FittedStackingForecaster {
     /// Last observed level.
     pub last: f64,
     /// Drift slope.
@@ -4068,7 +4068,7 @@ pub struct FittedStackingForecaster {
 
 impl FittedStackingForecaster {
     /// Combine member forecasts with the fitted meta weights.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(Vector::from_iter((1..=h).map(|k| {
             let naive = self.last;
@@ -4081,7 +4081,7 @@ impl FittedStackingForecaster {
 impl FitSeries for StackingForecaster {
     type Fitted = FittedStackingForecaster;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedStackingForecaster>> {
@@ -4130,11 +4130,11 @@ impl FitSeries for StackingForecaster {
 ///
 /// Member count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct AutoEnsembleForecaster;
+pub(crate) struct AutoEnsembleForecaster;
 
 /// Fitted softmax ensemble of last-value, drift, and SES.
 #[derive(Clone, Debug)]
-pub struct FittedAutoEnsembleForecaster {
+pub(crate) struct FittedAutoEnsembleForecaster {
     /// Last observed level (naive member).
     pub last: f64,
     /// Drift slope.
@@ -4151,7 +4151,7 @@ pub struct FittedAutoEnsembleForecaster {
 
 impl FittedAutoEnsembleForecaster {
     /// Weighted combination of the three member forecasts.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(Vector::from_iter((1..=h).map(|k| {
             let naive = self.last;
@@ -4165,7 +4165,7 @@ impl FittedAutoEnsembleForecaster {
 impl FitSeries for AutoEnsembleForecaster {
     type Fitted = FittedAutoEnsembleForecaster;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedAutoEnsembleForecaster>> {
@@ -4256,7 +4256,7 @@ impl FitSeries for AutoEnsembleForecaster {
 ///
 /// Member count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineEnsembleForecaster {
+pub(crate) struct OnlineEnsembleForecaster {
     last: f64,
     first: f64,
     n: u64,
@@ -4266,11 +4266,11 @@ pub struct OnlineEnsembleForecaster {
 }
 
 /// Fitted online ensemble state (same type as the updater).
-pub type FittedOnlineEnsembleForecaster = OnlineEnsembleForecaster;
+pub(crate) type FittedOnlineEnsembleForecaster = OnlineEnsembleForecaster;
 
 impl OnlineEnsembleForecaster {
     /// Empty online ensemble.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -4286,7 +4286,7 @@ impl OnlineEnsembleForecaster {
     }
 
     /// Weighted combination of last-value and drift.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let (wn, wd) = self.weights();
         let slope = if self.n > 1 {
@@ -4303,10 +4303,11 @@ impl OnlineEnsembleForecaster {
 impl FitSeries for OnlineEnsembleForecaster {
     type Fitted = OnlineEnsembleForecaster;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<OnlineEnsembleForecaster>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let n = y.len();
@@ -4318,24 +4319,24 @@ impl FitSeries for OnlineEnsembleForecaster {
                     .build(),
             );
         }
-        self.first = y.as_slice().first().copied().unwrap_or(0.0);
-        self.last = y.as_slice().last().copied().unwrap_or(0.0);
-        self.n = n as u64;
-        self.sse_naive = 0.0;
-        self.sse_drift = 0.0;
+        this.first = y.as_slice().first().copied().unwrap_or(0.0);
+        this.last = y.as_slice().last().copied().unwrap_or(0.0);
+        this.n = n as u64;
+        this.sse_naive = 0.0;
+        this.sse_drift = 0.0;
         let slope = if n > 1 {
-            (self.last - self.first) / (n as f64 - 1.0)
+            (this.last - this.first) / (n as f64 - 1.0)
         } else {
             0.0
         };
         for t in 1..n {
             let e_n = y[t] - y[t - 1];
             let e_d = y[t] - (y[t - 1] + slope);
-            self.sse_naive += e_n * e_n;
-            self.sse_drift += e_d * e_d;
+            this.sse_naive += e_n * e_n;
+            this.sse_drift += e_d * e_d;
         }
-        self.updates += 1;
-        ctx.finish(self.clone())
+        this.updates += 1;
+        ctx.finish(this.clone())
     }
 }
 
@@ -4408,7 +4409,7 @@ impl PartialFit for OnlineEnsembleForecaster {
 
 /// Seasonal-naive forecaster (repeat the last period).
 #[derive(Clone, Debug)]
-pub struct SeasonalNaive {
+pub(crate) struct SeasonalNaive {
     /// Seasonal period.
     pub period: usize,
 }
@@ -4421,14 +4422,14 @@ impl Default for SeasonalNaive {
 
 impl SeasonalNaive {
     /// Period-`period` seasonal naive.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self { period }
     }
 }
 
 /// Fitted seasonal-naive state.
 #[derive(Clone, Debug)]
-pub struct FittedSeasonalNaive {
+pub(crate) struct FittedSeasonalNaive {
     /// Last complete (or partial) season, length `period`.
     pub last_season: Vector,
     /// Period.
@@ -4439,7 +4440,7 @@ pub struct FittedSeasonalNaive {
 
 impl FittedSeasonalNaive {
     /// Repeat the last season.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let p = self.period.max(1);
         let out = Vector::from_iter((0..h).map(|k| {
@@ -4457,7 +4458,7 @@ impl FittedSeasonalNaive {
 impl FitSeries for SeasonalNaive {
     type Fitted = FittedSeasonalNaive;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedSeasonalNaive>> {
@@ -4490,11 +4491,11 @@ impl FitSeries for SeasonalNaive {
 
 /// Drift (random walk with linear drift) forecaster.
 #[derive(Clone, Debug, Default)]
-pub struct Drift;
+pub(crate) struct Drift;
 
 /// Fitted drift model.
 #[derive(Clone, Debug)]
-pub struct FittedDrift {
+pub(crate) struct FittedDrift {
     /// Last value.
     pub last: f64,
     /// `(y_n − y_1) / (n − 1)`.
@@ -4503,7 +4504,7 @@ pub struct FittedDrift {
 
 impl FittedDrift {
     /// `y_n + h · slope`.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(Vector::from_iter(
             (1..=h).map(|k| self.last + k as f64 * self.slope),
@@ -4513,7 +4514,7 @@ impl FittedDrift {
 
 impl FitSeries for Drift {
     type Fitted = FittedDrift;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedDrift>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedDrift>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 2 {
@@ -4537,11 +4538,11 @@ impl FitSeries for Drift {
 
 /// Theta method (Assimakopoulos & Nikolopoulos): SES plus a linear drift.
 #[derive(Clone, Debug, Default)]
-pub struct Theta;
+pub(crate) struct Theta;
 
 /// Fitted Theta (SES + half-slope drift).
 #[derive(Clone, Debug)]
-pub struct FittedTheta {
+pub(crate) struct FittedTheta {
     /// SES level.
     pub level: f64,
     /// SES α.
@@ -4552,7 +4553,7 @@ pub struct FittedTheta {
 
 impl FittedTheta {
     /// `level + h · drift`.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(Vector::from_iter(
             (1..=h).map(|k| self.level + k as f64 * self.drift),
@@ -4562,7 +4563,7 @@ impl FittedTheta {
 
 impl FitSeries for Theta {
     type Fitted = FittedTheta;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedTheta>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedTheta>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 2 {
@@ -4590,7 +4591,7 @@ impl FitSeries for Theta {
 
 /// One-dimensional local-level Kalman filter result.
 #[derive(Clone, Debug)]
-pub struct KalmanLevelFit {
+pub(crate) struct KalmanLevelFit {
     /// Filtered level `μ_{t|t}`.
     pub level: Vector,
     /// One-step predictions `μ_{t|t−1}`.
@@ -4602,7 +4603,7 @@ pub struct KalmanLevelFit {
 }
 
 /// Local-level Kalman filter (`y_t = μ_t + ε`, `μ_t = μ_{t−1} + η`).
-pub fn kalman_level(y: &Vector, session: &Session) -> Result<Qualified<KalmanLevelFit>> {
+pub(crate) fn kalman_level(y: &Vector, session: &Session) -> Result<Qualified<KalmanLevelFit>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     let n = y.len();
@@ -4665,7 +4666,7 @@ pub fn kalman_level(y: &Vector, session: &Session) -> Result<Qualified<KalmanLev
 /// Disturbance simulation smoother for the local-level model (statsmodels `simulation_smoother`).
 ///
 /// Draw count is not identification `p`.
-pub fn simulation_smoother(
+pub(crate) fn simulation_smoother(
     y: &Vector,
     seed: u64,
     session: &Session,
@@ -4682,7 +4683,7 @@ pub fn simulation_smoother(
 }
 
 /// Kalman one-step news / prediction error (statsmodels `news`).
-pub fn statespace_news(y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn statespace_news(y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     let kf = kalman_level(y, session)?;
@@ -4693,7 +4694,7 @@ pub fn statespace_news(y: &Vector, session: &Session) -> Result<Qualified<Vector
 /// Hodrick–Prescott filter: SPD solve `(I + λ D'D) τ = y`.
 ///
 /// Returns `(trend, cycle)` with `cycle = y − trend`.
-pub fn hp_filter(y: &Vector, lamb: f64, session: &Session) -> Result<Qualified<(Vector, Vector)>> {
+pub(crate) fn hp_filter(y: &Vector, lamb: f64, session: &Session) -> Result<Qualified<(Vector, Vector)>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     if !lamb.is_finite() || lamb < 0.0 {
@@ -4758,7 +4759,7 @@ pub fn hp_filter(y: &Vector, lamb: f64, session: &Session) -> Result<Qualified<(
 
 /// GARCH(1,1) specification (QMLE on a demeaned series).
 #[derive(Clone, Debug)]
-pub struct Garch11 {
+pub(crate) struct Garch11 {
     /// Coordinate-search iterations.
     pub max_iter: usize,
 }
@@ -4771,14 +4772,14 @@ impl Default for Garch11 {
 
 impl Garch11 {
     /// Default QMLE settings.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted GARCH(1,1) variance recursion.
 #[derive(Clone, Debug)]
-pub struct FittedGarch11 {
+pub(crate) struct FittedGarch11 {
     /// ω.
     pub omega: f64,
     /// ARCH coefficient.
@@ -4793,7 +4794,7 @@ pub struct FittedGarch11 {
 
 impl FittedGarch11 {
     /// Iterate the variance recursion `h` steps (using `E[ε²]=σ²`).
-    pub fn forecast_variance(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast_variance(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let last = self.sigma2.as_slice().last().copied().unwrap_or(self.omega);
         let last_e2 = self.resid.as_slice().last().copied().unwrap_or(0.0).powi(2);
@@ -4809,7 +4810,7 @@ impl FittedGarch11 {
 
 impl FitSeries for Garch11 {
     type Fitted = FittedGarch11;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedGarch11>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedGarch11>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 8 {
@@ -4889,7 +4890,7 @@ impl FitSeries for Garch11 {
 ///
 /// \(\log h_t = \omega + \alpha(|z_{t-1}|-\sqrt{2/π}) + \gamma z_{t-1} + \beta\log h_{t-1}\).
 #[derive(Clone, Debug)]
-pub struct Egarch {
+pub(crate) struct Egarch {
     /// Coordinate-search iterations.
     pub max_iter: usize,
 }
@@ -4902,7 +4903,7 @@ impl Default for Egarch {
 
 impl Egarch {
     /// Default EGARCH settings.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -4938,7 +4939,7 @@ fn egarch_nll(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64) -> f64 {
 
 impl FitSeries for Egarch {
     type Fitted = FittedGarch11;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedGarch11>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedGarch11>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 8 {
@@ -5016,7 +5017,7 @@ impl FitSeries for Egarch {
 /// News is fractionally weighted with \(d\in(0,1/2)\) before the EGARCH log
 /// recursion. The fractional order is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Fiegarch {
+pub(crate) struct Fiegarch {
     /// Coordinate-search iterations.
     pub max_iter: usize,
 }
@@ -5029,14 +5030,14 @@ impl Default for Fiegarch {
 
 impl Fiegarch {
     /// Default FIEGARCH settings.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted FIEGARCH variances.
 #[derive(Clone, Debug)]
-pub struct FittedFiegarch {
+pub(crate) struct FittedFiegarch {
     /// ω.
     pub omega: f64,
     /// Magnitude news.
@@ -5099,7 +5100,7 @@ fn fiegarch_nll(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64, d: f64
 
 impl FitSeries for Fiegarch {
     type Fitted = FittedFiegarch;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedFiegarch>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedFiegarch>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 8 {
@@ -5175,7 +5176,7 @@ impl FitSeries for Fiegarch {
 /// Historical value-at-risk at level `q` (arch `ValueAtRisk`).
 ///
 /// The quantile level is not identification `p`.
-pub fn value_at_risk(y: &Vector, q: f64, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn value_at_risk(y: &Vector, q: f64, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     let qq = if q.is_finite() && q > 0.0 && q < 1.0 {
@@ -5207,7 +5208,7 @@ pub fn value_at_risk(y: &Vector, q: f64, session: &Session) -> Result<Qualified<
 /// Historical expected shortfall (arch `expected_shortfall`).
 ///
 /// The tail level is not identification `p`.
-pub fn expected_shortfall(y: &Vector, q: f64, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn expected_shortfall(y: &Vector, q: f64, session: &Session) -> Result<Qualified<f64>> {
     let var = value_at_risk(y, q, session)?;
     let mut ctx = FitCtx::with_session(session.child("es"));
     if !var.value.is_finite() {
@@ -5228,7 +5229,7 @@ pub fn expected_shortfall(y: &Vector, q: f64, session: &Session) -> Result<Quali
 ///
 /// \(h_t=\omega+\alpha\varepsilon_{t-1}^2+\gamma\varepsilon_{t-1}^2 1_{\varepsilon<0}+\beta h_{t-1}\).
 #[derive(Clone, Debug)]
-pub struct GjrGarch {
+pub(crate) struct GjrGarch {
     /// Coordinate-search iterations.
     pub max_iter: usize,
 }
@@ -5241,14 +5242,14 @@ impl Default for GjrGarch {
 
 impl GjrGarch {
     /// Default GJR-GARCH settings.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted GJR-GARCH(1,1) with an explicit leverage coefficient.
 #[derive(Clone, Debug)]
-pub struct FittedGjrGarch {
+pub(crate) struct FittedGjrGarch {
     /// ω.
     pub omega: f64,
     /// Symmetric ARCH coefficient.
@@ -5265,7 +5266,7 @@ pub struct FittedGjrGarch {
 
 impl FittedGjrGarch {
     /// Iterate the GJR recursion `h` steps using \(\mathbb{E}[1_{\varepsilon<0}]=1/2\).
-    pub fn forecast_variance(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast_variance(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let last = self.sigma2.as_slice().last().copied().unwrap_or(self.omega);
         let last_e = self.resid.as_slice().last().copied().unwrap_or(0.0);
@@ -5311,7 +5312,7 @@ fn gjr_nll(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64) -> f64 {
 
 impl FitSeries for GjrGarch {
     type Fitted = FittedGjrGarch;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedGjrGarch>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedGjrGarch>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 8 {
@@ -5395,7 +5396,7 @@ impl FitSeries for GjrGarch {
 ///
 /// Truncation length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Figarch {
+pub(crate) struct Figarch {
     /// Coordinate-search iterations.
     pub max_iter: usize,
     /// ARCH(∞) truncation (not identification `p`).
@@ -5413,14 +5414,14 @@ impl Default for Figarch {
 
 impl Figarch {
     /// Default FIGARCH settings.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted FIGARCH fractional-integration state.
 #[derive(Clone, Debug)]
-pub struct FittedFigarch {
+pub(crate) struct FittedFigarch {
     /// ω.
     pub omega: f64,
     /// Fractional differencing `d ∈ (0, 1)`.
@@ -5482,7 +5483,7 @@ fn figarch_nll(e: &[f64], omega: f64, d: f64, beta: f64, trunc: usize) -> f64 {
 
 impl FitSeries for Figarch {
     type Fitted = FittedFigarch;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedFigarch>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedFigarch>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 8 {
@@ -5555,7 +5556,7 @@ impl FitSeries for Figarch {
 ///
 /// \(\sigma_t^\delta=\omega+\alpha(|\varepsilon_{t-1}|-\gamma\varepsilon_{t-1})^\delta+\beta\sigma_{t-1}^\delta\).
 #[derive(Clone, Debug)]
-pub struct Aparch {
+pub(crate) struct Aparch {
     /// Coordinate-search iterations.
     pub max_iter: usize,
 }
@@ -5568,14 +5569,14 @@ impl Default for Aparch {
 
 impl Aparch {
     /// Default APARCH settings.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted APARCH(1,1) power-volatility state.
 #[derive(Clone, Debug)]
-pub struct FittedAparch {
+pub(crate) struct FittedAparch {
     /// ω.
     pub omega: f64,
     /// ARCH coefficient.
@@ -5631,7 +5632,7 @@ fn aparch_nll(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64, delta: f
 
 impl FitSeries for Aparch {
     type Fitted = FittedAparch;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedAparch>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedAparch>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 8 {
@@ -5705,7 +5706,7 @@ impl FitSeries for Aparch {
 /// \(h_t=\omega+\alpha_1\varepsilon_{t-1}^2+\alpha_5\bar\varepsilon_{t,5}^2+\alpha_{22}\bar\varepsilon_{t,22}^2\).
 /// Window lengths are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Harch {
+pub(crate) struct Harch {
     /// Coordinate-search iterations.
     pub max_iter: usize,
 }
@@ -5718,14 +5719,14 @@ impl Default for Harch {
 
 impl Harch {
     /// Default HARCH(1, 5, 22).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted HARCH variances.
 #[derive(Clone, Debug)]
-pub struct FittedHarch {
+pub(crate) struct FittedHarch {
     /// ω.
     pub omega: f64,
     /// Daily ARCH weight.
@@ -5779,7 +5780,7 @@ fn harch_nll(e: &[f64], omega: f64, a1: f64, a5: f64, a22: f64) -> f64 {
 
 impl FitSeries for Harch {
     type Fitted = FittedHarch;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedHarch>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedHarch>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 8 {
@@ -5842,7 +5843,7 @@ impl FitSeries for Harch {
 ///
 /// \(h_t=\lambda h_{t-1}+(1-\lambda)\varepsilon_{t-1}^2\).
 #[derive(Clone, Debug)]
-pub struct EwmaVol {
+pub(crate) struct EwmaVol {
     /// Fixed decay; `None` QMLE-tunes \(\lambda\).
     pub lambda: Option<f64>,
 }
@@ -5855,19 +5856,19 @@ impl Default for EwmaVol {
 
 impl EwmaVol {
     /// RiskMetrics \(\lambda=0.94\).
-    pub fn riskmetrics() -> Self {
+    pub(crate) fn riskmetrics() -> Self {
         Self { lambda: Some(0.94) }
     }
 
     /// QMLE \(\lambda\).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted EWMA variances.
 #[derive(Clone, Debug)]
-pub struct FittedEwmaVol {
+pub(crate) struct FittedEwmaVol {
     /// Decay \(\lambda\).
     pub lambda: f64,
     /// In-sample conditional variances.
@@ -5904,7 +5905,7 @@ fn ewma_nll(e: &[f64], lam: f64) -> f64 {
 
 impl FitSeries for EwmaVol {
     type Fitted = FittedEwmaVol;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedEwmaVol>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedEwmaVol>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let mean = y.mean();
@@ -5951,7 +5952,7 @@ impl FitSeries for EwmaVol {
 
 /// Croston intermittent-demand smoother.
 #[derive(Clone, Debug)]
-pub struct Croston {
+pub(crate) struct Croston {
     /// Smoothing constant for both demand size and inter-arrival.
     pub alpha: f64,
 }
@@ -5964,14 +5965,14 @@ impl Default for Croston {
 
 impl Croston {
     /// Croston with smoothing `alpha`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self { alpha }
     }
 }
 
 /// Fitted Croston state: demand size `z` and interval `p`.
 #[derive(Clone, Debug)]
-pub struct FittedCroston {
+pub(crate) struct FittedCroston {
     /// Smoothed demand size.
     pub z: f64,
     /// Smoothed inter-arrival.
@@ -5982,7 +5983,7 @@ pub struct FittedCroston {
 
 impl FittedCroston {
     /// Constant `z/p` forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let rate = if self.p.abs() > 1e-15 {
             self.z / self.p
@@ -5995,7 +5996,7 @@ impl FittedCroston {
 
 impl FitSeries for Croston {
     type Fitted = FittedCroston;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedCroston>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedCroston>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.as_slice().iter().any(|&v| v < 0.0) {
@@ -6044,7 +6045,7 @@ impl FitSeries for Croston {
 ///
 /// Demand probability is updated on every step; demand size only on positives.
 #[derive(Clone, Debug)]
-pub struct TsbCroston {
+pub(crate) struct TsbCroston {
     /// Demand-size smoothing.
     pub alpha: f64,
     /// Demand-probability smoothing.
@@ -6062,14 +6063,14 @@ impl Default for TsbCroston {
 
 impl TsbCroston {
     /// TSB with demand/probability smoothers `alpha` / `beta`.
-    pub fn new(alpha: f64, beta: f64) -> Self {
+    pub(crate) fn new(alpha: f64, beta: f64) -> Self {
         Self { alpha, beta }
     }
 }
 
 /// Fitted TSB state.
 #[derive(Clone, Debug)]
-pub struct FittedTsbCroston {
+pub(crate) struct FittedTsbCroston {
     /// Smoothed demand size.
     pub z: f64,
     /// Smoothed demand probability.
@@ -6078,7 +6079,7 @@ pub struct FittedTsbCroston {
 
 impl FittedTsbCroston {
     /// Constant `z·p` forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(Vector::filled(h, self.z * self.p))
     }
@@ -6086,7 +6087,7 @@ impl FittedTsbCroston {
 
 impl FitSeries for TsbCroston {
     type Fitted = FittedTsbCroston;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedTsbCroston>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedTsbCroston>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.as_slice().iter().any(|&v| v < 0.0) {
@@ -6137,7 +6138,7 @@ impl FitSeries for TsbCroston {
 ///
 /// Forecast is \((z/p)\,(1-\alpha/2)\). Lag / interval counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SbaCroston {
+pub(crate) struct SbaCroston {
     /// Smoothing constant for demand size and inter-arrival.
     pub alpha: f64,
 }
@@ -6150,14 +6151,14 @@ impl Default for SbaCroston {
 
 impl SbaCroston {
     /// SBA Croston with smoothing `alpha`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self { alpha }
     }
 }
 
 /// Fitted Syntetos–Boylan state.
 #[derive(Clone, Debug)]
-pub struct FittedSbaCroston {
+pub(crate) struct FittedSbaCroston {
     /// Smoothed demand size.
     pub z: f64,
     /// Smoothed inter-arrival.
@@ -6168,7 +6169,7 @@ pub struct FittedSbaCroston {
 
 impl FittedSbaCroston {
     /// Constant bias-corrected `z/p` forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let rate = if self.p.abs() > 1e-15 {
             (self.z / self.p) * (1.0 - 0.5 * self.alpha)
@@ -6181,7 +6182,7 @@ impl FittedSbaCroston {
 
 impl FitSeries for SbaCroston {
     type Fitted = FittedSbaCroston;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedSbaCroston>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedSbaCroston>> {
         let q = Croston { alpha: self.alpha }.fit_series(y, session)?;
         Ok(q.map(|c| FittedSbaCroston {
             z: c.z,
@@ -6195,7 +6196,7 @@ impl FitSeries for SbaCroston {
 ///
 /// \(h_t=\omega+\sum_{i=1}^{L}\alpha_i\varepsilon_{t-i}^2\). Lag order is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ArchP {
+pub(crate) struct ArchP {
     /// ARCH lag count (not identification `p`).
     pub lags: usize,
     /// Coordinate-search iterations.
@@ -6213,7 +6214,7 @@ impl Default for ArchP {
 
 impl ArchP {
     /// ARCH with `lags` squared-residual terms.
-    pub fn new(lags: usize) -> Self {
+    pub(crate) fn new(lags: usize) -> Self {
         Self {
             lags: lags.max(1),
             ..Self::default()
@@ -6223,7 +6224,7 @@ impl ArchP {
 
 /// Fitted ARCH(`lags`) variance recursion.
 #[derive(Clone, Debug)]
-pub struct FittedArchP {
+pub(crate) struct FittedArchP {
     /// ω.
     pub omega: f64,
     /// ARCH coefficients \(\alpha_1,\ldots,\alpha_L\).
@@ -6271,7 +6272,7 @@ fn archp_nll(e: &[f64], omega: f64, alphas: &[f64]) -> f64 {
 
 impl FittedArchP {
     /// Iterate the ARCH recursion `h` steps using \(E[\varepsilon^2]=\sigma^2\).
-    pub fn forecast_variance(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast_variance(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let lags = self.alphas.len().max(1);
         let mut hist: Vec<f64> = self
@@ -6306,7 +6307,7 @@ impl FittedArchP {
 
 impl FitSeries for ArchP {
     type Fitted = FittedArchP;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedArchP>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedArchP>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let lags = self.lags.max(1);
@@ -6391,11 +6392,11 @@ impl FitSeries for ArchP {
 ///
 /// \(\mathrm{RV}=\sum_t \varepsilon_t^2\). This is a measurement, not a GARCH recursion.
 #[derive(Clone, Debug, Default)]
-pub struct RealizedVariance;
+pub(crate) struct RealizedVariance;
 
 /// Fitted realized-variance path.
 #[derive(Clone, Debug)]
-pub struct FittedRealizedVariance {
+pub(crate) struct FittedRealizedVariance {
     /// Per-period squared demeaned returns.
     pub sigma2: Vector,
     /// \(\sum\varepsilon_t^2\).
@@ -6404,7 +6405,7 @@ pub struct FittedRealizedVariance {
 
 impl RealizedVariance {
     /// Empty realized-variance estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
@@ -6412,7 +6413,7 @@ impl RealizedVariance {
 impl FitSeries for RealizedVariance {
     type Fitted = FittedRealizedVariance;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedRealizedVariance>> {
@@ -6448,20 +6449,20 @@ impl FitSeries for RealizedVariance {
 ///
 /// \(\hat\sigma^2_t=(4\ln 2)^{-1}(\ln H_t-\ln L_t)^2\). Column count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct Parkinson;
+pub(crate) struct Parkinson;
 
 /// Garman–Klass OHLC variance (arch `GarmanKlass`).
 ///
 /// \(\hat\sigma^2_t=\tfrac12(\ln H/L)^2-(2\ln 2-1)(\ln C/O)^2\).
 #[derive(Clone, Debug, Default)]
-pub struct GarmanKlass;
+pub(crate) struct GarmanKlass;
 
 fn ln2() -> f64 {
     std::f64::consts::LN_2
 }
 
 /// Parkinson estimator on columns `[high, low]`.
-pub fn parkinson(hl: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn parkinson(hl: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, hl, None, &ctx.policy);
     if hl.ncols() < 2 {
@@ -6497,7 +6498,7 @@ pub fn parkinson(hl: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
 }
 
 /// Garman–Klass estimator on columns `[open, high, low, close]`.
-pub fn garman_klass(ohlc: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn garman_klass(ohlc: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, ohlc, None, &ctx.policy);
     if ohlc.ncols() < 4 {
@@ -6540,24 +6541,24 @@ pub fn garman_klass(ohlc: &Matrix, session: &Session) -> Result<Qualified<Vector
 
 impl Parkinson {
     /// Empty Parkinson estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Per-bar Parkinson variance.
-    pub fn estimate(&self, hl: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn estimate(&self, hl: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         parkinson(hl, session)
     }
 }
 
 impl GarmanKlass {
     /// Empty Garman–Klass estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Per-bar Garman–Klass variance.
-    pub fn estimate(&self, ohlc: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn estimate(&self, ohlc: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         garman_klass(ohlc, session)
     }
 }
@@ -6566,11 +6567,11 @@ impl GarmanKlass {
 ///
 /// Candidate count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct AutoTheta;
+pub(crate) struct AutoTheta;
 
 /// Fitted AutoTheta winner.
 #[derive(Clone, Debug)]
-pub struct FittedAutoTheta {
+pub(crate) struct FittedAutoTheta {
     /// `"ses"` or `"theta"`.
     pub name: String,
     /// SES level.
@@ -6583,7 +6584,7 @@ pub struct FittedAutoTheta {
 
 impl FittedAutoTheta {
     /// SES: flat level. Theta: `level + h · drift`.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(Vector::from_iter((1..=h).map(|k| {
             if self.name == "ses" {
@@ -6597,7 +6598,7 @@ impl FittedAutoTheta {
 
 impl FitSeries for AutoTheta {
     type Fitted = FittedAutoTheta;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedAutoTheta>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedAutoTheta>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 2 {
@@ -6645,7 +6646,7 @@ impl FitSeries for AutoTheta {
 ///
 /// Lag count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct YtoX {
+pub(crate) struct YtoX {
     /// Number of lags.
     pub lags: usize,
 }
@@ -6658,12 +6659,12 @@ impl Default for YtoX {
 
 impl YtoX {
     /// Embed with `lags` columns.
-    pub fn new(lags: usize) -> Self {
+    pub(crate) fn new(lags: usize) -> Self {
         Self { lags: lags.max(1) }
     }
 
     /// Map `y` to `[y_{t-1}, …, y_{t-L}]` (`n` rows; leading lags are 0).
-    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         inspect_univariate(&mut ctx, y);
         let p = self.lags.max(1);
@@ -6681,11 +6682,11 @@ impl YtoX {
 
 /// Forecast of squared residuals of a SES level (sktime `SquaringResiduals`).
 #[derive(Clone, Debug, Default)]
-pub struct SquaringResiduals;
+pub(crate) struct SquaringResiduals;
 
 /// Fitted squared-residual smoother.
 #[derive(Clone, Debug)]
-pub struct FittedSquaringResiduals {
+pub(crate) struct FittedSquaringResiduals {
     /// Level SES.
     pub level: f64,
     /// Residual-variance SES level.
@@ -6694,7 +6695,7 @@ pub struct FittedSquaringResiduals {
 
 impl FittedSquaringResiduals {
     /// Flat forecast of residual variance.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(Vector::filled(h, self.vol.max(0.0)))
     }
@@ -6703,7 +6704,7 @@ impl FittedSquaringResiduals {
 impl FitSeries for SquaringResiduals {
     type Fitted = FittedSquaringResiduals;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedSquaringResiduals>> {
@@ -6725,11 +6726,11 @@ impl FitSeries for SquaringResiduals {
 ///
 /// Distinct from [`Drift`]: this is OLS of `y` on `[1, t]`, not last-plus-slope.
 #[derive(Clone, Debug, Default)]
-pub struct TrendForecaster;
+pub(crate) struct TrendForecaster;
 
 /// Fitted OLS time trend.
 #[derive(Clone, Debug)]
-pub struct FittedTrendForecaster {
+pub(crate) struct FittedTrendForecaster {
     /// Intercept.
     pub intercept: f64,
     /// Slope on `t = 0, 1, …`.
@@ -6740,7 +6741,7 @@ pub struct FittedTrendForecaster {
 
 impl FittedTrendForecaster {
     /// `intercept + slope · (n + h − 1)` for `h = 1..H`.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(Vector::from_iter(
             (0..h).map(|s| self.intercept + self.slope * (self.n + s) as f64),
@@ -6751,7 +6752,7 @@ impl FittedTrendForecaster {
 impl FitSeries for TrendForecaster {
     type Fitted = FittedTrendForecaster;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedTrendForecaster>> {
@@ -6796,18 +6797,18 @@ impl FitSeries for TrendForecaster {
 ///
 /// Alpha-grid size is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct Imapa;
+pub(crate) struct Imapa;
 
 /// Fitted IMAPA average rate.
 #[derive(Clone, Debug)]
-pub struct FittedImapa {
+pub(crate) struct FittedImapa {
     /// Averaged `z/p` rate.
     pub rate: f64,
 }
 
 impl FittedImapa {
     /// Constant averaged Croston rate.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(Vector::filled(h, self.rate))
     }
@@ -6815,7 +6816,7 @@ impl FittedImapa {
 
 impl FitSeries for Imapa {
     type Fitted = FittedImapa;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedImapa>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedImapa>> {
         let mut rates = Vec::new();
         for &a in &[0.1, 0.2, 0.3, 0.4] {
             match Croston::new(a).fit_series(y, &session.child(format!("imapa_{a}"))) {
@@ -6851,16 +6852,16 @@ impl FitSeries for Imapa {
 ///
 /// \(\hat\sigma^2_t=\ln(H/C)\ln(H/O)+\ln(L/C)\ln(L/O)\).
 #[derive(Clone, Debug, Default)]
-pub struct RogersSatchell;
+pub(crate) struct RogersSatchell;
 
 /// Yang–Zhang OHLC variance (arch `YangZhang`).
 ///
 /// Combines overnight, open-to-close, and Rogers–Satchell. Bar count is not `p`.
 #[derive(Clone, Debug, Default)]
-pub struct YangZhang;
+pub(crate) struct YangZhang;
 
 /// Rogers–Satchell estimator on columns `[open, high, low, close]`.
-pub fn rogers_satchell(ohlc: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn rogers_satchell(ohlc: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, ohlc, None, &ctx.policy);
     if ohlc.ncols() < 4 {
@@ -6899,7 +6900,7 @@ pub fn rogers_satchell(ohlc: &Matrix, session: &Session) -> Result<Qualified<Vec
 }
 
 /// Yang–Zhang series estimator on columns `[open, high, low, close]`.
-pub fn yang_zhang(ohlc: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn yang_zhang(ohlc: &Matrix, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, ohlc, None, &ctx.policy);
     if ohlc.ncols() < 4 || ohlc.nrows() < 2 {
@@ -6966,24 +6967,24 @@ pub fn yang_zhang(ohlc: &Matrix, session: &Session) -> Result<Qualified<f64>> {
 
 impl RogersSatchell {
     /// Empty Rogers–Satchell estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Per-bar Rogers–Satchell variance.
-    pub fn estimate(&self, ohlc: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn estimate(&self, ohlc: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         rogers_satchell(ohlc, session)
     }
 }
 
 impl YangZhang {
     /// Empty Yang–Zhang estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Series Yang–Zhang variance.
-    pub fn estimate(&self, ohlc: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+    pub(crate) fn estimate(&self, ohlc: &Matrix, session: &Session) -> Result<Qualified<f64>> {
         yang_zhang(ohlc, session)
     }
 }
@@ -6992,11 +6993,11 @@ impl YangZhang {
 ///
 /// Two AR(1) regimes split by a delay-1 threshold. Regime / lag counts are not `p`.
 #[derive(Clone, Debug, Default)]
-pub struct Setar;
+pub(crate) struct Setar;
 
 /// Fitted two-regime SETAR.
 #[derive(Clone, Debug)]
-pub struct FittedSetar {
+pub(crate) struct FittedSetar {
     /// Threshold on `y_{t-1}`.
     pub threshold: f64,
     /// Low-regime intercept and AR(1).
@@ -7009,7 +7010,7 @@ pub struct FittedSetar {
 
 impl FittedSetar {
     /// Iterate the threshold recursion.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let mut prev = self.last;
         let mut out = Vector::zeros(h);
@@ -7030,7 +7031,7 @@ impl FittedSetar {
 
 impl FitSeries for Setar {
     type Fitted = FittedSetar;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedSetar>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedSetar>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let n = y.len();
@@ -7122,7 +7123,7 @@ impl FitSeries for Setar {
 ///
 /// \(h_t=\omega+\alpha(\varepsilon_{t-1}-\gamma\sqrt{h_{t-1}})^2+\beta h_{t-1}\).
 #[derive(Clone, Debug)]
-pub struct Ngarch {
+pub(crate) struct Ngarch {
     /// Coordinate-search iterations.
     pub max_iter: usize,
 }
@@ -7135,14 +7136,14 @@ impl Default for Ngarch {
 
 impl Ngarch {
     /// Default NGARCH settings.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted NGARCH variances.
 #[derive(Clone, Debug)]
-pub struct FittedNgarch {
+pub(crate) struct FittedNgarch {
     /// ω.
     pub omega: f64,
     /// ARCH coefficient.
@@ -7186,7 +7187,7 @@ fn ngarch_nll(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64) -> f64 {
 
 impl FitSeries for Ngarch {
     type Fitted = FittedNgarch;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedNgarch>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedNgarch>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 8 {
@@ -7265,7 +7266,7 @@ impl FitSeries for Ngarch {
 /// variance is infinite when \(\omega>0\); that is the model, not a unit-root
 /// abort.
 #[derive(Clone, Debug)]
-pub struct Igarch {
+pub(crate) struct Igarch {
     /// Coordinate-search iterations.
     pub max_iter: usize,
 }
@@ -7278,14 +7279,14 @@ impl Default for Igarch {
 
 impl Igarch {
     /// Default IGARCH settings.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted IGARCH variances.
 #[derive(Clone, Debug)]
-pub struct FittedIgarch {
+pub(crate) struct FittedIgarch {
     /// ω.
     pub omega: f64,
     /// ARCH coefficient (\(\beta=1-\alpha\)).
@@ -7300,7 +7301,7 @@ pub struct FittedIgarch {
 
 impl FitSeries for Igarch {
     type Fitted = FittedIgarch;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedIgarch>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedIgarch>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 8 {
@@ -7380,7 +7381,7 @@ impl FitSeries for Igarch {
 /// \(q_t=\omega+\rho q_{t-1}+\phi(\varepsilon_{t-1}^2-h_{t-1})\),
 /// \(h_t=q_t+\alpha(\varepsilon_{t-1}^2-q_{t-1})+\beta(h_{t-1}-q_{t-1})\).
 #[derive(Clone, Debug)]
-pub struct ComponentGarch {
+pub(crate) struct ComponentGarch {
     /// Coordinate-search iterations.
     pub max_iter: usize,
 }
@@ -7393,14 +7394,14 @@ impl Default for ComponentGarch {
 
 impl ComponentGarch {
     /// Default component-GARCH settings.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted component-GARCH variances.
 #[derive(Clone, Debug)]
-pub struct FittedComponentGarch {
+pub(crate) struct FittedComponentGarch {
     /// Permanent intercept.
     pub omega: f64,
     /// Permanent persistence.
@@ -7462,7 +7463,7 @@ fn cgarch_nll(e: &[f64], omega: f64, rho: f64, phi: f64, alpha: f64, beta: f64) 
 impl FitSeries for ComponentGarch {
     type Fitted = FittedComponentGarch;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedComponentGarch>> {
@@ -7542,7 +7543,7 @@ impl FitSeries for ComponentGarch {
 
 /// Quadratic GARCH (Sentana): \(h_t=\omega+\alpha\varepsilon_{t-1}^2+\gamma\varepsilon_{t-1}+\beta h_{t-1}\).
 #[derive(Clone, Debug)]
-pub struct Qgarch {
+pub(crate) struct Qgarch {
     /// Coordinate-search iterations.
     pub max_iter: usize,
 }
@@ -7555,14 +7556,14 @@ impl Default for Qgarch {
 
 impl Qgarch {
     /// Default QGARCH settings.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted QGARCH variances.
 #[derive(Clone, Debug)]
-pub struct FittedQgarch {
+pub(crate) struct FittedQgarch {
     /// ω.
     pub omega: f64,
     /// ARCH coefficient.
@@ -7604,7 +7605,7 @@ fn qgarch_nll(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64) -> f64 {
 
 impl FitSeries for Qgarch {
     type Fitted = FittedQgarch;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedQgarch>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedQgarch>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 8 {
@@ -7678,7 +7679,7 @@ impl FitSeries for Qgarch {
 ///
 /// \(\sigma_t=\omega+\alpha|\varepsilon_{t-1}|+\gamma|\varepsilon_{t-1}|I_{\varepsilon<0}+\beta\sigma_{t-1}\).
 #[derive(Clone, Debug)]
-pub struct Tarch {
+pub(crate) struct Tarch {
     /// Coordinate-search iterations.
     pub max_iter: usize,
 }
@@ -7691,14 +7692,14 @@ impl Default for Tarch {
 
 impl Tarch {
     /// Default TARCH settings.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted TARCH scales.
 #[derive(Clone, Debug)]
-pub struct FittedTarch {
+pub(crate) struct FittedTarch {
     /// ω.
     pub omega: f64,
     /// Symmetric ARCH.
@@ -7742,7 +7743,7 @@ fn tarch_nll(e: &[f64], omega: f64, alpha: f64, gamma: f64, beta: f64) -> f64 {
 
 impl FitSeries for Tarch {
     type Fitted = FittedTarch;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedTarch>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedTarch>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 8 {
@@ -7814,9 +7815,9 @@ impl FitSeries for Tarch {
 }
 
 /// Alias of [`Aparch`] (Ding–Granger–Engle APARCH / APGARCH).
-pub type Apgarch = Aparch;
+pub(crate) type Apgarch = Aparch;
 /// Fitted alias of [`FittedAparch`].
-pub type FittedApgarch = FittedAparch;
+pub(crate) type FittedApgarch = FittedAparch;
 
 /// GARCH-in-mean (arch `GARCH` with a variance-in-mean term):
 /// \(y_t=\mu+\lambda\sigma_t+\varepsilon_t\), \(\sigma_t^2=\omega+\alpha\varepsilon_{t-1}^2+\beta\sigma_{t-1}^2\).
@@ -7824,7 +7825,7 @@ pub type FittedApgarch = FittedAparch;
 /// Risk-premium \(\lambda\) is not identification `p`. Distinct from
 /// [`Garch11`] (constant mean only).
 #[derive(Clone, Debug)]
-pub struct GarchM {
+pub(crate) struct GarchM {
     /// Coordinate-search iterations.
     pub max_iter: usize,
 }
@@ -7837,14 +7838,14 @@ impl Default for GarchM {
 
 impl GarchM {
     /// Default GARCH-in-mean settings.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted GARCH-in-mean state.
 #[derive(Clone, Debug)]
-pub struct FittedGarchM {
+pub(crate) struct FittedGarchM {
     /// Mean intercept \(\mu\).
     pub mu: f64,
     /// Risk premium \(\lambda\).
@@ -7897,7 +7898,7 @@ fn garch_m_path(
 
 impl FitSeries for GarchM {
     type Fitted = FittedGarchM;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedGarchM>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedGarchM>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 8 {
@@ -7981,7 +7982,7 @@ impl FitSeries for GarchM {
 
 /// Absolute-value GARCH (arch `AVGARCH`): \(\sigma_t=\omega+\alpha|\varepsilon_{t-1}|+\beta\sigma_{t-1}\).
 #[derive(Clone, Debug)]
-pub struct Avgarch {
+pub(crate) struct Avgarch {
     /// Coordinate-search iterations.
     pub max_iter: usize,
 }
@@ -7994,14 +7995,14 @@ impl Default for Avgarch {
 
 impl Avgarch {
     /// Default AVGARCH settings.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted AVGARCH scales.
 #[derive(Clone, Debug)]
-pub struct FittedAvgarch {
+pub(crate) struct FittedAvgarch {
     /// ω.
     pub omega: f64,
     /// ARCH on \(|\varepsilon|\).
@@ -8041,7 +8042,7 @@ fn avgarch_nll(e: &[f64], omega: f64, alpha: f64, beta: f64) -> f64 {
 
 impl FitSeries for Avgarch {
     type Fitted = FittedAvgarch;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedAvgarch>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedAvgarch>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 8 {
@@ -8106,7 +8107,7 @@ impl FitSeries for Avgarch {
 
 /// Taylor / ZARCH scale model: \(\sigma_t=\omega+\alpha|\varepsilon_{t-1}|\).
 #[derive(Clone, Debug)]
-pub struct Zarch {
+pub(crate) struct Zarch {
     /// Coordinate-search iterations.
     pub max_iter: usize,
 }
@@ -8119,14 +8120,14 @@ impl Default for Zarch {
 
 impl Zarch {
     /// Default ZARCH settings.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted ZARCH scales.
 #[derive(Clone, Debug)]
-pub struct FittedZarch {
+pub(crate) struct FittedZarch {
     /// ω.
     pub omega: f64,
     /// ARCH on \(|\varepsilon|\).
@@ -8143,7 +8144,7 @@ fn zarch_nll(e: &[f64], omega: f64, alpha: f64) -> f64 {
 
 impl FitSeries for Zarch {
     type Fitted = FittedZarch;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedZarch>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedZarch>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 8 {
@@ -8207,11 +8208,11 @@ impl FitSeries for Zarch {
 ///
 /// Series count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct DccGarch;
+pub(crate) struct DccGarch;
 
 /// Fitted DCC correlations and marginal variances.
 #[derive(Clone, Debug)]
-pub struct FittedDccGarch {
+pub(crate) struct FittedDccGarch {
     /// Per-series GARCH(1,1) variances (`T` × `k`).
     pub sigma2: Matrix,
     /// Terminal correlation matrix (`k` × `k`).
@@ -8224,12 +8225,12 @@ pub struct FittedDccGarch {
 
 impl DccGarch {
     /// Empty DCC estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit marginal GARCH(1,1) then a scalar DCC on standardized residuals.
-    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedDccGarch>> {
+    pub(crate) fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedDccGarch>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, y, None, &ctx.policy);
         let (n, k) = y.shape();
@@ -8300,18 +8301,18 @@ impl DccGarch {
 ///
 /// Series count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct HierarchyEnsembleForecaster;
+pub(crate) struct HierarchyEnsembleForecaster;
 
 /// Fitted hierarchy ensemble.
 #[derive(Clone, Debug)]
-pub struct FittedHierarchyEnsemble {
+pub(crate) struct FittedHierarchyEnsemble {
     /// Last value of each series.
     pub last: Vector,
 }
 
 impl FittedHierarchyEnsemble {
     /// Each column repeats its last value; an extra column is the mean.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let k = self.last.len();
         let out = Matrix::from_fn(h, k + 1, |_, j| {
@@ -8329,12 +8330,12 @@ impl FittedHierarchyEnsemble {
 
 impl HierarchyEnsembleForecaster {
     /// Empty hierarchy ensemble.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit last-value walkers on each column.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Matrix,
         session: &Session,
@@ -8356,7 +8357,7 @@ impl HierarchyEnsembleForecaster {
 ///
 /// The mean-volatility slope is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ArchInMean {
+pub(crate) struct ArchInMean {
     /// Coordinate-search iterations.
     pub max_iter: usize,
 }
@@ -8369,14 +8370,14 @@ impl Default for ArchInMean {
 
 impl ArchInMean {
     /// Default GARCH-in-mean settings.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted GARCH-in-mean state.
 #[derive(Clone, Debug)]
-pub struct FittedArchInMean {
+pub(crate) struct FittedArchInMean {
     /// Mean intercept.
     pub mu: f64,
     /// Risk premium \(\lambda\).
@@ -8426,7 +8427,7 @@ fn aim_nll(y: &[f64], mu: f64, lam: f64, omega: f64, alpha: f64, beta: f64) -> f
 
 impl FitSeries for ArchInMean {
     type Fitted = FittedArchInMean;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedArchInMean>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedArchInMean>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.len() < 8 {
@@ -8499,11 +8500,11 @@ impl FitSeries for ArchInMean {
 ///
 /// Series count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct CcGarch;
+pub(crate) struct CcGarch;
 
 /// Fitted CCC-GARCH margins and constant correlation.
 #[derive(Clone, Debug)]
-pub struct FittedCcGarch {
+pub(crate) struct FittedCcGarch {
     /// Per-series GARCH(1,1) variances (`T` × `k`).
     pub sigma2: Matrix,
     /// Constant correlation (`k` × `k`).
@@ -8512,12 +8513,12 @@ pub struct FittedCcGarch {
 
 impl CcGarch {
     /// Empty CCC estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit marginal GARCH(1,1) and the sample correlation of standardized residuals.
-    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedCcGarch>> {
+    pub(crate) fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedCcGarch>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, y, None, &ctx.policy);
         let (n, k) = y.shape();
@@ -8563,11 +8564,11 @@ impl CcGarch {
 ///
 /// Series / factor counts are not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct GoGarch;
+pub(crate) struct GoGarch;
 
 /// Fitted GO-GARCH mixing and factor variances.
 #[derive(Clone, Debug)]
-pub struct FittedGoGarch {
+pub(crate) struct FittedGoGarch {
     /// Mixing matrix \(A\) (`k` × `r`).
     pub loadings: Matrix,
     /// Factor GARCH variances (`T` × `r`).
@@ -8578,12 +8579,12 @@ pub struct FittedGoGarch {
 
 impl GoGarch {
     /// Empty GO-GARCH estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Marginal GARCH, SVD mixing, independent factor GARCH.
-    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedGoGarch>> {
+    pub(crate) fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedGoGarch>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, y, None, &ctx.policy);
         let (n, k) = y.shape();
@@ -8656,11 +8657,11 @@ impl GoGarch {
 ///
 /// Bandwidth \(\lfloor\sqrt{n}\rfloor\) is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct RealizedKernel;
+pub(crate) struct RealizedKernel;
 
 /// Fitted realized-kernel value.
 #[derive(Clone, Debug)]
-pub struct FittedRealizedKernel {
+pub(crate) struct FittedRealizedKernel {
     /// Kernel estimate of integrated variance.
     pub rk: f64,
     /// Bartlett bandwidth.
@@ -8669,7 +8670,7 @@ pub struct FittedRealizedKernel {
 
 impl RealizedKernel {
     /// Empty realized-kernel estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
@@ -8677,7 +8678,7 @@ impl RealizedKernel {
 impl FitSeries for RealizedKernel {
     type Fitted = FittedRealizedKernel;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedRealizedKernel>> {
@@ -8732,7 +8733,7 @@ impl FitSeries for RealizedKernel {
 ///
 /// Lag count is not identification `p`. Exponential Almon weights use one \(\theta\).
 #[derive(Clone, Debug)]
-pub struct Midas {
+pub(crate) struct Midas {
     /// Number of high-frequency lags.
     pub lags: usize,
 }
@@ -8745,12 +8746,12 @@ impl Default for Midas {
 
 impl Midas {
     /// MIDAS with `lags` weights.
-    pub fn new(lags: usize) -> Self {
+    pub(crate) fn new(lags: usize) -> Self {
         Self { lags: lags.max(1) }
     }
 
     /// Fit \(y_t=a+b\sum_k w_k(\theta)x_{t-k}\).
-    pub fn fit(&self, y: &Vector, x: &Vector, session: &Session) -> Result<Qualified<FittedMidas>> {
+    pub(crate) fn fit(&self, y: &Vector, x: &Vector, session: &Session) -> Result<Qualified<FittedMidas>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         inspect_univariate(&mut ctx, x);
@@ -8843,7 +8844,7 @@ impl Midas {
 
 /// Fitted MIDAS weights.
 #[derive(Clone, Debug)]
-pub struct FittedMidas {
+pub(crate) struct FittedMidas {
     /// Intercept.
     pub intercept: f64,
     /// Scale on the weighted high-frequency sum.
@@ -8857,7 +8858,7 @@ pub struct FittedMidas {
 
 impl FittedMidas {
     /// One-step MIDAS using the stored high-frequency tail (then flat).
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let mut s = 0.0;
         let mut den = 0.0;
@@ -8878,11 +8879,11 @@ impl FittedMidas {
 /// \(y_t=(a_0+b_0 y_{t-1})+G(y_{t-1};\gamma,c)\,(a_1+b_1 y_{t-1})\).
 /// Regime / lag counts are not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct Star;
+pub(crate) struct Star;
 
 /// Fitted logistic STAR.
 #[derive(Clone, Debug)]
-pub struct FittedStar {
+pub(crate) struct FittedStar {
     /// Low-regime intercept and AR(1).
     pub low: Vector,
     /// High-regime intercept and AR(1).
@@ -8902,7 +8903,7 @@ fn star_g(z: f64, gamma: f64, c: f64) -> f64 {
 
 impl FittedStar {
     /// Iterate the STAR recursion.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let mut prev = self.last;
         let mut out = Vector::zeros(h);
@@ -8920,7 +8921,7 @@ impl FittedStar {
 
 impl FitSeries for Star {
     type Fitted = FittedStar;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedStar>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedStar>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let n = y.len();
@@ -8999,11 +9000,11 @@ impl FitSeries for Star {
 ///
 /// Node count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct ReconcilerForecaster;
+pub(crate) struct ReconcilerForecaster;
 
 /// Fitted last-value hierarchy.
 #[derive(Clone, Debug)]
-pub struct FittedReconcilerForecaster {
+pub(crate) struct FittedReconcilerForecaster {
     /// Last value of each series.
     pub last: Vector,
 }
@@ -9013,7 +9014,7 @@ impl FittedReconcilerForecaster {
     ///
     /// `last` may be the full node vector or the bottom-level series
     /// (`last.len() == summing.ncols()`); bottoms are expanded through `S`.
-    pub fn forecast(
+    pub(crate) fn forecast(
         &self,
         h: usize,
         summing: &Matrix,
@@ -9042,12 +9043,12 @@ impl FittedReconcilerForecaster {
 
 impl ReconcilerForecaster {
     /// Empty reconciler.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Store the last observation of each column.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Matrix,
         session: &Session,
@@ -9069,7 +9070,7 @@ impl ReconcilerForecaster {
 ///
 /// Window / horizon counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct DirectTabularForecaster {
+pub(crate) struct DirectTabularForecaster {
     /// Lag window.
     pub window: usize,
     /// Direct horizons.
@@ -9087,7 +9088,7 @@ impl Default for DirectTabularForecaster {
 
 impl DirectTabularForecaster {
     /// Direct reducer with lag `window` and `horizon` models.
-    pub fn new(window: usize, horizon: usize) -> Self {
+    pub(crate) fn new(window: usize, horizon: usize) -> Self {
         Self {
             window: window.max(1),
             horizon: horizon.max(1),
@@ -9098,7 +9099,7 @@ impl DirectTabularForecaster {
 impl FitSeries for DirectTabularForecaster {
     type Fitted = crate::reducer::FittedDirectReducer;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<crate::reducer::FittedDirectReducer>> {
@@ -9115,7 +9116,7 @@ impl FitSeries for DirectTabularForecaster {
 /// Distinct from [`Tbats`] (trigonometric seasonality). Period / dummy count
 /// is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Bats {
+pub(crate) struct Bats {
     /// Seasonal period.
     pub period: usize,
     /// Log / Box–Cox (`λ = 0`) map. Requires a strictly positive series.
@@ -9133,7 +9134,7 @@ impl Default for Bats {
 
 impl Bats {
     /// BATS with seasonal period `period`.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(2),
             use_boxcox: false,
@@ -9143,7 +9144,7 @@ impl Bats {
 
 /// Fitted BATS-lite state.
 #[derive(Clone, Debug)]
-pub struct FittedBats {
+pub(crate) struct FittedBats {
     /// OLS coefficients on `[1, t, seasonal dummies]`.
     pub coef: Vector,
     /// AR(1) residual coefficient.
@@ -9178,7 +9179,7 @@ impl FittedBats {
     }
 
     /// `h`-step forecast on the original scale.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         let mut e = self.last_resid;
         let y = Vector::from_iter((0..h).map(|s| {
@@ -9201,7 +9202,7 @@ impl FittedBats {
 
 impl FitSeries for Bats {
     type Fitted = FittedBats;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedBats>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedBats>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let period = self.period.max(2);
@@ -9266,11 +9267,11 @@ impl FitSeries for Bats {
 
 /// Diagonal BEKK(1,1) (Engle–Kroner). Series count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct BekkGarch;
+pub(crate) struct BekkGarch;
 
 /// Fitted diagonal BEKK variances and terminal correlation.
 #[derive(Clone, Debug)]
-pub struct FittedBekkGarch {
+pub(crate) struct FittedBekkGarch {
     /// Per-series conditional variances (`T` × `k`).
     pub sigma2: Matrix,
     /// Terminal correlation (`k` × `k`).
@@ -9279,12 +9280,12 @@ pub struct FittedBekkGarch {
 
 impl BekkGarch {
     /// Empty BEKK estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit a diagonal BEKK path on demeaned columns.
-    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedBekkGarch>> {
+    pub(crate) fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedBekkGarch>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, y, None, &ctx.policy);
         let (n, k) = y.shape();
@@ -9362,7 +9363,7 @@ impl BekkGarch {
 /// One [`crate::reducer::DirectReducer`] per column. Column / window / horizon
 /// counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MultioutputTabularForecaster {
+pub(crate) struct MultioutputTabularForecaster {
     /// Lag window.
     pub window: usize,
     /// Direct horizons.
@@ -9380,7 +9381,7 @@ impl Default for MultioutputTabularForecaster {
 
 impl MultioutputTabularForecaster {
     /// Direct reducer on every column.
-    pub fn new(window: usize, horizon: usize) -> Self {
+    pub(crate) fn new(window: usize, horizon: usize) -> Self {
         Self {
             window: window.max(1),
             horizon: horizon.max(1),
@@ -9388,7 +9389,7 @@ impl MultioutputTabularForecaster {
     }
 
     /// Fit a direct lag-OLS model on each column.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Matrix,
         session: &Session,
@@ -9433,13 +9434,13 @@ impl MultioutputTabularForecaster {
 
 /// Fitted per-column direct reducers.
 #[derive(Clone, Debug)]
-pub struct FittedMultioutputTabular {
+pub(crate) struct FittedMultioutputTabular {
     models: Vec<crate::reducer::FittedDirectReducer>,
 }
 
 impl FittedMultioutputTabular {
     /// Horizon × series forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         let k = self.models.len();
         let mut out = Matrix::zeros(h, k);
@@ -9461,7 +9462,7 @@ impl FittedMultioutputTabular {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RecursiveTabularForecaster {
+pub(crate) struct RecursiveTabularForecaster {
     /// Lag window.
     pub window: usize,
 }
@@ -9474,7 +9475,7 @@ impl Default for RecursiveTabularForecaster {
 
 impl RecursiveTabularForecaster {
     /// Recursive reducer with lag `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self { window: window.max(1) }
     }
 }
@@ -9482,7 +9483,7 @@ impl RecursiveTabularForecaster {
 impl FitSeries for RecursiveTabularForecaster {
     type Fitted = crate::reducer::FittedReducer;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<crate::reducer::FittedReducer>> {
@@ -9497,7 +9498,7 @@ impl FitSeries for RecursiveTabularForecaster {
 ///
 /// Window / horizon counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct DirRecTabularForecaster {
+pub(crate) struct DirRecTabularForecaster {
     /// Lag window.
     pub window: usize,
     /// DirRec horizons.
@@ -9515,7 +9516,7 @@ impl Default for DirRecTabularForecaster {
 
 impl DirRecTabularForecaster {
     /// DirRec reducer with lag `window` and `horizon` models.
-    pub fn new(window: usize, horizon: usize) -> Self {
+    pub(crate) fn new(window: usize, horizon: usize) -> Self {
         Self {
             window: window.max(1),
             horizon: horizon.max(1),
@@ -9526,7 +9527,7 @@ impl DirRecTabularForecaster {
 impl FitSeries for DirRecTabularForecaster {
     type Fitted = crate::reducer::FittedDirRecReducer;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<crate::reducer::FittedDirRecReducer>> {
@@ -9542,11 +9543,11 @@ impl FitSeries for DirRecTabularForecaster {
 ///
 /// Realized-variance length is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct RealizedGarch;
+pub(crate) struct RealizedGarch;
 
 /// Fitted realized-GARCH path.
 #[derive(Clone, Debug)]
-pub struct FittedRealizedGarch {
+pub(crate) struct FittedRealizedGarch {
     /// ω.
     pub omega: f64,
     /// ARCH coefficient.
@@ -9561,12 +9562,12 @@ pub struct FittedRealizedGarch {
 
 impl RealizedGarch {
     /// Empty realized-GARCH estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on returns `y` and a realized-variance proxy `rv`.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Vector,
         rv: &Vector,
@@ -10294,7 +10295,7 @@ fn garch_nll(e: &[f64], omega: f64, alpha: f64, beta: f64) -> f64 {
 
 /// Seasonal-trend LOESS decomposition (statsmodels `STL`, sktime `STLTransformer`).
 #[derive(Clone, Debug)]
-pub struct Stl {
+pub(crate) struct Stl {
     /// Seasonal period.
     pub period: usize,
 }
@@ -10307,7 +10308,7 @@ impl Default for Stl {
 
 impl Stl {
     /// STL with the given period.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(2),
         }
@@ -10317,7 +10318,7 @@ impl Stl {
 impl FitSeries for Stl {
     type Fitted = SeasonalDecomposition;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<SeasonalDecomposition>> {
@@ -10374,7 +10375,7 @@ impl FitSeries for Stl {
 
 /// Subtract a linear time trend (sktime `Detrender`).
 #[derive(Clone, Debug, Default)]
-pub struct Detrender {
+pub(crate) struct Detrender {
     slope: f64,
     intercept: f64,
     fitted: bool,
@@ -10382,14 +10383,15 @@ pub struct Detrender {
 
 impl Detrender {
     /// Default linear detrender.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl FitSeries for Detrender {
     type Fitted = Self;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let n = y.len();
@@ -10398,17 +10400,17 @@ impl FitSeries for Detrender {
         if let Some(b) =
             crate::linalg::least_squares(&mut scratch, &x.with_intercept(), y, &ctx.policy)
         {
-            self.intercept = b.as_slice().first().copied().unwrap_or(0.0);
-            self.slope = b.as_slice().get(1).copied().unwrap_or(0.0);
+            this.intercept = b.as_slice().first().copied().unwrap_or(0.0);
+            this.slope = b.as_slice().get(1).copied().unwrap_or(0.0);
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
 impl Detrender {
     /// Subtract the fitted trend.
-    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         if !self.fitted {
             ctx.push(Issue::builder(IssueCode::StaleState).build());
@@ -10426,7 +10428,7 @@ impl Detrender {
 
 /// Subtract seasonal means (sktime `Deseasonalizer`).
 #[derive(Clone, Debug)]
-pub struct Deseasonalizer {
+pub(crate) struct Deseasonalizer {
     /// Seasonal period.
     pub period: usize,
     /// Seasonal means (`length = period`).
@@ -10446,7 +10448,7 @@ impl Default for Deseasonalizer {
 
 impl Deseasonalizer {
     /// Deseasonalizer with period `s`.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(2),
             ..Self::default()
@@ -10454,7 +10456,7 @@ impl Deseasonalizer {
     }
 
     /// Subtract stored seasonal means.
-    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         if !self.fitted || self.means.is_empty() {
             ctx.push(Issue::builder(IssueCode::StaleState).build());
@@ -10473,10 +10475,11 @@ impl Deseasonalizer {
 
 impl FitSeries for Deseasonalizer {
     type Fitted = Self;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
-        let period = self.period.max(2);
+        let period = this.period.max(2);
         if y.len() < 2 * period {
             ctx.push(
                 Issue::builder(IssueCode::InsufficientSeasonalCycles)
@@ -10493,13 +10496,13 @@ impl FitSeries for Deseasonalizer {
                 cnt[i % period] += 1.0;
             }
         }
-        self.means = acc
+        this.means = acc
             .iter()
             .zip(&cnt)
             .map(|(a, c)| if *c > 0.0 { a / c } else { 0.0 })
             .collect();
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -10508,7 +10511,7 @@ impl FitSeries for Deseasonalizer {
 ///
 /// Period is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ConditionalDeseasonalizer {
+pub(crate) struct ConditionalDeseasonalizer {
     /// Seasonal period.
     pub period: usize,
     /// Seasonal means (`length = period`) when applied.
@@ -10531,7 +10534,7 @@ impl Default for ConditionalDeseasonalizer {
 
 impl ConditionalDeseasonalizer {
     /// Conditional deseasonalizer with period `s`.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(2),
             ..Self::default()
@@ -10539,7 +10542,7 @@ impl ConditionalDeseasonalizer {
     }
 
     /// Subtract seasonal means when [`Self::applied`], else return `y`.
-    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         if !self.fitted {
             ctx.push(Issue::builder(IssueCode::StaleState).build());
@@ -10561,10 +10564,11 @@ impl ConditionalDeseasonalizer {
 
 impl FitSeries for ConditionalDeseasonalizer {
     type Fitted = Self;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
-        let period = self.period.max(2);
+        let period = this.period.max(2);
         if y.len() < 2 * period {
             ctx.push(
                 Issue::builder(IssueCode::InsufficientSeasonalCycles)
@@ -10604,14 +10608,14 @@ impl FitSeries for ConditionalDeseasonalizer {
         let df1 = (period.saturating_sub(1)).max(1) as f64;
         let df2 = (nfin - period as f64).max(1.0);
         let f = (ss_season / df1) / (ss_resid / df2).max(1e-18);
-        self.applied = f.is_finite() && f > 2.0;
-        self.means = if self.applied {
+        this.applied = f.is_finite() && f > 2.0;
+        this.means = if this.applied {
             means
         } else {
             vec![mu; period]
         };
-        self.fitted = true;
-        if !self.applied {
+        this.fitted = true;
+        if !this.applied {
             ctx.push(
                 Issue::builder(IssueCode::InsufficientSeasonalCycles)
                     .severity(Severity::Advisory)
@@ -10633,13 +10637,13 @@ impl FitSeries for ConditionalDeseasonalizer {
                 ))
                 .build(),
         );
-        ctx.finish(self.clone())
+        ctx.finish(this.clone())
     }
 }
 
 /// Polynomial trend forecaster (sktime `PolynomialTrendForecaster`).
 #[derive(Clone, Debug)]
-pub struct PolynomialTrendForecaster {
+pub(crate) struct PolynomialTrendForecaster {
     /// Polynomial degree (`1` = linear).
     pub degree: usize,
 }
@@ -10652,7 +10656,7 @@ impl Default for PolynomialTrendForecaster {
 
 impl PolynomialTrendForecaster {
     /// Degree-`d` trend.
-    pub fn new(degree: usize) -> Self {
+    pub(crate) fn new(degree: usize) -> Self {
         Self {
             degree: degree.max(1),
         }
@@ -10661,7 +10665,7 @@ impl PolynomialTrendForecaster {
 
 /// Fitted polynomial trend.
 #[derive(Clone, Debug)]
-pub struct FittedPolyTrend {
+pub(crate) struct FittedPolyTrend {
     /// Coefficients on `[1, t, t², …]`.
     pub coef: Vector,
     /// Training length.
@@ -10670,7 +10674,7 @@ pub struct FittedPolyTrend {
 
 impl FittedPolyTrend {
     /// `h`-step forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let p = self.coef.len();
         let y = Vector::from_iter((0..h).map(|s| {
@@ -10689,7 +10693,7 @@ impl FittedPolyTrend {
 
 impl FitSeries for PolynomialTrendForecaster {
     type Fitted = FittedPolyTrend;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedPolyTrend>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedPolyTrend>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let d = self.degree.max(1);
@@ -10723,7 +10727,7 @@ impl FitSeries for PolynomialTrendForecaster {
 /// Penalty length is not identification `p`. Distinct from the Kalman
 /// [`LocalLinearTrend`] and the OLS [`PolynomialTrendForecaster`].
 #[derive(Clone, Debug)]
-pub struct SmoothTrend {
+pub(crate) struct SmoothTrend {
     /// Second-difference penalty \(\lambda\).
     pub lambda: f64,
 }
@@ -10736,14 +10740,14 @@ impl Default for SmoothTrend {
 
 impl SmoothTrend {
     /// Whittaker smoother with penalty `lambda`.
-    pub fn new(lambda: f64) -> Self {
+    pub(crate) fn new(lambda: f64) -> Self {
         Self { lambda }
     }
 }
 
 /// Fitted Whittaker trend.
 #[derive(Clone, Debug)]
-pub struct FittedSmoothTrend {
+pub(crate) struct FittedSmoothTrend {
     /// Smoothed level.
     pub trend: Vector,
     /// Last first difference (used to extrapolate).
@@ -10752,7 +10756,7 @@ pub struct FittedSmoothTrend {
 
 impl FittedSmoothTrend {
     /// Continue the last slope for `h` steps.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let last = self.trend.as_slice().last().copied().unwrap_or(0.0);
         let out = Vector::from_iter((1..=h).map(|s| last + self.last_slope * s as f64));
@@ -10762,7 +10766,7 @@ impl FittedSmoothTrend {
 
 impl FitSeries for SmoothTrend {
     type Fitted = FittedSmoothTrend;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedSmoothTrend>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedSmoothTrend>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let n = y.len();
@@ -10842,7 +10846,7 @@ impl FitSeries for SmoothTrend {
 /// KPSS/ADF-style integration order (pmdarima / sktime `ndiffs`).
 ///
 /// Lag count is not identification `p`. Returns `0` or `1`.
-pub fn ndiffs(y: &Vector, session: &Session) -> Result<Qualified<usize>> {
+pub(crate) fn ndiffs(y: &Vector, session: &Session) -> Result<Qualified<usize>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     if y.len() < 6 {
@@ -10881,7 +10885,7 @@ pub fn ndiffs(y: &Vector, session: &Session) -> Result<Qualified<usize>> {
 /// Osborn–Chui–Smith–Birchenhall seasonal unit-root regression (sktime `nsdiffs`).
 ///
 /// Period is not identification `p`.
-pub fn ocsb(y: &Vector, period: usize, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn ocsb(y: &Vector, period: usize, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     let s = period.max(2);
@@ -10931,7 +10935,7 @@ pub fn ocsb(y: &Vector, period: usize, session: &Session) -> Result<Qualified<f6
 /// Seasonal integration order from an OCSB coefficient (sktime `nsdiffs`).
 ///
 /// Period is not identification `p`.
-pub fn nsdiffs(y: &Vector, period: usize, session: &Session) -> Result<Qualified<usize>> {
+pub(crate) fn nsdiffs(y: &Vector, period: usize, session: &Session) -> Result<Qualified<usize>> {
     let q = ocsb(y, period, session)?;
     let mut ctx = FitCtx::with_session(session.child("nsdiffs"));
     let d = if q.value.is_finite() && q.value.abs() < 0.15 {
@@ -10946,7 +10950,7 @@ pub fn nsdiffs(y: &Vector, period: usize, session: &Session) -> Result<Qualified
 ///
 /// Period is not identification `p`. The returned statistic is the t-ratio on
 /// the non-seasonal root \(\pi_1\).
-pub fn hegy(y: &Vector, period: usize, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn hegy(y: &Vector, period: usize, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     let s = period.max(2);
@@ -11055,7 +11059,7 @@ pub fn hegy(y: &Vector, period: usize, session: &Session) -> Result<Qualified<Hy
 /// Canova–Hansen seasonal-stability LM (statsmodels `canova_hansen`).
 ///
 /// Period is not identification `p`.
-pub fn canova_hansen(y: &Vector, period: usize, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn canova_hansen(y: &Vector, period: usize, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     let s = period.max(2);
@@ -11132,7 +11136,7 @@ pub fn canova_hansen(y: &Vector, period: usize, session: &Session) -> Result<Qua
 /// Lag count is not passed to identification — an AR(2) on 40 observations
 /// is identified.
 #[derive(Clone, Debug)]
-pub struct AutoReg {
+pub(crate) struct AutoReg {
     /// AR order.
     pub lags: usize,
 }
@@ -11145,14 +11149,14 @@ impl Default for AutoReg {
 
 impl AutoReg {
     /// AR(`lags`).
-    pub fn new(lags: usize) -> Self {
+    pub(crate) fn new(lags: usize) -> Self {
         Self { lags: lags.max(1) }
     }
 }
 
 /// Fitted AutoReg.
 #[derive(Clone, Debug)]
-pub struct FittedAutoReg {
+pub(crate) struct FittedAutoReg {
     /// Intercept.
     pub intercept: f64,
     /// `φ_1 … φ_p`.
@@ -11163,7 +11167,7 @@ pub struct FittedAutoReg {
 
 impl FittedAutoReg {
     /// `h`-step recursive forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         let p = self.ar.len().max(1);
         let mut hist = self.last.as_slice().to_vec();
@@ -11185,7 +11189,7 @@ impl FittedAutoReg {
 
 impl FitSeries for AutoReg {
     type Fitted = FittedAutoReg;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedAutoReg>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedAutoReg>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let p = self.lags.max(1);
@@ -11221,7 +11225,7 @@ impl FitSeries for AutoReg {
 
 /// ARDL(p, q): `y_t` on own lags and contemporaneous / lagged `X` (statsmodels `ARDL`).
 #[derive(Clone, Debug)]
-pub struct Ardl {
+pub(crate) struct Ardl {
     /// Lags of `y`.
     pub p: usize,
     /// Lags of each `X` column (including lag 0).
@@ -11236,7 +11240,7 @@ impl Default for Ardl {
 
 impl Ardl {
     /// ARDL(`p`, `q`).
-    pub fn new(p: usize, q: usize) -> Self {
+    pub(crate) fn new(p: usize, q: usize) -> Self {
         Self {
             p: p.max(1),
             q: q.max(0),
@@ -11244,8 +11248,8 @@ impl Ardl {
     }
 
     /// Fit on `y` and exogenous `x`. Do not identify on `p+q`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         y: &Vector,
         x: &Matrix,
         session: &Session,
@@ -11314,7 +11318,7 @@ impl Ardl {
 
 /// Fitted ARDL.
 #[derive(Clone, Debug)]
-pub struct FittedArdl {
+pub(crate) struct FittedArdl {
     /// Intercept.
     pub intercept: f64,
     /// `φ_1 … φ_p`.
@@ -11331,7 +11335,7 @@ pub struct FittedArdl {
 
 impl FittedArdl {
     /// Forecast with a future exogenous path (`h × k`).
-    pub fn forecast(&self, x_future: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, x_future: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         let h = x_future.nrows();
         let p = self.ar.len().max(1);
@@ -11378,11 +11382,11 @@ impl FittedArdl {
 /// \(\Delta y_t\) on \([1, y_{t-1}, x_{t-1}, \Delta y_{t-1}, \Delta x_t]\).
 /// Lag counts are not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct Uecm;
+pub(crate) struct Uecm;
 
 /// Fitted unrestricted ECM.
 #[derive(Clone, Debug)]
-pub struct FittedUecm {
+pub(crate) struct FittedUecm {
     /// Intercept of \(\Delta y_t\).
     pub intercept: f64,
     /// Coefficient on the lagged level \(y_{t-1}\).
@@ -11403,13 +11407,13 @@ pub struct FittedUecm {
 
 impl Uecm {
     /// Default UECM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit \(\Delta y\) on lagged levels and first differences.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         y: &Vector,
         x: &Matrix,
         session: &Session,
@@ -11507,7 +11511,7 @@ impl Uecm {
 
 impl FittedUecm {
     /// Iterate the ECM with a future exogenous path (`h × k`).
-    pub fn forecast(&self, x_future: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, x_future: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         let k = self.gamma.len().max(self.theta.len());
         if x_future.ncols() != k {
@@ -11561,7 +11565,7 @@ impl FittedUecm {
 ///
 /// Harmonic count is not an identification `p`.
 #[derive(Clone, Debug)]
-pub struct FourierFeatures {
+pub(crate) struct FourierFeatures {
     /// Seasonal period.
     pub period: usize,
     /// Number of harmonics `k = 1..n_harmonics`.
@@ -11579,7 +11583,7 @@ impl Default for FourierFeatures {
 
 impl FourierFeatures {
     /// `n_harmonics` pairs for the given period.
-    pub fn new(period: usize, n_harmonics: usize) -> Self {
+    pub(crate) fn new(period: usize, n_harmonics: usize) -> Self {
         Self {
             period: period.max(2),
             n_harmonics: n_harmonics.max(1),
@@ -11587,7 +11591,7 @@ impl FourierFeatures {
     }
 
     /// Map a length-`n` time index to Fourier columns.
-    pub fn transform(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn transform(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         let p = self.period.max(2);
         let h = self.n_harmonics.max(1);
@@ -11606,7 +11610,7 @@ impl FourierFeatures {
 
 /// AIC grid over SES / Holt / Holt–Winters (sktime `AutoETS`).
 #[derive(Clone, Debug)]
-pub struct AutoEts {
+pub(crate) struct AutoEts {
     /// Seasonal period for the Holt–Winters candidate.
     pub period: usize,
 }
@@ -11619,7 +11623,7 @@ impl Default for AutoEts {
 
 impl AutoEts {
     /// AutoETS with seasonal period `s` (used only if `n ≥ 2s`).
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(2),
         }
@@ -11628,7 +11632,7 @@ impl AutoEts {
 
 /// Fitted AutoETS winner.
 #[derive(Clone, Debug)]
-pub struct FittedAutoEts {
+pub(crate) struct FittedAutoEts {
     /// `"ses"`, `"holt"`, or `"hw"`.
     pub kind: &'static str,
     /// In-sample AIC.
@@ -11641,7 +11645,7 @@ pub struct FittedAutoEts {
 
 impl FittedAutoEts {
     /// `h`-step forecast of the selected model.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         if let Some(hw) = &self.hw {
             if self.kind == "hw" {
                 return hw.forecast(h, session);
@@ -11653,7 +11657,7 @@ impl FittedAutoEts {
 
 impl FitSeries for AutoEts {
     type Fitted = FittedAutoEts;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedAutoEts>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedAutoEts>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let n = y.len() as f64;
@@ -11736,7 +11740,7 @@ impl FitSeries for AutoEts {
 
 /// STL + seasonal-naive residual forecast (sktime `STLForecaster`).
 #[derive(Clone, Debug)]
-pub struct StlForecaster {
+pub(crate) struct StlForecaster {
     /// Seasonal period.
     pub period: usize,
 }
@@ -11749,7 +11753,7 @@ impl Default for StlForecaster {
 
 impl StlForecaster {
     /// STL forecaster with period `s`.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(2),
         }
@@ -11758,7 +11762,7 @@ impl StlForecaster {
 
 /// Fitted STL forecaster.
 #[derive(Clone, Debug)]
-pub struct FittedStlForecaster {
+pub(crate) struct FittedStlForecaster {
     /// In-sample decomposition.
     pub decomp: SeasonalDecomposition,
     /// Last residual (used as a level offset).
@@ -11767,7 +11771,7 @@ pub struct FittedStlForecaster {
 
 impl FittedStlForecaster {
     /// `h`-step: last trend + seasonal cycle + last residual.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         let n = self.decomp.observed.len();
         let period = self.decomp.period.max(2);
@@ -11790,7 +11794,7 @@ impl FittedStlForecaster {
 impl FitSeries for StlForecaster {
     type Fitted = FittedStlForecaster;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedStlForecaster>> {
@@ -11805,14 +11809,14 @@ impl FitSeries for StlForecaster {
 /// `λ` is chosen by a coarse Gaussian-likelihood grid. Non-positive `y` is
 /// [`IssueCode::NonPositiveSeries`].
 #[derive(Clone, Debug, Default)]
-pub struct BoxCoxTransformer {
+pub(crate) struct BoxCoxTransformer {
     /// Selected power. `None` until fit.
     pub lambda: Option<f64>,
 }
 
 impl BoxCoxTransformer {
     /// Empty transformer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -11828,7 +11832,8 @@ impl BoxCoxTransformer {
 
 impl FitSeries for BoxCoxTransformer {
     type Fitted = Self;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.as_slice().iter().any(|&v| v <= 0.0) {
@@ -11857,14 +11862,14 @@ impl FitSeries for BoxCoxTransformer {
                 best_l = lam;
             }
         }
-        self.lambda = Some(best_l);
-        ctx.finish(self.clone())
+        this.lambda = Some(best_l);
+        ctx.finish(this.clone())
     }
 }
 
 impl BoxCoxTransformer {
     /// Apply the fitted power map.
-    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         let lam = self.lambda.unwrap_or(0.0);
         if self.lambda.is_none() {
@@ -11878,19 +11883,19 @@ impl BoxCoxTransformer {
 
 /// First-difference transformer (sktime `Differencer`).
 #[derive(Clone, Debug, Default)]
-pub struct Differencer {
+pub(crate) struct Differencer {
     last: f64,
     fitted: bool,
 }
 
 impl Differencer {
     /// Empty differencer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// `Δy_t = y_t − y_{t−1}` (`y_0` is dropped as 0).
-    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         if !self.fitted {
             ctx.push(Issue::builder(IssueCode::StaleState).build());
@@ -11902,12 +11907,13 @@ impl Differencer {
 
 impl FitSeries for Differencer {
     type Fitted = Self;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
-        self.last = y.as_slice().last().copied().unwrap_or(0.0);
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.last = y.as_slice().last().copied().unwrap_or(0.0);
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -11915,7 +11921,7 @@ impl FitSeries for Differencer {
 ///
 /// Harmonic / period counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct DateTimeFeatures {
+pub(crate) struct DateTimeFeatures {
     /// Seasonal period used for `t mod period` and Fourier pair.
     pub period: usize,
 }
@@ -11928,14 +11934,14 @@ impl Default for DateTimeFeatures {
 
 impl DateTimeFeatures {
     /// Features for period `s`.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(2),
         }
     }
 
     /// Map `t = 0..n-1` to `[t, t mod s, sin, cos]`.
-    pub fn transform(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn transform(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         let p = self.period.max(2);
         let out = Matrix::from_fn(n, 4, |t, j| {
@@ -11955,7 +11961,7 @@ impl DateTimeFeatures {
 ///
 /// A 1 is placed every `period` steps. Period is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct HolidayFeatures {
+pub(crate) struct HolidayFeatures {
     /// Holiday spacing.
     pub period: usize,
 }
@@ -11968,14 +11974,14 @@ impl Default for HolidayFeatures {
 
 impl HolidayFeatures {
     /// Holiday every `period` steps.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(1),
         }
     }
 
     /// Map `t = 0..n-1` to a single holiday column.
-    pub fn transform(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn transform(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
         let ctx = FitCtx::with_session(session.child("transform"));
         let p = self.period.max(1);
         ctx.finish(Matrix::from_fn(n, 1, |t, _| {
@@ -11992,7 +11998,7 @@ impl HolidayFeatures {
 ///
 /// Seasonal dummy count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct DeterministicProcess {
+pub(crate) struct DeterministicProcess {
     /// Include a constant column.
     pub constant: bool,
     /// Include a linear trend.
@@ -12013,12 +12019,12 @@ impl Default for DeterministicProcess {
 
 impl DeterministicProcess {
     /// Constant + trend, no seasonal dummies.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Constant + trend + `period` seasonal dummies (drop-last).
-    pub fn seasonal(period: usize) -> Self {
+    pub(crate) fn seasonal(period: usize) -> Self {
         Self {
             constant: true,
             trend: true,
@@ -12027,7 +12033,7 @@ impl DeterministicProcess {
     }
 
     /// Design matrix for `t = 0..n-1`.
-    pub fn transform(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn transform(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
         let ctx = FitCtx::with_session(session.child("transform"));
         let seas = self.period.max(0).saturating_sub(1);
         let p = usize::from(self.constant) + usize::from(self.trend) + seas;
@@ -12063,16 +12069,16 @@ impl DeterministicProcess {
 /// Non-positive samples are clamped and recorded; [`IssueCode::NonPositiveSeries`]
 /// is lowered to a warning so a mixed series still transforms.
 #[derive(Clone, Debug, Default)]
-pub struct LogTransformer;
+pub(crate) struct LogTransformer;
 
 impl LogTransformer {
     /// Default log map.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// \(\log(\max(y, \varepsilon))\).
-    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         inspect_univariate(&mut ctx, y);
         let mut clamped = 0usize;
@@ -12108,7 +12114,7 @@ impl LogTransformer {
 ///
 /// Origin is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct TimeSince {
+pub(crate) struct TimeSince {
     /// Index treated as time 0.
     pub origin: usize,
 }
@@ -12121,12 +12127,12 @@ impl Default for TimeSince {
 
 impl TimeSince {
     /// Features relative to `origin`.
-    pub fn new(origin: usize) -> Self {
+    pub(crate) fn new(origin: usize) -> Self {
         Self { origin }
     }
 
     /// Map `t = 0..n-1` to `[t−origin, (t−origin)₊]`.
-    pub fn transform(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn transform(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
         let ctx = FitCtx::with_session(session.child("transform"));
         let o = self.origin as f64;
         let out = Matrix::from_fn(n, 2, |t, j| {
@@ -12143,7 +12149,7 @@ impl TimeSince {
 
 /// One univariate forecaster per column (sktime `ColumnEnsembleForecaster`).
 #[derive(Clone, Debug)]
-pub struct ColumnEnsembleForecaster {
+pub(crate) struct ColumnEnsembleForecaster {
     /// AutoReg lag used on each column.
     pub lags: usize,
 }
@@ -12156,12 +12162,12 @@ impl Default for ColumnEnsembleForecaster {
 
 impl ColumnEnsembleForecaster {
     /// Ensemble with AR(`lags`) per column.
-    pub fn new(lags: usize) -> Self {
+    pub(crate) fn new(lags: usize) -> Self {
         Self { lags: lags.max(1) }
     }
 
     /// Fit an [`AutoReg`] on each column of `y`.
-    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedColumnEnsemble>> {
+    pub(crate) fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedColumnEnsemble>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, y, None, &ctx.policy);
         let mut models = Vec::with_capacity(y.ncols());
@@ -12196,23 +12202,23 @@ impl ColumnEnsembleForecaster {
 ///
 /// Column count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct ForecastByLevel;
+pub(crate) struct ForecastByLevel;
 
 /// Fitted per-column last-value forecasts.
 #[derive(Clone, Debug)]
-pub struct FittedForecastByLevel {
+pub(crate) struct FittedForecastByLevel {
     /// Last observed value of each column.
     pub last: Vector,
 }
 
 impl ForecastByLevel {
     /// Default level-wise naive ensemble.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit a last-value walker on each column of `y`.
-    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedForecastByLevel>> {
+    pub(crate) fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedForecastByLevel>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, y, None, &ctx.policy);
         if y.nrows() == 0 || y.ncols() == 0 {
@@ -12237,7 +12243,7 @@ impl ForecastByLevel {
 
 impl FittedForecastByLevel {
     /// Repeat each column's last value for `h` horizons.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(Matrix::from_fn(h, self.last.len(), |_, j| self.last[j]))
     }
@@ -12245,14 +12251,14 @@ impl FittedForecastByLevel {
 
 /// Fitted per-column AutoReg ensemble.
 #[derive(Clone, Debug)]
-pub struct FittedColumnEnsemble {
+pub(crate) struct FittedColumnEnsemble {
     /// One AutoReg per column.
     pub models: Vec<FittedAutoReg>,
 }
 
 impl FittedColumnEnsemble {
     /// Forecast `h` steps for every column.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         let k = self.models.len();
         let mut out = Matrix::zeros(h, k);
@@ -12271,7 +12277,7 @@ impl FittedColumnEnsemble {
 }
 
 /// Cross-correlation `γ_{xy}(k)` for `k = 0..nlags` (statsmodels `ccf`).
-pub fn ccf(x: &Vector, y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn ccf(x: &Vector, y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, x);
     inspect_univariate(&mut ctx, y);
@@ -12301,7 +12307,7 @@ pub fn ccf(x: &Vector, y: &Vector, nlags: usize, session: &Session) -> Result<Qu
 }
 
 /// Periodogram `I(ω)` at `n/2` Fourier frequencies (statsmodels `periodogram`).
-pub fn periodogram(y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn periodogram(y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     let n = y.len();
@@ -12332,7 +12338,7 @@ pub fn periodogram(y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
 ///
 /// Segment length is not identification `p`. A Hann taper is applied; a
 /// single segment is recorded as spectral leakage.
-pub fn welch(y: &Vector, nperseg: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn welch(y: &Vector, nperseg: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     let n = y.len();
@@ -12422,7 +12428,7 @@ pub fn welch(y: &Vector, nperseg: usize, session: &Session) -> Result<Qualified<
 /// Order bounds are not identification `p`. Inner Hannan–Rissanen residuals
 /// that would abort a standalone ARIMA are skipped.
 #[derive(Clone, Debug)]
-pub struct ArmaOrderSelect {
+pub(crate) struct ArmaOrderSelect {
     /// Winning AR order.
     pub p: usize,
     /// Winning MA order.
@@ -12436,7 +12442,7 @@ pub struct ArmaOrderSelect {
 }
 
 /// Select ARMA(\(p,q\)) by AIC on a Hannan–Rissanen grid with \(d=0\).
-pub fn arma_order_select_ic(
+pub(crate) fn arma_order_select_ic(
     y: &Vector,
     max_p: usize,
     max_q: usize,
@@ -12553,7 +12559,7 @@ pub fn arma_order_select_ic(
 /// \(y_t \sim y_{t-1},\ldots,y_{t-p}, x_t\). Lag and exogenous counts are not
 /// passed as identification `p`.
 #[derive(Clone, Debug)]
-pub struct ForecastX {
+pub(crate) struct ForecastX {
     /// Autoregressive window.
     pub window: usize,
 }
@@ -12566,15 +12572,15 @@ impl Default for ForecastX {
 
 impl ForecastX {
     /// ForecastX with lag window `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
         }
     }
 
     /// Fit on a series and aligned exogenous matrix.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         y: &Vector,
         x: &Matrix,
         session: &Session,
@@ -12671,7 +12677,7 @@ impl ForecastX {
 
 /// Fitted exogenous reducer.
 #[derive(Clone, Debug)]
-pub struct FittedForecastX {
+pub(crate) struct FittedForecastX {
     /// Lag coefficients (oldest first).
     pub coef_lags: Vector,
     /// Exogenous coefficients.
@@ -12686,7 +12692,7 @@ pub struct FittedForecastX {
 
 impl FittedForecastX {
     /// `h`-step forecast using future exogenous rows (recycled last `x` if short).
-    pub fn forecast(
+    pub(crate) fn forecast(
         &self,
         horizon: usize,
         x_future: &Matrix,
@@ -12739,7 +12745,7 @@ impl FittedForecastX {
 /// matrix (`S`) from `b` bottom series to `m` nodes. The projection
 /// \(\hat Y S(S^\top S)^{-1}S^\top\) is applied independently at each
 /// horizon. Node / bottom counts are not identification `p`.
-pub fn reconcile_ols(
+pub(crate) fn reconcile_ols(
     yhat: &Matrix,
     summing: &Matrix,
     session: &Session,
@@ -12822,7 +12828,7 @@ pub fn reconcile_ols(
 ///
 /// Bottom-level weights are the inverse of the summing-matrix column sums.
 /// Node counts are not identification `p`.
-pub fn reconcile_mint(
+pub(crate) fn reconcile_mint(
     yhat: &Matrix,
     summing: &Matrix,
     session: &Session,
@@ -12949,7 +12955,7 @@ fn apply_summing(bottoms: &Matrix, summing: &Matrix) -> Matrix {
 ///
 /// Bottom nodes are the summing-matrix rows closest to the standard basis.
 /// Node / bottom counts are not identification `p`.
-pub fn reconcile_bottom_up(
+pub(crate) fn reconcile_bottom_up(
     yhat: &Matrix,
     summing: &Matrix,
     session: &Session,
@@ -12981,7 +12987,7 @@ pub fn reconcile_bottom_up(
 ///
 /// The most aggregated node (largest summing-matrix row sum) is distributed
 /// by that row's shares. Node counts are not identification `p`.
-pub fn reconcile_top_down(
+pub(crate) fn reconcile_top_down(
     yhat: &Matrix,
     summing: &Matrix,
     session: &Session,
@@ -13040,7 +13046,7 @@ pub fn reconcile_top_down(
 /// `gamma` is the autocovariance sequence \(\gamma_0,\ldots,\gamma_{m-1}\).
 /// Lag count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Innovations {
+pub(crate) struct Innovations {
     /// \(\theta_{n,j}\) stored as row `n`, column `j` (0-based, \(\theta_{n,0}\) unused).
     pub theta: Matrix,
     /// Innovation variances \(v_0,\ldots,v_{m-1}\).
@@ -13048,7 +13054,7 @@ pub struct Innovations {
 }
 
 /// Brockwell–Davis innovations algorithm on a covariance sequence.
-pub fn innovations_algo(gamma: &Vector, session: &Session) -> Result<Qualified<Innovations>> {
+pub(crate) fn innovations_algo(gamma: &Vector, session: &Session) -> Result<Qualified<Innovations>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, gamma);
     let m = gamma.len();
@@ -13103,7 +13109,7 @@ pub fn innovations_algo(gamma: &Vector, session: &Session) -> Result<Qualified<I
 ///
 /// Uses [`innovations_algo`] on the sample acovf of `y`. Lag count is not
 /// identification `p`.
-pub fn innovations_filter(
+pub(crate) fn innovations_filter(
     y: &Vector,
     nlags: usize,
     session: &Session,
@@ -13149,7 +13155,7 @@ pub fn innovations_filter(
 ///
 /// \(\psi_0=1\), \(\psi_k=\theta_k+\sum_j\phi_j\psi_{k-j}\). Orders are not
 /// identification `p`.
-pub fn arma2ma(
+pub(crate) fn arma2ma(
     ar: &Vector,
     ma: &Vector,
     lags: usize,
@@ -13193,7 +13199,7 @@ pub fn arma2ma(
 ///
 /// \(\pi_0=1\), \(\pi_k=\phi_k-\sum_j\theta_j\pi_{k-j}\). Orders are not
 /// identification `p`.
-pub fn arma2ar(
+pub(crate) fn arma2ar(
     ar: &Vector,
     ma: &Vector,
     lags: usize,
@@ -13238,7 +13244,7 @@ pub fn arma2ar(
 /// Second-period STL is run on the first residual. Periods are not
 /// identification `p`.
 #[derive(Clone, Debug)]
-pub struct Mstl {
+pub(crate) struct Mstl {
     /// Inner seasonal period.
     pub period: usize,
     /// Outer seasonal period.
@@ -13256,7 +13262,7 @@ impl Default for Mstl {
 
 impl Mstl {
     /// Two-period MSTL.
-    pub fn new(period: usize, period2: usize) -> Self {
+    pub(crate) fn new(period: usize, period2: usize) -> Self {
         Self {
             period: period.max(2),
             period2: period2.max(3),
@@ -13266,7 +13272,7 @@ impl Mstl {
 
 /// Fitted multi-seasonal decomposition.
 #[derive(Clone, Debug)]
-pub struct FittedMstl {
+pub(crate) struct FittedMstl {
     /// First seasonal component.
     pub seasonal: Vector,
     /// Second seasonal component.
@@ -13279,7 +13285,7 @@ pub struct FittedMstl {
 
 impl FitSeries for Mstl {
     type Fitted = FittedMstl;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedMstl>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedMstl>> {
         let q1 = Stl::new(self.period).fit_series(y, &session.child("mstl1"))?;
         let r1 = q1.value.resid.clone();
         let q2 = match Stl::new(self.period2).fit_series(&r1, &session.child("mstl2")) {
@@ -13304,7 +13310,7 @@ impl FitSeries for Mstl {
 
 /// Lag embedding of a univariate series (sktime `Lag`).
 #[derive(Clone, Debug)]
-pub struct LagTransformer {
+pub(crate) struct LagTransformer {
     /// Number of lags.
     pub lags: usize,
 }
@@ -13317,12 +13323,12 @@ impl Default for LagTransformer {
 
 impl LagTransformer {
     /// Embed with `lags` columns.
-    pub fn new(lags: usize) -> Self {
+    pub(crate) fn new(lags: usize) -> Self {
         Self { lags: lags.max(1) }
     }
 
     /// Map `y` to `[y_{t-1}, …, y_{t-p}]` (`n` rows; leading lags are 0).
-    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         inspect_univariate(&mut ctx, y);
         let p = self.lags.max(1);
@@ -13342,7 +13348,7 @@ impl LagTransformer {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct WindowSummarizer {
+pub(crate) struct WindowSummarizer {
     /// Rolling window.
     pub window: usize,
 }
@@ -13355,14 +13361,14 @@ impl Default for WindowSummarizer {
 
 impl WindowSummarizer {
     /// Summaries over the given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
         }
     }
 
     /// Map `y` to `[mean, std, min, max]` per time.
-    pub fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn transform(&self, y: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         inspect_univariate(&mut ctx, y);
         let w = self.window.max(2);
@@ -13415,7 +13421,7 @@ impl WindowSummarizer {
 
 /// Pick the best of Naive / Drift / AutoReg by in-sample SSE (sktime `MultiplexForecaster`).
 #[derive(Clone, Debug)]
-pub struct MultiplexForecaster {
+pub(crate) struct MultiplexForecaster {
     /// AutoReg lag used as one candidate.
     pub lags: usize,
 }
@@ -13428,14 +13434,14 @@ impl Default for MultiplexForecaster {
 
 impl MultiplexForecaster {
     /// Multiplex with AR(`lags`).
-    pub fn new(lags: usize) -> Self {
+    pub(crate) fn new(lags: usize) -> Self {
         Self { lags: lags.max(1) }
     }
 }
 
 /// Fitted multiplex (the winning univariate forecaster's last value / AR).
 #[derive(Clone, Debug)]
-pub struct FittedMultiplex {
+pub(crate) struct FittedMultiplex {
     /// Winning name.
     pub winner: &'static str,
     /// In-sample SSE of the winner.
@@ -13450,7 +13456,7 @@ pub struct FittedMultiplex {
 
 impl FittedMultiplex {
     /// Forecast `h` steps with the winning rule.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         if let Some(ar) = &self.ar {
             return ar.forecast(h, session);
         }
@@ -13463,7 +13469,7 @@ impl FittedMultiplex {
 
 impl FitSeries for MultiplexForecaster {
     type Fitted = FittedMultiplex;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedMultiplex>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedMultiplex>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let last = y.as_slice().last().copied().unwrap_or(0.0);
@@ -13521,21 +13527,21 @@ impl FitSeries for MultiplexForecaster {
 /// States are an independent mixture of OLS, not a filtered Markov chain —
 /// recorded as a numerical compromise.
 #[derive(Clone, Debug, Default)]
-pub struct MarkovRegression {
+pub(crate) struct MarkovRegression {
     /// EM iterations.
     pub max_iter: usize,
 }
 
 impl MarkovRegression {
     /// Two-regime mixture of regressions.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { max_iter: 20 }
     }
 }
 
 /// Fitted two-regime slopes.
 #[derive(Clone, Debug)]
-pub struct FittedMarkovReg {
+pub(crate) struct FittedMarkovReg {
     /// Intercept and slopes in regime 0.
     pub beta0: Vector,
     /// Intercept and slopes in regime 1.
@@ -13546,8 +13552,8 @@ pub struct FittedMarkovReg {
 
 impl MarkovRegression {
     /// Fit `y | X` with two intercept+slope regimes.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -13610,7 +13616,7 @@ impl MarkovRegression {
 /// Seasonal length is **not** an identification `p`. Variances are treated as
 /// known; this is a two-pass Kalman / dummy-seasonal smoother, not QMLE.
 #[derive(Clone, Debug)]
-pub struct UnobservedComponents {
+pub(crate) struct UnobservedComponents {
     /// Observation variance \(\sigma_\varepsilon^2\).
     pub obs_var: f64,
     /// Level innovation \(\sigma_\eta^2\).
@@ -13634,12 +13640,12 @@ impl Default for UnobservedComponents {
 
 impl UnobservedComponents {
     /// Local linear trend, no seasonal.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Local linear trend plus a dummy seasonal of period `s`.
-    pub fn with_seasonal(period: usize) -> Self {
+    pub(crate) fn with_seasonal(period: usize) -> Self {
         Self {
             seasonal_period: period,
             ..Self::default()
@@ -13649,7 +13655,7 @@ impl UnobservedComponents {
 
 /// Kalman-smoothed unobserved components.
 #[derive(Clone, Debug)]
-pub struct FittedUnobservedComponents {
+pub(crate) struct FittedUnobservedComponents {
     /// Level.
     pub level: Vector,
     /// Slope.
@@ -13663,7 +13669,7 @@ pub struct FittedUnobservedComponents {
 impl FitSeries for UnobservedComponents {
     type Fitted = FittedUnobservedComponents;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedUnobservedComponents>> {
@@ -13780,7 +13786,7 @@ impl FitSeries for UnobservedComponents {
 /// This is a Hamilton filter / Kim smoother with an EM M-step, not the
 /// i.i.d. mixture [`MarkovRegression`]. Lag count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MarkovSwitchingAutoregression {
+pub(crate) struct MarkovSwitchingAutoregression {
     /// AR order.
     pub lags: usize,
     /// EM iterations.
@@ -13798,7 +13804,7 @@ impl Default for MarkovSwitchingAutoregression {
 
 impl MarkovSwitchingAutoregression {
     /// Two-regime MS-AR(`lags`).
-    pub fn new(lags: usize) -> Self {
+    pub(crate) fn new(lags: usize) -> Self {
         Self {
             lags: lags.max(1),
             max_iter: 20,
@@ -13808,7 +13814,7 @@ impl MarkovSwitchingAutoregression {
 
 /// Fitted Hamilton-filtered switching AR.
 #[derive(Clone, Debug)]
-pub struct FittedMarkovSwitchingAr {
+pub(crate) struct FittedMarkovSwitchingAr {
     /// Intercepts \(\mu_0,\mu_1\).
     pub mu: Vector,
     /// AR coefficients per regime (`2 × p`).
@@ -13826,7 +13832,7 @@ pub struct FittedMarkovSwitchingAr {
 impl FitSeries for MarkovSwitchingAutoregression {
     type Fitted = FittedMarkovSwitchingAr;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedMarkovSwitchingAr>> {
@@ -14037,7 +14043,7 @@ fn gauss_pdf(y: f64, mean: f64, sd: f64) -> f64 {
 ///
 /// Knot and harmonic counts are **not** identification `p`.
 #[derive(Clone, Debug)]
-pub struct ProphetForecaster {
+pub(crate) struct ProphetForecaster {
     /// Number of evenly spaced changepoints.
     pub n_changepoints: usize,
     /// Seasonal period for Fourier features.
@@ -14058,7 +14064,7 @@ impl Default for ProphetForecaster {
 
 impl ProphetForecaster {
     /// Prophet-lite with `k` changepoints and `h` harmonics of period `s`.
-    pub fn new(n_changepoints: usize, period: usize, n_harmonics: usize) -> Self {
+    pub(crate) fn new(n_changepoints: usize, period: usize, n_harmonics: usize) -> Self {
         Self {
             n_changepoints: n_changepoints.max(1),
             period: period.max(2),
@@ -14069,7 +14075,7 @@ impl ProphetForecaster {
 
 /// Fitted Prophet-lite.
 #[derive(Clone, Debug)]
-pub struct FittedProphet {
+pub(crate) struct FittedProphet {
     /// Intercept.
     pub intercept: f64,
     /// Linear slope.
@@ -14088,7 +14094,7 @@ pub struct FittedProphet {
 
 impl FittedProphet {
     /// `h`-step forecast continuing the time index.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         let out = Vector::from_iter((0..h).map(|u| {
             let t = (self.n + u) as f64;
@@ -14139,7 +14145,7 @@ fn prophet_mean(
 
 impl FitSeries for ProphetForecaster {
     type Fitted = FittedProphet;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedProphet>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedProphet>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let n = y.len();
@@ -14214,7 +14220,7 @@ impl FitSeries for ProphetForecaster {
 
 /// Mean / last / seasonal-last dummy (sktime `DummyForecaster`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DummyStrategy {
+pub(crate) enum DummyStrategy {
     /// In-sample mean.
     Mean,
     /// Last observation.
@@ -14225,7 +14231,7 @@ pub enum DummyStrategy {
 
 /// Naive / mean / seasonal dummy forecaster.
 #[derive(Clone, Debug)]
-pub struct DummyForecaster {
+pub(crate) struct DummyForecaster {
     /// Forecast rule.
     pub strategy: DummyStrategy,
     /// Period used by [`DummyStrategy::SeasonalLast`].
@@ -14243,7 +14249,7 @@ impl Default for DummyForecaster {
 
 impl DummyForecaster {
     /// Dummy with the given strategy.
-    pub fn new(strategy: DummyStrategy) -> Self {
+    pub(crate) fn new(strategy: DummyStrategy) -> Self {
         Self {
             strategy,
             period: 1,
@@ -14253,7 +14259,7 @@ impl DummyForecaster {
 
 /// Fitted dummy forecaster.
 #[derive(Clone, Debug)]
-pub struct FittedDummyForecaster {
+pub(crate) struct FittedDummyForecaster {
     /// Strategy.
     pub strategy: DummyStrategy,
     /// Mean of the training series.
@@ -14266,7 +14272,7 @@ pub struct FittedDummyForecaster {
 
 impl FittedDummyForecaster {
     /// `h`-step dummy forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         let p = self.season.len().max(1);
         let out = Vector::from_iter((0..h).map(|u| match self.strategy {
@@ -14281,7 +14287,7 @@ impl FittedDummyForecaster {
 impl FitSeries for DummyForecaster {
     type Fitted = FittedDummyForecaster;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedDummyForecaster>> {
@@ -14453,11 +14459,11 @@ fn durbin_levinson_kk(rho: &[f64], k: usize) -> f64 {
 /// Marginal GARCH(1,1) then a fixed sample correlation of standardized
 /// residuals. Series count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct CccGarch;
+pub(crate) struct CccGarch;
 
 /// Fitted CCC correlations and marginal variances.
 #[derive(Clone, Debug)]
-pub struct FittedCccGarch {
+pub(crate) struct FittedCccGarch {
     /// Per-series GARCH(1,1) variances (`T` × `k`).
     pub sigma2: Matrix,
     /// Constant correlation (`k` × `k`).
@@ -14466,12 +14472,12 @@ pub struct FittedCccGarch {
 
 impl CccGarch {
     /// Empty CCC estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit marginal GARCH(1,1) and the sample correlation of `z_t`.
-    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedCccGarch>> {
+    pub(crate) fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedCccGarch>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, y, None, &ctx.policy);
         let (n, k) = y.shape();
@@ -14523,11 +14529,11 @@ impl CccGarch {
 ///
 /// \(h_t=\sigma^2\) for every \(t\).
 #[derive(Clone, Debug, Default)]
-pub struct FixedVariance;
+pub(crate) struct FixedVariance;
 
 /// Fitted constant variance.
 #[derive(Clone, Debug)]
-pub struct FittedFixedVariance {
+pub(crate) struct FittedFixedVariance {
     /// \(\sigma^2\).
     pub sigma2: f64,
     /// Demeaned residuals.
@@ -14536,7 +14542,7 @@ pub struct FittedFixedVariance {
 
 impl FixedVariance {
     /// Empty fixed-variance estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
@@ -14544,7 +14550,7 @@ impl FixedVariance {
 impl FitSeries for FixedVariance {
     type Fitted = FittedFixedVariance;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedFixedVariance>> {
@@ -14573,18 +14579,18 @@ impl FitSeries for FixedVariance {
 ///
 /// Wraps [`EwmaVol::riskmetrics`]; \(\lambda=0.94\) is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct RiskMetrics;
+pub(crate) struct RiskMetrics;
 
 impl RiskMetrics {
     /// RiskMetrics \(\lambda=0.94\).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
 
 impl FitSeries for RiskMetrics {
     type Fitted = FittedEwmaVol;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedEwmaVol>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedEwmaVol>> {
         EwmaVol::riskmetrics().fit_series(y, session)
     }
 }
@@ -14593,7 +14599,7 @@ impl FitSeries for RiskMetrics {
 ///
 /// Window lengths are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct HarX {
+pub(crate) struct HarX {
     /// Daily lookback.
     pub daily: usize,
     /// Weekly lookback.
@@ -14614,14 +14620,14 @@ impl Default for HarX {
 
 impl HarX {
     /// Corsi (1, 5, 22) windows plus `x`.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted HAR-X coefficients.
 #[derive(Clone, Debug)]
-pub struct FittedHarX {
+pub(crate) struct FittedHarX {
     /// Intercept.
     pub intercept: f64,
     /// Daily / weekly / monthly HAR slopes.
@@ -14642,7 +14648,7 @@ pub struct FittedHarX {
 
 impl FittedHarX {
     /// Recurse HAR-X `h` steps, holding the last exogenous row fixed.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let mut hist: Vec<f64> = self.history.as_slice().to_vec();
         let mut out = Vector::zeros(h);
@@ -14687,7 +14693,7 @@ impl FittedHarX {
 
 impl Fit for HarX {
     type Fitted = FittedHarX;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedHarX>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedHarX>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let daily = self.daily.max(1);
@@ -14767,7 +14773,7 @@ impl Fit for HarX {
 /// Rows are temporally aggregated by `period` (not identification `p`), SVD
 /// is taken on the low-frequency panel, and factors are expanded back.
 #[derive(Clone, Debug)]
-pub struct DynamicFactorMq {
+pub(crate) struct DynamicFactorMq {
     /// Number of latent factors.
     pub n_factors: usize,
     /// Aggregation period (e.g. 4 for quarterly-from-monthly).
@@ -14785,7 +14791,7 @@ impl Default for DynamicFactorMq {
 
 impl DynamicFactorMq {
     /// `r` factors and aggregation `period`.
-    pub fn new(n_factors: usize, period: usize) -> Self {
+    pub(crate) fn new(n_factors: usize, period: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             period: period.max(1),
@@ -14793,7 +14799,7 @@ impl DynamicFactorMq {
     }
 
     /// Fit on an `n × k` mixed-frequency panel (high-frequency rows).
-    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedDynamicFactorMq>> {
+    pub(crate) fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedDynamicFactorMq>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, y, None, &ctx.policy);
         let (n, k) = y.shape();
@@ -14882,7 +14888,7 @@ impl DynamicFactorMq {
 
 /// Fitted mixed-frequency dynamic factor model.
 #[derive(Clone, Debug)]
-pub struct FittedDynamicFactorMq {
+pub(crate) struct FittedDynamicFactorMq {
     /// Low-frequency DFM.
     pub inner: FittedDynamicFactor,
     /// Aggregation period.
@@ -14891,7 +14897,7 @@ pub struct FittedDynamicFactorMq {
 
 impl FittedDynamicFactorMq {
     /// `h` high-frequency steps: low-frequency forecast repeated `period` times.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
         let steps = h.div_ceil(self.period.max(1)).max(1);
         let lf = self.inner.forecast(steps, session)?;
         let ctx = FitCtx::with_session(session.child("dfmq-expand"));
@@ -14906,7 +14912,7 @@ impl FittedDynamicFactorMq {
 ///
 /// Seasonal dummy count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct X13 {
+pub(crate) struct X13 {
     /// Seasonal period.
     pub period: usize,
 }
@@ -14919,7 +14925,7 @@ impl Default for X13 {
 
 impl X13 {
     /// X-13 lite with the given period.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(2),
         }
@@ -14928,7 +14934,7 @@ impl X13 {
 
 /// Fitted X-13 lite components.
 #[derive(Clone, Debug)]
-pub struct FittedX13 {
+pub(crate) struct FittedX13 {
     /// Linear trend.
     pub trend: Vector,
     /// Seasonal dummy component.
@@ -14941,7 +14947,7 @@ pub struct FittedX13 {
 
 impl FitSeries for X13 {
     type Fitted = FittedX13;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedX13>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedX13>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let n = y.len();
@@ -14995,7 +15001,7 @@ impl FitSeries for X13 {
 /// KPSS on seasonal differences (pmdarima / statsmodels seasonal KPSS).
 ///
 /// Period is not identification `p`.
-pub fn seasonal_kpss(
+pub(crate) fn seasonal_kpss(
     y: &Vector,
     period: usize,
     session: &Session,
@@ -15056,7 +15062,7 @@ pub fn seasonal_kpss(
 /// Period is not identification `p`. Fold only on a series with some positive
 /// demand — Croston's `MeaninglessFit` aborts on an all-zero series.
 #[derive(Clone, Debug)]
-pub struct Adida {
+pub(crate) struct Adida {
     /// Aggregation bucket length.
     pub period: usize,
     /// Croston smoother on the aggregates.
@@ -15074,7 +15080,7 @@ impl Default for Adida {
 
 impl Adida {
     /// ADIDA with aggregation period `period`.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period,
             ..Self::default()
@@ -15084,7 +15090,7 @@ impl Adida {
 
 /// Fitted ADIDA rate on the original time scale.
 #[derive(Clone, Debug)]
-pub struct FittedAdida {
+pub(crate) struct FittedAdida {
     /// Disaggregated Croston rate.
     pub rate: f64,
     /// Aggregation period used.
@@ -15093,7 +15099,7 @@ pub struct FittedAdida {
 
 impl FittedAdida {
     /// Constant disaggregated rate.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(Vector::filled(h, self.rate))
     }
@@ -15115,7 +15121,7 @@ fn adida_aggregate(y: &Vector, period: usize) -> Vector {
 
 impl FitSeries for Adida {
     type Fitted = FittedAdida;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedAdida>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedAdida>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let s = self.period.max(1);
@@ -15159,7 +15165,7 @@ impl FitSeries for Adida {
 ///
 /// Combines Theta, SES, and seasonal-naive. Period is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct FourTheta {
+pub(crate) struct FourTheta {
     /// Seasonal period for the naive member.
     pub period: usize,
 }
@@ -15172,14 +15178,14 @@ impl Default for FourTheta {
 
 impl FourTheta {
     /// Four-Theta with seasonal period `period`.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self { period }
     }
 }
 
 /// Fitted Four-Theta members.
 #[derive(Clone, Debug)]
-pub struct FittedFourTheta {
+pub(crate) struct FittedFourTheta {
     /// Theta member.
     pub theta: FittedTheta,
     /// SES level.
@@ -15192,7 +15198,7 @@ pub struct FittedFourTheta {
 
 impl FittedFourTheta {
     /// Equal-weight combination of Theta, SES, and seasonal-naive.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let th = match self.theta.forecast(h, &session.child("fourtheta_th")) {
             Ok(q) => q.value,
@@ -15213,7 +15219,7 @@ impl FittedFourTheta {
 
 impl FitSeries for FourTheta {
     type Fitted = FittedFourTheta;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedFourTheta>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedFourTheta>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let s = self.period.max(1);
@@ -15268,7 +15274,7 @@ impl FitSeries for FourTheta {
 /// Residual-bootstrap intervals around last-value / SES. Bootstrap / member
 /// counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct EnbPI {
+pub(crate) struct EnbPI {
     /// Bootstrap draws.
     pub n_boot: usize,
     /// Nominal two-sided miss rate.
@@ -15289,7 +15295,7 @@ impl Default for EnbPI {
 
 impl EnbPI {
     /// EnbPI-lite with `n_boot` residual draws.
-    pub fn new(n_boot: usize) -> Self {
+    pub(crate) fn new(n_boot: usize) -> Self {
         Self {
             n_boot,
             ..Self::default()
@@ -15299,7 +15305,7 @@ impl EnbPI {
 
 /// Fitted EnbPI-lite intervals.
 #[derive(Clone, Debug)]
-pub struct FittedEnbPI {
+pub(crate) struct FittedEnbPI {
     /// Point forecast (SES level).
     pub point: f64,
     /// Lower residual quantile (added to the point).
@@ -15310,13 +15316,13 @@ pub struct FittedEnbPI {
 
 impl FittedEnbPI {
     /// Constant SES point forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(Vector::filled(h, self.point))
     }
 
     /// Point plus residual-bootstrap interval bounds `(lo, mid, hi)` per step.
-    pub fn interval(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn interval(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
         let ctx = FitCtx::with_session(session.child("interval"));
         ctx.finish(Matrix::from_fn(h, 3, |_, j| {
             if j == 0 {
@@ -15332,7 +15338,7 @@ impl FittedEnbPI {
 
 impl FitSeries for EnbPI {
     type Fitted = FittedEnbPI;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedEnbPI>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedEnbPI>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         if y.is_empty() {
@@ -15388,7 +15394,7 @@ impl FitSeries for EnbPI {
 /// \(y_{t+h}\) on an intercept and `lags` of \(y_t,y_{t-1},\ldots\). Lag count
 /// is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct HamiltonFilter {
+pub(crate) struct HamiltonFilter {
     /// Forecast horizon \(h\).
     pub horizon: usize,
     /// Number of lags of \(y_t\).
@@ -15406,14 +15412,14 @@ impl Default for HamiltonFilter {
 
 impl HamiltonFilter {
     /// Hamilton filter with horizon `h` and `lags` lags.
-    pub fn new(horizon: usize, lags: usize) -> Self {
+    pub(crate) fn new(horizon: usize, lags: usize) -> Self {
         Self { horizon, lags }
     }
 }
 
 /// Fitted Hamilton cycle.
 #[derive(Clone, Debug)]
-pub struct FittedHamiltonFilter {
+pub(crate) struct FittedHamiltonFilter {
     /// Residual cycle (length \(n\); leading observations are NaN).
     pub cycle: Vector,
     /// OLS coefficients `[intercept, y_t, …]`.
@@ -15425,7 +15431,7 @@ pub struct FittedHamiltonFilter {
 impl FitSeries for HamiltonFilter {
     type Fitted = FittedHamiltonFilter;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedHamiltonFilter>> {
@@ -15483,7 +15489,7 @@ impl FitSeries for HamiltonFilter {
 ///
 /// `kind` is `"c"`, `"t"`, or `"ct"`. Trend-column count is not identification
 /// `p`.
-pub fn add_trend(y: &Vector, kind: &str, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn add_trend(y: &Vector, kind: &str, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     let n = y.len();
@@ -15519,7 +15525,7 @@ pub fn add_trend(y: &Vector, kind: &str, session: &Session) -> Result<Qualified<
 ///
 /// Column `j` is \(y_{t-j}\) for \(j=1,\ldots,\mathrm{maxlag}\). Lag count is
 /// not identification `p`.
-pub fn lagmat(y: &Vector, maxlag: usize, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn lagmat(y: &Vector, maxlag: usize, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     let n = y.len();
@@ -15546,7 +15552,7 @@ pub fn lagmat(y: &Vector, maxlag: usize, session: &Session) -> Result<Qualified<
 /// Yule–Walker PACF via Durbin–Levinson (statsmodels `pacf_yw`).
 ///
 /// Lag count is not identification `p`.
-pub fn pacf_yw(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn pacf_yw(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     let rho = acf_raw(y.as_slice(), nlags);
@@ -15581,7 +15587,7 @@ fn dft_re_im(y: &[f64]) -> (Vec<f64>, Vec<f64>) {
 /// Sliding-window periodogram (SciPy / statsmodels `spectrogram`).
 ///
 /// Segment length is not identification `p`.
-pub fn spectrogram(
+pub(crate) fn spectrogram(
     y: &Vector,
     nperseg: usize,
     session: &Session,
@@ -15646,7 +15652,7 @@ pub fn spectrogram(
 /// Cross-spectral density (SciPy `csd` / statsmodels).
 ///
 /// Frequency count is not identification `p`.
-pub fn csd(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn csd(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, x);
     inspect_univariate(&mut ctx, y);
@@ -15682,7 +15688,7 @@ pub fn csd(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<Vector
 /// Magnitude-squared coherence (SciPy `coherence`).
 ///
 /// Frequency count is not identification `p`.
-pub fn coherence(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn coherence(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, x);
     inspect_univariate(&mut ctx, y);
@@ -15719,7 +15725,7 @@ pub fn coherence(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<
 /// `innovations.arma_innovations` / `innovations_mle` lite).
 ///
 /// Lag count is not identification `p`.
-pub fn innovations_mle(
+pub(crate) fn innovations_mle(
     y: &Vector,
     nlags: usize,
     session: &Session,
@@ -15766,7 +15772,7 @@ pub fn innovations_mle(
 /// ARMA innovations residuals and scale (statsmodels `arma_innovations`).
 ///
 /// Lag count is not identification `p`.
-pub fn arma_innovations(
+pub(crate) fn arma_innovations(
     y: &Vector,
     nlags: usize,
     session: &Session,
@@ -15796,7 +15802,7 @@ pub fn arma_innovations(
 ///
 /// \(\rho_{xy}(k)=\gamma_{xy}(k)/\sqrt{\gamma_{xx}(0)\gamma_{yy}(0)}\). Lag
 /// count is not identification `p`.
-pub fn ccf_from_acf(
+pub(crate) fn ccf_from_acf(
     x: &Vector,
     y: &Vector,
     nlags: usize,
@@ -15825,7 +15831,7 @@ pub fn ccf_from_acf(
 ///
 /// Reflection coefficients of [`crate::stats::burg_ar`]. Order is not
 /// identification `p`.
-pub fn pacf_burg(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn pacf_burg(y: &Vector, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     let h = nlags.max(1).min(y.len().saturating_sub(1).max(1));
@@ -15864,14 +15870,14 @@ pub fn pacf_burg(y: &Vector, nlags: usize, session: &Session) -> Result<Qualifie
 }
 
 /// Prepend a column of ones (statsmodels `add_constant`).
-pub fn add_constant(x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn add_constant(x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, None, &ctx.policy);
     ctx.finish(x.with_intercept())
 }
 
 /// Subtract a linear time trend (statsmodels `detrend`).
-pub fn detrend(y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn detrend(y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     let n = y.len();
@@ -15897,7 +15903,7 @@ pub fn detrend(y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
 /// Linear convolution (SciPy `fftconvolve` lite; direct sum, not an FFT).
 ///
 /// Lengths are not identification `p`.
-pub fn fftconvolve(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn fftconvolve(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, a);
     inspect_univariate(&mut ctx, b);
@@ -15939,7 +15945,7 @@ pub fn fftconvolve(a: &Vector, b: &Vector, session: &Session) -> Result<Qualifie
 ///
 /// Seasonal dummies are OLS-fitted and a KPSS-like statistic is formed on the
 /// residuals. Period is not identification `p`.
-pub fn ch_test(
+pub(crate) fn ch_test(
     y: &Vector,
     period: usize,
     session: &Session,
@@ -16000,7 +16006,7 @@ pub fn ch_test(
 ///
 /// Column block `j` holds lags \(1,\ldots,\mathrm{maxlag}\) of input column
 /// `j`. Lag and column counts are not identification `p`.
-pub fn lagmat2ds(
+pub(crate) fn lagmat2ds(
     x: &Matrix,
     maxlag: usize,
     session: &Session,
@@ -16033,7 +16039,7 @@ pub fn lagmat2ds(
 /// Seasonal means of length `period` (statsmodels `seasonal.seasonal_mean`).
 ///
 /// Period is not identification `p`.
-pub fn seasonal_mean(
+pub(crate) fn seasonal_mean(
     y: &Vector,
     period: usize,
     session: &Session,
@@ -16080,7 +16086,7 @@ pub fn seasonal_mean(
 ///
 /// Harmonic / period counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct CalendarFourier {
+pub(crate) struct CalendarFourier {
     /// Seasonal period.
     pub period: usize,
     /// Number of harmonics.
@@ -16098,7 +16104,7 @@ impl Default for CalendarFourier {
 
 impl CalendarFourier {
     /// `order` sine/cosine pairs for `period`.
-    pub fn new(period: usize, order: usize) -> Self {
+    pub(crate) fn new(period: usize, order: usize) -> Self {
         Self {
             period: period.max(2),
             order: order.max(1),
@@ -16106,7 +16112,7 @@ impl CalendarFourier {
     }
 
     /// In-sample design of length `n`.
-    pub fn in_sample(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn in_sample(&self, n: usize, session: &Session) -> Result<Qualified<Matrix>> {
         let ctx = FitCtx::with_session(session.child("in_sample"));
         let p = self.period.max(2);
         let h = self.order.max(1);
@@ -16126,7 +16132,7 @@ impl CalendarFourier {
 /// Theoretical ARMA ACF (statsmodels `arima_process.arma_acf`).
 ///
 /// Uses a truncated MA(∞) expansion. Orders are not identification `p`.
-pub fn arma_acf(
+pub(crate) fn arma_acf(
     ar: &Vector,
     ma: &Vector,
     nlags: usize,
@@ -16196,7 +16202,7 @@ pub fn arma_acf(
 ///
 /// Candidate order is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ArOrderSelect {
+pub(crate) struct ArOrderSelect {
     /// Selected order (0 = intercept-only / white noise).
     pub order: usize,
     /// AIC for orders `0..=maxlag`.
@@ -16204,7 +16210,7 @@ pub struct ArOrderSelect {
 }
 
 /// Grid Burg AIC over AR(0)..AR(`maxlag`).
-pub fn ar_select_order(
+pub(crate) fn ar_select_order(
     y: &Vector,
     maxlag: usize,
     session: &Session,
@@ -16279,7 +16285,7 @@ pub fn ar_select_order(
 /// (statsmodels `tsatools.add_lags`).
 ///
 /// Lag / column counts are not identification `p`.
-pub fn add_lags(x: &Matrix, lags: usize, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn add_lags(x: &Matrix, lags: usize, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, None, &ctx.policy);
     let n = x.nrows();
@@ -16308,7 +16314,7 @@ pub fn add_lags(x: &Matrix, lags: usize, session: &Session) -> Result<Qualified<
 
 /// Map a pandas / statsmodels frequency alias to a period
 /// (statsmodels `tsatools.freq_to_period`).
-pub fn freq_to_period(freq: &str, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn freq_to_period(freq: &str, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     let key = freq.trim().to_ascii_uppercase();
     let period = match key.as_str() {
@@ -16338,7 +16344,7 @@ pub fn freq_to_period(freq: &str, session: &Session) -> Result<Qualified<f64>> {
 ///
 /// Orders are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ArmaProcess {
+pub(crate) struct ArmaProcess {
     /// Autoregressive coefficients \(\phi_1,\ldots,\phi_p\).
     pub ar: Vector,
     /// Moving-average coefficients \(\theta_1,\ldots,\theta_q\).
@@ -16347,22 +16353,22 @@ pub struct ArmaProcess {
 
 impl ArmaProcess {
     /// ARMA(\(p,q\)) from coefficient vectors.
-    pub fn new(ar: Vector, ma: Vector) -> Self {
+    pub(crate) fn new(ar: Vector, ma: Vector) -> Self {
         Self { ar, ma }
     }
 
     /// Theoretical ACF via [`arma_acf`].
-    pub fn acf(&self, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn acf(&self, nlags: usize, session: &Session) -> Result<Qualified<Vector>> {
         arma_acf(&self.ar, &self.ma, nlags, session)
     }
 
     /// Impulse response \(\psi\) via [`arma2ma`].
-    pub fn impulse(&self, lags: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn impulse(&self, lags: usize, session: &Session) -> Result<Qualified<Vector>> {
         arma2ma(&self.ar, &self.ma, lags, session)
     }
 
     /// Simulate `n` observations.
-    pub fn generate(&self, n: usize, seed: u64, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn generate(&self, n: usize, seed: u64, session: &Session) -> Result<Qualified<Vector>> {
         arma_generate_sample(&self.ar, &self.ma, n, seed, session)
     }
 }
@@ -16370,7 +16376,7 @@ impl ArmaProcess {
 /// Simulate an ARMA series (statsmodels `arma_generate_sample`).
 ///
 /// Orders are not identification `p`.
-pub fn arma_generate_sample(
+pub(crate) fn arma_generate_sample(
     ar: &Vector,
     ma: &Vector,
     n: usize,
@@ -16433,7 +16439,7 @@ pub fn arma_generate_sample(
 /// Impulse-response coefficients (statsmodels `ArmaProcess.arma2ma`).
 ///
 /// Alias of [`arma2ma`]. Orders are not identification `p`.
-pub fn arma_impulse_response(
+pub(crate) fn arma_impulse_response(
     ar: &Vector,
     ma: &Vector,
     lags: usize,
@@ -16447,7 +16453,7 @@ pub fn arma_impulse_response(
 /// Returns \(\gamma(0),\ldots,\gamma(\mathrm{nlags})\) for unit innovation
 /// variance via a truncated MA(\(\infty\)) expansion. Orders are not
 /// identification `p`.
-pub fn arma_acovf(
+pub(crate) fn arma_acovf(
     ar: &Vector,
     ma: &Vector,
     nlags: usize,
@@ -16504,7 +16510,7 @@ pub fn arma_acovf(
 ///
 /// Levinson–Durbin reflection coefficients of [`arma_acf`]. Orders are not
 /// identification `p`.
-pub fn arma_pacf(
+pub(crate) fn arma_pacf(
     ar: &Vector,
     ma: &Vector,
     nlags: usize,
@@ -16585,7 +16591,7 @@ pub fn arma_pacf(
 ///
 /// Regime count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct KimSmoother {
+pub(crate) struct KimSmoother {
     /// Stay probability.
     pub stay: f64,
 }
@@ -16598,12 +16604,12 @@ impl Default for KimSmoother {
 
 impl KimSmoother {
     /// Two-regime Kim smoother with stay probability `stay`.
-    pub fn new(stay: f64) -> Self {
+    pub(crate) fn new(stay: f64) -> Self {
         Self { stay }
     }
 
     /// Fit alias.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedKimSmoother>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedKimSmoother>> {
         let mut s = self.clone();
         s.fit_series(y, session)
     }
@@ -16611,7 +16617,7 @@ impl KimSmoother {
 
 /// Smoothed two-regime probabilities.
 #[derive(Clone, Debug)]
-pub struct FittedKimSmoother {
+pub(crate) struct FittedKimSmoother {
     /// \(P(s_t=1 \mid y_{1:T})\).
     pub smoothed: Vector,
     /// Filtered \(P(s_t=1 \mid y_{1:t})\).
@@ -16623,7 +16629,7 @@ pub struct FittedKimSmoother {
 impl FitSeries for KimSmoother {
     type Fitted = FittedKimSmoother;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedKimSmoother>> {
@@ -16743,26 +16749,26 @@ impl FitSeries for KimSmoother {
 
 /// Named Theta forecaster (sktime `ThetaForecaster`).
 #[derive(Clone, Debug, Default)]
-pub struct ThetaForecaster {
+pub(crate) struct ThetaForecaster {
     inner: Theta,
 }
 
 impl ThetaForecaster {
     /// Default Theta method.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted Theta wrapper.
 #[derive(Clone, Debug)]
-pub struct FittedThetaForecaster {
+pub(crate) struct FittedThetaForecaster {
     inner: FittedTheta,
 }
 
 impl FittedThetaForecaster {
     /// `level + h · drift`.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         self.inner.forecast(h, session)
     }
 }
@@ -16770,7 +16776,7 @@ impl FittedThetaForecaster {
 impl FitSeries for ThetaForecaster {
     type Fitted = FittedThetaForecaster;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedThetaForecaster>> {
@@ -16784,7 +16790,7 @@ impl FitSeries for ThetaForecaster {
 ///
 /// Seasonal periods are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MstlForecaster {
+pub(crate) struct MstlForecaster {
     inner: Mstl,
 }
 
@@ -16801,7 +16807,7 @@ impl Default for MstlForecaster {
 
 impl MstlForecaster {
     /// Two-period MSTL forecaster.
-    pub fn new(period: usize, period2: usize) -> Self {
+    pub(crate) fn new(period: usize, period2: usize) -> Self {
         Self {
             inner: Mstl::new(period, period2),
         }
@@ -16810,7 +16816,7 @@ impl MstlForecaster {
 
 /// Fitted MSTL + residual SES.
 #[derive(Clone, Debug)]
-pub struct FittedMstlForecaster {
+pub(crate) struct FittedMstlForecaster {
     last_trend: f64,
     seasonal: Vector,
     seasonal2: Vector,
@@ -16821,7 +16827,7 @@ pub struct FittedMstlForecaster {
 
 impl FittedMstlForecaster {
     /// Repeat last trend plus seasonal tiles plus SES residual level.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let n = self.seasonal.len().max(1);
         let n2 = self.seasonal2.len().max(1);
@@ -16843,7 +16849,7 @@ impl FittedMstlForecaster {
 impl FitSeries for MstlForecaster {
     type Fitted = FittedMstlForecaster;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedMstlForecaster>> {
@@ -16884,33 +16890,33 @@ impl FitSeries for MstlForecaster {
 
 /// Named threshold AR (statsmodels `TAR` / sktime `ThresholdAR`).
 #[derive(Clone, Debug, Default)]
-pub struct ThresholdAr {
+pub(crate) struct ThresholdAr {
     inner: Setar,
 }
 
 impl ThresholdAr {
     /// Default two-regime TAR.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted threshold AR.
 #[derive(Clone, Debug)]
-pub struct FittedThresholdAr {
+pub(crate) struct FittedThresholdAr {
     inner: FittedSetar,
 }
 
 impl FittedThresholdAr {
     /// Iterate the threshold recursion.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         self.inner.forecast(h, session)
     }
 }
 
 impl FitSeries for ThresholdAr {
     type Fitted = FittedThresholdAr;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedThresholdAr>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedThresholdAr>> {
         self.inner
             .fit_series(y, session)
             .map(|q| q.map(|inner| FittedThresholdAr { inner }))
@@ -16921,7 +16927,7 @@ impl FitSeries for ThresholdAr {
 ///
 /// Trend polynomial degree and seasonal harmonic count are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct NbeatsForecaster {
+pub(crate) struct NbeatsForecaster {
     /// Polynomial degree of the trend block.
     pub trend_degree: usize,
     /// Seasonal period.
@@ -16942,7 +16948,7 @@ impl Default for NbeatsForecaster {
 
 impl NbeatsForecaster {
     /// Interpretable N-BEATS with polynomial trend and Fourier seasonality.
-    pub fn new(trend_degree: usize, period: usize, n_harmonics: usize) -> Self {
+    pub(crate) fn new(trend_degree: usize, period: usize, n_harmonics: usize) -> Self {
         Self {
             trend_degree,
             period,
@@ -16953,7 +16959,7 @@ impl NbeatsForecaster {
 
 /// Fitted N-BEATS residual blocks.
 #[derive(Clone, Debug)]
-pub struct FittedNbeats {
+pub(crate) struct FittedNbeats {
     n: usize,
     trend_degree: usize,
     period: usize,
@@ -16965,7 +16971,7 @@ pub struct FittedNbeats {
 
 impl FittedNbeats {
     /// Sum of trend, seasonal, and leftover-level forecasts.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let n = self.n.max(1) as f64;
         let per = self.period.max(2) as f64;
@@ -16998,7 +17004,7 @@ impl FittedNbeats {
 
 impl FitSeries for NbeatsForecaster {
     type Fitted = FittedNbeats;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedNbeats>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedNbeats>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let n = y.len();
@@ -17108,7 +17114,7 @@ impl FitSeries for NbeatsForecaster {
 ///
 /// Pooling rates are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct NhitsForecaster {
+pub(crate) struct NhitsForecaster {
     /// Coarse-to-fine pooling widths. Not identification `p`.
     pub scales: Vec<usize>,
 }
@@ -17123,7 +17129,7 @@ impl Default for NhitsForecaster {
 
 impl NhitsForecaster {
     /// N-HiTS with the given pooling rates.
-    pub fn new(scales: Vec<usize>) -> Self {
+    pub(crate) fn new(scales: Vec<usize>) -> Self {
         Self { scales }
     }
 }
@@ -17138,13 +17144,13 @@ struct NhitsBlock {
 
 /// Fitted multi-rate interpolation stacks.
 #[derive(Clone, Debug)]
-pub struct FittedNhits {
+pub(crate) struct FittedNhits {
     blocks: Vec<NhitsBlock>,
 }
 
 impl FittedNhits {
     /// Sum of linearly interpolated per-scale forecasts.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let out = Vector::from_iter((0..h).map(|k| {
             let mut yhat = 0.0;
@@ -17160,7 +17166,7 @@ impl FittedNhits {
 
 impl FitSeries for NhitsForecaster {
     type Fitted = FittedNhits;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedNhits>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedNhits>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let n = y.len();
@@ -17243,7 +17249,7 @@ impl FitSeries for NhitsForecaster {
 ///
 /// Hidden width is not identification `p`. Forecasts the mean path, not samples.
 #[derive(Clone, Debug)]
-pub struct DeepArForecaster {
+pub(crate) struct DeepArForecaster {
     /// Lag order. Not identification `p`.
     pub lags: usize,
     /// Hidden tanh units. Not identification `p`.
@@ -17270,14 +17276,14 @@ impl Default for DeepArForecaster {
 
 impl DeepArForecaster {
     /// Default DeepAR-lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted Gaussian mean-path DeepAR.
 #[derive(Clone, Debug)]
-pub struct FittedDeepAr {
+pub(crate) struct FittedDeepAr {
     lags: usize,
     w: Matrix,
     b: Vector,
@@ -17310,7 +17316,7 @@ impl FittedDeepAr {
     }
 
     /// Recursive mean-path forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let p = self.lags.max(1);
         let mut hist: Vec<f64> = self.last.as_slice().to_vec();
@@ -17332,7 +17338,7 @@ impl FittedDeepAr {
 
 impl FitSeries for DeepArForecaster {
     type Fitted = FittedDeepAr;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedDeepAr>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedDeepAr>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let n = y.len();
@@ -17507,18 +17513,18 @@ fn timesnet_period(y: &[f64]) -> usize {
 ///
 /// The detected period is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct TimesNetForecaster;
+pub(crate) struct TimesNetForecaster;
 
 impl TimesNetForecaster {
     /// Default TimesNet-lite forecaster.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
 
 /// Fitted period-reshape seasonal means plus residual drift.
 #[derive(Clone, Debug)]
-pub struct FittedTimesNet {
+pub(crate) struct FittedTimesNet {
     period: usize,
     seasonal: Vector,
     drift: f64,
@@ -17527,7 +17533,7 @@ pub struct FittedTimesNet {
 
 impl FittedTimesNet {
     /// Repeat the period-reshape seasonal tile plus residual drift.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let p = self.period.max(2);
         let out = Vector::from_iter((1..=h).map(|k| {
@@ -17545,7 +17551,7 @@ impl FittedTimesNet {
 
 impl FitSeries for TimesNetForecaster {
     type Fitted = FittedTimesNet;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedTimesNet>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedTimesNet>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let n = y.len();
@@ -17824,7 +17830,7 @@ fn recurse_features(
 ///
 /// Kernel count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RocketForecaster {
+pub(crate) struct RocketForecaster {
     /// Lag window. Not identification `p`.
     pub window: usize,
     /// Random kernels.
@@ -17851,14 +17857,14 @@ impl Default for RocketForecaster {
 
 impl RocketForecaster {
     /// Default ROCKET-lite forecaster.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted ROCKET-window ridge.
 #[derive(Clone, Debug)]
-pub struct FittedRocketForecaster {
+pub(crate) struct FittedRocketForecaster {
     kernels: Vec<Vec<f64>>,
     coef: Vector,
     intercept: f64,
@@ -17867,7 +17873,7 @@ pub struct FittedRocketForecaster {
 
 impl FittedRocketForecaster {
     /// Recursive ROCKET-window forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let out = recurse_features(
             &self.last,
@@ -17883,7 +17889,7 @@ impl FittedRocketForecaster {
 impl FitSeries for RocketForecaster {
     type Fitted = FittedRocketForecaster;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedRocketForecaster>> {
@@ -17940,7 +17946,7 @@ impl FitSeries for RocketForecaster {
 ///
 /// Kernel count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct CnnForecaster {
+pub(crate) struct CnnForecaster {
     /// Lag window.
     pub window: usize,
     /// Random kernels.
@@ -17967,14 +17973,14 @@ impl Default for CnnForecaster {
 
 impl CnnForecaster {
     /// Default CNN-lite forecaster.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted CNN-window ridge.
 #[derive(Clone, Debug)]
-pub struct FittedCnnForecaster {
+pub(crate) struct FittedCnnForecaster {
     kernels: Vec<Vec<f64>>,
     coef: Vector,
     intercept: f64,
@@ -17983,7 +17989,7 @@ pub struct FittedCnnForecaster {
 
 impl FittedCnnForecaster {
     /// Recursive CNN-window forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(recurse_features(
             &self.last,
@@ -17997,7 +18003,7 @@ impl FittedCnnForecaster {
 
 impl FitSeries for CnnForecaster {
     type Fitted = FittedCnnForecaster;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedCnnForecaster>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedCnnForecaster>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let wlen = self.width.max(1).min(self.window.max(1));
@@ -18037,7 +18043,7 @@ impl FitSeries for CnnForecaster {
 ///
 /// Feature count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Catch22Forecaster {
+pub(crate) struct Catch22Forecaster {
     /// Lag window.
     pub window: usize,
     /// Ridge \(\alpha\).
@@ -18055,14 +18061,14 @@ impl Default for Catch22Forecaster {
 
 impl Catch22Forecaster {
     /// Default Catch22-lite forecaster.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted Catch22-window ridge.
 #[derive(Clone, Debug)]
-pub struct FittedCatch22Forecaster {
+pub(crate) struct FittedCatch22Forecaster {
     coef: Vector,
     intercept: f64,
     last: Vec<f64>,
@@ -18070,7 +18076,7 @@ pub struct FittedCatch22Forecaster {
 
 impl FittedCatch22Forecaster {
     /// Recursive Catch22-window forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(recurse_features(
             &self.last,
@@ -18085,7 +18091,7 @@ impl FittedCatch22Forecaster {
 impl FitSeries for Catch22Forecaster {
     type Fitted = FittedCatch22Forecaster;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedCatch22Forecaster>> {
@@ -18231,7 +18237,7 @@ fn tcn_window(win: &[f64], kernels: &[Vec<f64>], dilations: &[usize]) -> Vec<f64
 /// Two ReLU conv layers then global-average-pool; kernel count is not
 /// identification `p`. Distinct from [`CnnForecaster`] (single-layer max-pool).
 #[derive(Clone, Debug)]
-pub struct FcnForecaster {
+pub(crate) struct FcnForecaster {
     /// Lag window. Not identification `p`.
     pub window: usize,
     /// Layer-1 kernels.
@@ -18258,14 +18264,14 @@ impl Default for FcnForecaster {
 
 impl FcnForecaster {
     /// Default FCN-lite forecaster.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted FCN-window ridge.
 #[derive(Clone, Debug)]
-pub struct FittedFcnForecaster {
+pub(crate) struct FittedFcnForecaster {
     layer1: Vec<Vec<f64>>,
     layer2: Vec<Vec<f64>>,
     coef: Vector,
@@ -18275,7 +18281,7 @@ pub struct FittedFcnForecaster {
 
 impl FittedFcnForecaster {
     /// Recursive FCN-window forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(recurse_features(
             &self.last,
@@ -18289,7 +18295,7 @@ impl FittedFcnForecaster {
 
 impl FitSeries for FcnForecaster {
     type Fitted = FittedFcnForecaster;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedFcnForecaster>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedFcnForecaster>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let wlen = self.width.max(1).min(self.window.max(1));
@@ -18334,7 +18340,7 @@ impl FitSeries for FcnForecaster {
 /// Skip-connected conv then GAP; kernel count is not identification `p`.
 /// Distinct from [`FcnForecaster`] (no skip) and [`CnnForecaster`] (no residual).
 #[derive(Clone, Debug)]
-pub struct ResNetForecaster {
+pub(crate) struct ResNetForecaster {
     /// Lag window.
     pub window: usize,
     /// Residual kernels.
@@ -18361,14 +18367,14 @@ impl Default for ResNetForecaster {
 
 impl ResNetForecaster {
     /// Default ResNet-lite forecaster.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted ResNet-window ridge.
 #[derive(Clone, Debug)]
-pub struct FittedResNetForecaster {
+pub(crate) struct FittedResNetForecaster {
     kernels: Vec<Vec<f64>>,
     coef: Vector,
     intercept: f64,
@@ -18377,7 +18383,7 @@ pub struct FittedResNetForecaster {
 
 impl FittedResNetForecaster {
     /// Recursive residual-conv forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(recurse_features(
             &self.last,
@@ -18392,7 +18398,7 @@ impl FittedResNetForecaster {
 impl FitSeries for ResNetForecaster {
     type Fitted = FittedResNetForecaster;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedResNetForecaster>> {
@@ -18436,7 +18442,7 @@ impl FitSeries for ResNetForecaster {
 /// Multi-width max-pooled kernels; width count is not identification `p`.
 /// Distinct from [`CnnForecaster`] (single width).
 #[derive(Clone, Debug)]
-pub struct InceptionTimeForecaster {
+pub(crate) struct InceptionTimeForecaster {
     /// Lag window.
     pub window: usize,
     /// Kernels per width.
@@ -18460,14 +18466,14 @@ impl Default for InceptionTimeForecaster {
 
 impl InceptionTimeForecaster {
     /// Default InceptionTime-lite forecaster.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted InceptionTime-window ridge.
 #[derive(Clone, Debug)]
-pub struct FittedInceptionTimeForecaster {
+pub(crate) struct FittedInceptionTimeForecaster {
     kernels: Vec<Vec<f64>>,
     coef: Vector,
     intercept: f64,
@@ -18476,7 +18482,7 @@ pub struct FittedInceptionTimeForecaster {
 
 impl FittedInceptionTimeForecaster {
     /// Recursive multi-scale conv forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(recurse_features(
             &self.last,
@@ -18491,7 +18497,7 @@ impl FittedInceptionTimeForecaster {
 impl FitSeries for InceptionTimeForecaster {
     type Fitted = FittedInceptionTimeForecaster;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedInceptionTimeForecaster>> {
@@ -18544,7 +18550,7 @@ impl FitSeries for InceptionTimeForecaster {
 /// Dilated max-pool; dilation count is not identification `p`. Distinct from
 /// [`CnnForecaster`] (dilation 1 only).
 #[derive(Clone, Debug)]
-pub struct TcnForecaster {
+pub(crate) struct TcnForecaster {
     /// Lag window.
     pub window: usize,
     /// Kernel bank.
@@ -18571,14 +18577,14 @@ impl Default for TcnForecaster {
 
 impl TcnForecaster {
     /// Default TCN-lite forecaster.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted TCN-window ridge.
 #[derive(Clone, Debug)]
-pub struct FittedTcnForecaster {
+pub(crate) struct FittedTcnForecaster {
     kernels: Vec<Vec<f64>>,
     dilations: Vec<usize>,
     coef: Vector,
@@ -18588,7 +18594,7 @@ pub struct FittedTcnForecaster {
 
 impl FittedTcnForecaster {
     /// Recursive dilated-conv forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(recurse_features(
             &self.last,
@@ -18602,7 +18608,7 @@ impl FittedTcnForecaster {
 
 impl FitSeries for TcnForecaster {
     type Fitted = FittedTcnForecaster;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedTcnForecaster>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedTcnForecaster>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_univariate(&mut ctx, y);
         let wlen = self.width.max(1).min(self.window.max(1));
@@ -18736,7 +18742,7 @@ fn disjoint_window(win: &[f64], kernels: &[Vec<f64>], n_blocks: usize) -> Vec<f6
 /// Patch count is not identification `p`. Distinct from [`CnnForecaster`]
 /// (no patches) and [`Catch22Forecaster`] (global summaries).
 #[derive(Clone, Debug)]
-pub struct PatchTstForecaster {
+pub(crate) struct PatchTstForecaster {
     /// Lag window.
     pub window: usize,
     /// Patch length. Not identification `p`.
@@ -18757,14 +18763,14 @@ impl Default for PatchTstForecaster {
 
 impl PatchTstForecaster {
     /// Default PatchTST-lite forecaster.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted patch-window ridge.
 #[derive(Clone, Debug)]
-pub struct FittedPatchTstForecaster {
+pub(crate) struct FittedPatchTstForecaster {
     patch: usize,
     coef: Vector,
     intercept: f64,
@@ -18773,7 +18779,7 @@ pub struct FittedPatchTstForecaster {
 
 impl FittedPatchTstForecaster {
     /// Recursive patch-window forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(recurse_features(
             &self.last,
@@ -18788,7 +18794,7 @@ impl FittedPatchTstForecaster {
 impl FitSeries for PatchTstForecaster {
     type Fitted = FittedPatchTstForecaster;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedPatchTstForecaster>> {
@@ -18823,7 +18829,7 @@ impl FitSeries for PatchTstForecaster {
 /// Hidden / kernel counts are not identification `p`. Distinct from
 /// [`FcnForecaster`] (no recurrence) and [`TcnForecaster`] (no Elman state).
 #[derive(Clone, Debug)]
-pub struct LstmFcnForecaster {
+pub(crate) struct LstmFcnForecaster {
     /// Lag window.
     pub window: usize,
     /// Elman hidden width. Not identification `p`.
@@ -18853,14 +18859,14 @@ impl Default for LstmFcnForecaster {
 
 impl LstmFcnForecaster {
     /// Default LSTM-FCN-lite forecaster.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted LSTM-FCN-window ridge.
 #[derive(Clone, Debug)]
-pub struct FittedLstmFcnForecaster {
+pub(crate) struct FittedLstmFcnForecaster {
     wx: Vector,
     uh: Vector,
     kernels: Vec<Vec<f64>>,
@@ -18871,7 +18877,7 @@ pub struct FittedLstmFcnForecaster {
 
 impl FittedLstmFcnForecaster {
     /// Recursive Elman+conv forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(recurse_features(
             &self.last,
@@ -18886,7 +18892,7 @@ impl FittedLstmFcnForecaster {
 impl FitSeries for LstmFcnForecaster {
     type Fitted = FittedLstmFcnForecaster;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedLstmFcnForecaster>> {
@@ -18935,7 +18941,7 @@ impl FitSeries for LstmFcnForecaster {
 /// Block count is not identification `p`. Distinct from [`CnnForecaster`]
 /// (full-window conv) and [`InceptionTimeForecaster`] (multi-width, not blocked).
 #[derive(Clone, Debug)]
-pub struct DisjointCnnForecaster {
+pub(crate) struct DisjointCnnForecaster {
     /// Lag window.
     pub window: usize,
     /// Contiguous blocks. Not identification `p`.
@@ -18965,14 +18971,14 @@ impl Default for DisjointCnnForecaster {
 
 impl DisjointCnnForecaster {
     /// Default disjoint-CNN-lite forecaster.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted disjoint-CNN-window ridge.
 #[derive(Clone, Debug)]
-pub struct FittedDisjointCnnForecaster {
+pub(crate) struct FittedDisjointCnnForecaster {
     kernels: Vec<Vec<f64>>,
     n_blocks: usize,
     coef: Vector,
@@ -18982,7 +18988,7 @@ pub struct FittedDisjointCnnForecaster {
 
 impl FittedDisjointCnnForecaster {
     /// Recursive block-conv forecast.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         ctx.finish(recurse_features(
             &self.last,
@@ -18997,7 +19003,7 @@ impl FittedDisjointCnnForecaster {
 impl FitSeries for DisjointCnnForecaster {
     type Fitted = FittedDisjointCnnForecaster;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedDisjointCnnForecaster>> {
@@ -19043,7 +19049,7 @@ impl FitSeries for DisjointCnnForecaster {
 /// \(S\) and used as diagonal WLS weights. Distinct from
 /// [`reconcile_mint`] (column-sum weights) and [`reconcile_ols`]
 /// (identity weights). Variance count is not identification `p`.
-pub fn reconcile_wls(
+pub(crate) fn reconcile_wls(
     yhat: &Matrix,
     summing: &Matrix,
     node_var: &Vector,
@@ -19130,23 +19136,23 @@ pub fn reconcile_wls(
 ///
 /// Column-variance count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct WlsReconcilerForecaster;
+pub(crate) struct WlsReconcilerForecaster;
 
 /// Fitted WLS hierarchy.
 #[derive(Clone, Debug)]
-pub struct FittedWlsReconciler {
+pub(crate) struct FittedWlsReconciler {
     last: Vector,
     node_var: Vector,
 }
 
 impl WlsReconcilerForecaster {
     /// Empty WLS reconciler.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Store last values and column variances.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Matrix,
         session: &Session,
@@ -19175,7 +19181,7 @@ impl WlsReconcilerForecaster {
 
 impl FittedWlsReconciler {
     /// Repeat last values (expanding bottoms through `S` if needed), then WLS.
-    pub fn forecast(
+    pub(crate) fn forecast(
         &self,
         h: usize,
         summing: &Matrix,
@@ -19225,7 +19231,7 @@ impl FittedWlsReconciler {
 ///
 /// Distinct from [`reconcile_mint`] (column-sum weights) and
 /// [`reconcile_wls`] (diagonal variances). Node count is not identification `p`.
-pub fn reconcile_mint_cov(
+pub(crate) fn reconcile_mint_cov(
     yhat: &Matrix,
     summing: &Matrix,
     cov: &Matrix,
@@ -19364,23 +19370,23 @@ pub fn reconcile_mint_cov(
 /// Series count is not identification `p`. Distinct from
 /// [`WlsReconcilerForecaster`] (diagonal column variance).
 #[derive(Clone, Debug, Default)]
-pub struct MinTReconcilerForecaster;
+pub(crate) struct MinTReconcilerForecaster;
 
 /// Fitted covariance MinT hierarchy.
 #[derive(Clone, Debug)]
-pub struct FittedMinTReconciler {
+pub(crate) struct FittedMinTReconciler {
     last: Vector,
     cov: Matrix,
 }
 
 impl MinTReconcilerForecaster {
     /// Empty MinT reconciler.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Store last values and the sample covariance of the training columns.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Matrix,
         session: &Session,
@@ -19422,7 +19428,7 @@ impl MinTReconcilerForecaster {
 
 impl FittedMinTReconciler {
     /// Repeat last values, expand through `S` if needed, then covariance MinT.
-    pub fn forecast(
+    pub(crate) fn forecast(
         &self,
         h: usize,
         summing: &Matrix,
@@ -19480,22 +19486,22 @@ impl FittedMinTReconciler {
 /// [`MinTReconcilerForecaster`] (covariance weights) and
 /// [`WlsReconcilerForecaster`] (diagonal variances).
 #[derive(Clone, Debug, Default)]
-pub struct OlsReconcilerForecaster;
+pub(crate) struct OlsReconcilerForecaster;
 
 /// Fitted OLS hierarchy.
 #[derive(Clone, Debug)]
-pub struct FittedOlsReconciler {
+pub(crate) struct FittedOlsReconciler {
     last: Vector,
 }
 
 impl OlsReconcilerForecaster {
     /// Empty OLS reconciler.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Store last node values.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Matrix,
         session: &Session,
@@ -19515,7 +19521,7 @@ impl OlsReconcilerForecaster {
 
 impl FittedOlsReconciler {
     /// Repeat last values, expand through `S` if needed, then OLS reconcile.
-    pub fn forecast(
+    pub(crate) fn forecast(
         &self,
         h: usize,
         summing: &Matrix,
@@ -19547,22 +19553,22 @@ impl FittedOlsReconciler {
 /// Distinct from [`reconcile_top_down`] (structural \(S\)-row weights).
 /// Node count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct TopDownReconcilerForecaster;
+pub(crate) struct TopDownReconcilerForecaster;
 
 /// Fitted empirical top-down hierarchy.
 #[derive(Clone, Debug)]
-pub struct FittedTopDownReconciler {
+pub(crate) struct FittedTopDownReconciler {
     last: Vector,
 }
 
 impl TopDownReconcilerForecaster {
     /// Empty empirical top-down reconciler.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Store the last training row.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Matrix,
         session: &Session,
@@ -19582,7 +19588,7 @@ impl TopDownReconcilerForecaster {
 
 impl FittedTopDownReconciler {
     /// Allocate a last-value top through empirical bottom shares, then \(S\).
-    pub fn forecast(
+    pub(crate) fn forecast(
         &self,
         h: usize,
         summing: &Matrix,
@@ -19640,22 +19646,22 @@ impl FittedTopDownReconciler {
 /// Distinct from [`TopDownReconcilerForecaster`] (largest row-sum) and
 /// [`reconcile_bottom_up`] (basis rows). Node count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct MiddleOutReconcilerForecaster;
+pub(crate) struct MiddleOutReconcilerForecaster;
 
 /// Fitted middle-out hierarchy.
 #[derive(Clone, Debug)]
-pub struct FittedMiddleOutReconciler {
+pub(crate) struct FittedMiddleOutReconciler {
     last: Vector,
 }
 
 impl MiddleOutReconcilerForecaster {
     /// Empty middle-out reconciler.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Store the last training row.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Matrix,
         session: &Session,
@@ -19675,7 +19681,7 @@ impl MiddleOutReconcilerForecaster {
 
 impl FittedMiddleOutReconciler {
     /// Allocate the median-\(S\)-row last value through empirical bottom shares.
-    pub fn forecast(
+    pub(crate) fn forecast(
         &self,
         h: usize,
         summing: &Matrix,

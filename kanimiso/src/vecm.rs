@@ -15,19 +15,19 @@ use signlred::{Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified
 
 /// Johansen trace / max-eigen test (constant in the cointegrating relation).
 #[derive(Clone, Debug, Default)]
-pub struct Johansen {
+pub(crate) struct Johansen {
     /// Include an unrestricted intercept in \(\Delta Y\) (Case 3 / “c”).
     pub detrend: bool,
 }
 
 impl Johansen {
     /// Intercept-in-CE Johansen test.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { detrend: true }
     }
 
     /// Fit on an \(T \times K\) level series (columns are variables).
-    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedJohansen>> {
+    pub(crate) fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedJohansen>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, y, None, &ctx.policy);
         let (n, k) = y.shape();
@@ -176,7 +176,7 @@ impl Johansen {
 
 /// Fitted Johansen spectrum.
 #[derive(Clone, Debug)]
-pub struct FittedJohansen {
+pub(crate) struct FittedJohansen {
     /// \(\lambda_1 \ge \cdots \ge \lambda_K \in [0,1)\).
     pub eigenvalues: Vector,
     /// Trace statistic for \(H_0: r = 0,1,\ldots,K-1\).
@@ -198,7 +198,7 @@ pub struct FittedJohansen {
 
 impl FittedJohansen {
     /// Build a VECM of rank `r` from this spectrum (α, β, Π).
-    pub fn vecm(&self, r: usize, session: &Session) -> Result<Qualified<FittedVecm>> {
+    pub(crate) fn vecm(&self, r: usize, session: &Session) -> Result<Qualified<FittedVecm>> {
         let mut ctx = FitCtx::with_session(session.child("vecm"));
         let r = r.min(self.k);
         if r == 0 {
@@ -249,7 +249,7 @@ impl FittedJohansen {
 
 /// Vector error-correction model \(\Delta Y_t = \Pi Y_{t-1}\) (no short-run lags).
 #[derive(Clone, Debug)]
-pub struct Vecm {
+pub(crate) struct Vecm {
     /// Cointegrating rank.
     pub rank: usize,
 }
@@ -262,12 +262,12 @@ impl Default for Vecm {
 
 impl Vecm {
     /// VECM of the given rank.
-    pub fn new(rank: usize) -> Self {
+    pub(crate) fn new(rank: usize) -> Self {
         Self { rank }
     }
 
     /// Estimate Π via Johansen and keep the first `rank` relations.
-    pub fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedVecm>> {
+    pub(crate) fn fit(&self, y: &Matrix, session: &Session) -> Result<Qualified<FittedVecm>> {
         let j = Johansen::new().fit(y, session)?;
         let (inner, report) = j.into_parts();
         if self.rank > inner.suggested_rank {
@@ -303,7 +303,7 @@ impl Vecm {
 
 /// Fitted VECM (Π = αβ′, no short-run Γ lags).
 #[derive(Clone, Debug)]
-pub struct FittedVecm {
+pub(crate) struct FittedVecm {
     /// Cointegrating rank.
     pub rank: usize,
     /// Adjustment loadings \(K \times r\).
@@ -317,7 +317,7 @@ pub struct FittedVecm {
 
 impl FittedVecm {
     /// Iterate \(y_t = y_{t-1} + \Pi y_{t-1}\) for `h` steps.
-    pub fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn forecast(&self, h: usize, session: &Session) -> Result<Qualified<Matrix>> {
         let ctx = FitCtx::with_session(session.child("forecast"));
         let k = self.pi.nrows();
         let mut y = Vector::from_iter((0..k).map(|j| self.last.get(0, j)));

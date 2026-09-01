@@ -18,7 +18,7 @@ use signlred::{Issue, IssueCode, NumericalCompromise, Qualified, Result};
 
 /// Empirical / shrunk / robust covariance plus its location.
 #[derive(Clone, Debug)]
-pub struct FittedCovariance {
+pub(crate) struct FittedCovariance {
     /// Location (column means, or MCD centre).
     pub location: Vector,
     /// Covariance matrix (`p × p`).
@@ -31,7 +31,7 @@ pub struct FittedCovariance {
 
 impl FittedCovariance {
     /// Mahalanobis distances of the rows of `x` to `location`.
-    pub fn mahalanobis(&self, x: &Matrix) -> Vector {
+    pub(crate) fn mahalanobis(&self, x: &Matrix) -> Vector {
         let p = self.location.len().min(x.ncols());
         Vector::from_iter((0..x.nrows()).map(|i| {
             let mut d = Vector::zeros(p);
@@ -187,14 +187,14 @@ fn empirical_cov_mat(x: &Matrix, location: &Vector, mle: bool) -> (Mat<f64>, usi
 
 /// Maximum-likelihood empirical covariance (`1/n` Gram of centred rows).
 #[derive(Clone, Debug, Default)]
-pub struct EmpiricalCovariance {
+pub(crate) struct EmpiricalCovariance {
     /// If true, divide by `n` (MLE); else by `n-1`.
     pub assume_centered_mle: bool,
 }
 
 impl EmpiricalCovariance {
     /// MLE empirical covariance.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             assume_centered_mle: true,
         }
@@ -204,7 +204,7 @@ impl EmpiricalCovariance {
 impl FitUnsupervised for EmpiricalCovariance {
     type Fitted = FittedCovariance;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedCovariance>> {
@@ -228,11 +228,11 @@ fn shrink(s: &Mat<f64>, alpha: f64, mu: f64) -> Mat<f64> {
 
 /// Ledoit–Wolf linear shrinkage toward `μ I`.
 #[derive(Clone, Debug, Default)]
-pub struct LedoitWolf {}
+pub(crate) struct LedoitWolf {}
 
 impl LedoitWolf {
     /// Default Ledoit–Wolf estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {}
     }
 }
@@ -240,7 +240,7 @@ impl LedoitWolf {
 impl FitUnsupervised for LedoitWolf {
     type Fitted = FittedCovariance;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedCovariance>> {
@@ -291,7 +291,7 @@ impl FitUnsupervised for LedoitWolf {
 
 /// Fixed-intensity shrinkage \((1-\alpha)S+\alpha\mu I\) (sklearn `ShrunkCovariance`).
 #[derive(Clone, Debug)]
-pub struct ShrunkCovariance {
+pub(crate) struct ShrunkCovariance {
     /// Shrinkage intensity in `[0, 1]`.
     pub shrinkage: f64,
 }
@@ -304,7 +304,7 @@ impl Default for ShrunkCovariance {
 
 impl ShrunkCovariance {
     /// Shrinkage with the given `α`.
-    pub fn new(shrinkage: f64) -> Self {
+    pub(crate) fn new(shrinkage: f64) -> Self {
         Self { shrinkage }
     }
 }
@@ -312,7 +312,7 @@ impl ShrunkCovariance {
 impl FitUnsupervised for ShrunkCovariance {
     type Fitted = FittedCovariance;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedCovariance>> {
@@ -350,11 +350,11 @@ impl FitUnsupervised for ShrunkCovariance {
 
 /// Oracle approximating shrinkage (Chen, Wiesel, Hero).
 #[derive(Clone, Debug, Default)]
-pub struct Oas {}
+pub(crate) struct Oas {}
 
 impl Oas {
     /// Default OAS estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {}
     }
 }
@@ -362,7 +362,7 @@ impl Oas {
 impl FitUnsupervised for Oas {
     type Fitted = FittedCovariance;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedCovariance>> {
@@ -409,7 +409,7 @@ fn det_via_chol(cov: &Mat<f64>) -> Option<f64> {
 
 /// Minimum covariance determinant via random h-subset search plus one reweight.
 #[derive(Clone, Debug)]
-pub struct MinCovDet {
+pub(crate) struct MinCovDet {
     /// Number of random subsets.
     pub n_trials: usize,
     /// PRNG seed.
@@ -427,7 +427,7 @@ impl Default for MinCovDet {
 
 impl MinCovDet {
     /// MCD with the given trial count.
-    pub fn new(n_trials: usize) -> Self {
+    pub(crate) fn new(n_trials: usize) -> Self {
         Self { n_trials, seed: 0 }
     }
 }
@@ -468,7 +468,7 @@ fn subset_cov(x: &Matrix, idx: &[usize]) -> (Vector, Mat<f64>) {
 impl FitUnsupervised for MinCovDet {
     type Fitted = FittedCovariance;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedCovariance>> {
@@ -518,7 +518,7 @@ impl FitUnsupervised for MinCovDet {
 
 /// Graphical lasso: ℓ₁-penalized precision via proximal gradient (few iterations).
 #[derive(Clone, Debug)]
-pub struct GraphicalLasso {
+pub(crate) struct GraphicalLasso {
     /// Off-diagonal ℓ₁ penalty.
     pub alpha: f64,
     /// Proximal-gradient steps.
@@ -539,7 +539,7 @@ impl Default for GraphicalLasso {
 
 impl GraphicalLasso {
     /// Graphical lasso with penalty `alpha`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self {
             alpha,
             ..Self::default()
@@ -580,7 +580,7 @@ fn soft(z: f64, g: f64) -> f64 {
 impl FitUnsupervised for GraphicalLasso {
     type Fitted = FittedCovariance;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedCovariance>> {
@@ -658,7 +658,7 @@ impl FitUnsupervised for GraphicalLasso {
 
 /// Elliptic envelope: MinCovDet Mahalanobis with a contamination threshold.
 #[derive(Clone, Debug)]
-pub struct EllipticEnvelope {
+pub(crate) struct EllipticEnvelope {
     /// Expected outlier fraction in `(0, 0.5]`.
     pub contamination: f64,
     /// MCD trials.
@@ -679,7 +679,7 @@ impl Default for EllipticEnvelope {
 
 impl EllipticEnvelope {
     /// Envelope with the given contamination.
-    pub fn new(contamination: f64) -> Self {
+    pub(crate) fn new(contamination: f64) -> Self {
         Self {
             contamination,
             ..Self::default()
@@ -689,7 +689,7 @@ impl EllipticEnvelope {
 
 /// Fitted elliptic envelope.
 #[derive(Clone, Debug)]
-pub struct FittedEllipticEnvelope {
+pub(crate) struct FittedEllipticEnvelope {
     /// Robust covariance.
     pub cov: FittedCovariance,
     /// Mahalanobis cutoff (inlier if `d ≤ threshold`).
@@ -698,7 +698,7 @@ pub struct FittedEllipticEnvelope {
 
 impl FittedEllipticEnvelope {
     /// Mahalanobis scores (higher = more outlying).
-    pub fn scores(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn scores(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("score"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(self.cov.mahalanobis(x))
@@ -744,7 +744,7 @@ fn quantile(mut xs: Vec<f64>, q: f64) -> f64 {
 impl FitUnsupervised for EllipticEnvelope {
     type Fitted = FittedEllipticEnvelope;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedEllipticEnvelope>> {
@@ -798,7 +798,7 @@ impl FitUnsupervised for EllipticEnvelope {
 
 /// Cross-validated graphical lasso (held-out Gaussian log-likelihood).
 #[derive(Clone, Debug)]
-pub struct GraphicalLassoCV {
+pub(crate) struct GraphicalLassoCV {
     /// Candidate off-diagonal penalties.
     pub alphas: Vec<f64>,
     /// CV splitter.
@@ -816,7 +816,7 @@ impl Default for GraphicalLassoCV {
 
 impl GraphicalLassoCV {
     /// Grid over the given `alpha` values.
-    pub fn new(alphas: Vec<f64>) -> Self {
+    pub(crate) fn new(alphas: Vec<f64>) -> Self {
         Self {
             alphas,
             ..Self::default()
@@ -826,7 +826,7 @@ impl GraphicalLassoCV {
 
 /// Selected graphical lasso and the CV scores that justified it.
 #[derive(Clone, Debug)]
-pub struct FittedGraphicalLassoCV {
+pub(crate) struct FittedGraphicalLassoCV {
     /// Penalty with the highest held-out Gaussian log-likelihood.
     pub best_alpha: f64,
     /// Mean fold score of `best_alpha`.
@@ -883,7 +883,7 @@ fn glasso_loglik(prec: &Matrix, x: &Matrix, loc: &Vector) -> f64 {
 impl FitUnsupervised for GraphicalLassoCV {
     type Fitted = FittedGraphicalLassoCV;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedGraphicalLassoCV>> {

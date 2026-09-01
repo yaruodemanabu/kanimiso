@@ -13,7 +13,7 @@ use crate::validate::{inspect_classes, inspect_xy};
 use ojizou_san::Session;
 use signlred::{Issue, IssueCode, NumericalCompromise, Qualified, Result};
 
-pub use crate::tree::{AdaBoostAlgorithm, AdaBoostClassifier, FittedAdaBoost};
+pub(crate) use crate::tree::{AdaBoostAlgorithm, AdaBoostClassifier, FittedAdaBoost};
 
 fn take_rows(x: &Matrix, idx: &[usize]) -> Matrix {
     Matrix::from_fn(idx.len(), x.ncols(), |i, j| x.get(idx[i], j))
@@ -69,7 +69,7 @@ fn linear_pred(m: &FittedLinear, x: &Matrix) -> Vector {
 
 /// Soft-voting classifier: bootstrap copies of [`LogisticRegression`], average probabilities.
 #[derive(Clone, Debug)]
-pub struct VotingClassifier {
+pub(crate) struct VotingClassifier {
     /// Number of logistic voters.
     pub n_estimators: usize,
     /// PRNG seed for the bootstrap.
@@ -87,7 +87,7 @@ impl Default for VotingClassifier {
 
 impl VotingClassifier {
     /// `n` bootstrap logistic voters.
-    pub fn new(n_estimators: usize) -> Self {
+    pub(crate) fn new(n_estimators: usize) -> Self {
         Self {
             n_estimators,
             seed: 0,
@@ -97,7 +97,7 @@ impl VotingClassifier {
 
 /// Fitted voting classifier.
 #[derive(Clone, Debug)]
-pub struct FittedVotingClassifier {
+pub(crate) struct FittedVotingClassifier {
     /// Bootstrap logistic models.
     pub members: Vec<FittedLogistic>,
     /// Sorted training classes.
@@ -137,7 +137,7 @@ impl Predict for FittedVotingClassifier {
 impl Fit for VotingClassifier {
     type Fitted = FittedVotingClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -169,7 +169,7 @@ impl Fit for VotingClassifier {
 
 /// Averaging regressor of bootstrap [`LinearRegression`] models.
 #[derive(Clone, Debug)]
-pub struct VotingRegressor {
+pub(crate) struct VotingRegressor {
     /// Number of OLS voters.
     pub n_estimators: usize,
     /// PRNG seed.
@@ -187,7 +187,7 @@ impl Default for VotingRegressor {
 
 impl VotingRegressor {
     /// `n` bootstrap OLS voters.
-    pub fn new(n_estimators: usize) -> Self {
+    pub(crate) fn new(n_estimators: usize) -> Self {
         Self {
             n_estimators,
             seed: 0,
@@ -197,7 +197,7 @@ impl VotingRegressor {
 
 /// Fitted voting regressor.
 #[derive(Clone, Debug)]
-pub struct FittedVotingRegressor {
+pub(crate) struct FittedVotingRegressor {
     /// Bootstrap OLS models.
     pub members: Vec<FittedLinear>,
 }
@@ -225,7 +225,7 @@ impl Predict for FittedVotingRegressor {
 impl Fit for VotingRegressor {
     type Fitted = FittedVotingRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -252,7 +252,7 @@ impl Fit for VotingRegressor {
 
 /// Bagged [`LinearRegression`] (bootstrap aggregating).
 #[derive(Clone, Debug)]
-pub struct BaggingRegressor {
+pub(crate) struct BaggingRegressor {
     /// Number of bags.
     pub n_estimators: usize,
     /// PRNG seed.
@@ -270,7 +270,7 @@ impl Default for BaggingRegressor {
 
 impl BaggingRegressor {
     /// `n` bootstrap OLS bags.
-    pub fn new(n_estimators: usize) -> Self {
+    pub(crate) fn new(n_estimators: usize) -> Self {
         Self {
             n_estimators,
             seed: 0,
@@ -280,7 +280,7 @@ impl BaggingRegressor {
 
 /// Fitted bagging regressor (same representation as voting OLS).
 #[derive(Clone, Debug)]
-pub struct FittedBaggingRegressor {
+pub(crate) struct FittedBaggingRegressor {
     /// Bootstrap OLS models.
     pub members: Vec<FittedLinear>,
 }
@@ -298,7 +298,7 @@ impl Predict for FittedBaggingRegressor {
 impl Fit for BaggingRegressor {
     type Fitted = FittedBaggingRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -314,7 +314,7 @@ impl Fit for BaggingRegressor {
 
 /// Two [`LinearRegression`] bases + a meta OLS on out-of-fold predictions.
 #[derive(Clone, Debug)]
-pub struct StackingRegressor {
+pub(crate) struct StackingRegressor {
     /// If true, the second base is fit without an intercept (diversity).
     pub diverse_intercept: bool,
 }
@@ -329,14 +329,14 @@ impl Default for StackingRegressor {
 
 impl StackingRegressor {
     /// Default two-base stacker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted stacking regressor.
 #[derive(Clone, Debug)]
-pub struct FittedStackingRegressor {
+pub(crate) struct FittedStackingRegressor {
     /// First base (intercept on).
     pub base_a: FittedLinear,
     /// Second base (optionally intercept off).
@@ -361,7 +361,7 @@ impl Predict for FittedStackingRegressor {
 impl Fit for StackingRegressor {
     type Fitted = FittedStackingRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -458,7 +458,7 @@ impl Fit for StackingRegressor {
 
 /// Bagged [`LogisticRegression`] (bootstrap aggregating).
 #[derive(Clone, Debug)]
-pub struct BaggingClassifier {
+pub(crate) struct BaggingClassifier {
     /// Number of bags.
     pub n_estimators: usize,
     /// PRNG seed.
@@ -476,7 +476,7 @@ impl Default for BaggingClassifier {
 
 impl BaggingClassifier {
     /// `n` bootstrap logistic bags.
-    pub fn new(n_estimators: usize) -> Self {
+    pub(crate) fn new(n_estimators: usize) -> Self {
         Self {
             n_estimators,
             seed: 0,
@@ -486,7 +486,7 @@ impl BaggingClassifier {
 
 /// Fitted bagging classifier.
 #[derive(Clone, Debug)]
-pub struct FittedBaggingClassifier {
+pub(crate) struct FittedBaggingClassifier {
     /// Bootstrap logistic models.
     pub members: Vec<FittedLogistic>,
     /// Sorted training classes.
@@ -507,7 +507,7 @@ impl Predict for FittedBaggingClassifier {
 impl Fit for BaggingClassifier {
     type Fitted = FittedBaggingClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -526,7 +526,7 @@ impl Fit for BaggingClassifier {
 
 /// Two [`LogisticRegression`] bases + a meta logistic on hold-out scores.
 #[derive(Clone, Debug)]
-pub struct StackingClassifier {
+pub(crate) struct StackingClassifier {
     /// If true, the second base uses a larger ridge-like step cap via default logistic.
     pub diverse: bool,
 }
@@ -539,14 +539,14 @@ impl Default for StackingClassifier {
 
 impl StackingClassifier {
     /// Default two-base stacker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted stacking classifier.
 #[derive(Clone, Debug)]
-pub struct FittedStackingClassifier {
+pub(crate) struct FittedStackingClassifier {
     /// First base.
     pub base_a: FittedLogistic,
     /// Second base.
@@ -576,7 +576,7 @@ impl Predict for FittedStackingClassifier {
 impl Fit for StackingClassifier {
     type Fitted = FittedStackingClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -693,7 +693,7 @@ fn apply_feature_rotation(x: &Matrix, q: &Matrix) -> Matrix {
 /// Feature-group count is not identification `p`. When `p < 2` the rotation
 /// is the identity and is recorded as a compromise.
 #[derive(Clone, Debug)]
-pub struct RotationForest {
+pub(crate) struct RotationForest {
     /// Trees.
     pub n_estimators: usize,
     /// Tree depth.
@@ -714,14 +714,14 @@ impl Default for RotationForest {
 
 impl RotationForest {
     /// Default rotation forest.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted rotation forest.
 #[derive(Clone, Debug)]
-pub struct FittedRotationForest {
+pub(crate) struct FittedRotationForest {
     trees: Vec<crate::tree::FittedTreeClassifier>,
     rots: Vec<Matrix>,
     /// Fallback label.
@@ -731,7 +731,7 @@ pub struct FittedRotationForest {
 impl Fit for RotationForest {
     type Fitted = FittedRotationForest;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -835,7 +835,7 @@ impl Predict for FittedRotationForest {
 /// Feature-group count is not identification `p`. Inner CART trees that abort
 /// on vacuous constant predictions are skipped, not promoted.
 #[derive(Clone, Debug)]
-pub struct RotationForestRegressor {
+pub(crate) struct RotationForestRegressor {
     /// Trees. Not identification `p`.
     pub n_estimators: usize,
     /// Tree depth.
@@ -856,14 +856,14 @@ impl Default for RotationForestRegressor {
 
 impl RotationForestRegressor {
     /// Default rotation-forest regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted rotation-forest regressor.
 #[derive(Clone, Debug)]
-pub struct FittedRotationForestRegressor {
+pub(crate) struct FittedRotationForestRegressor {
     trees: Vec<crate::tree::FittedTreeRegressor>,
     rots: Vec<Matrix>,
     /// Fallback mean response.
@@ -873,7 +873,7 @@ pub struct FittedRotationForestRegressor {
 impl Fit for RotationForestRegressor {
     type Fitted = FittedRotationForestRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,

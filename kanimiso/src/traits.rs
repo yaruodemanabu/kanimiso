@@ -9,20 +9,18 @@ pub trait Fit {
     /// Fitted object stored on the estimator or returned.
     type Fitted;
     /// Fit and return a quality-qualified fitted model.
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session)
-        -> Result<Qualified<Self::Fitted>>;
+    ///
+    /// Batch fit does not mutate `self`. State updates belong on
+    /// [`PartialFit`].
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self::Fitted>>;
 }
 
 /// Unsupervised fit on `X` only.
 pub trait FitUnsupervised {
     /// Fitted object.
     type Fitted;
-    /// Fit on features alone.
-    fn fit_unsupervised(
-        &mut self,
-        x: &Matrix,
-        session: &Session,
-    ) -> Result<Qualified<Self::Fitted>>;
+    /// Fit on features alone. Does not mutate `self` (see [`Fit::fit`]).
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self::Fitted>>;
 }
 
 /// Predict from a fitted model.
@@ -58,6 +56,6 @@ pub trait PartialFit {
 pub trait FitSeries {
     /// Fitted object.
     type Fitted;
-    /// Fit on a univariate series.
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<Self::Fitted>>;
+    /// Fit on a univariate series. Does not mutate `self` (see [`Fit::fit`]).
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<Self::Fitted>>;
 }

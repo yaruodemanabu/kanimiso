@@ -14,7 +14,7 @@ use signlred::{Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified
 
 /// Batch variational LDA.
 #[derive(Clone, Debug)]
-pub struct LatentDirichletAllocation {
+pub(crate) struct LatentDirichletAllocation {
     /// Topics \(K\).
     pub n_topics: usize,
     /// Document-topic Dirichlet \(\alpha\).
@@ -41,7 +41,7 @@ impl Default for LatentDirichletAllocation {
 
 impl LatentDirichletAllocation {
     /// `k`-topic LDA.
-    pub fn new(n_topics: usize) -> Self {
+    pub(crate) fn new(n_topics: usize) -> Self {
         Self {
             n_topics,
             ..Self::default()
@@ -49,14 +49,14 @@ impl LatentDirichletAllocation {
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedLda>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedLda>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Fitted LDA (variational point).
 #[derive(Clone, Debug)]
-pub struct FittedLda {
+pub(crate) struct FittedLda {
     /// Topic-word Dirichlet means (`K` × `V`).
     pub components: Matrix,
     /// Document-topic means on the training corpus (`n` × `K`).
@@ -82,7 +82,7 @@ fn digamma(mut x: f64) -> f64 {
 
 impl FitUnsupervised for LatentDirichletAllocation {
     type Fitted = FittedLda;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedLda>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedLda>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let (n, v) = x.shape();

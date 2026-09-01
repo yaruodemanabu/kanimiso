@@ -16,7 +16,7 @@ use signlred::{
 
 /// Independent ridge regressor per column of `Y`.
 #[derive(Clone, Debug)]
-pub struct MultiOutputRegressor {
+pub(crate) struct MultiOutputRegressor {
     /// Shared ℓ₂ penalty.
     pub alpha: f64,
 }
@@ -29,13 +29,13 @@ impl Default for MultiOutputRegressor {
 
 impl MultiOutputRegressor {
     /// Multi-output ridge with the given `α`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self { alpha }
     }
 
     /// Fit one ridge per column of `y`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Matrix,
         session: &Session,
@@ -113,7 +113,7 @@ impl MultiOutputRegressor {
 
 /// Fitted independent ridges.
 #[derive(Clone, Debug)]
-pub struct FittedMultiOutput {
+pub(crate) struct FittedMultiOutput {
     /// One ridge per output column.
     pub models: Vec<FittedPenalized>,
     /// Number of output columns.
@@ -122,7 +122,11 @@ pub struct FittedMultiOutput {
 
 impl FittedMultiOutput {
     /// Predict an `n × n_outputs` matrix.
-    pub fn predict_matrix(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn predict_matrix(
+        &self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         let mut out = Matrix::zeros(x.nrows(), self.n_outputs);
         for (j, m) in self.models.iter().enumerate() {
@@ -141,7 +145,7 @@ impl FittedMultiOutput {
 
 /// Binary classifier chain: column `k` sees `X` plus predictions of `0..k-1`.
 #[derive(Clone, Debug)]
-pub struct ClassifierChain {
+pub(crate) struct ClassifierChain {
     /// Ridge classifier penalty.
     pub alpha: f64,
 }
@@ -154,13 +158,13 @@ impl Default for ClassifierChain {
 
 impl ClassifierChain {
     /// Chain with the given ridge `α`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self { alpha }
     }
 
     /// Fit on a binary `n × k` label matrix.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Matrix,
         session: &Session,
@@ -232,7 +236,7 @@ impl ClassifierChain {
 
 /// Fitted classifier chain.
 #[derive(Clone, Debug)]
-pub struct FittedClassifierChain {
+pub(crate) struct FittedClassifierChain {
     models: Vec<FittedRidgeClassifier>,
     /// Number of label columns.
     pub n_outputs: usize,
@@ -241,7 +245,11 @@ pub struct FittedClassifierChain {
 
 impl FittedClassifierChain {
     /// Sequential binary predictions (`n × k`).
-    pub fn predict_matrix(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn predict_matrix(
+        &self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         let mut prev = Matrix::zeros(x.nrows(), 0);
         let mut out = Matrix::zeros(x.nrows(), self.n_outputs);
@@ -271,7 +279,7 @@ impl FittedClassifierChain {
 
 /// Regressor chain: column `k` sees `X` plus predictions of `0..k-1`.
 #[derive(Clone, Debug)]
-pub struct RegressorChain {
+pub(crate) struct RegressorChain {
     /// Shared ridge `α`.
     pub alpha: f64,
 }
@@ -284,13 +292,13 @@ impl Default for RegressorChain {
 
 impl RegressorChain {
     /// Chain with the given ridge `α`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self { alpha }
     }
 
     /// Fit on an `n × k` target matrix.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Matrix,
         session: &Session,
@@ -351,7 +359,7 @@ impl RegressorChain {
 
 /// Fitted regressor chain.
 #[derive(Clone, Debug)]
-pub struct FittedRegressorChain {
+pub(crate) struct FittedRegressorChain {
     models: Vec<FittedPenalized>,
     /// Number of output columns.
     pub n_outputs: usize,
@@ -360,7 +368,11 @@ pub struct FittedRegressorChain {
 
 impl FittedRegressorChain {
     /// Sequential predictions (`n × k`).
-    pub fn predict_matrix(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn predict_matrix(
+        &self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         let mut prev = Matrix::zeros(x.nrows(), 0);
         let mut out = Matrix::zeros(x.nrows(), self.n_outputs);
@@ -394,7 +406,7 @@ impl FittedRegressorChain {
 /// A constant column is Misleading for that output only. Do not treat
 /// `n_outputs` as a linear-model parameter count.
 #[derive(Clone, Debug)]
-pub struct MultiOutputClassifier {
+pub(crate) struct MultiOutputClassifier {
     /// Shared ridge `α`.
     pub alpha: f64,
 }
@@ -407,13 +419,13 @@ impl Default for MultiOutputClassifier {
 
 impl MultiOutputClassifier {
     /// Multi-output ridge classifier with the given `α`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self { alpha }
     }
 
     /// Fit one binary ridge per column of `y`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Matrix,
         session: &Session,
@@ -487,7 +499,7 @@ impl MultiOutputClassifier {
 
 /// Fitted independent binary ridges.
 #[derive(Clone, Debug)]
-pub struct FittedMultiOutputClassifier {
+pub(crate) struct FittedMultiOutputClassifier {
     /// One ridge classifier per output column.
     pub models: Vec<FittedRidgeClassifier>,
     /// Number of output columns.
@@ -496,7 +508,11 @@ pub struct FittedMultiOutputClassifier {
 
 impl FittedMultiOutputClassifier {
     /// Predict an `n × n_outputs` label matrix.
-    pub fn predict_matrix(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn predict_matrix(
+        &self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         let mut out = Matrix::zeros(x.nrows(), self.n_outputs);
         for (j, m) in self.models.iter().enumerate() {

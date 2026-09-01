@@ -16,7 +16,7 @@ use signlred::{
 
 /// Recursive reduction: \(y_t \sim y_{t-1},\ldots,y_{t-p}\).
 #[derive(Clone, Debug)]
-pub struct RecursiveReducer {
+pub(crate) struct RecursiveReducer {
     /// Autoregressive order (window length).
     pub window: usize,
 }
@@ -29,14 +29,14 @@ impl Default for RecursiveReducer {
 
 impl RecursiveReducer {
     /// Reducer with lag window `p`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self { window }
     }
 }
 
 /// Fitted recursive reducer.
 #[derive(Clone, Debug)]
-pub struct FittedReducer {
+pub(crate) struct FittedReducer {
     /// Lag coefficients (oldest lag first).
     pub coef: Vector,
     /// Intercept.
@@ -48,7 +48,7 @@ pub struct FittedReducer {
 
 impl FittedReducer {
     /// Recursive `h`-step forecast from the last training window.
-    pub fn forecast(&self, horizon: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, horizon: usize, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         if horizon == 0 {
             return ctx.finish(Vector::zeros(0));
@@ -93,7 +93,7 @@ impl FittedReducer {
 
 impl FitSeries for RecursiveReducer {
     type Fitted = FittedReducer;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<FittedReducer>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedReducer>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let p = self.window.max(1);
         if y.len() <= p {
@@ -187,7 +187,7 @@ impl FitSeries for RecursiveReducer {
 
 /// Direct multi-horizon reduction: one lag-OLS per forecast step.
 #[derive(Clone, Debug)]
-pub struct DirectReducer {
+pub(crate) struct DirectReducer {
     /// Lag window.
     pub window: usize,
     /// Number of direct horizons to identify.
@@ -205,14 +205,14 @@ impl Default for DirectReducer {
 
 impl DirectReducer {
     /// Direct reducer with lag `window` and `horizon` models.
-    pub fn new(window: usize, horizon: usize) -> Self {
+    pub(crate) fn new(window: usize, horizon: usize) -> Self {
         Self { window, horizon }
     }
 }
 
 /// Fitted direct reducer.
 #[derive(Clone, Debug)]
-pub struct FittedDirectReducer {
+pub(crate) struct FittedDirectReducer {
     /// `(coef, intercept)` per horizon (1-based order).
     pub models: Vec<(Vector, f64)>,
     last: Vector,
@@ -222,7 +222,7 @@ pub struct FittedDirectReducer {
 
 impl FittedDirectReducer {
     /// Direct `h`-step forecast from the last training window (not recursive).
-    pub fn forecast(&self, horizon: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, horizon: usize, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         if horizon == 0 {
             return ctx.finish(Vector::zeros(0));
@@ -263,11 +263,7 @@ impl FittedDirectReducer {
 
 impl FitSeries for DirectReducer {
     type Fitted = FittedDirectReducer;
-    fn fit_series(
-        &mut self,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedDirectReducer>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedDirectReducer>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let p = self.window.max(1);
         let hmax = self.horizon.max(1);
@@ -368,7 +364,7 @@ impl FitSeries for DirectReducer {
 ///
 /// Horizon count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct DirRecReducer {
+pub(crate) struct DirRecReducer {
     /// Autoregressive order (window length).
     pub window: usize,
     /// Number of horizon-specific models.
@@ -386,14 +382,14 @@ impl Default for DirRecReducer {
 
 impl DirRecReducer {
     /// DirRec reducer with lag `window` and `horizon` models.
-    pub fn new(window: usize, horizon: usize) -> Self {
+    pub(crate) fn new(window: usize, horizon: usize) -> Self {
         Self { window, horizon }
     }
 }
 
 /// Fitted DirRec reducer.
 #[derive(Clone, Debug)]
-pub struct FittedDirRecReducer {
+pub(crate) struct FittedDirRecReducer {
     /// `(coef, intercept)` per horizon (1-based order).
     pub models: Vec<(Vector, f64)>,
     last: Vector,
@@ -404,7 +400,7 @@ pub struct FittedDirRecReducer {
 impl FittedDirRecReducer {
     /// DirRec `h`-step forecast: each step feeds the previous prediction
     /// into the lag window before the next horizon-specific model fires.
-    pub fn forecast(&self, horizon: usize, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn forecast(&self, horizon: usize, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("forecast"));
         if horizon == 0 {
             return ctx.finish(Vector::zeros(0));
@@ -450,11 +446,7 @@ impl FittedDirRecReducer {
 
 impl FitSeries for DirRecReducer {
     type Fitted = FittedDirRecReducer;
-    fn fit_series(
-        &mut self,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedDirRecReducer>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedDirRecReducer>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let p = self.window.max(1);
         let hmax = self.horizon.max(1);

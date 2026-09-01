@@ -14,7 +14,7 @@ use signlred::{
 
 /// RANSAC wrapper around OLS.
 #[derive(Clone, Debug)]
-pub struct RansacRegressor {
+pub(crate) struct RansacRegressor {
     /// Residual threshold for inliers.
     pub residual_threshold: f64,
     /// Number of random elemental subsets.
@@ -38,14 +38,14 @@ impl Default for RansacRegressor {
 
 impl RansacRegressor {
     /// Default RANSAC.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted RANSAC: OLS on the consensus set.
 #[derive(Clone, Debug)]
-pub struct FittedRansac {
+pub(crate) struct FittedRansac {
     /// Consensus OLS.
     pub model: FittedLinear,
     /// Inlier mask (1 = inlier).
@@ -56,12 +56,7 @@ pub struct FittedRansac {
 
 impl Fit for RansacRegressor {
     type Fitted = FittedRansac;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedRansac>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRansac>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         if ctx.report.contains(IssueCode::ConstantTarget) {
@@ -213,7 +208,7 @@ fn take_y(y: &Vector, idx: &[usize]) -> Vector {
 
 /// Theil–Sen pairwise-median slope (multivariate: median of elemental OLS).
 #[derive(Clone, Debug)]
-pub struct TheilSenRegressor {
+pub(crate) struct TheilSenRegressor {
     /// Max elemental subsets (all pairs when p=1 and n is small).
     pub max_subsets: usize,
     /// Seed.
@@ -231,14 +226,14 @@ impl Default for TheilSenRegressor {
 
 impl TheilSenRegressor {
     /// Default Theil–Sen.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted Theil–Sen.
 #[derive(Clone, Debug)]
-pub struct FittedTheilSen {
+pub(crate) struct FittedTheilSen {
     /// Median slopes.
     pub coef: Vector,
     /// Median intercept.
@@ -247,12 +242,7 @@ pub struct FittedTheilSen {
 
 impl Fit for TheilSenRegressor {
     type Fitted = FittedTheilSen;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedTheilSen>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedTheilSen>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let n = x.nrows();
@@ -360,7 +350,7 @@ fn median_of(xs: &mut [f64]) -> f64 {
 /// Feasible GLS: Ω supplied as a square n×n covariance, or estimated from OLS residuals
 /// as a diagonal of squared residuals (heteroscedastic WLS fallback).
 #[derive(Clone, Debug)]
-pub struct Gls {
+pub(crate) struct Gls {
     /// If true, prepend intercept.
     pub fit_intercept: bool,
 }
@@ -375,13 +365,13 @@ impl Default for Gls {
 
 impl Gls {
     /// Default GLS.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit with an explicit residual covariance `omega` (n×n, SPD).
-    pub fn fit_with_omega(
-        &mut self,
+    pub(crate) fn fit_with_omega(
+        &self,
         x: &Matrix,
         y: &Vector,
         omega: &faer::Mat<f64>,
@@ -496,12 +486,7 @@ impl Gls {
 
 impl Fit for Gls {
     type Fitted = FittedLinear;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedLinear>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLinear>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         // Feasible diagonal Ω = diag(e²) from a first OLS, floored.
@@ -534,7 +519,7 @@ impl Fit for Gls {
 
 /// Gamma GLM with log link (IRLS).
 #[derive(Clone, Debug)]
-pub struct GammaRegressor {
+pub(crate) struct GammaRegressor {
     /// ℓ₂ penalty.
     pub alpha: f64,
     /// Max IRLS iterations.
@@ -555,19 +540,14 @@ impl Default for GammaRegressor {
 
 impl GammaRegressor {
     /// Default Gamma GLM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for GammaRegressor {
     type Fitted = FittedLinear;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedLinear>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLinear>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         for (i, &yi) in y.as_slice().iter().enumerate() {
@@ -647,7 +627,7 @@ impl Fit for GammaRegressor {
 ///
 /// Variance \(\mu^3\). The IRLS working weight is \(1/\mu\).
 #[derive(Clone, Debug)]
-pub struct InverseGaussianRegressor {
+pub(crate) struct InverseGaussianRegressor {
     /// ℓ₂ penalty.
     pub alpha: f64,
     /// Max IRLS iterations.
@@ -668,19 +648,14 @@ impl Default for InverseGaussianRegressor {
 
 impl InverseGaussianRegressor {
     /// Default inverse-Gaussian GLM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for InverseGaussianRegressor {
     type Fitted = FittedLinear;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedLinear>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLinear>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         for (i, &yi) in y.as_slice().iter().enumerate() {
@@ -784,7 +759,7 @@ impl Fit for InverseGaussianRegressor {
 
 /// Orthogonal matching pursuit.
 #[derive(Clone, Debug)]
-pub struct OrthogonalMatchingPursuit {
+pub(crate) struct OrthogonalMatchingPursuit {
     /// Number of non-zero coefficients.
     pub n_nonzero: usize,
 }
@@ -797,14 +772,14 @@ impl Default for OrthogonalMatchingPursuit {
 
 impl OrthogonalMatchingPursuit {
     /// OMP with `k` active columns.
-    pub fn new(n_nonzero: usize) -> Self {
+    pub(crate) fn new(n_nonzero: usize) -> Self {
         Self { n_nonzero }
     }
 }
 
 /// Fitted OMP.
 #[derive(Clone, Debug)]
-pub struct FittedOmp {
+pub(crate) struct FittedOmp {
     /// Sparse slopes (unselected = 0).
     pub coef: Vector,
     /// Intercept (training y mean).
@@ -815,7 +790,7 @@ pub struct FittedOmp {
 
 impl Fit for OrthogonalMatchingPursuit {
     type Fitted = FittedOmp;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedOmp>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedOmp>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let (xc, xmean) = x.centered();
@@ -899,7 +874,7 @@ impl Predict for FittedOmp {
 /// Inner weighted OLS issues that would abort a valid M-step
 /// (`NearSingular`, `ResidualTooLarge`) are not promoted.
 #[derive(Clone, Debug)]
-pub struct Rlm {
+pub(crate) struct Rlm {
     /// Huber cutoff in residual MAD units.
     pub k: f64,
     /// IRLS iteration cap.
@@ -917,14 +892,14 @@ impl Default for Rlm {
 
 impl Rlm {
     /// Default Huber RLM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted robust slopes.
 #[derive(Clone, Debug)]
-pub struct FittedRlm {
+pub(crate) struct FittedRlm {
     /// Slopes.
     pub coef: Vector,
     /// Intercept.
@@ -933,7 +908,7 @@ pub struct FittedRlm {
 
 impl Fit for Rlm {
     type Fitted = FittedRlm;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
         let k = if self.k.is_finite() && self.k > 0.0 {
             self.k
         } else {
@@ -1055,7 +1030,7 @@ fn rlm_irls(
 ///
 /// Cutoff \(k\) is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct HuberT {
+pub(crate) struct HuberT {
     /// Huber cutoff in residual MAD units.
     pub k: f64,
     /// IRLS iteration cap.
@@ -1073,14 +1048,14 @@ impl Default for HuberT {
 
 impl HuberT {
     /// Default Huber *T*.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for HuberT {
     type Fitted = FittedRlm;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
         let k = if self.k.is_finite() && self.k > 0.0 {
             self.k
         } else {
@@ -1103,7 +1078,7 @@ impl Fit for HuberT {
 ///
 /// Tuning \(c\) is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct TukeyBiweight {
+pub(crate) struct TukeyBiweight {
     /// Rejection cutoff in residual MAD units.
     pub c: f64,
     /// IRLS iteration cap.
@@ -1121,14 +1096,14 @@ impl Default for TukeyBiweight {
 
 impl TukeyBiweight {
     /// Default Tukey biweight.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for TukeyBiweight {
     type Fitted = FittedRlm;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
         let c = if self.c.is_finite() && self.c > 0.0 {
             self.c
         } else {
@@ -1150,7 +1125,7 @@ impl Fit for TukeyBiweight {
 ///
 /// Knots \((a,b,c)\) are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Hampel {
+pub(crate) struct Hampel {
     /// First knot (full efficiency).
     pub a: f64,
     /// Second knot (linear taper start).
@@ -1174,14 +1149,14 @@ impl Default for Hampel {
 
 impl Hampel {
     /// Default Hampel knots.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for Hampel {
     type Fitted = FittedRlm;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
         let a = if self.a.is_finite() && self.a > 0.0 {
             self.a
         } else {
@@ -1216,7 +1191,7 @@ impl Fit for Hampel {
 ///
 /// Tuning \(a\) is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct AndrewWave {
+pub(crate) struct AndrewWave {
     /// Sine period scale.
     pub a: f64,
     /// IRLS iteration cap.
@@ -1234,14 +1209,14 @@ impl Default for AndrewWave {
 
 impl AndrewWave {
     /// Default Andrew wave.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for AndrewWave {
     type Fitted = FittedRlm;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
         let a = if self.a.is_finite() && self.a > 0.0 {
             self.a
         } else {
@@ -1265,7 +1240,7 @@ impl Fit for AndrewWave {
 ///
 /// Decay \(a\) is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RamsayE {
+pub(crate) struct RamsayE {
     /// Exponential decay.
     pub a: f64,
     /// IRLS iteration cap.
@@ -1283,14 +1258,14 @@ impl Default for RamsayE {
 
 impl RamsayE {
     /// Default Ramsay *E*.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for RamsayE {
     type Fitted = FittedRlm;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRlm>> {
         let a = if self.a.is_finite() && self.a > 0.0 {
             self.a
         } else {
@@ -1367,22 +1342,42 @@ mod tests {
         let ht = HuberT::new()
             .fit(&x, &y, &Session::new("ht", "fit"))
             .expect("hubert");
-        assert!((ht.value.coef[0] - 2.0).abs() < 0.3, "ht={}", ht.value.coef[0]);
+        assert!(
+            (ht.value.coef[0] - 2.0).abs() < 0.3,
+            "ht={}",
+            ht.value.coef[0]
+        );
         let tb = TukeyBiweight::new()
             .fit(&x, &y, &Session::new("tb", "fit"))
             .expect("tukeybw");
-        assert!((tb.value.coef[0] - 2.0).abs() < 0.35, "tb={}", tb.value.coef[0]);
+        assert!(
+            (tb.value.coef[0] - 2.0).abs() < 0.35,
+            "tb={}",
+            tb.value.coef[0]
+        );
         let hp = Hampel::new()
             .fit(&x, &y, &Session::new("hp", "fit"))
             .expect("hampel");
-        assert!((hp.value.coef[0] - 2.0).abs() < 0.35, "hp={}", hp.value.coef[0]);
+        assert!(
+            (hp.value.coef[0] - 2.0).abs() < 0.35,
+            "hp={}",
+            hp.value.coef[0]
+        );
         let aw = AndrewWave::new()
             .fit(&x, &y, &Session::new("aw", "fit"))
             .expect("andrew");
-        assert!((aw.value.coef[0] - 2.0).abs() < 0.4, "aw={}", aw.value.coef[0]);
+        assert!(
+            (aw.value.coef[0] - 2.0).abs() < 0.4,
+            "aw={}",
+            aw.value.coef[0]
+        );
         let re = RamsayE::new()
             .fit(&x, &y, &Session::new("re", "fit"))
             .expect("ramsaye");
-        assert!((re.value.coef[0] - 2.0).abs() < 0.4, "re={}", re.value.coef[0]);
+        assert!(
+            (re.value.coef[0] - 2.0).abs() < 0.4,
+            "re={}",
+            re.value.coef[0]
+        );
     }
 }

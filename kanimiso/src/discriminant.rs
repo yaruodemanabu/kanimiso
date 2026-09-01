@@ -151,7 +151,7 @@ fn logdet_spd(ctx: &mut FitCtx, a: &Mat<f64>) -> f64 {
 
 /// Linear discriminant analysis (shared pooled covariance).
 #[derive(Clone, Debug)]
-pub struct LinearDiscriminantAnalysis {
+pub(crate) struct LinearDiscriminantAnalysis {
     /// Shrinkage toward a scaled identity on the pooled covariance (`0` = none).
     pub shrinkage: f64,
 }
@@ -164,14 +164,14 @@ impl Default for LinearDiscriminantAnalysis {
 
 impl LinearDiscriminantAnalysis {
     /// Unshrunk LDA.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted LDA.
 #[derive(Clone, Debug)]
-pub struct FittedLda {
+pub(crate) struct FittedLda {
     /// Sorted class labels.
     pub classes: Vec<i64>,
     /// Class means (`K × p`).
@@ -247,7 +247,7 @@ impl Predict for FittedLda {
 
 impl Fit for LinearDiscriminantAnalysis {
     type Fitted = FittedLda;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLda>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLda>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -399,7 +399,7 @@ impl Fit for LinearDiscriminantAnalysis {
 
 /// Quadratic discriminant analysis (per-class covariance).
 #[derive(Clone, Debug)]
-pub struct QuadraticDiscriminantAnalysis {
+pub(crate) struct QuadraticDiscriminantAnalysis {
     /// Diagonal jitter added to every class covariance.
     pub reg_param: f64,
 }
@@ -412,14 +412,14 @@ impl Default for QuadraticDiscriminantAnalysis {
 
 impl QuadraticDiscriminantAnalysis {
     /// Unregularized QDA.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted QDA.
 #[derive(Clone, Debug)]
-pub struct FittedQda {
+pub(crate) struct FittedQda {
     /// Sorted class labels.
     pub classes: Vec<i64>,
     /// Class means (`K × p`).
@@ -477,7 +477,7 @@ impl Predict for FittedQda {
 
 impl Fit for QuadraticDiscriminantAnalysis {
     type Fitted = FittedQda;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedQda>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedQda>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);

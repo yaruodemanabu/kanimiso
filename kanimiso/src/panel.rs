@@ -14,7 +14,9 @@ use crate::stats::HypothesisTest;
 use crate::traits::Predict;
 use crate::validate::inspect_xy;
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result, Severity};
+use signlred::{
+    Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result, Severity,
+};
 use std::collections::BTreeMap;
 
 fn group_sizes(groups: &Vector) -> BTreeMap<i64, usize> {
@@ -110,7 +112,7 @@ fn empty_panel(p: usize) -> FittedPanel {
 
 /// Fitted panel slopes (within, between, or first-difference).
 #[derive(Clone, Debug)]
-pub struct FittedPanel {
+pub(crate) struct FittedPanel {
     /// Slopes on the transformed design.
     pub coef: Vector,
     /// Intercept (0 for within / first-difference).
@@ -146,17 +148,17 @@ impl Predict for FittedPanel {
 
 /// Within (fixed-effects) OLS: \(y_{it}-\bar y_i\) on \(X_{it}-\bar X_i\).
 #[derive(Clone, Debug, Default)]
-pub struct PanelFe;
+pub(crate) struct PanelFe;
 
 impl PanelFe {
     /// Default within estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit `y | groups` after group demeaning. No intercept is identified.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -235,22 +237,22 @@ impl PanelFe {
 
 /// Between OLS: group means \(\bar y_g\) on \(\bar X_g\).
 #[derive(Clone, Debug, Default)]
-pub struct BetweenOls {
+pub(crate) struct BetweenOls {
     /// Include an intercept on the group-mean regression.
     pub fit_intercept: bool,
 }
 
 impl BetweenOls {
     /// Intercept-on between estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             fit_intercept: true,
         }
     }
 
     /// Fit on the group-mean cross-section.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -327,17 +329,17 @@ impl BetweenOls {
 
 /// First-difference OLS: \(\Delta y\) on \(\Delta X\) within group (row order = time).
 #[derive(Clone, Debug, Default)]
-pub struct FirstDifferenceOls;
+pub(crate) struct FirstDifferenceOls;
 
 impl FirstDifferenceOls {
     /// Default first-difference estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on consecutive within-group differences.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -447,22 +449,22 @@ impl FirstDifferenceOls {
 
 /// Pooled OLS: ignore the group structure except for a thin-panel warning.
 #[derive(Clone, Debug, Default)]
-pub struct PooledOls {
+pub(crate) struct PooledOls {
     /// Include an intercept.
     pub fit_intercept: bool,
 }
 
 impl PooledOls {
     /// Intercept-on pooled OLS.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             fit_intercept: true,
         }
     }
 
     /// Fit pooled OLS of `y` on `X`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -517,17 +519,17 @@ impl PooledOls {
 /// `θ` is computed from within and between residual scales. A collapsed
 /// `σ_α²` is a warning that the GLS is pooled OLS.
 #[derive(Clone, Debug, Default)]
-pub struct RandomEffects;
+pub(crate) struct RandomEffects;
 
 impl RandomEffects {
     /// Default RE estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit quasi-demeaned GLS.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -641,7 +643,7 @@ impl RandomEffects {
 /// Covariance of the difference is approximated by a residual-scale
 /// diagonal; that is recorded as a compromise. A large statistic is
 /// [`IssueCode::CausalClaimUnidentified`] (RE is inconsistent if FE differs).
-pub fn hausman(
+pub(crate) fn hausman(
     x: &Matrix,
     y: &Vector,
     groups: &Vector,
@@ -713,17 +715,17 @@ pub fn hausman(
 /// with collapsed instrument \(y_{i,t-2}\) (and \(\Delta x\)). Group count is
 /// **not** passed as identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct ArellanoBondGmm;
+pub(crate) struct ArellanoBondGmm;
 
 impl ArellanoBondGmm {
     /// Default collapsed Arellano–Bond.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on rows sorted by group then time.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -833,7 +835,7 @@ impl ArellanoBondGmm {
 
 /// Fitted Arellano–Bond.
 #[derive(Clone, Debug)]
-pub struct FittedArellanoBond {
+pub(crate) struct FittedArellanoBond {
     /// Coefficient on \(\Delta y_{i,t-1}\).
     pub rho: f64,
     /// Slopes on \(\Delta X\).
@@ -848,17 +850,17 @@ pub struct FittedArellanoBond {
 ///
 /// Level instruments are `Δy_{i,t-1}`. Group count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct BlundellBond;
+pub(crate) struct BlundellBond;
 
 impl BlundellBond {
     /// Default collapsed system GMM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on rows sorted by group then time.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -979,7 +981,7 @@ impl BlundellBond {
 
 /// Fitted Blundell–Bond.
 #[derive(Clone, Debug)]
-pub struct FittedBlundellBond {
+pub(crate) struct FittedBlundellBond {
     /// Coefficient on the lagged level / difference of `y`.
     pub rho: f64,
     /// Slopes on `X`.
@@ -994,17 +996,17 @@ pub struct FittedBlundellBond {
 ///
 /// Group count is not identification `p`. Delegates to [`ArellanoBondGmm`].
 #[derive(Clone, Debug, Default)]
-pub struct DifferenceGmm;
+pub(crate) struct DifferenceGmm;
 
 impl DifferenceGmm {
     /// Default collapsed first-difference GMM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on rows sorted by group then time.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -1056,17 +1058,17 @@ impl DifferenceGmm {
 ///
 /// Group count is not identification `p`. Delegates to [`BlundellBond`].
 #[derive(Clone, Debug, Default)]
-pub struct SystemGmm;
+pub(crate) struct SystemGmm;
 
 impl SystemGmm {
     /// Default collapsed system GMM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on rows sorted by group then time.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -1119,11 +1121,11 @@ impl SystemGmm {
 /// Time count is not identification `p`. Cross-section OLS at each time uses a
 /// scratch report; aborting inner codes are not promoted.
 #[derive(Clone, Debug, Default)]
-pub struct FamaMacBeth;
+pub(crate) struct FamaMacBeth;
 
 /// Averaged Fama–MacBeth slopes.
 #[derive(Clone, Debug)]
-pub struct FittedFamaMacBeth {
+pub(crate) struct FittedFamaMacBeth {
     /// Mean cross-sectional slopes.
     pub coef: Vector,
     /// Mean cross-sectional intercept.
@@ -1138,13 +1140,13 @@ pub struct FittedFamaMacBeth {
 
 impl FamaMacBeth {
     /// Default two-pass estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit `y ~ 1 + X` in each time slice, then average the slopes.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         times: &Vector,
@@ -1211,9 +1213,9 @@ impl FamaMacBeth {
                 continue;
             }
             intercepts.push(sol.as_slice().first().copied().unwrap_or(0.0));
-            betas.push(Vector::from_iter((0..p).map(|j| {
-                sol.as_slice().get(j + 1).copied().unwrap_or(0.0)
-            })));
+            betas.push(Vector::from_iter(
+                (0..p).map(|j| sol.as_slice().get(j + 1).copied().unwrap_or(0.0)),
+            ));
             n_cs += rows.len() as f64;
         }
         let n_times = betas.len();
@@ -1232,18 +1234,21 @@ impl FamaMacBeth {
             });
         }
         let intercept = intercepts.iter().sum::<f64>() / n_times as f64;
-        let coef = Vector::from_iter((0..p).map(|j| {
-            betas.iter().map(|b| b[j]).sum::<f64>() / n_times as f64
-        }));
+        let coef = Vector::from_iter(
+            (0..p).map(|j| betas.iter().map(|b| b[j]).sum::<f64>() / n_times as f64),
+        );
         let se = Vector::from_iter((0..p).map(|j| {
             if n_times < 2 {
                 return f64::NAN;
             }
             let m = coef[j];
-            let ss: f64 = betas.iter().map(|b| {
-                let d = b[j] - m;
-                d * d
-            }).sum();
+            let ss: f64 = betas
+                .iter()
+                .map(|b| {
+                    let d = b[j] - m;
+                    d * d
+                })
+                .sum();
             (ss / (n_times as f64 - 1.0)).sqrt() / (n_times as f64).sqrt()
         }));
         ctx.finish(FittedFamaMacBeth {
@@ -1260,17 +1265,17 @@ impl FamaMacBeth {
 ///
 /// Group count is not identification `p`. Delegates to [`PanelFe`].
 #[derive(Clone, Debug, Default)]
-pub struct AbsorbingLs;
+pub(crate) struct AbsorbingLs;
 
 impl AbsorbingLs {
     /// Default one-way absorbed FE.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit after absorbing `groups`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -1324,17 +1329,17 @@ impl AbsorbingLs {
 ///
 /// Group and time counts are not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct TwoWayFe;
+pub(crate) struct TwoWayFe;
 
 impl TwoWayFe {
     /// Default two-way within estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit after entity and time demeaning.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -1471,17 +1476,17 @@ impl TwoWayFe {
 ///
 /// Group count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct Mundlak;
+pub(crate) struct Mundlak;
 
 impl Mundlak {
     /// Default Mundlak device.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit \(y \sim 1 + X + \bar X_g\).
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -1552,9 +1557,8 @@ impl Mundlak {
             ctx.push(issue.clone());
         }
         let intercept = beta.as_slice().first().copied().unwrap_or(0.0);
-        let coef = Vector::from_iter((0..p).map(|j| {
-            beta.as_slice().get(j + 1).copied().unwrap_or(0.0)
-        }));
+        let coef =
+            Vector::from_iter((0..p).map(|j| beta.as_slice().get(j + 1).copied().unwrap_or(0.0)));
         ctx.finish(FittedPanel {
             coef,
             intercept,
@@ -1569,17 +1573,17 @@ impl Mundlak {
 ///
 /// Group count is not identification `p`. Not the full HT IV system.
 #[derive(Clone, Debug, Default)]
-pub struct HausmanTaylor;
+pub(crate) struct HausmanTaylor;
 
 impl HausmanTaylor {
     /// Default Hausman–Taylor sketch.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit within slopes, then a pooled residual intercept.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -1655,17 +1659,17 @@ impl HausmanTaylor {
 ///
 /// Time count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct ClusteredFamaMacBeth;
+pub(crate) struct ClusteredFamaMacBeth;
 
 impl ClusteredFamaMacBeth {
     /// Default clustered two-pass estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit `y ~ 1 + X` in each time slice; SE is lag-1 HAC of the slopes.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         times: &Vector,
@@ -1724,9 +1728,9 @@ impl ClusteredFamaMacBeth {
                 continue;
             }
             intercepts.push(sol.as_slice().first().copied().unwrap_or(0.0));
-            betas.push(Vector::from_iter((0..p).map(|j| {
-                sol.as_slice().get(j + 1).copied().unwrap_or(0.0)
-            })));
+            betas.push(Vector::from_iter(
+                (0..p).map(|j| sol.as_slice().get(j + 1).copied().unwrap_or(0.0)),
+            ));
             n_cs += rows.len() as f64;
         }
         let n_times = betas.len();
@@ -1745,9 +1749,9 @@ impl ClusteredFamaMacBeth {
             });
         }
         let intercept = intercepts.iter().sum::<f64>() / n_times as f64;
-        let coef = Vector::from_iter((0..p).map(|j| {
-            betas.iter().map(|b| b[j]).sum::<f64>() / n_times as f64
-        }));
+        let coef = Vector::from_iter(
+            (0..p).map(|j| betas.iter().map(|b| b[j]).sum::<f64>() / n_times as f64),
+        );
         let se = Vector::from_iter((0..p).map(|j| {
             if n_times < 2 {
                 return f64::NAN;
@@ -1781,17 +1785,17 @@ impl ClusteredFamaMacBeth {
 ///
 /// Group count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct Between2Sls;
+pub(crate) struct Between2Sls;
 
 impl Between2Sls {
     /// Default between IV.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit \(\bar y_g\) on \(\widehat{\bar X}_g(Z)\).
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         z: &Matrix,
@@ -1898,9 +1902,9 @@ impl Between2Sls {
         }
         ctx.finish(FittedPanel {
             intercept: beta.as_slice().first().copied().unwrap_or(0.0),
-            coef: Vector::from_iter((0..p).map(|j| {
-                beta.as_slice().get(j + 1).copied().unwrap_or(0.0)
-            })),
+            coef: Vector::from_iter(
+                (0..p).map(|j| beta.as_slice().get(j + 1).copied().unwrap_or(0.0)),
+            ),
             n_groups: g,
             n_eff: g,
         })
@@ -1911,17 +1915,17 @@ impl Between2Sls {
 ///
 /// Group count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct FirstDifferenceIv;
+pub(crate) struct FirstDifferenceIv;
 
 impl FirstDifferenceIv {
     /// Default first-difference IV.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit \(\Delta y\) on \(\widehat{\Delta X}(\Delta Z)\) within group.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         z: &Matrix,
@@ -1954,8 +1958,16 @@ impl FirstDifferenceIv {
                 continue;
             }
             yd.push(y[i] - y[i - 1]);
-            xd.push((0..p).map(|j| x.get(i, j) - x.get(i - 1, j)).collect::<Vec<_>>());
-            zd.push((0..q).map(|j| z.get(i, j) - z.get(i - 1, j)).collect::<Vec<_>>());
+            xd.push(
+                (0..p)
+                    .map(|j| x.get(i, j) - x.get(i - 1, j))
+                    .collect::<Vec<_>>(),
+            );
+            zd.push(
+                (0..q)
+                    .map(|j| z.get(i, j) - z.get(i - 1, j))
+                    .collect::<Vec<_>>(),
+            );
         }
         if xd.is_empty() {
             ctx.push(
@@ -2051,17 +2063,17 @@ impl FirstDifferenceIv {
 ///
 /// Group count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct Pooled2Sls;
+pub(crate) struct Pooled2Sls;
 
 impl Pooled2Sls {
     /// Default pooled IV.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit \(y\) on \(\widehat X(Z)\) with an intercept.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         z: &Matrix,
@@ -2147,9 +2159,9 @@ impl Pooled2Sls {
         }
         ctx.finish(FittedPanel {
             intercept: beta.as_slice().first().copied().unwrap_or(0.0),
-            coef: Vector::from_iter((0..p).map(|j| {
-                beta.as_slice().get(j + 1).copied().unwrap_or(0.0)
-            })),
+            coef: Vector::from_iter(
+                (0..p).map(|j| beta.as_slice().get(j + 1).copied().unwrap_or(0.0)),
+            ),
             n_groups: 1,
             n_eff: n,
         })
@@ -2205,7 +2217,11 @@ fn twosls_stages(
             ctx.push(issue.clone());
         }
     }
-    let design = if intercept { xhat.with_intercept() } else { xhat };
+    let design = if intercept {
+        xhat.with_intercept()
+    } else {
+        xhat
+    };
     let y_use = Vector::from_iter((0..n).map(|i| y[i]));
     let mut scratch = signlred::Report::new(tag, "ss");
     let beta = least_squares(&mut scratch, &design, &y_use, policy);
@@ -2220,19 +2236,19 @@ fn twosls_stages(
 
 /// Named between IV (linearmodels `BetweenIV`).
 #[derive(Clone, Debug, Default)]
-pub struct BetweenIv {
+pub(crate) struct BetweenIv {
     inner: Between2Sls,
 }
 
 impl BetweenIv {
     /// Default between IV.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit group-mean 2SLS.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         z: &Matrix,
@@ -2247,17 +2263,17 @@ impl BetweenIv {
 ///
 /// Group count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct Absorbing2Sls;
+pub(crate) struct Absorbing2Sls;
 
 impl Absorbing2Sls {
     /// Default within IV.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit 2SLS after group demeaning (no intercept).
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         z: &Matrix,
@@ -2301,10 +2317,18 @@ impl Absorbing2Sls {
             let g = g_n[i].round() as i64;
             yw[i] = y_n[i] - my.get(&g).copied().unwrap_or(0.0);
             for j in 0..p {
-                xw.set(i, j, x_n.get(i, j) - mx.get(&g).map(|v| v[j]).unwrap_or(0.0));
+                xw.set(
+                    i,
+                    j,
+                    x_n.get(i, j) - mx.get(&g).map(|v| v[j]).unwrap_or(0.0),
+                );
             }
             for j in 0..q {
-                zw.set(i, j, z_n.get(i, j) - mz.get(&g).map(|v| v[j]).unwrap_or(0.0));
+                zw.set(
+                    i,
+                    j,
+                    z_n.get(i, j) - mz.get(&g).map(|v| v[j]).unwrap_or(0.0),
+                );
             }
         }
         if yw.std() <= ctx.policy.near_zero_variance {
@@ -2356,7 +2380,7 @@ impl Absorbing2Sls {
 ///
 /// Group count is not identification `p`. θ is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RandomEffectsIv {
+pub(crate) struct RandomEffectsIv {
     /// Quasi-demeaning weight in \([0,1]\).
     pub theta: f64,
 }
@@ -2369,13 +2393,13 @@ impl Default for RandomEffectsIv {
 
 impl RandomEffectsIv {
     /// RE-IV with quasi-demeaning `theta`.
-    pub fn new(theta: f64) -> Self {
+    pub(crate) fn new(theta: f64) -> Self {
         Self { theta }
     }
 
     /// Fit 2SLS on \(y-\theta\bar y_g\), \(X-\theta\bar X_g\), \(Z-\theta\bar Z_g\).
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         z: &Matrix,
@@ -2457,9 +2481,9 @@ impl RandomEffectsIv {
         match twosls_stages(&xq, &yq, &zq, true, &policy, "reiv", &mut ctx) {
             Some(beta) => ctx.finish(FittedPanel {
                 intercept: beta.as_slice().first().copied().unwrap_or(0.0),
-                coef: Vector::from_iter((0..p).map(|j| {
-                    beta.as_slice().get(j + 1).copied().unwrap_or(0.0)
-                })),
+                coef: Vector::from_iter(
+                    (0..p).map(|j| beta.as_slice().get(j + 1).copied().unwrap_or(0.0)),
+                ),
                 n_groups: sizes.len(),
                 n_eff: n,
             }),
@@ -2479,17 +2503,17 @@ impl RandomEffectsIv {
 ///
 /// Group and time counts are not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct Chamberlain;
+pub(crate) struct Chamberlain;
 
 impl Chamberlain {
     /// Default two-way Mundlak device.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit pooled OLS on \((1, X, \bar X_g, \bar X_t)\).
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -2562,9 +2586,9 @@ impl Chamberlain {
         }
         ctx.finish(FittedPanel {
             intercept: beta.as_slice().first().copied().unwrap_or(0.0),
-            coef: Vector::from_iter((0..p).map(|j| {
-                beta.as_slice().get(j + 1).copied().unwrap_or(0.0)
-            })),
+            coef: Vector::from_iter(
+                (0..p).map(|j| beta.as_slice().get(j + 1).copied().unwrap_or(0.0)),
+            ),
             n_groups: gsz.len(),
             n_eff: n,
         })
@@ -2573,19 +2597,19 @@ impl Chamberlain {
 
 /// Named two-way Mundlak alias of [`Chamberlain`].
 #[derive(Clone, Debug, Default)]
-pub struct TwoWayMundlak {
+pub(crate) struct TwoWayMundlak {
     inner: Chamberlain,
 }
 
 impl TwoWayMundlak {
     /// Default two-way Mundlak.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit \(y\sim 1+X+\bar X_g+\bar X_t\).
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -2600,17 +2624,17 @@ impl TwoWayMundlak {
 ///
 /// Group count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct MeanGroup;
+pub(crate) struct MeanGroup;
 
 impl MeanGroup {
     /// Default mean-group OLS.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Average within-group OLS slopes (with intercept).
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -2696,17 +2720,17 @@ impl MeanGroup {
 /// Time and entity counts are not identification `p`. Point estimates match
 /// the two-pass average; SE come from entity-summed scores, not date HAC.
 #[derive(Clone, Debug, Default)]
-pub struct EntityClusteredFamaMacBeth;
+pub(crate) struct EntityClusteredFamaMacBeth;
 
 impl EntityClusteredFamaMacBeth {
     /// Default entity-clustered two-pass estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit `y ~ 1 + X` in each time slice; cluster the scores by `groups`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         times: &Vector,
@@ -2758,9 +2782,9 @@ impl EntityClusteredFamaMacBeth {
             let a = sol.as_slice().first().copied().unwrap_or(0.0);
             intercepts.push(a);
             alpha_t.insert(t, a);
-            betas.push(Vector::from_iter((0..p).map(|j| {
-                sol.as_slice().get(j + 1).copied().unwrap_or(0.0)
-            })));
+            betas.push(Vector::from_iter(
+                (0..p).map(|j| sol.as_slice().get(j + 1).copied().unwrap_or(0.0)),
+            ));
             n_cs += rows.len() as f64;
         }
         let n_times = betas.len();
@@ -2779,9 +2803,9 @@ impl EntityClusteredFamaMacBeth {
             });
         }
         let intercept = intercepts.iter().sum::<f64>() / n_times as f64;
-        let coef = Vector::from_iter((0..p).map(|j| {
-            betas.iter().map(|b| b[j]).sum::<f64>() / n_times as f64
-        }));
+        let coef = Vector::from_iter(
+            (0..p).map(|j| betas.iter().map(|b| b[j]).sum::<f64>() / n_times as f64),
+        );
         let mut scores: BTreeMap<i64, Vector> = BTreeMap::new();
         for i in 0..n {
             if !times[i].is_finite() || !groups[i].is_finite() {
@@ -2835,11 +2859,11 @@ impl EntityClusteredFamaMacBeth {
 /// Group / period counts are not identification `p`. The design is
 /// \(y\sim 1+D+T+D{\times}T\).
 #[derive(Clone, Debug, Default)]
-pub struct DiffInDiff;
+pub(crate) struct DiffInDiff;
 
 /// Fitted DiD interaction.
 #[derive(Clone, Debug)]
-pub struct FittedDiffInDiff {
+pub(crate) struct FittedDiffInDiff {
     /// \(\hat\tau\) on \(D\times T\).
     pub att: f64,
     /// Treat, post, and interaction slopes.
@@ -2850,12 +2874,12 @@ pub struct FittedDiffInDiff {
 
 impl DiffInDiff {
     /// Default 2×2 DiD.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// OLS of `y` on treat, post, and treat×post.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Vector,
         treat: &Vector,
@@ -2939,11 +2963,11 @@ impl DiffInDiff {
 /// Donor / pre-period counts are not identification `p`. Weights are
 /// projected onto the simplex after ISTA on the pre-period SSE.
 #[derive(Clone, Debug, Default)]
-pub struct SyntheticControl;
+pub(crate) struct SyntheticControl;
 
 /// Fitted donor weights and post-period gap.
 #[derive(Clone, Debug)]
-pub struct FittedSyntheticControl {
+pub(crate) struct FittedSyntheticControl {
     /// Simplex weights on donors (columns of `donors`).
     pub weights: Vector,
     /// Pre-period SSE.
@@ -2954,14 +2978,14 @@ pub struct FittedSyntheticControl {
 
 impl SyntheticControl {
     /// Default synthetic control.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Match `treated` to `donors` on the first `n_pre` rows.
     ///
     /// `n_pre` is a time-window width, not identification `p`.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         treated: &Vector,
         donors: &Matrix,
@@ -3059,7 +3083,7 @@ impl SyntheticControl {
 ///
 /// Window width is not identification `p`. The omitted bin is \(k=-1\).
 #[derive(Clone, Debug)]
-pub struct EventStudy {
+pub(crate) struct EventStudy {
     /// Maximum \(|k|\). Not identification `p`.
     pub window: usize,
 }
@@ -3072,7 +3096,7 @@ impl Default for EventStudy {
 
 /// Event-time coefficients.
 #[derive(Clone, Debug)]
-pub struct FittedEventStudy {
+pub(crate) struct FittedEventStudy {
     /// Relative times (excluding \(-1\)).
     pub event_times: Vector,
     /// Coefficients on those bins.
@@ -3083,7 +3107,7 @@ pub struct FittedEventStudy {
 
 impl EventStudy {
     /// Window of `window` leads and lags.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
         }
@@ -3092,7 +3116,7 @@ impl EventStudy {
     /// OLS of `y` on event-time dummies \(k=t-g\) for treated units.
     ///
     /// `first_treat` is the first treated calendar time per row (`NaN` = never).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Vector,
         times: &Vector,
@@ -3169,11 +3193,11 @@ impl EventStudy {
 ///
 /// Cohort / calendar counts are not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct CallawaySantanna;
+pub(crate) struct CallawaySantanna;
 
 /// Cohort-time ATT table.
 #[derive(Clone, Debug)]
-pub struct FittedCallawaySantanna {
+pub(crate) struct FittedCallawaySantanna {
     /// Simple average of cohort-time ATTs.
     pub att: f64,
     /// One ATT per \((g,t)\) cell with a pre period.
@@ -3182,12 +3206,12 @@ pub struct FittedCallawaySantanna {
 
 impl CallawaySantanna {
     /// Default CS estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Never-treated 2×2 ATTs for each cohort \(g\) and post time \(t\ge g\).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Vector,
         times: &Vector,
@@ -3256,7 +3280,8 @@ impl CallawaySantanna {
                         None
                     }
                 };
-                let treated = |i: usize| first_treat[i].is_finite() && first_treat[i].round() as i64 == g;
+                let treated =
+                    |i: usize| first_treat[i].is_finite() && first_treat[i].round() as i64 == g;
                 let never = |i: usize| !first_treat[i].is_finite();
                 let (Some(ytg), Some(ypg), Some(ytn), Some(ypn)) = (
                     mean(&treated, t),
@@ -3273,7 +3298,9 @@ impl CallawaySantanna {
             ctx.push(
                 Issue::builder(IssueCode::InsufficientSample)
                     .severity(Severity::Warning)
-                    .message("CallawaySantanna found no (g,t) cell with a pre period and never-treated")
+                    .message(
+                        "CallawaySantanna found no (g,t) cell with a pre period and never-treated",
+                    )
                     .build(),
             );
         }
@@ -3303,18 +3330,18 @@ impl CallawaySantanna {
 
 /// Named staggered DiD alias.
 #[derive(Clone, Debug, Default)]
-pub struct StaggeredDid {
+pub(crate) struct StaggeredDid {
     inner: CallawaySantanna,
 }
 
 impl StaggeredDid {
     /// Default CS / staggered DiD.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit cohort-time ATTs.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Vector,
         times: &Vector,
@@ -3331,11 +3358,11 @@ impl StaggeredDid {
 /// is fit on not-yet / never-treated rows only, then treated residuals are
 /// averaged.
 #[derive(Clone, Debug, Default)]
-pub struct BorusyakJaravelSpiess;
+pub(crate) struct BorusyakJaravelSpiess;
 
 /// Imputation ATT.
 #[derive(Clone, Debug)]
-pub struct FittedBorusyak {
+pub(crate) struct FittedBorusyak {
     /// Mean treated residual after imputed \(Y(0)\).
     pub att: f64,
     /// Number of treated-post residuals.
@@ -3344,7 +3371,7 @@ pub struct FittedBorusyak {
 
 impl BorusyakJaravelSpiess {
     /// Default imputation DiD.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
@@ -3352,7 +3379,7 @@ impl BorusyakJaravelSpiess {
     ///
     /// `groups` are entity codes. `first_treat` is the first treated calendar
     /// time (`NaN` = never treated).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Vector,
         times: &Vector,
@@ -3456,7 +3483,9 @@ impl BorusyakJaravelSpiess {
         ctx.push(
             Issue::builder(IssueCode::CausalClaimUnidentified)
                 .severity(Severity::Advisory)
-                .message("BorusyakJaravelSpiess is alternating two-way FE, not the published estimator")
+                .message(
+                    "BorusyakJaravelSpiess is alternating two-way FE, not the published estimator",
+                )
                 .compromise(NumericalCompromise::new(
                     "BJS imputation DiD",
                     "entity + time means on untreated rows, then treated residuals",
@@ -3478,7 +3507,7 @@ impl BorusyakJaravelSpiess {
 /// \(\mathrm{ATT}(g,k)\) is a 2×2 vs never-treated, then weighted by
 /// the cohort's share among treated units at that \(k\).
 #[derive(Clone, Debug)]
-pub struct SunAbraham {
+pub(crate) struct SunAbraham {
     /// Maximum post relative time. Not identification `p`.
     pub window: usize,
 }
@@ -3491,14 +3520,14 @@ impl Default for SunAbraham {
 
 impl SunAbraham {
     /// IW event study with post window `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
         }
     }
 
     /// Cohort-weighted average of post-period 2×2 ATTs.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Vector,
         times: &Vector,
@@ -3587,7 +3616,9 @@ impl SunAbraham {
         ctx.push(
             Issue::builder(IssueCode::CausalClaimUnidentified)
                 .severity(Severity::Advisory)
-                .message("SunAbraham is cell-size-weighted 2×2 ATTs, not the published IW estimator")
+                .message(
+                    "SunAbraham is cell-size-weighted 2×2 ATTs, not the published IW estimator",
+                )
                 .compromise(NumericalCompromise::new(
                     "Sun–Abraham interaction-weighted event study",
                     "cohort-size weighted average of never-treated 2×2 cells",
@@ -3605,7 +3636,7 @@ impl SunAbraham {
 
 /// IW event-study ATT.
 #[derive(Clone, Debug)]
-pub struct FittedSunAbraham {
+pub(crate) struct FittedSunAbraham {
     /// Cohort-weighted average ATT.
     pub att: f64,
     /// Number of identified \((g,k)\) cells.
@@ -3620,11 +3651,11 @@ pub struct FittedSunAbraham {
 /// (never-treated only, every post \(t\ge g\)) and [`SunAbraham`]
 /// (cohort-size weighted never-treated cells).
 #[derive(Clone, Debug, Default)]
-pub struct DeChaisemartin;
+pub(crate) struct DeChaisemartin;
 
 /// Instantaneous switcher ATT.
 #[derive(Clone, Debug)]
-pub struct FittedDeChaisemartin {
+pub(crate) struct FittedDeChaisemartin {
     /// Simple average of calendar switcher 2×2 ATTs.
     pub att: f64,
     /// Number of identified switcher times.
@@ -3633,12 +3664,12 @@ pub struct FittedDeChaisemartin {
 
 impl DeChaisemartin {
     /// Default DCDH switcher DiD.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Consecutive-time 2×2 for first-time switchers vs not-yet-treated.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Vector,
         times: &Vector,
@@ -3686,9 +3717,8 @@ impl DeChaisemartin {
             };
             let switcher =
                 |i: usize| first_treat[i].is_finite() && first_treat[i].round() as i64 == t;
-            let not_yet = |i: usize| {
-                !first_treat[i].is_finite() || first_treat[i].round() as i64 > t
-            };
+            let not_yet =
+                |i: usize| !first_treat[i].is_finite() || first_treat[i].round() as i64 > t;
             let (Some(ys), Some(ys0), Some(yc), Some(yc0)) = (
                 mean(&switcher, t),
                 mean(&switcher, pre),
@@ -3742,11 +3772,11 @@ impl DeChaisemartin {
 /// post), then the treated-post residual mean is the ATT. That leaks
 /// treatment into \(Y(0)\) — documented as a numerical compromise.
 #[derive(Clone, Debug, Default)]
-pub struct GardnerTwoStage;
+pub(crate) struct GardnerTwoStage;
 
 /// Two-stage TWFE ATT.
 #[derive(Clone, Debug)]
-pub struct FittedGardner {
+pub(crate) struct FittedGardner {
     /// Mean treated-post residual after full-sample two-way FE.
     pub att: f64,
     /// Number of treated-post residuals.
@@ -3755,13 +3785,13 @@ pub struct FittedGardner {
 
 impl GardnerTwoStage {
     /// Default Gardner two-stage DiD.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Residualize \(Y\) on entity + time FE using every finite row, then
     /// average treated-post residuals.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Vector,
         times: &Vector,
@@ -3883,11 +3913,11 @@ impl GardnerTwoStage {
 /// \(D T(Y-\mu_{11})/e-D(1-T)(Y-\mu_{10})/e-(1-D)T(Y-\mu_{01})/(1-e)+(1-D)(1-T)(Y-\mu_{00})/(1-e)\).
 /// Distinct from [`DiffInDiff`] (OLS interaction only).
 #[derive(Clone, Debug, Default)]
-pub struct AipwDid;
+pub(crate) struct AipwDid;
 
 /// Fitted AIPW 2×2 ATT.
 #[derive(Clone, Debug)]
-pub struct FittedAipwDid {
+pub(crate) struct FittedAipwDid {
     /// Outcome-regression DiD.
     pub att_or: f64,
     /// AIPW-adjusted ATT.
@@ -3896,12 +3926,12 @@ pub struct FittedAipwDid {
 
 impl AipwDid {
     /// Default AIPW 2×2 DiD.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Cell means plus saturated AIPW influence.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Vector,
         treat: &Vector,
@@ -3930,10 +3960,7 @@ impl AipwDid {
             n_d += d as f64;
             n_ok += 1.0;
         }
-        if cells[0][0].1 < 1.0
-            || cells[0][1].1 < 1.0
-            || cells[1][0].1 < 1.0
-            || cells[1][1].1 < 1.0
+        if cells[0][0].1 < 1.0 || cells[0][1].1 < 1.0 || cells[1][0].1 < 1.0 || cells[1][1].1 < 1.0
         {
             ctx.push(
                 Issue::builder(IssueCode::MeaninglessFit)
@@ -4080,13 +4107,15 @@ mod tests {
         let als = AbsorbingLs::new()
             .fit(&x, &y, &g, &Session::new("als", "fit"))
             .expect("als");
-        assert!((als.value.coef[0] - 2.0).abs() < 0.25, "als={}", als.value.coef[0]);
-        let xtw = Matrix::from_fn(32, 1, |i, _| {
-            (i % 8) as f64 * (1.0 + (i / 8) as f64)
-        });
-        let ytw = Vector::from_iter((0..32).map(|i| {
-            2.0 * (i % 8) as f64 * (1.0 + (i / 8) as f64) + 5.0 * (i / 8) as f64
-        }));
+        assert!(
+            (als.value.coef[0] - 2.0).abs() < 0.25,
+            "als={}",
+            als.value.coef[0]
+        );
+        let xtw = Matrix::from_fn(32, 1, |i, _| (i % 8) as f64 * (1.0 + (i / 8) as f64));
+        let ytw = Vector::from_iter(
+            (0..32).map(|i| 2.0 * (i % 8) as f64 * (1.0 + (i / 8) as f64) + 5.0 * (i / 8) as f64),
+        );
         let tw = TwoWayFe::new()
             .fit(&xtw, &ytw, &g, &time, &Session::new("twfe", "fit"))
             .expect("twfe");
@@ -4102,7 +4131,11 @@ mod tests {
         let ht = HausmanTaylor::new()
             .fit(&x, &y, &g, &Session::new("ht", "fit"))
             .expect("ht");
-        assert!((ht.value.coef[0] - 2.0).abs() < 0.25, "ht={}", ht.value.coef[0]);
+        assert!(
+            (ht.value.coef[0] - 2.0).abs() < 0.25,
+            "ht={}",
+            ht.value.coef[0]
+        );
         let cfm = ClusteredFamaMacBeth::new()
             .fit(&xfm, &y, &time, &Session::new("cfm", "fit"))
             .expect("cfm");
@@ -4127,7 +4160,11 @@ mod tests {
         let a2 = Absorbing2Sls::new()
             .fit(&x, &y, &x, &g, &Session::new("a2s", "fit"))
             .expect("a2s");
-        assert!((a2.value.coef[0] - 2.0).abs() < 0.25, "a2s={}", a2.value.coef[0]);
+        assert!(
+            (a2.value.coef[0] - 2.0).abs() < 0.25,
+            "a2s={}",
+            a2.value.coef[0]
+        );
         let reiv = RandomEffectsIv::new(0.5)
             .fit(&x, &y, &x, &g, &Session::new("reiv", "fit"))
             .expect("reiv");
@@ -4143,7 +4180,11 @@ mod tests {
         let mg = MeanGroup::new()
             .fit(&x, &y, &g, &Session::new("mg", "fit"))
             .expect("mg");
-        assert!((mg.value.coef[0] - 2.0).abs() < 0.25, "mg={}", mg.value.coef[0]);
+        assert!(
+            (mg.value.coef[0] - 2.0).abs() < 0.25,
+            "mg={}",
+            mg.value.coef[0]
+        );
         let ecfm = EntityClusteredFamaMacBeth::new()
             .fit(&xfm, &y, &time, &g, &Session::new("ecfm", "fit"))
             .expect("ecfm");
@@ -4163,13 +4204,7 @@ mod tests {
             .expect("sc");
         assert_eq!(sc.value.weights.len(), 3);
         assert!(sc.value.att.is_finite());
-        let first = Vector::from_iter((0..32).map(|i| {
-            if i / 8 >= 2 {
-                4.0
-            } else {
-                f64::NAN
-            }
-        }));
+        let first = Vector::from_iter((0..32).map(|i| if i / 8 >= 2 { 4.0 } else { f64::NAN }));
         let evs = EventStudy::new(2)
             .fit(&y, &time, &first, &Session::new("evs", "fit"))
             .expect("evs");

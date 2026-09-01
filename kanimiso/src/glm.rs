@@ -48,7 +48,7 @@ fn dummy_explain(update: u64, batch: usize, n_seen: u64) -> IncrementalExplain {
 
 /// Fitted GLM coefficients (probit / NB2).
 #[derive(Clone, Debug)]
-pub struct FittedGlm {
+pub(crate) struct FittedGlm {
     /// Slopes.
     pub coef: Vector,
     /// Intercept.
@@ -78,7 +78,7 @@ impl Predict for FittedGlm {
 
 /// Binary probit GLM (statsmodels `Probit`) via IRLS.
 #[derive(Clone, Debug)]
-pub struct ProbitRegression {
+pub(crate) struct ProbitRegression {
     /// Max IRLS iterations.
     pub max_iter: usize,
     /// Prepend an intercept.
@@ -96,14 +96,14 @@ impl Default for ProbitRegression {
 
 impl ProbitRegression {
     /// Default probit.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for ProbitRegression {
     type Fitted = FittedGlm;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -228,7 +228,7 @@ impl Fit for ProbitRegression {
 /// \(\mu = 1-\exp(-\exp(\eta))\). IRLS uses a scratch report so a large
 /// working residual cannot abort a well-separated binary fit.
 #[derive(Clone, Debug)]
-pub struct Cloglog {
+pub(crate) struct Cloglog {
     /// Max IRLS iterations.
     pub max_iter: usize,
     /// Prepend an intercept.
@@ -246,14 +246,14 @@ impl Default for Cloglog {
 
 impl Cloglog {
     /// Default complementary log-log.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for Cloglog {
     type Fitted = FittedGlm;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -376,7 +376,7 @@ impl Fit for Cloglog {
 
 /// Negative-binomial GLM (NB2, log link) with a moment \(\alpha\).
 #[derive(Clone, Debug)]
-pub struct NegativeBinomialRegressor {
+pub(crate) struct NegativeBinomialRegressor {
     /// Fixed \(\alpha = \mathrm{Var}/\mu^2 - 1/\mu\). `None` ⇒ moment estimate.
     pub alpha: Option<f64>,
     /// Max IRLS iterations.
@@ -397,14 +397,14 @@ impl Default for NegativeBinomialRegressor {
 
 impl NegativeBinomialRegressor {
     /// NB2 with a moment-estimated dispersion.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for NegativeBinomialRegressor {
     type Fitted = FittedGlm;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         for (i, &yi) in y.as_slice().iter().enumerate() {
@@ -520,7 +520,7 @@ impl Fit for NegativeBinomialRegressor {
 
 /// Mini-batch SGD classifier (hinge or log loss).
 #[derive(Clone, Debug)]
-pub struct SgdClassifier {
+pub(crate) struct SgdClassifier {
     /// Learning rate.
     pub learning_rate: f64,
     /// ℓ2 penalty.
@@ -539,7 +539,7 @@ pub struct SgdClassifier {
 
 /// Loss for [`SgdClassifier`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SgdLoss {
+pub(crate) enum SgdLoss {
     /// Linear SVM hinge.
     Hinge,
     /// Logistic log-loss.
@@ -565,12 +565,12 @@ impl Default for SgdClassifier {
 
 impl SgdClassifier {
     /// Default hinge SGD.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current slopes.
-    pub fn coef(&self) -> &Vector {
+    pub(crate) fn coef(&self) -> &Vector {
         &self.coef
     }
 }
@@ -786,7 +786,7 @@ impl Predict for SgdClassifier {
 
 /// ε-insensitive passive-aggressive regressor (Crammer et al.).
 #[derive(Clone, Debug)]
-pub struct PassiveAggressiveRegressor {
+pub(crate) struct PassiveAggressiveRegressor {
     /// Aggressiveness \(C\).
     pub c: f64,
     /// Insensitivity tube \(\varepsilon\).
@@ -814,7 +814,7 @@ impl Default for PassiveAggressiveRegressor {
 
 impl PassiveAggressiveRegressor {
     /// PA-I regressor with aggressiveness `c`.
-    pub fn new(c: f64) -> Self {
+    pub(crate) fn new(c: f64) -> Self {
         Self {
             c,
             ..Self::default()
@@ -822,7 +822,7 @@ impl PassiveAggressiveRegressor {
     }
 
     /// Current slopes.
-    pub fn coef(&self) -> &Vector {
+    pub(crate) fn coef(&self) -> &Vector {
         &self.coef
     }
 }
@@ -937,7 +937,7 @@ impl Predict for PassiveAggressiveRegressor {
 }
 
 /// NB2 log-likelihood helper used by tests / diagnostics.
-pub fn nb2_loglik(y: &Vector, mu: &Vector, alpha: f64) -> f64 {
+pub(crate) fn nb2_loglik(y: &Vector, mu: &Vector, alpha: f64) -> f64 {
     let a = alpha.max(1e-12);
     let mut s = 0.0;
     for i in 0..y.len().min(mu.len()) {
@@ -956,7 +956,7 @@ pub fn nb2_loglik(y: &Vector, mu: &Vector, alpha: f64) -> f64 {
 /// Classes must be ordered by their integer labels. A single class leaves
 /// \((\beta,\theta)\) unidentified.
 #[derive(Clone, Debug)]
-pub struct OrderedLogit {
+pub(crate) struct OrderedLogit {
     /// Learning rate.
     pub eta: f64,
     /// Max gradient steps.
@@ -977,14 +977,14 @@ impl Default for OrderedLogit {
 
 impl OrderedLogit {
     /// Default ordered logit.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted ordered logit.
 #[derive(Clone, Debug)]
-pub struct FittedOrderedLogit {
+pub(crate) struct FittedOrderedLogit {
     /// Slopes.
     pub coef: Vector,
     /// Increasing cutpoints \(\theta_1 < \cdots < \theta_{K-1}\).
@@ -995,7 +995,7 @@ pub struct FittedOrderedLogit {
 
 impl FittedOrderedLogit {
     /// Predicted class (argmax of category probabilities).
-    pub fn predict_label(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_label(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         if x.ncols() != self.coef.len() {
             ctx.push(
@@ -1039,7 +1039,7 @@ impl FittedOrderedLogit {
 impl Fit for OrderedLogit {
     type Fitted = FittedOrderedLogit;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -1165,7 +1165,7 @@ fn ordered_prob_grad(c: usize, k: usize, xb: f64, thr: &Vector) -> (f64, f64, Ve
 ///
 /// Cut / class counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct OrderedProbit {
+pub(crate) struct OrderedProbit {
     /// Learning rate.
     pub eta: f64,
     /// Max gradient steps.
@@ -1186,14 +1186,14 @@ impl Default for OrderedProbit {
 
 impl OrderedProbit {
     /// Default ordered probit.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted ordered probit.
 #[derive(Clone, Debug)]
-pub struct FittedOrderedProbit {
+pub(crate) struct FittedOrderedProbit {
     /// Slopes.
     pub coef: Vector,
     /// Increasing cutpoints \(\theta_1 < \cdots < \theta_{K-1}\).
@@ -1204,7 +1204,7 @@ pub struct FittedOrderedProbit {
 
 impl FittedOrderedProbit {
     /// Predicted class (argmax of category probabilities).
-    pub fn predict_label(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_label(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         if x.ncols() != self.coef.len() {
             ctx.push(
@@ -1249,7 +1249,7 @@ impl FittedOrderedProbit {
 impl Fit for OrderedProbit {
     type Fitted = FittedOrderedProbit;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -1392,7 +1392,7 @@ fn ordered_probit_grad(c: usize, k: usize, xb: f64, thr: &Vector) -> (f64, f64, 
 
 /// Linear GEE with exchangeable working correlation (Liang–Zeger).
 #[derive(Clone, Debug)]
-pub struct Gee {
+pub(crate) struct Gee {
     /// IRLS / GLS iterations.
     pub max_iter: usize,
     /// Include an intercept.
@@ -1410,13 +1410,13 @@ impl Default for Gee {
 
 impl Gee {
     /// Default exchangeable linear GEE.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit `y | groups` under an exchangeable working `V`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -1540,7 +1540,7 @@ impl Gee {
 
 /// Fitted exchangeable linear GEE.
 #[derive(Clone, Debug)]
-pub struct FittedGee {
+pub(crate) struct FittedGee {
     /// Fixed slopes.
     pub coef: Vector,
     /// Intercept.
@@ -1576,19 +1576,19 @@ impl Predict for FittedGee {
 ///
 /// Group count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct PhiGee {
+pub(crate) struct PhiGee {
     inner: Gee,
 }
 
 impl PhiGee {
     /// Default exchangeable GEE with Pearson scale.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit the working GEE and report \(\hat\phi = \sum e_i^2 / (n-k)\).
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -1641,7 +1641,7 @@ impl PhiGee {
 
 /// Fitted GEE with Pearson \(\phi\).
 #[derive(Clone, Debug)]
-pub struct FittedPhiGee {
+pub(crate) struct FittedPhiGee {
     /// Working GEE mean.
     pub gee: FittedGee,
     /// Pearson dispersion.
@@ -1659,19 +1659,19 @@ impl Predict for FittedPhiGee {
 ///
 /// Class count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct NominalGee {
+pub(crate) struct NominalGee {
     inner: Gee,
 }
 
 impl NominalGee {
     /// Default last-vs-rest GEE.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit a binary GEE of the largest label versus the rest.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -1726,7 +1726,7 @@ impl NominalGee {
 
 /// Fitted last-vs-rest GEE.
 #[derive(Clone, Debug)]
-pub struct FittedNominalGee {
+pub(crate) struct FittedNominalGee {
     /// Binary working GEE.
     pub gee: FittedGee,
     /// Label coded as 1.
@@ -1744,19 +1744,19 @@ impl Predict for FittedNominalGee {
 ///
 /// Class count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct OrdinalGee {
+pub(crate) struct OrdinalGee {
     inner: Gee,
 }
 
 impl OrdinalGee {
     /// Default score-GEE.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit an exchangeable GEE on the raw scores.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -1807,7 +1807,7 @@ impl OrdinalGee {
 
 /// Fitted score-GEE.
 #[derive(Clone, Debug)]
-pub struct FittedOrdinalGee {
+pub(crate) struct FittedOrdinalGee {
     /// Working GEE on the scores.
     pub gee: FittedGee,
     /// Distinct rounded labels.
@@ -1823,7 +1823,7 @@ impl Predict for FittedOrdinalGee {
 
 /// Zero-inflated Poisson (Lambert): intercept-only inflate + Poisson count GLM.
 #[derive(Clone, Debug)]
-pub struct ZeroInflatedPoisson {
+pub(crate) struct ZeroInflatedPoisson {
     /// EM / IRLS cycles.
     pub max_iter: usize,
     /// Count-model intercept.
@@ -1841,14 +1841,14 @@ impl Default for ZeroInflatedPoisson {
 
 impl ZeroInflatedPoisson {
     /// Default ZIP.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted ZIP.
 #[derive(Clone, Debug)]
-pub struct FittedZip {
+pub(crate) struct FittedZip {
     /// Count-model slopes.
     pub coef: Vector,
     /// Count-model intercept.
@@ -1879,7 +1879,7 @@ impl Predict for FittedZip {
 
 impl Fit for ZeroInflatedPoisson {
     type Fitted = FittedZip;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedZip>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedZip>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         for (i, &yi) in y.as_slice().iter().enumerate() {
@@ -2003,7 +2003,7 @@ impl Fit for ZeroInflatedPoisson {
 
 /// Zero-inflated negative binomial (NB2 count + intercept-only inflate).
 #[derive(Clone, Debug)]
-pub struct ZeroInflatedNegativeBinomial {
+pub(crate) struct ZeroInflatedNegativeBinomial {
     /// EM / IRLS cycles.
     pub max_iter: usize,
     /// Count-model intercept.
@@ -2021,14 +2021,14 @@ impl Default for ZeroInflatedNegativeBinomial {
 
 impl ZeroInflatedNegativeBinomial {
     /// Default ZINB.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted ZINB.
 #[derive(Clone, Debug)]
-pub struct FittedZinb {
+pub(crate) struct FittedZinb {
     /// Count-model slopes.
     pub coef: Vector,
     /// Count-model intercept.
@@ -2061,7 +2061,7 @@ impl Predict for FittedZinb {
 
 impl Fit for ZeroInflatedNegativeBinomial {
     type Fitted = FittedZinb;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedZinb>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedZinb>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         for (i, &yi) in y.as_slice().iter().enumerate() {
@@ -2195,7 +2195,7 @@ impl Fit for ZeroInflatedNegativeBinomial {
 
 /// Weibull AFT (uncensored): \(\log T = x^\top\beta + \sigma\varepsilon\), \(\varepsilon\sim\) Gumbel.
 #[derive(Clone, Debug)]
-pub struct WeibullAft {
+pub(crate) struct WeibullAft {
     /// Gradient steps.
     pub max_iter: usize,
 }
@@ -2208,14 +2208,14 @@ impl Default for WeibullAft {
 
 impl WeibullAft {
     /// Default Weibull AFT.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted Weibull AFT.
 #[derive(Clone, Debug)]
-pub struct FittedWeibullAft {
+pub(crate) struct FittedWeibullAft {
     /// Slopes.
     pub coef: Vector,
     /// Intercept on the log-time scale.
@@ -2246,7 +2246,7 @@ impl Predict for FittedWeibullAft {
 impl Fit for WeibullAft {
     type Fitted = FittedWeibullAft;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -2333,7 +2333,7 @@ impl Fit for WeibullAft {
 ///
 /// `y ≤ 0` is [`IssueCode::NonPositiveSeries`] (Error).
 #[derive(Clone, Debug)]
-pub struct ExponentialAft {
+pub(crate) struct ExponentialAft {
     /// Unused (kept for a Weibull-compatible constructor surface).
     pub max_iter: usize,
 }
@@ -2346,7 +2346,7 @@ impl Default for ExponentialAft {
 
 impl ExponentialAft {
     /// Default exponential AFT.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -2354,7 +2354,7 @@ impl ExponentialAft {
 impl Fit for ExponentialAft {
     type Fitted = FittedWeibullAft;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -2419,11 +2419,11 @@ impl Fit for ExponentialAft {
 /// Fit is log-OLS with \(\sigma = \hat s \sqrt{3}/\pi\). `y ≤ 0` is
 /// [`IssueCode::NonPositiveSeries`].
 #[derive(Clone, Debug, Default)]
-pub struct LogLogisticAft;
+pub(crate) struct LogLogisticAft;
 
 impl LogLogisticAft {
     /// Default log-logistic AFT.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
@@ -2431,7 +2431,7 @@ impl LogLogisticAft {
 impl Fit for LogLogisticAft {
     type Fitted = FittedWeibullAft;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -2505,11 +2505,11 @@ impl Fit for LogLogisticAft {
 /// Fit is log-OLS with \(\sigma = \hat s\). `y ≤ 0` is
 /// [`IssueCode::NonPositiveSeries`].
 #[derive(Clone, Debug, Default)]
-pub struct LogNormalAft;
+pub(crate) struct LogNormalAft;
 
 impl LogNormalAft {
     /// Default log-normal AFT.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
@@ -2517,7 +2517,7 @@ impl LogNormalAft {
 impl Fit for LogNormalAft {
     type Fitted = FittedWeibullAft;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -2590,11 +2590,11 @@ impl Fit for LogNormalAft {
 /// Fit is log-OLS with \(\sigma = \hat s \sqrt{6}/\pi\). `y ≤ 0` is
 /// [`IssueCode::NonPositiveSeries`].
 #[derive(Clone, Debug, Default)]
-pub struct GompertzAft;
+pub(crate) struct GompertzAft;
 
 impl GompertzAft {
     /// Default Gompertz AFT.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
@@ -2602,7 +2602,7 @@ impl GompertzAft {
 impl Fit for GompertzAft {
     type Fitted = FittedWeibullAft;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -2674,18 +2674,18 @@ impl Fit for GompertzAft {
 /// A series of all zeros is vacuous. Few positives are a warning, not
 /// [`IssueCode::InsufficientSample`] as an error.
 #[derive(Clone, Debug, Default)]
-pub struct Hurdle;
+pub(crate) struct Hurdle;
 
 impl Hurdle {
     /// Default hurdle.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
 
 /// Fitted two-part hurdle.
 #[derive(Clone, Debug)]
-pub struct FittedHurdle {
+pub(crate) struct FittedHurdle {
     /// Logit intercept for the zero hurdle.
     pub hurdle_intercept: f64,
     /// Logit slopes.
@@ -2698,12 +2698,7 @@ pub struct FittedHurdle {
 
 impl Fit for Hurdle {
     type Fitted = FittedHurdle;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedHurdle>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedHurdle>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let n = x.nrows().min(y.len());
@@ -2796,18 +2791,18 @@ impl Fit for Hurdle {
 ///
 /// Inner probit / OLS failures of the usual residual kind are not promoted.
 #[derive(Clone, Debug, Default)]
-pub struct TobitRegressor;
+pub(crate) struct TobitRegressor;
 
 impl TobitRegressor {
     /// Default Tobit.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
 
 /// Fitted two-step Tobit.
 #[derive(Clone, Debug)]
-pub struct FittedTobit {
+pub(crate) struct FittedTobit {
     /// Outcome intercept.
     pub intercept: f64,
     /// Outcome slopes.
@@ -2820,7 +2815,7 @@ pub struct FittedTobit {
 
 impl Fit for TobitRegressor {
     type Fitted = FittedTobit;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedTobit>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedTobit>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let n = x.nrows().min(y.len());
@@ -2930,17 +2925,17 @@ impl Fit for TobitRegressor {
 /// no extra exclusion restriction is supplied — recorded as unidentified
 /// for a causal reading of the mills term.
 #[derive(Clone, Debug, Default)]
-pub struct HeckmanSelection;
+pub(crate) struct HeckmanSelection;
 
 impl HeckmanSelection {
     /// Default Heckman two-step.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit the outcome on selected rows with a mills correction from `selected`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         selected: &Vector,
@@ -3057,7 +3052,7 @@ impl HeckmanSelection {
 
 /// Fitted Heckman two-step.
 #[derive(Clone, Debug)]
-pub struct FittedHeckman {
+pub(crate) struct FittedHeckman {
     /// Outcome intercept.
     pub intercept: f64,
     /// Outcome slopes.
@@ -3073,7 +3068,7 @@ pub struct FittedHeckman {
 /// Few groups are a warning, not [`IssueCode::InsufficientSample`] as an error.
 /// Alternative count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ConditionalLogit {
+pub(crate) struct ConditionalLogit {
     /// Newton iterations.
     pub max_iter: usize,
 }
@@ -3086,13 +3081,13 @@ impl Default for ConditionalLogit {
 
 impl ConditionalLogit {
     /// Default conditional logit.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit `y ∈ {0,1}` chosen alternative within `groups`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -3210,7 +3205,7 @@ impl ConditionalLogit {
 
 /// Fitted conditional logit.
 #[derive(Clone, Debug)]
-pub struct FittedConditionalLogit {
+pub(crate) struct FittedConditionalLogit {
     /// Slopes (no intercept; it is swept by the group softmax).
     pub coef: Vector,
     /// Number of choice sets.
@@ -3221,7 +3216,7 @@ pub struct FittedConditionalLogit {
 ///
 /// \(y\in(0,1)\). Boundary values are squeezed; that is a compromise.
 #[derive(Clone, Debug)]
-pub struct BetaRegression {
+pub(crate) struct BetaRegression {
     /// IRLS iterations.
     pub max_iter: usize,
 }
@@ -3234,14 +3229,14 @@ impl Default for BetaRegression {
 
 impl BetaRegression {
     /// Default beta regression.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for BetaRegression {
     type Fitted = FittedGlm;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let n = x.nrows().min(y.len());
@@ -3426,7 +3421,7 @@ fn gee_moments(
 ///
 /// Variance is `μ(1+αμ)²`. Inner IRLS residual issues are not promoted.
 #[derive(Clone, Debug)]
-pub struct GeneralizedPoisson {
+pub(crate) struct GeneralizedPoisson {
     /// Max IRLS iterations.
     pub max_iter: usize,
     /// Intercept.
@@ -3444,14 +3439,14 @@ impl Default for GeneralizedPoisson {
 
 impl GeneralizedPoisson {
     /// Default generalized Poisson.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for GeneralizedPoisson {
     type Fitted = FittedGlm;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         for (i, &yi) in y.as_slice().iter().enumerate() {
@@ -3537,7 +3532,7 @@ impl Fit for GeneralizedPoisson {
 ///
 /// Mean is \(\mu/(1-e^{-\mu})\). Zeros abort as a vacuous truncated sample.
 #[derive(Clone, Debug)]
-pub struct TruncatedPoisson {
+pub(crate) struct TruncatedPoisson {
     /// Max IRLS iterations.
     pub max_iter: usize,
     /// Prepend an intercept.
@@ -3555,14 +3550,14 @@ impl Default for TruncatedPoisson {
 
 impl TruncatedPoisson {
     /// Default zero-truncated Poisson.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for TruncatedPoisson {
     type Fitted = FittedGlm;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let mut n_zero = 0usize;
@@ -3677,7 +3672,7 @@ impl Fit for TruncatedPoisson {
 /// \(\mathrm{Var}=\mu+\alpha\mu^2\). Do not treat dropped zeros as a
 /// `MeaninglessFit`.
 #[derive(Clone, Debug)]
-pub struct TruncatedNegativeBinomial {
+pub(crate) struct TruncatedNegativeBinomial {
     /// Max IRLS iterations.
     pub max_iter: usize,
     /// Fixed \(\alpha\). `None` ⇒ moment estimate on the positives.
@@ -3698,14 +3693,14 @@ impl Default for TruncatedNegativeBinomial {
 
 impl TruncatedNegativeBinomial {
     /// Default zero-truncated NB2.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for TruncatedNegativeBinomial {
     type Fitted = FittedGlm;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let mut n_zero = 0usize;
@@ -3825,7 +3820,7 @@ impl Fit for TruncatedNegativeBinomial {
 ///
 /// \(P=1\) is NB1, \(P=2\) is NB2. Inner IRLS residual issues are not promoted.
 #[derive(Clone, Debug)]
-pub struct NegativeBinomialP {
+pub(crate) struct NegativeBinomialP {
     /// Power \(P\) on the mean in the variance function.
     pub power: f64,
     /// Fixed \(\alpha\). `None` ⇒ moment estimate.
@@ -3849,7 +3844,7 @@ impl Default for NegativeBinomialP {
 
 impl NegativeBinomialP {
     /// NB-P with the given variance power.
-    pub fn new(power: f64) -> Self {
+    pub(crate) fn new(power: f64) -> Self {
         Self {
             power,
             ..Self::default()
@@ -3859,7 +3854,7 @@ impl NegativeBinomialP {
 
 impl Fit for NegativeBinomialP {
     type Fitted = FittedGlm;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         for (i, &yi) in y.as_slice().iter().enumerate() {
@@ -3986,12 +3981,7 @@ impl Fit for NegativeBinomialP {
     }
 }
 
-fn binary_irls(
-    design: &Matrix,
-    y: &Vector,
-    policy: &signlred::Policy,
-    max_iter: usize,
-) -> Vector {
+fn binary_irls(design: &Matrix, y: &Vector, policy: &signlred::Policy, max_iter: usize) -> Vector {
     let mut beta = Vector::zeros(design.ncols());
     if !beta.is_empty() {
         let p = y.as_slice().iter().filter(|v| **v > 0.5).count() as f64 / y.len().max(1) as f64;
@@ -4031,7 +4021,7 @@ fn binary_irls(
 /// Sorted unique labels are split into two nests (first half vs rest). Nest
 /// count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct NestedLogit {
+pub(crate) struct NestedLogit {
     /// IRLS cycles per nest.
     pub max_iter: usize,
 }
@@ -4044,14 +4034,14 @@ impl Default for NestedLogit {
 
 impl NestedLogit {
     /// Default two-nest sequential logit.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted nested logit.
 #[derive(Clone, Debug)]
-pub struct FittedNestedLogit {
+pub(crate) struct FittedNestedLogit {
     /// Sorted unique class labels.
     pub classes: Vector,
     /// Nest index per class (`0` or `1`).
@@ -4066,7 +4056,7 @@ pub struct FittedNestedLogit {
 
 impl FittedNestedLogit {
     /// Predicted class labels.
-    pub fn predict_label(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_label(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         let p = self.nest_beta.len().saturating_sub(1);
         if x.ncols() != p {
@@ -4130,7 +4120,7 @@ impl FittedNestedLogit {
 impl Fit for NestedLogit {
     type Fitted = FittedNestedLogit;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -4165,9 +4155,13 @@ impl Fit for NestedLogit {
             });
         }
         let split = classes.len() / 2;
-        let nest = Vector::from_iter((0..classes.len()).map(|k| if k >= split { 1.0 } else { 0.0 }));
+        let nest =
+            Vector::from_iter((0..classes.len()).map(|k| if k >= split { 1.0 } else { 0.0 }));
         let y_nest = Vector::from_iter(y.as_slice().iter().map(|yi| {
-            let k = classes.iter().position(|c| (c - *yi).abs() < 1e-12).unwrap_or(0);
+            let k = classes
+                .iter()
+                .position(|c| (c - *yi).abs() < 1e-12)
+                .unwrap_or(0);
             nest[k]
         }));
         let nest_beta = binary_irls(&design, &y_nest, &ctx.policy, self.max_iter);
@@ -4198,7 +4192,13 @@ impl Fit for NestedLogit {
                 return Vector::zeros(0);
             }
             let xd = Matrix::from_fn(rows.len(), design.ncols(), |r, j| design.get(rows[r], j));
-            let yd = Vector::from_iter(rows.iter().map(|&i| if (y[i] - last).abs() < 1e-12 { 1.0 } else { 0.0 }));
+            let yd = Vector::from_iter(rows.iter().map(|&i| {
+                if (y[i] - last).abs() < 1e-12 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }));
             binary_irls(&xd, &yd, &ctx.policy, self.max_iter)
         };
         let within0 = within(0.0);
@@ -4217,7 +4217,7 @@ impl Fit for NestedLogit {
 ///
 /// Binary mixed logit with a random intercept; draws are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MixedLogit {
+pub(crate) struct MixedLogit {
     /// IRLS cycles.
     pub max_iter: usize,
     /// Simulation draws for the random intercept.
@@ -4235,14 +4235,14 @@ impl Default for MixedLogit {
 
 impl MixedLogit {
     /// Default mixed logit.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted mixed logit.
 #[derive(Clone, Debug)]
-pub struct FittedMixedLogit {
+pub(crate) struct FittedMixedLogit {
     /// Mean slopes (no intercept).
     pub coef: Vector,
     /// Mean intercept.
@@ -4273,7 +4273,7 @@ impl Predict for FittedMixedLogit {
 impl Fit for MixedLogit {
     type Fitted = FittedMixedLogit;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -4283,7 +4283,11 @@ impl Fit for MixedLogit {
         inspect_classes(&mut ctx.report, y, &ctx.policy);
         let design = x.with_intercept();
         inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
-        let y01 = Vector::from_iter(y.as_slice().iter().map(|v| if *v > 0.5 { 1.0 } else { 0.0 }));
+        let y01 = Vector::from_iter(
+            y.as_slice()
+                .iter()
+                .map(|v| if *v > 0.5 { 1.0 } else { 0.0 }),
+        );
         let beta0 = binary_irls(&design, &y01, &ctx.policy, self.max_iter);
         let mut rng = crate::rng::Rng::new(3);
         let nd = self.n_draws.max(4);
@@ -4361,7 +4365,7 @@ impl Fit for MixedLogit {
 
 /// Zero-inflated gamma (statsmodels `ZeroInflatedGamma`): point mass at 0 + gamma mean.
 #[derive(Clone, Debug)]
-pub struct ZeroInflatedGamma {
+pub(crate) struct ZeroInflatedGamma {
     /// EM / IRLS cycles.
     pub max_iter: usize,
     /// Gamma-model intercept.
@@ -4379,14 +4383,14 @@ impl Default for ZeroInflatedGamma {
 
 impl ZeroInflatedGamma {
     /// Default ZI-gamma.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted zero-inflated gamma.
 #[derive(Clone, Debug)]
-pub struct FittedZig {
+pub(crate) struct FittedZig {
     /// Gamma slopes.
     pub coef: Vector,
     /// Gamma intercept (log-mean).
@@ -4417,7 +4421,7 @@ impl Predict for FittedZig {
 
 impl Fit for ZeroInflatedGamma {
     type Fitted = FittedZig;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedZig>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedZig>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         for (i, &yi) in y.as_slice().iter().enumerate() {
@@ -4529,7 +4533,7 @@ impl Fit for ZeroInflatedGamma {
 /// Count variance is \(\mathrm{Var}=\mu(1+\alpha\mu)^2\). The inflate weight is
 /// intercept-only and is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ZeroInflatedGeneralizedPoisson {
+pub(crate) struct ZeroInflatedGeneralizedPoisson {
     /// EM / IRLS cycles.
     pub max_iter: usize,
     /// Count-model intercept.
@@ -4547,14 +4551,14 @@ impl Default for ZeroInflatedGeneralizedPoisson {
 
 impl ZeroInflatedGeneralizedPoisson {
     /// Default ZIGP.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted ZIGP.
 #[derive(Clone, Debug)]
-pub struct FittedZigp {
+pub(crate) struct FittedZigp {
     /// Count-model slopes.
     pub coef: Vector,
     /// Count-model intercept.
@@ -4587,7 +4591,7 @@ impl Predict for FittedZigp {
 
 impl Fit for ZeroInflatedGeneralizedPoisson {
     type Fitted = FittedZigp;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedZigp>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedZigp>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         for (i, &yi) in y.as_slice().iter().enumerate() {
@@ -4733,7 +4737,7 @@ impl Fit for ZeroInflatedGeneralizedPoisson {
 /// Within-group totals induce a multinomial / Newton score. Group count is
 /// not identification `p`. Inner Cholesky failures stay on a scratch report.
 #[derive(Clone, Debug)]
-pub struct ConditionalPoisson {
+pub(crate) struct ConditionalPoisson {
     /// Newton iterations.
     pub max_iter: usize,
 }
@@ -4746,13 +4750,13 @@ impl Default for ConditionalPoisson {
 
 impl ConditionalPoisson {
     /// Default conditional Poisson.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit counts `y` within `groups` (group intercepts swept).
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -4880,7 +4884,7 @@ impl ConditionalPoisson {
 
 /// Fitted conditional Poisson.
 #[derive(Clone, Debug)]
-pub struct FittedConditionalPoisson {
+pub(crate) struct FittedConditionalPoisson {
     /// Slopes (no intercept; it is swept by the group softmax).
     pub coef: Vector,
     /// Number of groups.
@@ -4893,7 +4897,7 @@ pub struct FittedConditionalPoisson {
 /// be fractional; IRLS is the Papke–Wooldridge quasi-likelihood. Do not treat
 /// dropped rows as a `MeaninglessFit`.
 #[derive(Clone, Debug)]
-pub struct TruncatedLogit {
+pub(crate) struct TruncatedLogit {
     /// Max IRLS iterations.
     pub max_iter: usize,
     /// Prepend an intercept.
@@ -4911,14 +4915,14 @@ impl Default for TruncatedLogit {
 
 impl TruncatedLogit {
     /// Default truncated / fractional logit.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for TruncatedLogit {
     type Fitted = FittedGlm;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let mut n_drop = 0usize;
@@ -4985,7 +4989,7 @@ impl Fit for TruncatedLogit {
 /// The chosen alternative in each group is \(\arg\max y_i\). Group count is
 /// not identification `p`. Inner Cholesky stays on a scratch report.
 #[derive(Clone, Debug)]
-pub struct ConditionalMNLogit {
+pub(crate) struct ConditionalMNLogit {
     /// Newton iterations.
     pub max_iter: usize,
 }
@@ -4998,13 +5002,13 @@ impl Default for ConditionalMNLogit {
 
 impl ConditionalMNLogit {
     /// Default conditional MNLogit.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit a chosen-alternative index `y` within `groups`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         groups: &Vector,
@@ -5123,7 +5127,7 @@ impl ConditionalMNLogit {
 
 /// Fitted conditional MNLogit.
 #[derive(Clone, Debug)]
-pub struct FittedConditionalMNLogit {
+pub(crate) struct FittedConditionalMNLogit {
     /// Slopes (no intercept; it is swept by the group softmax).
     pub coef: Vector,
     /// Number of choice sets.
@@ -5134,7 +5138,7 @@ pub struct FittedConditionalMNLogit {
 ///
 /// Knot count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct GlmGam {
+pub(crate) struct GlmGam {
     /// Interior knots on column 0.
     pub n_knots: usize,
 }
@@ -5147,14 +5151,14 @@ impl Default for GlmGam {
 
 impl GlmGam {
     /// Default three-knot truncated-power GAM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted spline-basis OLS.
 #[derive(Clone, Debug)]
-pub struct FittedGlmGam {
+pub(crate) struct FittedGlmGam {
     /// Knots on column 0.
     pub knots: Vector,
     /// Slopes on `[x | (x_0-κ)_+^3]` (no intercept).
@@ -5168,7 +5172,10 @@ fn gam_knots(x: &Matrix, n_knots: usize) -> Vec<f64> {
     if n == 0 {
         return Vec::new();
     }
-    let mut col: Vec<f64> = (0..n).map(|i| x.get(i, 0)).filter(|v| v.is_finite()).collect();
+    let mut col: Vec<f64> = (0..n)
+        .map(|i| x.get(i, 0))
+        .filter(|v| v.is_finite())
+        .collect();
     if col.is_empty() {
         return Vec::new();
     }
@@ -5201,7 +5208,7 @@ fn gam_design(x: &Matrix, knots: &[f64]) -> Matrix {
 
 impl Fit for GlmGam {
     type Fitted = FittedGlmGam;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlmGam>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlmGam>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let knots = gam_knots(x, self.n_knots);
@@ -5225,7 +5232,9 @@ impl Fit for GlmGam {
         ctx.push(
             Issue::builder(IssueCode::CausalClaimUnidentified)
                 .severity(Severity::Advisory)
-                .message("GlmGam uses a truncated-power cubic basis + OLS, not IRLS penalized splines")
+                .message(
+                    "GlmGam uses a truncated-power cubic basis + OLS, not IRLS penalized splines",
+                )
                 .compromise(NumericalCompromise::new(
                     "P-spline / cyclic cubic GAM",
                     "unpenalized truncated-power OLS on column 0",
@@ -5277,7 +5286,7 @@ impl Predict for FittedGlmGam {
 ///
 /// Degrees of freedom \(\nu\) are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct TLinear {
+pub(crate) struct TLinear {
     /// Error degrees of freedom \(\nu > 2\).
     pub df: f64,
 }
@@ -5290,14 +5299,14 @@ impl Default for TLinear {
 
 impl TLinear {
     /// \(t_\nu\) errors.
-    pub fn new(df: f64) -> Self {
+    pub(crate) fn new(df: f64) -> Self {
         Self { df }
     }
 }
 
 /// Fitted \(t\)-error linear model.
 #[derive(Clone, Debug)]
-pub struct FittedTLinear {
+pub(crate) struct FittedTLinear {
     /// Slopes.
     pub coef: Vector,
     /// Intercept.
@@ -5333,12 +5342,7 @@ impl Predict for FittedTLinear {
 
 impl Fit for TLinear {
     type Fitted = FittedTLinear;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedTLinear>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedTLinear>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let n = x.nrows().min(y.len());
@@ -5444,7 +5448,7 @@ impl Fit for TLinear {
 ///
 /// Group count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct BayesMixedGLM {
+pub(crate) struct BayesMixedGLM {
     /// IRLS cycles for the fixed-effect seed.
     pub max_iter: usize,
 }
@@ -5457,12 +5461,12 @@ impl Default for BayesMixedGLM {
 
 impl BayesMixedGLM {
     /// Default random-intercept logit.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit a binary response with a Gaussian random intercept per `groups`.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -5563,7 +5567,7 @@ impl BayesMixedGLM {
 
 /// Fitted Bayes mixed GLM.
 #[derive(Clone, Debug)]
-pub struct FittedBayesMixedGlm {
+pub(crate) struct FittedBayesMixedGlm {
     /// Fixed-effect slopes.
     pub coef: Vector,
     /// Fixed intercept.
@@ -5578,7 +5582,7 @@ pub struct FittedBayesMixedGlm {
 ///
 /// \(P=\sigma(\eta)^\alpha\). The shape \(\alpha\) is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Scobit {
+pub(crate) struct Scobit {
     /// IRLS cycles per \(\alpha\) trial.
     pub max_iter: usize,
 }
@@ -5591,14 +5595,14 @@ impl Default for Scobit {
 
 impl Scobit {
     /// Default scobit.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted scobit.
 #[derive(Clone, Debug)]
-pub struct FittedScobit {
+pub(crate) struct FittedScobit {
     /// Slopes.
     pub coef: Vector,
     /// Intercept.
@@ -5628,13 +5632,17 @@ impl Predict for FittedScobit {
 
 impl Fit for Scobit {
     type Fitted = FittedScobit;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedScobit>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedScobit>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_classes(&mut ctx.report, y, &ctx.policy);
         let design = x.with_intercept();
         inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
-        let y01 = Vector::from_iter(y.as_slice().iter().map(|v| if *v > 0.5 { 1.0 } else { 0.0 }));
+        let y01 = Vector::from_iter(
+            y.as_slice()
+                .iter()
+                .map(|v| if *v > 0.5 { 1.0 } else { 0.0 }),
+        );
         let mut best_ll = f64::NEG_INFINITY;
         let mut best_beta = binary_irls(&design, &y01, &ctx.policy, self.max_iter);
         let mut best_a = 1.0_f64;
@@ -5680,7 +5688,11 @@ impl Fit for Scobit {
                 }
                 let s = sigmoid(eta).clamp(1e-12, 1.0 - 1e-12);
                 let mu = s.powf(alpha).clamp(1e-12, 1.0 - 1e-12);
-                ll += if y01[i] > 0.5 { mu.ln() } else { (1.0 - mu).ln() };
+                ll += if y01[i] > 0.5 {
+                    mu.ln()
+                } else {
+                    (1.0 - mu).ln()
+                };
             }
             if ll > best_ll {
                 best_ll = ll;
@@ -5698,7 +5710,7 @@ impl Fit for Scobit {
 
 /// Named Weibull AFT (lifelines `WeibullAFTFitter`).
 #[derive(Clone, Debug)]
-pub struct WeibullAftFitter {
+pub(crate) struct WeibullAftFitter {
     inner: WeibullAft,
 }
 
@@ -5712,7 +5724,7 @@ impl Default for WeibullAftFitter {
 
 impl WeibullAftFitter {
     /// Default Weibull AFT fitter.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -5720,7 +5732,7 @@ impl WeibullAftFitter {
 impl Fit for WeibullAftFitter {
     type Fitted = FittedWeibullAft;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -5731,7 +5743,7 @@ impl Fit for WeibullAftFitter {
 
 /// Named exponential AFT (lifelines `ExponentialFitter` / AFT).
 #[derive(Clone, Debug)]
-pub struct ExponentialAftFitter {
+pub(crate) struct ExponentialAftFitter {
     inner: ExponentialAft,
 }
 
@@ -5745,7 +5757,7 @@ impl Default for ExponentialAftFitter {
 
 impl ExponentialAftFitter {
     /// Default exponential AFT fitter.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -5753,7 +5765,7 @@ impl ExponentialAftFitter {
 impl Fit for ExponentialAftFitter {
     type Fitted = FittedWeibullAft;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -5764,13 +5776,13 @@ impl Fit for ExponentialAftFitter {
 
 /// Named log-logistic AFT (lifelines `LogLogisticAFTFitter`).
 #[derive(Clone, Debug, Default)]
-pub struct LogLogisticAftFitter {
+pub(crate) struct LogLogisticAftFitter {
     inner: LogLogisticAft,
 }
 
 impl LogLogisticAftFitter {
     /// Default log-logistic AFT fitter.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -5778,7 +5790,7 @@ impl LogLogisticAftFitter {
 impl Fit for LogLogisticAftFitter {
     type Fitted = FittedWeibullAft;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -5789,13 +5801,13 @@ impl Fit for LogLogisticAftFitter {
 
 /// Named log-normal AFT (lifelines `LogNormalAFTFitter`).
 #[derive(Clone, Debug, Default)]
-pub struct LogNormalAftFitter {
+pub(crate) struct LogNormalAftFitter {
     inner: LogNormalAft,
 }
 
 impl LogNormalAftFitter {
     /// Default log-normal AFT fitter.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -5803,7 +5815,7 @@ impl LogNormalAftFitter {
 impl Fit for LogNormalAftFitter {
     type Fitted = FittedWeibullAft;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -5814,13 +5826,13 @@ impl Fit for LogNormalAftFitter {
 
 /// Named Gompertz AFT (lifelines `GompertzFitter` / AFT).
 #[derive(Clone, Debug, Default)]
-pub struct GompertzAftFitter {
+pub(crate) struct GompertzAftFitter {
     inner: GompertzAft,
 }
 
 impl GompertzAftFitter {
     /// Default Gompertz AFT fitter.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -5828,7 +5840,7 @@ impl GompertzAftFitter {
 impl Fit for GompertzAftFitter {
     type Fitted = FittedWeibullAft;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,

@@ -26,7 +26,7 @@ use signlred::{
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 
-pub use crate::linear_model::SgdRegressor;
+pub(crate) use crate::linear_model::SgdRegressor;
 
 /// Online recursive least squares with a forgetting factor `λ`.
 ///
@@ -83,7 +83,7 @@ impl LinearRegression {
     }
 
     /// Slope coefficients (intercept excluded).
-    pub fn coef(&self) -> Vector {
+    pub(crate) fn coef(&self) -> Vector {
         if self.fit_intercept && self.theta.len() > 0 {
             Vector::from_iter((1..self.theta.len()).map(|i| self.theta[i]))
         } else {
@@ -92,7 +92,7 @@ impl LinearRegression {
     }
 
     /// Intercept, or 0 when `fit_intercept` is false.
-    pub fn intercept(&self) -> f64 {
+    pub(crate) fn intercept(&self) -> f64 {
         if self.fit_intercept && !self.theta.is_empty() {
             self.theta[0]
         } else {
@@ -101,7 +101,7 @@ impl LinearRegression {
     }
 
     /// Inverse Gram `P` (covariance of `θ` up to σ²).
-    pub fn p_matrix(&self) -> Option<&Mat<f64>> {
+    pub(crate) fn p_matrix(&self) -> Option<&Mat<f64>> {
         self.p_mat.as_ref()
     }
 
@@ -362,7 +362,7 @@ fn rls_mse(m: &LinearRegression, x: &Matrix, y: &Vector) -> f64 {
 
 /// Online logistic regression by SGD (binary, labels mapped to `{0, 1}`).
 #[derive(Clone, Debug)]
-pub struct LogisticRegression {
+pub(crate) struct LogisticRegression {
     /// Step size.
     pub learning_rate: f64,
     /// ℓ₂ penalty on the slopes.
@@ -393,17 +393,17 @@ impl Default for LogisticRegression {
 
 impl LogisticRegression {
     /// Default online logistic.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current slopes.
-    pub fn coef(&self) -> &Vector {
+    pub(crate) fn coef(&self) -> &Vector {
         &self.coef
     }
 
     /// Current intercept.
-    pub fn intercept(&self) -> f64 {
+    pub(crate) fn intercept(&self) -> f64 {
         self.intercept
     }
 }
@@ -523,7 +523,7 @@ impl Predict for LogisticRegression {
 
 /// Online perceptron (mistake-driven, labels mapped to `±1`).
 #[derive(Clone, Debug)]
-pub struct Perceptron {
+pub(crate) struct Perceptron {
     coef: Vector,
     intercept: f64,
     n_seen: u64,
@@ -547,12 +547,12 @@ impl Default for Perceptron {
 
 impl Perceptron {
     /// Zero-initialized perceptron.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current slopes.
-    pub fn coef(&self) -> &Vector {
+    pub(crate) fn coef(&self) -> &Vector {
         &self.coef
     }
 }
@@ -658,7 +658,7 @@ impl Predict for Perceptron {
 
 /// Passive-aggressive PA-I classifier (Crammer et al.).
 #[derive(Clone, Debug)]
-pub struct PassiveAggressive {
+pub(crate) struct PassiveAggressive {
     /// Aggressiveness `C` (maximum step).
     pub c: f64,
     coef: Vector,
@@ -683,7 +683,7 @@ impl Default for PassiveAggressive {
 
 impl PassiveAggressive {
     /// PA-I with aggressiveness `c`.
-    pub fn new(c: f64) -> Self {
+    pub(crate) fn new(c: f64) -> Self {
         Self {
             c,
             ..Self::default()
@@ -691,7 +691,7 @@ impl PassiveAggressive {
     }
 
     /// Current slopes.
-    pub fn coef(&self) -> &Vector {
+    pub(crate) fn coef(&self) -> &Vector {
         &self.coef
     }
 }
@@ -805,7 +805,7 @@ impl Predict for PassiveAggressive {
 /// A split is taken when the Gini-gain gap exceeds the Hoeffding bound
 /// `√(ln(1/δ) / (2 n))`, or the bound itself falls below `tau`.
 #[derive(Clone, Debug)]
-pub struct HoeffdingTree {
+pub(crate) struct HoeffdingTree {
     /// Split-confidence `δ`.
     pub delta: f64,
     /// Minimum observations in a leaf before a split is considered.
@@ -996,17 +996,17 @@ impl Default for HoeffdingTree {
 
 impl HoeffdingTree {
     /// Default VFDT.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Narrative of the most recent leaf split, if any.
-    pub fn last_split(&self) -> Option<&str> {
+    pub(crate) fn last_split(&self) -> Option<&str> {
         self.last_split.as_deref()
     }
 
     /// Reset to an empty root (used by adaptive forests after drift).
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.root = HtNode::Leaf(HtLeaf::new(0, self.n_features));
         self.n_seen = 0;
         self.last_split = None;
@@ -1212,7 +1212,7 @@ impl Predict for HoeffdingTree {
 /// Leaves predict a running mean. A split is taken when the variance-reduction
 /// gap exceeds the Hoeffding bound, or the bound itself falls below `tau`.
 #[derive(Clone, Debug)]
-pub struct HoeffdingRegressor {
+pub(crate) struct HoeffdingRegressor {
     /// Split-confidence `δ`.
     pub delta: f64,
     /// Minimum observations in a leaf before a split is considered.
@@ -1340,7 +1340,7 @@ impl Default for HoeffdingRegressor {
 
 impl HoeffdingRegressor {
     /// Default Hoeffding regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -1548,7 +1548,7 @@ impl Predict for HoeffdingRegressor {
 /// Width is capped at `n_features × max_categories`. New categories after the
 /// first update are a warned feature-space change, not an abort.
 #[derive(Clone, Debug)]
-pub struct OnlineOneHotEncoder {
+pub(crate) struct OnlineOneHotEncoder {
     /// Cap on distinct codes per column.
     pub max_categories: usize,
     maps: Vec<HashMap<i64, usize>>,
@@ -1575,7 +1575,7 @@ impl Default for OnlineOneHotEncoder {
 
 impl OnlineOneHotEncoder {
     /// Encoder with `max_categories` slots per column.
-    pub fn new(max_categories: usize) -> Self {
+    pub(crate) fn new(max_categories: usize) -> Self {
         Self {
             max_categories: max_categories.max(1),
             ..Self::default()
@@ -1711,7 +1711,7 @@ impl Transform for OnlineOneHotEncoder {
 /// [`IssueCode::FeatureSpaceChangedOnline`] as a warning (the default Error
 /// would abort a valid stream).
 #[derive(Clone, Debug)]
-pub struct OnlineOrdinalEncoder {
+pub(crate) struct OnlineOrdinalEncoder {
     /// Cap on distinct codes per column.
     pub max_categories: usize,
     maps: Vec<HashMap<i64, usize>>,
@@ -1738,7 +1738,7 @@ impl Default for OnlineOrdinalEncoder {
 
 impl OnlineOrdinalEncoder {
     /// Encoder with `max_categories` codes per column.
-    pub fn new(max_categories: usize) -> Self {
+    pub(crate) fn new(max_categories: usize) -> Self {
         Self {
             max_categories: max_categories.max(1),
             ..Self::default()
@@ -1867,7 +1867,7 @@ impl Transform for OnlineOrdinalEncoder {
 
 /// Outcome of a univariate drift detector.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum DriftDecision {
+pub(crate) enum DriftDecision {
     /// No evidence of a change.
     Stable,
     /// Warning region (DDM) or mild evidence.
@@ -1887,7 +1887,7 @@ pub enum DriftDecision {
 /// Fires every `every` observations (`0` never fires). The period is not
 /// identification `p`.
 #[derive(Clone, Debug)]
-pub struct DummyDrift {
+pub(crate) struct DummyDrift {
     /// Drift period. `0` means never.
     pub every: u64,
     n_seen: u64,
@@ -1908,7 +1908,7 @@ impl Default for DummyDrift {
 
 impl DummyDrift {
     /// Fire every `every` rows (`0` = never).
-    pub fn new(every: u64) -> Self {
+    pub(crate) fn new(every: u64) -> Self {
         Self {
             every,
             ..Self::default()
@@ -1916,7 +1916,7 @@ impl DummyDrift {
     }
 
     /// Last decision.
-    pub fn decision(&self) -> DriftDecision {
+    pub(crate) fn decision(&self) -> DriftDecision {
         self.last
     }
 }
@@ -1974,7 +1974,7 @@ impl PartialFit for DummyDrift {
 
 /// ADWIN (Bifet & Gavaldà): adaptive windowing on a scalar stream.
 #[derive(Clone, Debug)]
-pub struct Adwin {
+pub(crate) struct Adwin {
     /// Confidence `δ`.
     pub delta: f64,
     /// Hard cap on the stored window (oldest points are dropped).
@@ -1996,7 +1996,7 @@ impl Default for Adwin {
 
 impl Adwin {
     /// Detector with the given `δ`.
-    pub fn new(delta: f64) -> Self {
+    pub(crate) fn new(delta: f64) -> Self {
         Self {
             delta,
             ..Self::default()
@@ -2004,22 +2004,22 @@ impl Adwin {
     }
 
     /// Current window length.
-    pub fn window_len(&self) -> usize {
+    pub(crate) fn window_len(&self) -> usize {
         self.window.len()
     }
 
     /// Reset the window.
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.window.clear();
     }
 
     /// Number of ADWIN cuts performed so far.
-    pub fn n_cuts(&self) -> u64 {
+    pub(crate) fn n_cuts(&self) -> u64 {
         self.cuts
     }
 
     /// Consume one observation and decide whether the window must shrink.
-    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+    pub(crate) fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
         let mut ctx = FitCtx::with_session(session.child("update"));
         if x.is_finite() {
             self.window.push(x);
@@ -2087,7 +2087,7 @@ impl Adwin {
 
 /// Gama et al. Drift Detection Method on a 0/1 error stream.
 #[derive(Clone, Debug)]
-pub struct Ddm {
+pub(crate) struct Ddm {
     n: u64,
     p: f64,
     p_min: f64,
@@ -2107,12 +2107,12 @@ impl Default for Ddm {
 
 impl Ddm {
     /// Fresh DDM detector.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Update with a 0/1 error indicator.
-    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+    pub(crate) fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
         let mut ctx = FitCtx::with_session(session.child("update"));
         let e = if x > 0.5 { 1.0 } else { 0.0 };
         self.n += 1;
@@ -2146,7 +2146,7 @@ impl Ddm {
 
 /// Two-sided Page–Hinkley test.
 #[derive(Clone, Debug)]
-pub struct PageHinkley {
+pub(crate) struct PageHinkley {
     /// Magnitude of change to detect.
     pub delta: f64,
     /// Threshold `λ`.
@@ -2174,7 +2174,7 @@ impl Default for PageHinkley {
 
 impl PageHinkley {
     /// Detector with change magnitude `delta` and threshold `lambda`.
-    pub fn new(delta: f64, lambda: f64) -> Self {
+    pub(crate) fn new(delta: f64, lambda: f64) -> Self {
         Self {
             delta,
             lambda,
@@ -2183,7 +2183,7 @@ impl PageHinkley {
     }
 
     /// Update with a scalar observation.
-    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+    pub(crate) fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
         let mut ctx = FitCtx::with_session(session.child("update"));
         if !x.is_finite() {
             return ctx.finish(DriftDecision::Stable);
@@ -2222,7 +2222,7 @@ impl PageHinkley {
 
 /// A handful of Hoeffding trees with a per-tree ADWIN detector.
 #[derive(Clone, Debug)]
-pub struct AdaptiveRandomForest {
+pub(crate) struct AdaptiveRandomForest {
     /// Number of trees.
     pub n_estimators: usize,
     trees: Vec<HoeffdingTree>,
@@ -2249,7 +2249,7 @@ impl Default for AdaptiveRandomForest {
 
 impl AdaptiveRandomForest {
     /// Forest with `n_estimators` trees.
-    pub fn new(n_estimators: usize) -> Self {
+    pub(crate) fn new(n_estimators: usize) -> Self {
         Self {
             n_estimators: n_estimators.max(1),
             ..Self::default()
@@ -2420,7 +2420,7 @@ impl Predict for AdaptiveRandomForest {
 /// detector on absolute residual. Nested `partial_fit` of the leaves adds
 /// extra incremental events (allowed).
 #[derive(Clone, Debug)]
-pub struct AdaptiveRandomForestRegressor {
+pub(crate) struct AdaptiveRandomForestRegressor {
     /// Number of RLS leaves.
     pub n_estimators: usize,
     trees: Vec<LinearRegression>,
@@ -2449,7 +2449,7 @@ impl Default for AdaptiveRandomForestRegressor {
 
 impl AdaptiveRandomForestRegressor {
     /// Forest with `n_estimators` RLS leaves.
-    pub fn new(n_estimators: usize) -> Self {
+    pub(crate) fn new(n_estimators: usize) -> Self {
         Self {
             n_estimators: n_estimators.max(1),
             ..Self::default()
@@ -2605,7 +2605,7 @@ impl Predict for AdaptiveRandomForestRegressor {
 
 /// Online column-wise standard scaler (Welford).
 #[derive(Clone, Debug)]
-pub struct OnlineStandardScaler {
+pub(crate) struct OnlineStandardScaler {
     mean: Vector,
     m2: Vector,
     count: Vector,
@@ -2629,12 +2629,12 @@ impl Default for OnlineStandardScaler {
 
 impl OnlineStandardScaler {
     /// Empty scaler.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Running means.
-    pub fn mean(&self) -> &Vector {
+    pub(crate) fn mean(&self) -> &Vector {
         &self.mean
     }
 }
@@ -2735,7 +2735,7 @@ impl Transform for OnlineStandardScaler {
 
 /// Mini-batch / streaming k-means.
 #[derive(Clone, Debug)]
-pub struct StreamKMeans {
+pub(crate) struct StreamKMeans {
     /// Number of centroids.
     pub k: usize,
     centers: Matrix,
@@ -2760,7 +2760,7 @@ impl Default for StreamKMeans {
 
 impl StreamKMeans {
     /// `k` streaming centroids.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k: k.max(1),
             ..Self::default()
@@ -2768,7 +2768,7 @@ impl StreamKMeans {
     }
 
     /// Current centroids (`k × p`).
-    pub fn centers(&self) -> &Matrix {
+    pub(crate) fn centers(&self) -> &Matrix {
         &self.centers
     }
 }
@@ -2906,7 +2906,7 @@ impl Predict for StreamKMeans {
 
 /// Half-space trees for online anomaly scoring (Tan, Ting, Liu).
 #[derive(Clone, Debug)]
-pub struct HalfSpaceTrees {
+pub(crate) struct HalfSpaceTrees {
     /// Number of trees.
     pub n_trees: usize,
     /// Maximum depth.
@@ -2948,7 +2948,7 @@ impl Default for HalfSpaceTrees {
 
 impl HalfSpaceTrees {
     /// Ensemble of half-space trees.
-    pub fn new(n_trees: usize, max_depth: usize) -> Self {
+    pub(crate) fn new(n_trees: usize, max_depth: usize) -> Self {
         Self {
             n_trees: n_trees.max(1),
             max_depth: max_depth.max(1),
@@ -3146,7 +3146,7 @@ impl Predict for HalfSpaceTrees {
 
 /// Rolling 0/1 accuracy. `x` is the prediction, `y` the label.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineAccuracy {
+pub(crate) struct OnlineAccuracy {
     correct: u64,
     n: u64,
     updates: u64,
@@ -3154,12 +3154,12 @@ pub struct OnlineAccuracy {
 
 impl OnlineAccuracy {
     /// Empty metric.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current accuracy, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -3196,7 +3196,7 @@ impl PartialFit for OnlineAccuracy {
 
 /// Rolling mean squared error. `x` is the prediction, `y` the target.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineMse {
+pub(crate) struct OnlineMse {
     sse: f64,
     n: u64,
     updates: u64,
@@ -3204,12 +3204,12 @@ pub struct OnlineMse {
 
 impl OnlineMse {
     /// Empty metric.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current MSE, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -3237,7 +3237,7 @@ impl PartialFit for OnlineMse {
 
 /// Rolling coefficient of determination.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineR2 {
+pub(crate) struct OnlineR2 {
     sse: f64,
     sy: f64,
     sy2: f64,
@@ -3247,12 +3247,12 @@ pub struct OnlineR2 {
 
 impl OnlineR2 {
     /// Empty metric.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current R², or NaN when unidentified.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n < 2 {
             return f64::NAN;
         }
@@ -3286,7 +3286,7 @@ impl PartialFit for OnlineR2 {
 
 /// Additive Holt–Winters with online level / trend / seasonal updates.
 #[derive(Clone, Debug)]
-pub struct HoltWintersOnline {
+pub(crate) struct HoltWintersOnline {
     /// Level smoothing.
     pub alpha: f64,
     /// Trend smoothing.
@@ -3322,7 +3322,7 @@ impl Default for HoltWintersOnline {
 
 impl HoltWintersOnline {
     /// Additive Holt–Winters with the given period.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(1),
             season: vec![0.0; period.max(1)],
@@ -3331,12 +3331,12 @@ impl HoltWintersOnline {
     }
 
     /// Current level.
-    pub fn level(&self) -> f64 {
+    pub(crate) fn level(&self) -> f64 {
         self.level
     }
 
     /// Current trend.
-    pub fn trend(&self) -> f64 {
+    pub(crate) fn trend(&self) -> f64 {
         self.trend
     }
 
@@ -3560,7 +3560,7 @@ fn top_moved(delta: &Vector, k: usize) -> Vec<(String, f64)> {
 /// Each `partial_fit` names the leaf that moved, the candidate split (if any),
 /// and whether the post-update state is still a single unidentified intercept.
 #[derive(Clone, Debug)]
-pub struct AdaptiveModelRules {
+pub(crate) struct AdaptiveModelRules {
     /// Forgetting factor of each leaf RLS.
     pub forgetting: f64,
     /// Hoeffding δ.
@@ -3675,7 +3675,7 @@ impl Default for AdaptiveModelRules {
 
 impl AdaptiveModelRules {
     /// AMRules with forgetting `λ`.
-    pub fn new(forgetting: f64) -> Self {
+    pub(crate) fn new(forgetting: f64) -> Self {
         Self {
             forgetting,
             ..Self::default()
@@ -4034,7 +4034,7 @@ where
 /// sliding window. A KS statistic above the Hoeffding-style threshold is
 /// [`IssueCode::ConceptDriftDetected`].
 #[derive(Clone, Debug)]
-pub struct Kswin {
+pub(crate) struct Kswin {
     /// Window length.
     pub window_size: usize,
     /// Length of the recent comparison sample.
@@ -4061,7 +4061,7 @@ impl Default for Kswin {
 
 impl Kswin {
     /// Detector with window `w`.
-    pub fn new(window_size: usize) -> Self {
+    pub(crate) fn new(window_size: usize) -> Self {
         Self {
             window_size,
             ..Self::default()
@@ -4093,7 +4093,7 @@ impl Kswin {
     }
 
     /// Consume one scalar and decide.
-    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+    pub(crate) fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
         let mut ctx = FitCtx::with_session(session.child("update"));
         if x.is_finite() {
             self.window.push(x);
@@ -4179,7 +4179,7 @@ impl PartialFit for Kswin {
 
 /// Hoeffding drift detection (river `HDDM_A`) on a 0/1 error stream.
 #[derive(Clone, Debug)]
-pub struct Hddm {
+pub(crate) struct Hddm {
     /// Confidence \(\delta\).
     pub delta: f64,
     n: u64,
@@ -4204,7 +4204,7 @@ impl Default for Hddm {
 
 impl Hddm {
     /// Fresh HDDM_A detector.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -4216,7 +4216,7 @@ impl Hddm {
     }
 
     /// Update with a 0/1 error indicator.
-    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+    pub(crate) fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
         let mut ctx = FitCtx::with_session(session.child("update"));
         let e = if x > 0.5 { 1.0 } else { 0.0 };
         self.n += 1;
@@ -4302,7 +4302,7 @@ impl PartialFit for Hddm {
 
 /// Approximate large-margin algorithm (Gentile 2001; river `ALMA`).
 #[derive(Clone, Debug)]
-pub struct Alma {
+pub(crate) struct Alma {
     /// Margin parameter \(\alpha \in (0,1]\).
     pub alpha: f64,
     /// Aggressiveness \(C\).
@@ -4331,12 +4331,12 @@ impl Default for Alma {
 
 impl Alma {
     /// Default ALMA.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current weights (unit-norm after each update).
-    pub fn coef(&self) -> &Vector {
+    pub(crate) fn coef(&self) -> &Vector {
         &self.coef
     }
 }
@@ -4441,7 +4441,7 @@ impl PartialFit for Alma {
 
 /// Early drift detection (Baena-García; river `EDDM`) on a 0/1 error stream.
 #[derive(Clone, Debug)]
-pub struct Eddm {
+pub(crate) struct Eddm {
     n: u64,
     last_error_at: Option<u64>,
     mean_d: f64,
@@ -4467,12 +4467,12 @@ impl Default for Eddm {
 
 impl Eddm {
     /// Fresh EDDM detector.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Update with a 0/1 error indicator.
-    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+    pub(crate) fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
         let mut ctx = FitCtx::with_session(session.child("update"));
         let e = if x > 0.5 { 1.0 } else { 0.0 };
         self.n += 1;
@@ -4569,7 +4569,7 @@ impl PartialFit for Eddm {
 
 /// Hoeffding drift detection with an EWMA mean (river `HDDM_W`).
 #[derive(Clone, Debug)]
-pub struct HddmW {
+pub(crate) struct HddmW {
     /// Confidence \(\delta\).
     pub delta: f64,
     /// EWMA weight \(\lambda\).
@@ -4597,7 +4597,7 @@ impl Default for HddmW {
 
 impl HddmW {
     /// Fresh HDDM_W detector.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -4611,7 +4611,7 @@ impl HddmW {
     }
 
     /// Update with a 0/1 error indicator.
-    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+    pub(crate) fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
         let mut ctx = FitCtx::with_session(session.child("update"));
         let e = if x > 0.5 { 1.0 } else { 0.0 };
         self.n += 1;
@@ -4702,7 +4702,7 @@ impl PartialFit for HddmW {
 
 /// Leveraging bagging: Poisson(\(w\)) online bagging of Hoeffding trees.
 #[derive(Clone, Debug)]
-pub struct LeveragingBagging {
+pub(crate) struct LeveragingBagging {
     /// Number of trees.
     pub n_estimators: usize,
     /// Poisson mean of the leverage weights.
@@ -4730,7 +4730,7 @@ impl Default for LeveragingBagging {
 
 impl LeveragingBagging {
     /// Forest with `n_estimators` trees.
-    pub fn new(n_estimators: usize) -> Self {
+    pub(crate) fn new(n_estimators: usize) -> Self {
         Self {
             n_estimators: n_estimators.max(1),
             ..Self::default()
@@ -4871,7 +4871,7 @@ impl Predict for Alma {
 
 /// Online SNARIMAX: RLS on AR lags, MA residual lags, and exogenous columns.
 #[derive(Clone, Debug)]
-pub struct Snarimax {
+pub(crate) struct Snarimax {
     /// Autoregressive order.
     pub p: usize,
     /// Moving-average order.
@@ -4899,7 +4899,7 @@ impl Default for Snarimax {
 
 impl Snarimax {
     /// SNARIMAX with AR(`p`) and MA(`q`).
-    pub fn new(p: usize, q: usize) -> Self {
+    pub(crate) fn new(p: usize, q: usize) -> Self {
         Self {
             p,
             q,
@@ -5022,7 +5022,7 @@ impl PartialFit for Snarimax {
 
 /// DenStream-style decaying micro-clusters (river `cluster.DenStream`).
 #[derive(Clone, Debug)]
-pub struct DenStream {
+pub(crate) struct DenStream {
     /// Merge radius.
     pub eps: f64,
     /// Per-step weight decay.
@@ -5046,7 +5046,7 @@ impl Default for DenStream {
 
 impl DenStream {
     /// DenStream with merge radius `eps`.
-    pub fn new(eps: f64) -> Self {
+    pub(crate) fn new(eps: f64) -> Self {
         Self {
             eps,
             ..Self::default()
@@ -5054,7 +5054,7 @@ impl DenStream {
     }
 
     /// Current micro-cluster count.
-    pub fn n_micro(&self) -> usize {
+    pub(crate) fn n_micro(&self) -> usize {
         self.micros.len()
     }
 }
@@ -5154,7 +5154,7 @@ impl PartialFit for DenStream {
 
 /// Hoeffding Adaptive Tree: a VFDT plus ADWIN on 0/1 error (Bifet & Gavaldà).
 #[derive(Clone, Debug)]
-pub struct HoeffdingAdaptiveTree {
+pub(crate) struct HoeffdingAdaptiveTree {
     tree: HoeffdingTree,
     detector: Adwin,
     n_seen: u64,
@@ -5176,7 +5176,7 @@ impl Default for HoeffdingAdaptiveTree {
 
 impl HoeffdingAdaptiveTree {
     /// Default HAT.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -5278,7 +5278,7 @@ impl Predict for HoeffdingAdaptiveTree {
 ///
 /// ADWIN watches absolute residual; a cut resets the tree.
 #[derive(Clone, Debug)]
-pub struct HoeffdingAdaptiveTreeRegressor {
+pub(crate) struct HoeffdingAdaptiveTreeRegressor {
     tree: HoeffdingRegressor,
     detector: Adwin,
     n_seen: u64,
@@ -5300,7 +5300,7 @@ impl Default for HoeffdingAdaptiveTreeRegressor {
 
 impl HoeffdingAdaptiveTreeRegressor {
     /// Default HAT regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -5396,7 +5396,7 @@ impl Predict for HoeffdingAdaptiveTreeRegressor {
 
 /// Streaming Random Patches: Hoeffding trees on random feature subsets.
 #[derive(Clone, Debug)]
-pub struct StreamingRandomPatches {
+pub(crate) struct StreamingRandomPatches {
     /// Number of trees.
     pub n_estimators: usize,
     trees: Vec<HoeffdingTree>,
@@ -5423,7 +5423,7 @@ impl Default for StreamingRandomPatches {
 
 impl StreamingRandomPatches {
     /// Forest with `n_estimators` patch trees.
-    pub fn new(n_estimators: usize) -> Self {
+    pub(crate) fn new(n_estimators: usize) -> Self {
         Self {
             n_estimators: n_estimators.max(1),
             ..Self::default()
@@ -5572,7 +5572,7 @@ impl Predict for StreamingRandomPatches {
 ///
 /// Estimator count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SrpRegressor {
+pub(crate) struct SrpRegressor {
     /// Number of patch trees.
     pub n_estimators: usize,
     trees: Vec<HoeffdingRegressor>,
@@ -5599,7 +5599,7 @@ impl Default for SrpRegressor {
 
 impl SrpRegressor {
     /// Forest with `n_estimators` patch regressors.
-    pub fn new(n_estimators: usize) -> Self {
+    pub(crate) fn new(n_estimators: usize) -> Self {
         Self {
             n_estimators: n_estimators.max(1),
             ..Self::default()
@@ -5733,7 +5733,7 @@ impl Predict for SrpRegressor {
 ///
 /// Tree / mask counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SrpClassifier {
+pub(crate) struct SrpClassifier {
     /// Number of patch trees.
     pub n_estimators: usize,
     trees: Vec<HoeffdingTree>,
@@ -5760,7 +5760,7 @@ impl Default for SrpClassifier {
 
 impl SrpClassifier {
     /// Forest with `n_estimators` patch classifiers.
-    pub fn new(n_estimators: usize) -> Self {
+    pub(crate) fn new(n_estimators: usize) -> Self {
         Self {
             n_estimators: n_estimators.max(1),
             ..Self::default()
@@ -5898,7 +5898,7 @@ impl Predict for SrpClassifier {
 ///
 /// `X` has two columns: user id and item id (rounded). `y` is the rating.
 #[derive(Clone, Debug)]
-pub struct FunkMf {
+pub(crate) struct FunkMf {
     /// Latent rank.
     pub n_factors: usize,
     /// SGD step.
@@ -5933,7 +5933,7 @@ impl Default for FunkMf {
 
 impl FunkMf {
     /// FunkMF with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -6078,7 +6078,7 @@ impl Predict for FunkMf {
 
 /// CluStream-style q-micro-cluster summary (Aggarwal et al.).
 #[derive(Clone, Debug)]
-pub struct CluStream {
+pub(crate) struct CluStream {
     /// Maximum number of micro-clusters.
     pub q: usize,
     /// Assign-to-nearest radius; beyond this a new micro is spawned.
@@ -6102,7 +6102,7 @@ impl Default for CluStream {
 
 impl CluStream {
     /// CluStream with at most `q` micro-clusters.
-    pub fn new(q: usize) -> Self {
+    pub(crate) fn new(q: usize) -> Self {
         Self {
             q: q.max(1),
             ..Self::default()
@@ -6110,7 +6110,7 @@ impl CluStream {
     }
 
     /// Current micro-cluster count.
-    pub fn n_micro(&self) -> usize {
+    pub(crate) fn n_micro(&self) -> usize {
         self.micros.len()
     }
 
@@ -6266,7 +6266,7 @@ impl Predict for CluStream {
 /// re-split of an existing node is not implemented — documented as a
 /// compromise versus Manapragada, Webb & Salehi.
 #[derive(Clone, Debug)]
-pub struct ExtremelyFastDecisionTree {
+pub(crate) struct ExtremelyFastDecisionTree {
     tree: HoeffdingTree,
 }
 
@@ -6281,7 +6281,7 @@ impl Default for ExtremelyFastDecisionTree {
 
 impl ExtremelyFastDecisionTree {
     /// Eager VFDT.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -6314,7 +6314,7 @@ impl Predict for ExtremelyFastDecisionTree {
 
 /// Biased matrix factorization: `μ + b_u + b_i` (river `reco.BiasedMF`).
 #[derive(Clone, Debug)]
-pub struct BiasedMf {
+pub(crate) struct BiasedMf {
     /// SGD step.
     pub learning_rate: f64,
     /// ℓ2 on biases.
@@ -6342,7 +6342,7 @@ impl Default for BiasedMf {
 
 impl BiasedMf {
     /// Default biased MF.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -6472,7 +6472,7 @@ impl Predict for BiasedMf {
 /// Every labelled row is stored. A 1-row batch uses
 /// [`inspect_online_xy`], not [`inspect_xy`].
 #[derive(Clone, Debug)]
-pub struct KnnClassifier {
+pub(crate) struct KnnClassifier {
     /// Neighbourhood size.
     pub k: usize,
     xs: Vec<Vec<f64>>,
@@ -6495,7 +6495,7 @@ impl Default for KnnClassifier {
 
 impl KnnClassifier {
     /// `k`-NN memory.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k: k.max(1),
             ..Self::default()
@@ -6615,7 +6615,7 @@ impl Predict for KnnClassifier {
 
 /// Online min–max scaler (river `preprocessing.MinMaxScaler`).
 #[derive(Clone, Debug)]
-pub struct OnlineMinMaxScaler {
+pub(crate) struct OnlineMinMaxScaler {
     min: Vector,
     max: Vector,
     n_seen: u64,
@@ -6637,7 +6637,7 @@ impl Default for OnlineMinMaxScaler {
 
 impl OnlineMinMaxScaler {
     /// Empty scaler.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -6739,7 +6739,7 @@ impl Transform for OnlineMinMaxScaler {
 
 /// Online max-abs scaler (river `preprocessing.MaxAbsScaler`).
 #[derive(Clone, Debug)]
-pub struct OnlineMaxAbsScaler {
+pub(crate) struct OnlineMaxAbsScaler {
     max_abs: Vector,
     n_seen: u64,
     updates: u64,
@@ -6759,7 +6759,7 @@ impl Default for OnlineMaxAbsScaler {
 
 impl OnlineMaxAbsScaler {
     /// Empty scaler.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -6852,7 +6852,7 @@ impl Transform for OnlineMaxAbsScaler {
 
 /// Global-mean recommender (river `reco.Baseline` without biases).
 #[derive(Clone, Debug, Default)]
-pub struct Baseline {
+pub(crate) struct Baseline {
     mean: f64,
     n_seen: u64,
     updates: u64,
@@ -6860,7 +6860,7 @@ pub struct Baseline {
 
 impl Baseline {
     /// Empty baseline.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -6926,7 +6926,7 @@ impl Predict for Baseline {
 ///
 /// Item-id cardinality is not identification `p`. Column 1 of `x` is the item.
 #[derive(Clone, Debug, Default)]
-pub struct PopularReco {
+pub(crate) struct PopularReco {
     item_sum: HashMap<i64, f64>,
     item_n: HashMap<i64, f64>,
     global: f64,
@@ -6936,7 +6936,7 @@ pub struct PopularReco {
 
 impl PopularReco {
     /// Empty popularity table.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -7023,7 +7023,7 @@ impl Predict for PopularReco {
 ///
 /// Predicts the running mean; sampling noise is not used at predict time.
 #[derive(Clone, Debug, Default)]
-pub struct RandomNormalReco {
+pub(crate) struct RandomNormalReco {
     mean: f64,
     m2: f64,
     n_seen: u64,
@@ -7032,7 +7032,7 @@ pub struct RandomNormalReco {
 
 impl RandomNormalReco {
     /// Empty Gaussian rating model.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -7100,7 +7100,7 @@ impl Predict for RandomNormalReco {
 
 /// Online k-NN regressor (river `neighbors.KNNRegressor`).
 #[derive(Clone, Debug)]
-pub struct KnnRegressor {
+pub(crate) struct KnnRegressor {
     /// Neighbourhood size.
     pub k: usize,
     xs: Vec<Vec<f64>>,
@@ -7123,7 +7123,7 @@ impl Default for KnnRegressor {
 
 impl KnnRegressor {
     /// `k`-NN memory.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k: k.max(1),
             ..Self::default()
@@ -7232,7 +7232,7 @@ impl Predict for KnnRegressor {
 
 /// Online robust scaler via stochastic quartiles (river `preprocessing.RobustScaler`).
 #[derive(Clone, Debug)]
-pub struct OnlineRobustScaler {
+pub(crate) struct OnlineRobustScaler {
     q25: Vector,
     q75: Vector,
     n_seen: u64,
@@ -7254,7 +7254,7 @@ impl Default for OnlineRobustScaler {
 
 impl OnlineRobustScaler {
     /// Empty scaler.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -7350,7 +7350,7 @@ impl Transform for OnlineRobustScaler {
 
 /// Online softmax / multinomial logistic (river `linear_model.SoftmaxRegression`).
 #[derive(Clone, Debug)]
-pub struct SoftmaxRegression {
+pub(crate) struct SoftmaxRegression {
     /// Learning rate.
     pub eta: f64,
     coef: Matrix,
@@ -7377,7 +7377,7 @@ impl Default for SoftmaxRegression {
 
 impl SoftmaxRegression {
     /// Empty softmax classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -7528,7 +7528,7 @@ impl Predict for SoftmaxRegression {
 
 /// Online Gaussian naïve Bayes (river `naive_bayes.GaussianNB`).
 #[derive(Clone, Debug)]
-pub struct OnlineGaussianNb {
+pub(crate) struct OnlineGaussianNb {
     classes: Vec<i64>,
     n_per: Vec<f64>,
     mean: Matrix,
@@ -7554,7 +7554,7 @@ impl Default for OnlineGaussianNb {
 
 impl OnlineGaussianNb {
     /// Empty online GNB.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -7681,7 +7681,7 @@ impl Predict for OnlineGaussianNb {
 /// Document count is not identification `p`. IDF uses add-one smoothing and is
 /// recorded as a running approximation of the corpus IDF.
 #[derive(Clone, Debug)]
-pub struct OnlineTfidf {
+pub(crate) struct OnlineTfidf {
     df: Vector,
     n_docs: u64,
     n_features: usize,
@@ -7703,7 +7703,7 @@ impl Default for OnlineTfidf {
 
 impl OnlineTfidf {
     /// Empty streaming TF–IDF.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -7825,7 +7825,7 @@ impl Transform for OnlineTfidf {
 /// has never been observed finite is filled with 0 and recorded; that is not
 /// a vacuous all-missing abort.
 #[derive(Clone, Debug)]
-pub struct StatImputer {
+pub(crate) struct StatImputer {
     mean: Vector,
     m2: Vector,
     count: Vector,
@@ -7849,7 +7849,7 @@ impl Default for StatImputer {
 
 impl StatImputer {
     /// Empty streaming mean imputer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -7970,7 +7970,7 @@ impl Transform for StatImputer {
 /// Class count is not identification `p`. Scores are class-conditional Welford
 /// moments; a thin class is recorded, not treated as a cluster/`p` gate.
 #[derive(Clone, Debug)]
-pub struct OnlineSelectKBest {
+pub(crate) struct OnlineSelectKBest {
     /// Number of columns to keep.
     pub k: usize,
     classes: Vec<i64>,
@@ -7999,7 +7999,7 @@ impl Default for OnlineSelectKBest {
 
 impl OnlineSelectKBest {
     /// Keep `k` columns with the largest running ANOVA *F*.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k,
             ..Self::default()
@@ -8172,7 +8172,7 @@ impl Transform for OnlineSelectKBest {
 
 /// Rolling mean absolute error (river `metrics.MAE`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineMae {
+pub(crate) struct OnlineMae {
     sae: f64,
     n: u64,
     updates: u64,
@@ -8180,12 +8180,12 @@ pub struct OnlineMae {
 
 impl OnlineMae {
     /// Empty MAE.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current MAE, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -8212,7 +8212,7 @@ impl PartialFit for OnlineMae {
 
 /// Rolling symmetric MAPE (river `metrics.SMAPE`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineSmape {
+pub(crate) struct OnlineSmape {
     acc: f64,
     n: u64,
     updates: u64,
@@ -8220,12 +8220,12 @@ pub struct OnlineSmape {
 
 impl OnlineSmape {
     /// Empty SMAPE.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current SMAPE, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -8263,7 +8263,7 @@ impl PartialFit for OnlineSmape {
 
 /// Rolling Huber loss (river `metrics.Huber`).
 #[derive(Clone, Debug)]
-pub struct OnlineHuber {
+pub(crate) struct OnlineHuber {
     /// Huber threshold.
     pub delta: f64,
     acc: f64,
@@ -8284,7 +8284,7 @@ impl Default for OnlineHuber {
 
 impl OnlineHuber {
     /// Huber metric with threshold `delta`.
-    pub fn new(delta: f64) -> Self {
+    pub(crate) fn new(delta: f64) -> Self {
         Self {
             delta,
             ..Self::default()
@@ -8292,7 +8292,7 @@ impl OnlineHuber {
     }
 
     /// Current mean Huber loss, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -8337,7 +8337,7 @@ impl PartialFit for OnlineHuber {
 
 /// Rolling pinball / quantile loss (river `metrics.Pinball`).
 #[derive(Clone, Debug)]
-pub struct OnlinePinball {
+pub(crate) struct OnlinePinball {
     /// Quantile \(\tau\in(0,1)\).
     pub tau: f64,
     acc: f64,
@@ -8358,7 +8358,7 @@ impl Default for OnlinePinball {
 
 impl OnlinePinball {
     /// Pinball metric at quantile `tau`.
-    pub fn new(tau: f64) -> Self {
+    pub(crate) fn new(tau: f64) -> Self {
         Self {
             tau,
             ..Self::default()
@@ -8366,7 +8366,7 @@ impl OnlinePinball {
     }
 
     /// Current mean pinball loss, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -8409,7 +8409,7 @@ impl PartialFit for OnlinePinball {
 ///
 /// `x` is treated as a probability and clipped to \((\varepsilon,1-\varepsilon)\).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineLogLoss {
+pub(crate) struct OnlineLogLoss {
     nll: f64,
     n: u64,
     updates: u64,
@@ -8417,12 +8417,12 @@ pub struct OnlineLogLoss {
 
 impl OnlineLogLoss {
     /// Empty log-loss.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current mean log-loss, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -8462,7 +8462,7 @@ impl PartialFit for OnlineLogLoss {
 /// Pairs are kept in a 256-row buffer; the AUC is the Mann–Whitney U on that
 /// window, not the exact stream AUC.
 #[derive(Clone, Debug)]
-pub struct OnlineRocAuc {
+pub(crate) struct OnlineRocAuc {
     scores: Vec<f64>,
     labels: Vec<f64>,
     updates: u64,
@@ -8480,12 +8480,12 @@ impl Default for OnlineRocAuc {
 
 impl OnlineRocAuc {
     /// Empty windowed AUC.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Mann–Whitney AUC on the current window.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         let mut pos = Vec::new();
         let mut neg = Vec::new();
         for (s, y) in self.scores.iter().zip(&self.labels) {
@@ -8545,7 +8545,7 @@ impl PartialFit for OnlineRocAuc {
 ///
 /// Class count is not identification `p`. Negative counts are skipped.
 #[derive(Clone, Debug)]
-pub struct OnlineMultinomialNb {
+pub(crate) struct OnlineMultinomialNb {
     /// Additive smoothing.
     pub alpha: f64,
     classes: Vec<i64>,
@@ -8572,7 +8572,7 @@ impl Default for OnlineMultinomialNb {
 
 impl OnlineMultinomialNb {
     /// Empty multinomial NB.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -8710,13 +8710,13 @@ impl Predict for OnlineMultinomialNb {
 ///
 /// Class count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineComplementNb {
+pub(crate) struct OnlineComplementNb {
     inner: OnlineMultinomialNb,
 }
 
 impl OnlineComplementNb {
     /// Empty complement NB.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -8773,7 +8773,7 @@ impl Predict for OnlineComplementNb {
 
 /// Last-observation imputer (river `imputation.PreviousImputer`).
 #[derive(Clone, Debug)]
-pub struct PreviousImputer {
+pub(crate) struct PreviousImputer {
     last: Vector,
     n_seen: u64,
     updates: u64,
@@ -8793,7 +8793,7 @@ impl Default for PreviousImputer {
 
 impl PreviousImputer {
     /// Empty previous-value imputer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -8904,7 +8904,7 @@ impl Transform for PreviousImputer {
 
 /// Exponentially weighted standard scaler (river `preprocessing.AdaptiveStandardScaler`).
 #[derive(Clone, Debug)]
-pub struct AdaptiveStandardScaler {
+pub(crate) struct AdaptiveStandardScaler {
     /// Forgetting factor in `(0, 1]`.
     pub fading: f64,
     mean: Vector,
@@ -8929,7 +8929,7 @@ impl Default for AdaptiveStandardScaler {
 
 impl AdaptiveStandardScaler {
     /// Scaler with fading factor `fading`.
-    pub fn new(fading: f64) -> Self {
+    pub(crate) fn new(fading: f64) -> Self {
         Self {
             fading,
             ..Self::default()
@@ -9043,7 +9043,7 @@ impl Transform for AdaptiveStandardScaler {
 
 /// Streaming Gaussian anomaly score (river `anomaly.GaussianScorer`).
 #[derive(Clone, Debug)]
-pub struct GaussianScorer {
+pub(crate) struct GaussianScorer {
     mean: Vector,
     m2: Vector,
     count: Vector,
@@ -9067,7 +9067,7 @@ impl Default for GaussianScorer {
 
 impl GaussianScorer {
     /// Empty Gaussian scorer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -9166,7 +9166,7 @@ impl Transform for GaussianScorer {
 
 /// Streaming F1 (river `metrics.F1`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineF1 {
+pub(crate) struct OnlineF1 {
     tp: f64,
     fp: f64,
     fn_: f64,
@@ -9175,12 +9175,12 @@ pub struct OnlineF1 {
 
 impl OnlineF1 {
     /// Empty F1.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current F1, or NaN when no positive predictions or labels.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         let den = 2.0 * self.tp + self.fp + self.fn_;
         if den <= 0.0 {
             f64::NAN
@@ -9223,7 +9223,7 @@ impl PartialFit for OnlineF1 {
 
 /// Streaming precision (river `metrics.Precision`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlinePrecision {
+pub(crate) struct OnlinePrecision {
     tp: f64,
     fp: f64,
     updates: u64,
@@ -9231,12 +9231,12 @@ pub struct OnlinePrecision {
 
 impl OnlinePrecision {
     /// Empty precision.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current precision, or NaN when no positive predictions.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         let den = self.tp + self.fp;
         if den <= 0.0 {
             f64::NAN
@@ -9277,7 +9277,7 @@ impl PartialFit for OnlinePrecision {
 
 /// Streaming recall (river `metrics.Recall`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineRecall {
+pub(crate) struct OnlineRecall {
     tp: f64,
     fn_: f64,
     updates: u64,
@@ -9285,12 +9285,12 @@ pub struct OnlineRecall {
 
 impl OnlineRecall {
     /// Empty recall.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current recall, or NaN when no positive labels.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         let den = self.tp + self.fn_;
         if den <= 0.0 {
             f64::NAN
@@ -9334,7 +9334,7 @@ impl PartialFit for OnlineRecall {
 /// Class count is not identification `p`. Features are treated as
 /// \(\{0,1\}\) via a \(0.5\) threshold.
 #[derive(Clone, Debug)]
-pub struct OnlineBernoulliNb {
+pub(crate) struct OnlineBernoulliNb {
     /// Additive smoothing.
     pub alpha: f64,
     classes: Vec<i64>,
@@ -9361,7 +9361,7 @@ impl Default for OnlineBernoulliNb {
 
 impl OnlineBernoulliNb {
     /// Empty Bernoulli NB.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -9487,7 +9487,7 @@ impl Predict for OnlineBernoulliNb {
 ///
 /// Features are ignored; the mix is a two-expert forecast of the target.
 #[derive(Clone, Debug)]
-pub struct EwaRegressor {
+pub(crate) struct EwaRegressor {
     /// Multiplicative weight step \(\eta > 0\).
     pub eta: f64,
     w_mean: f64,
@@ -9516,7 +9516,7 @@ impl Default for EwaRegressor {
 
 impl EwaRegressor {
     /// EWA mix with step `eta`.
-    pub fn new(eta: f64) -> Self {
+    pub(crate) fn new(eta: f64) -> Self {
         Self {
             eta,
             ..Self::default()
@@ -9642,7 +9642,7 @@ impl Predict for EwaRegressor {
 /// Values above the empirical `q`-quantile of a 256-row window are clipped
 /// to that quantile. `q` is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct QuantileFilter {
+pub(crate) struct QuantileFilter {
     /// Upper quantile in \((0, 1)\).
     pub q: f64,
     window: Vec<f64>,
@@ -9663,7 +9663,7 @@ impl Default for QuantileFilter {
 
 impl QuantileFilter {
     /// Filter at quantile `q`.
-    pub fn new(q: f64) -> Self {
+    pub(crate) fn new(q: f64) -> Self {
         Self {
             q,
             ..Self::default()
@@ -9771,7 +9771,7 @@ impl Transform for QuantileFilter {
 
 /// Streaming RMSE (river `metrics.RMSE`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineRmse {
+pub(crate) struct OnlineRmse {
     sse: f64,
     n: u64,
     updates: u64,
@@ -9779,12 +9779,12 @@ pub struct OnlineRmse {
 
 impl OnlineRmse {
     /// Empty RMSE.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current RMSE, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -9820,7 +9820,7 @@ impl PartialFit for OnlineRmse {
 
 /// Streaming Cohen's κ (river `metrics.CohenKappa`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineCohenKappa {
+pub(crate) struct OnlineCohenKappa {
     a: f64,
     b: f64,
     c: f64,
@@ -9830,12 +9830,12 @@ pub struct OnlineCohenKappa {
 
 impl OnlineCohenKappa {
     /// Empty κ.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current κ, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         let n = self.a + self.b + self.c + self.d;
         if n <= 0.0 {
             return f64::NAN;
@@ -9883,7 +9883,7 @@ impl PartialFit for OnlineCohenKappa {
 
 /// Exponentially weighted mean (river `stats.EWMean`).
 #[derive(Clone, Debug)]
-pub struct EwMean {
+pub(crate) struct EwMean {
     /// Fade factor in \((0, 1]\). `1` is the expanding mean.
     pub fading: f64,
     mean: f64,
@@ -9906,7 +9906,7 @@ impl Default for EwMean {
 
 impl EwMean {
     /// EW mean with fade `fading`.
-    pub fn new(fading: f64) -> Self {
+    pub(crate) fn new(fading: f64) -> Self {
         Self {
             fading,
             ..Self::default()
@@ -9914,7 +9914,7 @@ impl EwMean {
     }
 
     /// Current mean, or NaN before the first update.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.initialized {
             self.mean
         } else {
@@ -10009,7 +10009,7 @@ impl Predict for EwMean {
 ///
 /// Expanded width is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct PolynomialExtender {
+pub(crate) struct PolynomialExtender {
     /// Polynomial degree (`1` or `2`).
     pub degree: usize,
     n_in: usize,
@@ -10032,7 +10032,7 @@ impl Default for PolynomialExtender {
 
 impl PolynomialExtender {
     /// Expander of the given degree.
-    pub fn new(degree: usize) -> Self {
+    pub(crate) fn new(degree: usize) -> Self {
         Self {
             degree,
             ..Self::default()
@@ -10159,7 +10159,7 @@ impl Transform for PolynomialExtender {
 
 /// Online target-mean encoder (river `preprocessing.TargetEncoder` / `stats.Mean`).
 #[derive(Clone, Debug)]
-pub struct TargetMeanEncoder {
+pub(crate) struct TargetMeanEncoder {
     maps: Vec<HashMap<i64, (f64, f64)>>,
     global: f64,
     global_n: f64,
@@ -10183,7 +10183,7 @@ impl Default for TargetMeanEncoder {
 
 impl TargetMeanEncoder {
     /// Empty target-mean encoder.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -10286,7 +10286,7 @@ impl Transform for TargetMeanEncoder {
 
 /// Poisson-bootstrap bag of perceptrons (river `ensemble.BaggingClassifier`).
 #[derive(Clone, Debug)]
-pub struct OnlineBagging {
+pub(crate) struct OnlineBagging {
     /// Members.
     pub n_models: usize,
     models: Vec<Perceptron>,
@@ -10309,7 +10309,7 @@ impl Default for OnlineBagging {
 
 impl OnlineBagging {
     /// Bag of `n_models` perceptrons.
-    pub fn new(n_models: usize) -> Self {
+    pub(crate) fn new(n_models: usize) -> Self {
         Self {
             n_models: n_models.max(1),
             ..Self::default()
@@ -10415,7 +10415,7 @@ impl Predict for OnlineBagging {
 
 /// Rolling quantile (river `stats.Quantile`).
 #[derive(Clone, Debug)]
-pub struct RollingQuantile {
+pub(crate) struct RollingQuantile {
     /// Quantile in \((0, 1)\).
     pub q: f64,
     window: Vec<f64>,
@@ -10436,7 +10436,7 @@ impl Default for RollingQuantile {
 
 impl RollingQuantile {
     /// Rolling quantile `q`.
-    pub fn new(q: f64) -> Self {
+    pub(crate) fn new(q: f64) -> Self {
         Self {
             q,
             ..Self::default()
@@ -10444,7 +10444,7 @@ impl RollingQuantile {
     }
 
     /// Current quantile, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.window.is_empty() {
             return f64::NAN;
         }
@@ -10521,7 +10521,7 @@ impl PartialFit for RollingQuantile {
 
 /// Streaming Hamming loss (river `metrics.Hamming`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineHamming {
+pub(crate) struct OnlineHamming {
     bad: f64,
     n: u64,
     updates: u64,
@@ -10529,12 +10529,12 @@ pub struct OnlineHamming {
 
 impl OnlineHamming {
     /// Empty Hamming.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current Hamming loss, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -10571,7 +10571,7 @@ impl PartialFit for OnlineHamming {
 
 /// Streaming Jaccard index (river `metrics.Jaccard`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineJaccard {
+pub(crate) struct OnlineJaccard {
     inter: f64,
     union: f64,
     n: u64,
@@ -10580,12 +10580,12 @@ pub struct OnlineJaccard {
 
 impl OnlineJaccard {
     /// Empty Jaccard.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Intersection over union, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.union <= 0.0 {
             f64::NAN
         } else {
@@ -10627,7 +10627,7 @@ impl PartialFit for OnlineJaccard {
 
 /// Exponentially weighted variance (river `stats.EWVar`).
 #[derive(Clone, Debug)]
-pub struct EwVar {
+pub(crate) struct EwVar {
     fading: f64,
     mean: f64,
     m2: f64,
@@ -10651,7 +10651,7 @@ impl Default for EwVar {
 
 impl EwVar {
     /// EW variance with fading factor in `(0, 1]`.
-    pub fn new(fading: f64) -> Self {
+    pub(crate) fn new(fading: f64) -> Self {
         Self {
             fading,
             ..Self::default()
@@ -10659,7 +10659,7 @@ impl EwVar {
     }
 
     /// Current variance, or NaN during warmup.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.w <= 1e-12 {
             f64::NAN
         } else {
@@ -10738,7 +10738,7 @@ impl PartialFit for EwVar {
 /// Model count is not identification `p`. The worst half is dropped when
 /// `n_seen` crosses successive powers of two.
 #[derive(Clone, Debug)]
-pub struct SuccessiveHalvingClassifier {
+pub(crate) struct SuccessiveHalvingClassifier {
     /// Initial candidate count.
     pub n_models: usize,
     models: Vec<Perceptron>,
@@ -10765,7 +10765,7 @@ impl Default for SuccessiveHalvingClassifier {
 
 impl SuccessiveHalvingClassifier {
     /// Committee of `n_models` perceptrons.
-    pub fn new(n_models: usize) -> Self {
+    pub(crate) fn new(n_models: usize) -> Self {
         Self {
             n_models: n_models.max(1),
             ..Self::default()
@@ -10773,7 +10773,7 @@ impl SuccessiveHalvingClassifier {
     }
 
     /// Models still alive.
-    pub fn n_alive(&self) -> usize {
+    pub(crate) fn n_alive(&self) -> usize {
         self.models.len()
     }
 }
@@ -10938,7 +10938,7 @@ impl Predict for SuccessiveHalvingClassifier {
 
 /// Successive-halving RLS committee (river `model_selection.SuccessiveHalvingRegressor`).
 #[derive(Clone, Debug)]
-pub struct SuccessiveHalvingRegressor {
+pub(crate) struct SuccessiveHalvingRegressor {
     /// Initial candidate count.
     pub n_models: usize,
     models: Vec<LinearRegression>,
@@ -10965,7 +10965,7 @@ impl Default for SuccessiveHalvingRegressor {
 
 impl SuccessiveHalvingRegressor {
     /// Committee of `n_models` RLS estimators.
-    pub fn new(n_models: usize) -> Self {
+    pub(crate) fn new(n_models: usize) -> Self {
         Self {
             n_models: n_models.max(1),
             ..Self::default()
@@ -11136,7 +11136,7 @@ impl Predict for SuccessiveHalvingRegressor {
 /// Tree count is not identification `p`. Each tree grows at most one
 /// axis-aligned stump once two labelled rows have been seen.
 #[derive(Clone, Debug)]
-pub struct AmfClassifier {
+pub(crate) struct AmfClassifier {
     /// Trees.
     pub n_trees: usize,
     trees: Vec<AmfTree>,
@@ -11172,7 +11172,7 @@ impl Default for AmfClassifier {
 
 impl AmfClassifier {
     /// AMF with `n_trees` Mondrian stumps.
-    pub fn new(n_trees: usize) -> Self {
+    pub(crate) fn new(n_trees: usize) -> Self {
         Self {
             n_trees: n_trees.max(1),
             ..Self::default()
@@ -11350,7 +11350,7 @@ impl Predict for AmfClassifier {
 ///
 /// Tree count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct AmfRegressor {
+pub(crate) struct AmfRegressor {
     /// Trees.
     pub n_trees: usize,
     trees: Vec<AmfRegTree>,
@@ -11389,7 +11389,7 @@ impl Default for AmfRegressor {
 
 impl AmfRegressor {
     /// AMF regressor with `n_trees` Mondrian stumps.
-    pub fn new(n_trees: usize) -> Self {
+    pub(crate) fn new(n_trees: usize) -> Self {
         Self {
             n_trees: n_trees.max(1),
             ..Self::default()
@@ -11563,7 +11563,7 @@ impl Predict for AmfRegressor {
 ///
 /// Micro-cluster count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct DbStream {
+pub(crate) struct DbStream {
     /// Merge radius.
     pub eps: f64,
     /// Per-row weight decay.
@@ -11587,7 +11587,7 @@ impl Default for DbStream {
 
 impl DbStream {
     /// DBSTREAM with radius `eps`.
-    pub fn new(eps: f64) -> Self {
+    pub(crate) fn new(eps: f64) -> Self {
         Self {
             eps,
             ..Self::default()
@@ -11595,7 +11595,7 @@ impl DbStream {
     }
 
     /// Current micro-cluster count.
-    pub fn n_micro(&self) -> usize {
+    pub(crate) fn n_micro(&self) -> usize {
         self.micros.len()
     }
 }
@@ -11763,7 +11763,7 @@ impl Predict for DbStream {
 
 /// Poisson-bootstrap bag of RLS members (river `ensemble.BaggingRegressor`).
 #[derive(Clone, Debug)]
-pub struct OnlineBaggingRegressor {
+pub(crate) struct OnlineBaggingRegressor {
     /// Members.
     pub n_models: usize,
     models: Vec<LinearRegression>,
@@ -11786,7 +11786,7 @@ impl Default for OnlineBaggingRegressor {
 
 impl OnlineBaggingRegressor {
     /// Bag of `n_models` RLS estimators.
-    pub fn new(n_models: usize) -> Self {
+    pub(crate) fn new(n_models: usize) -> Self {
         Self {
             n_models: n_models.max(1),
             ..Self::default()
@@ -11886,7 +11886,7 @@ impl Predict for OnlineBaggingRegressor {
 
 /// Streaming binarizer (river `preprocessing.Binarizer`).
 #[derive(Clone, Debug)]
-pub struct OnlineBinarizer {
+pub(crate) struct OnlineBinarizer {
     /// Threshold.
     pub threshold: f64,
     p: usize,
@@ -11907,7 +11907,7 @@ impl Default for OnlineBinarizer {
 
 impl OnlineBinarizer {
     /// Binarizer with threshold `threshold`.
-    pub fn new(threshold: f64) -> Self {
+    pub(crate) fn new(threshold: f64) -> Self {
         Self {
             threshold,
             ..Self::default()
@@ -11997,7 +11997,7 @@ impl Transform for OnlineBinarizer {
 ///
 /// Tree count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct OnlineIsolationForest {
+pub(crate) struct OnlineIsolationForest {
     /// Trees.
     pub n_trees: usize,
     /// Depth.
@@ -12031,7 +12031,7 @@ impl Default for OnlineIsolationForest {
 
 impl OnlineIsolationForest {
     /// Isolation ensemble with `n_trees` trees of depth `max_depth`.
-    pub fn new(n_trees: usize, max_depth: usize) -> Self {
+    pub(crate) fn new(n_trees: usize, max_depth: usize) -> Self {
         Self {
             n_trees: n_trees.max(1),
             max_depth: max_depth.max(1),
@@ -12082,7 +12082,7 @@ impl OnlineIsolationForest {
     }
 
     /// Mean isolation score in \([0, 1]\); higher is more anomalous.
-    pub fn score_row(&self, x: &Matrix, i: usize) -> f64 {
+    pub(crate) fn score_row(&self, x: &Matrix, i: usize) -> f64 {
         if self.trees.is_empty() || self.n_seen == 0 {
             return 0.5;
         }
@@ -12190,7 +12190,7 @@ fn rolling_push(window: &mut Vec<f64>, v: f64, cap: usize) {
 
 /// Rolling minimum (river `stats.RollingMin`).
 #[derive(Clone, Debug, Default)]
-pub struct RollingMin {
+pub(crate) struct RollingMin {
     window: Vec<f64>,
     n_seen: u64,
     updates: u64,
@@ -12198,12 +12198,12 @@ pub struct RollingMin {
 
 impl RollingMin {
     /// Empty rolling min.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current min, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         self.window
             .iter()
             .copied()
@@ -12256,7 +12256,7 @@ impl PartialFit for RollingMin {
 
 /// Rolling maximum (river `stats.RollingMax`).
 #[derive(Clone, Debug, Default)]
-pub struct RollingMax {
+pub(crate) struct RollingMax {
     window: Vec<f64>,
     n_seen: u64,
     updates: u64,
@@ -12264,12 +12264,12 @@ pub struct RollingMax {
 
 impl RollingMax {
     /// Empty rolling max.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current max, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         self.window
             .iter()
             .copied()
@@ -12322,7 +12322,7 @@ impl PartialFit for RollingMax {
 
 /// Streaming skewness (river `stats.Skew`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineSkew {
+pub(crate) struct OnlineSkew {
     n: f64,
     mean: f64,
     m2: f64,
@@ -12332,12 +12332,12 @@ pub struct OnlineSkew {
 
 impl OnlineSkew {
     /// Empty skewness accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current skewness, or NaN during warmup.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n < 3.0 || self.m2 <= 1e-18 {
             f64::NAN
         } else {
@@ -12400,7 +12400,7 @@ impl PartialFit for OnlineSkew {
 
 /// Streaming excess kurtosis (river `stats.Kurtosis`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineKurtosis {
+pub(crate) struct OnlineKurtosis {
     n: f64,
     mean: f64,
     m2: f64,
@@ -12411,12 +12411,12 @@ pub struct OnlineKurtosis {
 
 impl OnlineKurtosis {
     /// Empty kurtosis accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current excess kurtosis, or NaN during warmup.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n < 4.0 || self.m2 <= 1e-18 {
             f64::NAN
         } else {
@@ -12483,7 +12483,7 @@ impl PartialFit for OnlineKurtosis {
 
 /// Streaming Shannon entropy of rounded values (river `stats.Entropy`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineEntropy {
+pub(crate) struct OnlineEntropy {
     counts: HashMap<i64, u64>,
     n: u64,
     updates: u64,
@@ -12491,12 +12491,12 @@ pub struct OnlineEntropy {
 
 impl OnlineEntropy {
     /// Empty entropy accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current entropy in nats, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             return f64::NAN;
         }
@@ -12562,7 +12562,7 @@ impl PartialFit for OnlineEntropy {
 ///
 /// Period is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Periodic {
+pub(crate) struct Periodic {
     /// Period of the cycle.
     pub period: f64,
     p: usize,
@@ -12583,7 +12583,7 @@ impl Default for Periodic {
 
 impl Periodic {
     /// Periodic map with period `period`.
-    pub fn new(period: f64) -> Self {
+    pub(crate) fn new(period: f64) -> Self {
         Self {
             period,
             ..Self::default()
@@ -12675,7 +12675,7 @@ impl Transform for Periodic {
 
 /// Streaming pairwise covariance (river `stats.Cov`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineCovariance {
+pub(crate) struct OnlineCovariance {
     n: f64,
     mx: f64,
     my: f64,
@@ -12685,12 +12685,12 @@ pub struct OnlineCovariance {
 
 impl OnlineCovariance {
     /// Empty covariance accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current covariance, or NaN during warmup.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n < 2.0 {
             f64::NAN
         } else {
@@ -12771,7 +12771,7 @@ impl PartialFit for OnlineCovariance {
 ///
 /// Output width is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct HashingTrick {
+pub(crate) struct HashingTrick {
     /// Hash-bin count.
     pub n_features: usize,
     n_seen: u64,
@@ -12790,7 +12790,7 @@ impl Default for HashingTrick {
 
 impl HashingTrick {
     /// Hasher with `n_features` bins.
-    pub fn new(n_features: usize) -> Self {
+    pub(crate) fn new(n_features: usize) -> Self {
         Self {
             n_features: n_features.max(1),
             ..Self::default()
@@ -12867,7 +12867,7 @@ impl Transform for HashingTrick {
 /// Finite entries of `X` are hashed into `n_features` count bins.
 /// Bin count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct BagOfWords {
+pub(crate) struct BagOfWords {
     /// Hash-bin count.
     pub n_features: usize,
     n_seen: u64,
@@ -12886,7 +12886,7 @@ impl Default for BagOfWords {
 
 impl BagOfWords {
     /// Bag with `n_features` bins.
-    pub fn new(n_features: usize) -> Self {
+    pub(crate) fn new(n_features: usize) -> Self {
         Self {
             n_features: n_features.max(1),
             ..Self::default()
@@ -12968,7 +12968,7 @@ impl Transform for BagOfWords {
 /// Lite: a single logit leaf updated by log-loss SGD. Split / leaf counts
 /// are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SgtClassifier {
+pub(crate) struct SgtClassifier {
     /// Step size.
     pub learning_rate: f64,
     logit: f64,
@@ -12989,7 +12989,7 @@ impl Default for SgtClassifier {
 
 impl SgtClassifier {
     /// Default SGT classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -13065,7 +13065,7 @@ impl PartialFit for SgtClassifier {
 /// Lite: a single leaf mean updated by squared-error SGD. Leaf count is not
 /// identification `p`.
 #[derive(Clone, Debug)]
-pub struct SgtRegressor {
+pub(crate) struct SgtRegressor {
     /// Step size.
     pub learning_rate: f64,
     level: f64,
@@ -13086,7 +13086,7 @@ impl Default for SgtRegressor {
 
 impl SgtRegressor {
     /// Default SGT regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -13161,7 +13161,7 @@ impl PartialFit for SgtRegressor {
 /// Output 0 is `y`. Extra `X` columns beyond the first are additional targets.
 /// Output count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct IsoUPTree {
+pub(crate) struct IsoUPTree {
     /// Number of output heads.
     pub n_outputs: usize,
     means: Vec<f64>,
@@ -13184,7 +13184,7 @@ impl Default for IsoUPTree {
 
 impl IsoUPTree {
     /// `n_outputs` target heads.
-    pub fn new(n_outputs: usize) -> Self {
+    pub(crate) fn new(n_outputs: usize) -> Self {
         let k = n_outputs.max(1);
         Self {
             n_outputs: k,
@@ -13273,7 +13273,7 @@ impl PartialFit for IsoUPTree {
 ///
 /// Feature count is not treated as an extra identification `p` on a stream.
 #[derive(Clone, Debug)]
-pub struct OnlineSvm {
+pub(crate) struct OnlineSvm {
     /// Regularization \(\lambda > 0\).
     pub lambda: f64,
     coef: Vector,
@@ -13296,7 +13296,7 @@ impl Default for OnlineSvm {
 
 impl OnlineSvm {
     /// Default Pegasos SVM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -13398,7 +13398,7 @@ impl PartialFit for OnlineSvm {
 
 /// Streaming median absolute deviation (river `stats.MAD`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineMad {
+pub(crate) struct OnlineMad {
     window: Vec<f64>,
     n_seen: u64,
     updates: u64,
@@ -13406,12 +13406,12 @@ pub struct OnlineMad {
 
 impl OnlineMad {
     /// Empty MAD accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current MAD, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.window.is_empty() {
             return f64::NAN;
         }
@@ -13469,7 +13469,7 @@ impl PartialFit for OnlineMad {
 
 /// Streaming interquartile range (river `stats.IQR`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineIqr {
+pub(crate) struct OnlineIqr {
     window: Vec<f64>,
     n_seen: u64,
     updates: u64,
@@ -13477,12 +13477,12 @@ pub struct OnlineIqr {
 
 impl OnlineIqr {
     /// Empty IQR accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current IQR, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.window.len() < 2 {
             return f64::NAN;
         }
@@ -13544,7 +13544,7 @@ impl PartialFit for OnlineIqr {
 
 /// Streaming Pearson correlation (river `stats.PearsonCorr`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlinePearson {
+pub(crate) struct OnlinePearson {
     n: f64,
     mx: f64,
     my: f64,
@@ -13556,12 +13556,12 @@ pub struct OnlinePearson {
 
 impl OnlinePearson {
     /// Empty correlation accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current correlation, or NaN during warmup.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n < 2.0 {
             return f64::NAN;
         }
@@ -13647,7 +13647,7 @@ impl PartialFit for OnlinePearson {
 
 /// Streaming mode of a discretized column (river `stats.Mode`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineMode {
+pub(crate) struct OnlineMode {
     counts: HashMap<i64, u64>,
     mode_key: i64,
     mode_count: u64,
@@ -13657,12 +13657,12 @@ pub struct OnlineMode {
 
 impl OnlineMode {
     /// Empty mode accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current mode (decoded from milli-bins), or NaN before the first update.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n_seen == 0 {
             f64::NAN
         } else {
@@ -13725,7 +13725,7 @@ impl PartialFit for OnlineMode {
 
 /// Expanding maximum (river `stats.Peak`).
 #[derive(Clone, Debug)]
-pub struct OnlinePeak {
+pub(crate) struct OnlinePeak {
     peak: f64,
     n_seen: u64,
     updates: u64,
@@ -13743,12 +13743,12 @@ impl Default for OnlinePeak {
 
 impl OnlinePeak {
     /// Empty peak tracker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current peak, or NaN before the first finite value.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n_seen == 0 {
             f64::NAN
         } else {
@@ -13806,7 +13806,7 @@ impl PartialFit for OnlinePeak {
 
 /// Streaming standard error of the mean (river `stats.SEM`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineSem {
+pub(crate) struct OnlineSem {
     n: f64,
     mean: f64,
     m2: f64,
@@ -13815,12 +13815,12 @@ pub struct OnlineSem {
 
 impl OnlineSem {
     /// Empty SEM accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// \(s/\sqrt{n}\), or NaN during warmup.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n < 2.0 {
             return f64::NAN;
         }
@@ -13885,7 +13885,7 @@ impl PartialFit for OnlineSem {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineSpearman {
+pub(crate) struct OnlineSpearman {
     xs: Vec<f64>,
     ys: Vec<f64>,
     n_seen: u64,
@@ -13894,12 +13894,12 @@ pub struct OnlineSpearman {
 
 impl OnlineSpearman {
     /// Empty rank-correlation window.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current Spearman ρ, or NaN during warmup.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         spearman_window(&self.xs, &self.ys)
     }
 }
@@ -14022,7 +14022,7 @@ impl PartialFit for OnlineSpearman {
 ///
 /// Reservoir size is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct HillSketch {
+pub(crate) struct HillSketch {
     /// Number of upper order statistics kept.
     pub k: usize,
     heap: Vec<f64>,
@@ -14043,7 +14043,7 @@ impl Default for HillSketch {
 
 impl HillSketch {
     /// Hill reservoir of size `k`.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k: k.max(3),
             ..Self::default()
@@ -14051,7 +14051,7 @@ impl HillSketch {
     }
 
     /// Hill \(\xi\), or NaN during warmup.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         let k = self.k.max(3).min(self.heap.len());
         if k < 3 {
             return f64::NAN;
@@ -14120,7 +14120,7 @@ impl PartialFit for HillSketch {
 
 /// Expanding max-abs (river `stats.AbsMax`).
 #[derive(Clone, Debug)]
-pub struct OnlineAbsMax {
+pub(crate) struct OnlineAbsMax {
     peak: f64,
     n_seen: u64,
     updates: u64,
@@ -14138,12 +14138,12 @@ impl Default for OnlineAbsMax {
 
 impl OnlineAbsMax {
     /// Empty max-abs tracker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current max |x|, or NaN before the first finite value.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n_seen == 0 {
             f64::NAN
         } else {
@@ -14201,7 +14201,7 @@ impl PartialFit for OnlineAbsMax {
 
 /// One-step lag / shift (river `stats.Shift`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineShift {
+pub(crate) struct OnlineShift {
     last: Option<f64>,
     delayed: f64,
     n_seen: u64,
@@ -14210,12 +14210,12 @@ pub struct OnlineShift {
 
 impl OnlineShift {
     /// Empty lag-1 shift.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Previous finite value, or NaN during warmup.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n_seen < 2 {
             f64::NAN
         } else {
@@ -14276,7 +14276,7 @@ impl PartialFit for OnlineShift {
 ///
 /// Class count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct MultinomialProba {
+pub(crate) struct MultinomialProba {
     counts: HashMap<i64, f64>,
     total: f64,
     n_seen: u64,
@@ -14285,12 +14285,12 @@ pub struct MultinomialProba {
 
 impl MultinomialProba {
     /// Empty class counter.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Probability of the most frequent class, or NaN before the first label.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.total <= 0.0 {
             f64::NAN
         } else {
@@ -14299,7 +14299,7 @@ impl MultinomialProba {
     }
 
     /// \(\hat p(c)\) for integer class `c`.
-    pub fn pmf(&self, c: i64) -> f64 {
+    pub(crate) fn pmf(&self, c: i64) -> f64 {
         if self.total <= 0.0 {
             f64::NAN
         } else {
@@ -14364,7 +14364,7 @@ impl PartialFit for MultinomialProba {
 ///
 /// `x` is the prediction, `y` the label. Class count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineConfusion {
+pub(crate) struct OnlineConfusion {
     tp: u64,
     fp: u64,
     tn: u64,
@@ -14375,12 +14375,12 @@ pub struct OnlineConfusion {
 
 impl OnlineConfusion {
     /// Empty confusion matrix.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Accuracy, or NaN before the first labelled pair.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         let n = self.tp + self.fp + self.tn + self.fn_;
         if n == 0 {
             f64::NAN
@@ -14450,7 +14450,7 @@ impl PartialFit for OnlineConfusion {
 
 /// Expanding range max−min (river `stats.Range`).
 #[derive(Clone, Debug)]
-pub struct OnlineRange {
+pub(crate) struct OnlineRange {
     min: f64,
     max: f64,
     n_seen: u64,
@@ -14470,12 +14470,12 @@ impl Default for OnlineRange {
 
 impl OnlineRange {
     /// Empty range tracker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current max−min, or NaN before the first finite value.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n_seen == 0 {
             f64::NAN
         } else {
@@ -14536,7 +14536,7 @@ impl PartialFit for OnlineRange {
 
 /// Expanding minimum (river `stats.Min`).
 #[derive(Clone, Debug)]
-pub struct OnlineMin {
+pub(crate) struct OnlineMin {
     min: f64,
     n_seen: u64,
     updates: u64,
@@ -14554,12 +14554,12 @@ impl Default for OnlineMin {
 
 impl OnlineMin {
     /// Empty min tracker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current min, or NaN before the first finite value.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n_seen == 0 {
             f64::NAN
         } else {
@@ -14619,7 +14619,7 @@ impl PartialFit for OnlineMin {
 ///
 /// `x` is the prediction, `y` the label.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineMcc {
+pub(crate) struct OnlineMcc {
     tp: f64,
     fp: f64,
     tn: f64,
@@ -14630,12 +14630,12 @@ pub struct OnlineMcc {
 
 impl OnlineMcc {
     /// Empty MCC tracker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current MCC, or NaN before the first labelled pair.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         let n = self.tp + self.fp + self.tn + self.fn_;
         if n <= 0.0 {
             return f64::NAN;
@@ -14712,7 +14712,7 @@ impl PartialFit for OnlineMcc {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Swinn {
+pub(crate) struct Swinn {
     /// Window capacity.
     pub window: usize,
     /// Neighbours.
@@ -14738,7 +14738,7 @@ impl Default for Swinn {
 
 impl Swinn {
     /// SWINN with `k` neighbours.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k: k.max(1),
             ..Self::default()
@@ -14746,7 +14746,7 @@ impl Swinn {
     }
 
     /// Majority vote of the current window, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.ys.is_empty() {
             f64::NAN
         } else {
@@ -14807,7 +14807,7 @@ impl PartialFit for Swinn {
 
 /// 2-D Pareto skyline (river `misc.Skyline`).
 #[derive(Clone, Debug, Default)]
-pub struct Skyline {
+pub(crate) struct Skyline {
     points: Vec<(f64, f64)>,
     n_seen: u64,
     updates: u64,
@@ -14815,12 +14815,12 @@ pub struct Skyline {
 
 impl Skyline {
     /// Empty skyline.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Number of non-dominated points, or NaN before the first finite pair.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n_seen == 0 {
             f64::NAN
         } else {
@@ -14885,7 +14885,7 @@ impl PartialFit for Skyline {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Sdft {
+pub(crate) struct Sdft {
     /// Window.
     pub window: usize,
     buf: Vec<f64>,
@@ -14906,7 +14906,7 @@ impl Default for Sdft {
 
 impl Sdft {
     /// SDFT with `window` samples.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             ..Self::default()
@@ -14914,7 +14914,7 @@ impl Sdft {
     }
 
     /// Magnitude of the first harmonic, or NaN during warmup.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         let w = self.window.max(2);
         if self.buf.len() < w {
             return f64::NAN;
@@ -14982,7 +14982,7 @@ impl PartialFit for Sdft {
 
 /// AMSGrad linear regressor (river `optim.AMSGrad`).
 #[derive(Clone, Debug)]
-pub struct AmsGradRegressor {
+pub(crate) struct AmsGradRegressor {
     /// Step \(\eta\).
     pub learning_rate: f64,
     /// Second-moment decay.
@@ -15018,7 +15018,7 @@ impl Default for AmsGradRegressor {
 
 impl AmsGradRegressor {
     /// Default AMSGrad regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -15130,7 +15130,7 @@ impl Predict for AmsGradRegressor {
 
 /// Streaming balanced accuracy (river `metrics.BalancedAccuracy`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineBalancedAccuracy {
+pub(crate) struct OnlineBalancedAccuracy {
     tp: f64,
     tn: f64,
     p: f64,
@@ -15141,12 +15141,12 @@ pub struct OnlineBalancedAccuracy {
 
 impl OnlineBalancedAccuracy {
     /// Empty balanced-accuracy tracker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// \((\mathrm{TPR}+\mathrm{TNR})/2\), or NaN before both classes appear.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.p <= 0.0 || self.n <= 0.0 {
             f64::NAN
         } else {
@@ -15217,7 +15217,7 @@ impl PartialFit for OnlineBalancedAccuracy {
 
 /// Streaming Gini impurity of integer labels (river `stats.Gini`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineGini {
+pub(crate) struct OnlineGini {
     counts: HashMap<i64, f64>,
     total: f64,
     n_seen: u64,
@@ -15226,12 +15226,12 @@ pub struct OnlineGini {
 
 impl OnlineGini {
     /// Empty Gini tracker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// \(1-\sum p_k^2\), or NaN before the first label.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.total <= 0.0 {
             f64::NAN
         } else {
@@ -15295,7 +15295,7 @@ impl PartialFit for OnlineGini {
 
 /// Exponentially weighted mean (river `stats.EWMean`).
 #[derive(Clone, Debug)]
-pub struct OnlineEwMean {
+pub(crate) struct OnlineEwMean {
     /// Smoothing \(\alpha\in(0,1]\).
     pub alpha: f64,
     mean: f64,
@@ -15316,7 +15316,7 @@ impl Default for OnlineEwMean {
 
 impl OnlineEwMean {
     /// EW mean with the given \(\alpha\).
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self {
             alpha,
             ..Self::default()
@@ -15324,7 +15324,7 @@ impl OnlineEwMean {
     }
 
     /// Current EW mean, or NaN before the first finite value.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n_seen == 0 {
             f64::NAN
         } else {
@@ -15391,7 +15391,7 @@ impl PartialFit for OnlineEwMean {
 ///
 /// Distinct-key count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct NUnique {
+pub(crate) struct NUnique {
     keys: HashSet<i64>,
     n_seen: u64,
     updates: u64,
@@ -15399,12 +15399,12 @@ pub struct NUnique {
 
 impl NUnique {
     /// Empty unique counter.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Number of distinct rounded values, or NaN before the first finite value.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n_seen == 0 {
             f64::NAN
         } else {
@@ -15462,7 +15462,7 @@ impl PartialFit for NUnique {
 ///
 /// Non-positive observations are skipped with a warning; they do not abort.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineGeometricMean {
+pub(crate) struct OnlineGeometricMean {
     log_sum: f64,
     n_pos: u64,
     n_seen: u64,
@@ -15471,12 +15471,12 @@ pub struct OnlineGeometricMean {
 
 impl OnlineGeometricMean {
     /// Empty geometric mean.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current geometric mean, or NaN before the first positive value.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n_pos == 0 {
             f64::NAN
         } else {
@@ -15550,7 +15550,7 @@ impl PartialFit for OnlineGeometricMean {
 ///
 /// Distinct from [`OnlineAbsMax`].
 #[derive(Clone, Debug)]
-pub struct OnlineMax {
+pub(crate) struct OnlineMax {
     max: f64,
     n_seen: u64,
     updates: u64,
@@ -15568,12 +15568,12 @@ impl Default for OnlineMax {
 
 impl OnlineMax {
     /// Empty max tracker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current max, or NaN before the first finite value.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n_seen == 0 {
             f64::NAN
         } else {
@@ -15631,7 +15631,7 @@ impl PartialFit for OnlineMax {
 
 /// Streaming Fβ (river `metrics.FBeta`).
 #[derive(Clone, Debug)]
-pub struct OnlineFbeta {
+pub(crate) struct OnlineFbeta {
     /// β weight on recall.
     pub beta: f64,
     tp: f64,
@@ -15654,7 +15654,7 @@ impl Default for OnlineFbeta {
 
 impl OnlineFbeta {
     /// Fβ with the given β.
-    pub fn new(beta: f64) -> Self {
+    pub(crate) fn new(beta: f64) -> Self {
         Self {
             beta,
             ..Self::default()
@@ -15662,7 +15662,7 @@ impl OnlineFbeta {
     }
 
     /// Current Fβ, or NaN when the denominator is zero.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         let b2 = self.beta * self.beta;
         let den = (1.0 + b2) * self.tp + b2 * self.fn_ + self.fp;
         if den <= 0.0 {
@@ -15706,7 +15706,7 @@ impl PartialFit for OnlineFbeta {
 
 /// Streaming MAPE (river `metrics.MAPE`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineMape {
+pub(crate) struct OnlineMape {
     sum: f64,
     n: f64,
     updates: u64,
@@ -15714,12 +15714,12 @@ pub struct OnlineMape {
 
 impl OnlineMape {
     /// Empty MAPE.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current MAPE, or NaN before a usable pair.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n <= 0.0 {
             f64::NAN
         } else {
@@ -15758,7 +15758,7 @@ impl PartialFit for OnlineMape {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct TimeRolling {
+pub(crate) struct TimeRolling {
     /// Window length in observations.
     pub window: usize,
     buf: Vec<f64>,
@@ -15779,7 +15779,7 @@ impl Default for TimeRolling {
 
 impl TimeRolling {
     /// Rolling window of length `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -15787,7 +15787,7 @@ impl TimeRolling {
     }
 
     /// Current window mean, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.buf.is_empty() {
             f64::NAN
         } else {
@@ -15845,7 +15845,7 @@ impl PartialFit for TimeRolling {
 ///
 /// Distinct named companion to [`OnlineEwMean`].
 #[derive(Clone, Debug)]
-pub struct OnlineEwVar {
+pub(crate) struct OnlineEwVar {
     /// Smoothing \(\alpha\in(0,1]\).
     pub alpha: f64,
     mean: f64,
@@ -15868,7 +15868,7 @@ impl Default for OnlineEwVar {
 
 impl OnlineEwVar {
     /// EW variance with the given \(\alpha\).
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self {
             alpha,
             ..Self::default()
@@ -15876,7 +15876,7 @@ impl OnlineEwVar {
     }
 
     /// Current EW variance, or NaN during warmup.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n_seen < 2 {
             f64::NAN
         } else {
@@ -15946,7 +15946,7 @@ impl PartialFit for OnlineEwVar {
 ///
 /// `y` holds weights when present; otherwise each row weighs 1.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineWeightedMean {
+pub(crate) struct OnlineWeightedMean {
     sw: f64,
     sx: f64,
     n_seen: u64,
@@ -15955,12 +15955,12 @@ pub struct OnlineWeightedMean {
 
 impl OnlineWeightedMean {
     /// Empty weighted mean.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current weighted mean, or NaN before the first finite pair.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.sw.abs() <= 1e-15 {
             f64::NAN
         } else {
@@ -16021,7 +16021,7 @@ impl PartialFit for OnlineWeightedMean {
 
 /// Bayesian running mean with a unit-information prior (river `stats.BayesianMean`).
 #[derive(Clone, Debug)]
-pub struct OnlineBayesianMean {
+pub(crate) struct OnlineBayesianMean {
     /// Prior mean.
     pub prior_mean: f64,
     /// Prior pseudo-count.
@@ -16045,7 +16045,7 @@ impl Default for OnlineBayesianMean {
 
 impl OnlineBayesianMean {
     /// Unit-information prior at `prior_mean`.
-    pub fn new(prior_mean: f64) -> Self {
+    pub(crate) fn new(prior_mean: f64) -> Self {
         Self {
             prior_mean,
             ..Self::default()
@@ -16053,7 +16053,7 @@ impl OnlineBayesianMean {
     }
 
     /// Posterior mean.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         let n0 = self.prior_n.max(0.0);
         (n0 * self.prior_mean + self.sum) / (n0 + self.n_seen as f64).max(1e-12)
     }
@@ -16102,7 +16102,7 @@ impl PartialFit for OnlineBayesianMean {
 
 /// Rolling mean (river `stats.RollingMean`).
 #[derive(Clone, Debug, Default)]
-pub struct RollingMean {
+pub(crate) struct RollingMean {
     window: Vec<f64>,
     n_seen: u64,
     updates: u64,
@@ -16110,12 +16110,12 @@ pub struct RollingMean {
 
 impl RollingMean {
     /// Empty rolling mean.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current mean, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.window.is_empty() {
             f64::NAN
         } else {
@@ -16172,7 +16172,7 @@ impl PartialFit for RollingMean {
 /// Non-positive values are skipped with a warning. Test streams that start at
 /// 0 must not abort.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineHarmonicMean {
+pub(crate) struct OnlineHarmonicMean {
     inv_sum: f64,
     n_pos: u64,
     n_seen: u64,
@@ -16181,12 +16181,12 @@ pub struct OnlineHarmonicMean {
 
 impl OnlineHarmonicMean {
     /// Empty harmonic mean.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current harmonic mean, or NaN before the first positive value.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n_pos == 0 || self.inv_sum.abs() < 1e-300 {
             f64::NAN
         } else {
@@ -16258,7 +16258,7 @@ impl PartialFit for OnlineHarmonicMean {
 
 /// Expanding quadratic mean / RMS (river `stats.QuadraticMean`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineQuadraticMean {
+pub(crate) struct OnlineQuadraticMean {
     sumsq: f64,
     n_seen: u64,
     updates: u64,
@@ -16266,12 +16266,12 @@ pub struct OnlineQuadraticMean {
 
 impl OnlineQuadraticMean {
     /// Empty quadratic mean.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current RMS, or NaN before the first finite value.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n_seen == 0 {
             f64::NAN
         } else {
@@ -16329,7 +16329,7 @@ impl PartialFit for OnlineQuadraticMean {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingVar {
+pub(crate) struct RollingVar {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -16350,7 +16350,7 @@ impl Default for RollingVar {
 
 impl RollingVar {
     /// Rolling variance with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             ..Self::default()
@@ -16358,7 +16358,7 @@ impl RollingVar {
     }
 
     /// Current sample variance, or NaN when the window has fewer than 2 points.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.buf.len() < 2 {
             f64::NAN
         } else {
@@ -16418,7 +16418,7 @@ impl PartialFit for RollingVar {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingCov {
+pub(crate) struct RollingCov {
     /// Window capacity.
     pub window: usize,
     xs: Vec<f64>,
@@ -16441,7 +16441,7 @@ impl Default for RollingCov {
 
 impl RollingCov {
     /// Rolling covariance with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             ..Self::default()
@@ -16449,7 +16449,7 @@ impl RollingCov {
     }
 
     /// Current sample covariance, or NaN when the window has fewer than 2 pairs.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         let n = self.xs.len().min(self.ys.len());
         if n < 2 {
             f64::NAN
@@ -16534,7 +16534,7 @@ fn window_quantile(xs: &[f64], q: f64) -> f64 {
 
 /// Expanding median (river `stats.Quantile(0.5)` / `stats.Median`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineMedian {
+pub(crate) struct OnlineMedian {
     buf: Vec<f64>,
     n_seen: u64,
     updates: u64,
@@ -16542,12 +16542,12 @@ pub struct OnlineMedian {
 
 impl OnlineMedian {
     /// Empty median tracker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current median, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         window_quantile(&self.buf, 0.5)
     }
 }
@@ -16600,7 +16600,7 @@ impl PartialFit for OnlineMedian {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingMedian {
+pub(crate) struct RollingMedian {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -16621,7 +16621,7 @@ impl Default for RollingMedian {
 
 impl RollingMedian {
     /// Rolling median with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             ..Self::default()
@@ -16629,7 +16629,7 @@ impl RollingMedian {
     }
 
     /// Current window median, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         window_quantile(&self.buf, 0.5)
     }
 }
@@ -16680,7 +16680,7 @@ impl PartialFit for RollingMedian {
 
 /// Expanding standard deviation (river `stats.Var` square-root).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineStd {
+pub(crate) struct OnlineStd {
     n: f64,
     mean: f64,
     m2: f64,
@@ -16689,12 +16689,12 @@ pub struct OnlineStd {
 
 impl OnlineStd {
     /// Empty standard-deviation accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current sample std, or NaN during warmup.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n < 2.0 {
             f64::NAN
         } else {
@@ -16755,7 +16755,7 @@ impl PartialFit for OnlineStd {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingStd {
+pub(crate) struct RollingStd {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -16776,7 +16776,7 @@ impl Default for RollingStd {
 
 impl RollingStd {
     /// Rolling std with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             ..Self::default()
@@ -16784,7 +16784,7 @@ impl RollingStd {
     }
 
     /// Current sample std, or NaN when the window has fewer than 2 points.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.buf.len() < 2 {
             f64::NAN
         } else {
@@ -16844,7 +16844,7 @@ impl PartialFit for RollingStd {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingSum {
+pub(crate) struct RollingSum {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -16865,7 +16865,7 @@ impl Default for RollingSum {
 
 impl RollingSum {
     /// Rolling sum with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -16873,7 +16873,7 @@ impl RollingSum {
     }
 
     /// Current window sum, or 0 when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         self.buf.iter().sum()
     }
 }
@@ -16922,7 +16922,7 @@ impl PartialFit for RollingSum {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingIqr {
+pub(crate) struct RollingIqr {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -16943,7 +16943,7 @@ impl Default for RollingIqr {
 
 impl RollingIqr {
     /// Rolling IQR with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             ..Self::default()
@@ -16951,7 +16951,7 @@ impl RollingIqr {
     }
 
     /// Current IQR, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.buf.is_empty() {
             f64::NAN
         } else {
@@ -17006,7 +17006,7 @@ impl PartialFit for RollingIqr {
 
 /// Expanding peak-to-peak range (river `stats.PeakToPeak`).
 #[derive(Clone, Debug)]
-pub struct OnlinePeakToPeak {
+pub(crate) struct OnlinePeakToPeak {
     min: f64,
     max: f64,
     n_seen: u64,
@@ -17026,12 +17026,12 @@ impl Default for OnlinePeakToPeak {
 
 impl OnlinePeakToPeak {
     /// Empty peak-to-peak tracker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current range, or NaN before the first finite value.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n_seen == 0 {
             f64::NAN
         } else {
@@ -17094,7 +17094,7 @@ impl PartialFit for OnlinePeakToPeak {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingPeakToPeak {
+pub(crate) struct RollingPeakToPeak {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -17115,7 +17115,7 @@ impl Default for RollingPeakToPeak {
 
 impl RollingPeakToPeak {
     /// Rolling peak-to-peak with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             ..Self::default()
@@ -17123,7 +17123,7 @@ impl RollingPeakToPeak {
     }
 
     /// Current window range, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.buf.is_empty() {
             f64::NAN
         } else {
@@ -17182,7 +17182,7 @@ impl PartialFit for RollingPeakToPeak {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingSem {
+pub(crate) struct RollingSem {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -17203,7 +17203,7 @@ impl Default for RollingSem {
 
 impl RollingSem {
     /// Rolling SEM with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             ..Self::default()
@@ -17211,7 +17211,7 @@ impl RollingSem {
     }
 
     /// Current SEM, or NaN when the window has fewer than 2 points.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.buf.len() < 2 {
             f64::NAN
         } else {
@@ -17271,7 +17271,7 @@ impl PartialFit for RollingSem {
 ///
 /// Non-positive pairs are skipped with a warning.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineMsle {
+pub(crate) struct OnlineMsle {
     acc: f64,
     n: u64,
     updates: u64,
@@ -17279,12 +17279,12 @@ pub struct OnlineMsle {
 
 impl OnlineMsle {
     /// Empty MSLE.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current MSLE, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -17363,7 +17363,7 @@ impl PartialFit for OnlineMsle {
 ///
 /// Column 0 of `x` is the predicted probability; `y` is the 0/1 label.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineBrier {
+pub(crate) struct OnlineBrier {
     acc: f64,
     n: u64,
     updates: u64,
@@ -17371,12 +17371,12 @@ pub struct OnlineBrier {
 
 impl OnlineBrier {
     /// Empty Brier accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current Brier score, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -17446,7 +17446,7 @@ impl PartialFit for OnlineBrier {
 /// Distinct from [`OnlineLogLoss`]: `y` is treated as a probability in
 /// \([0,1]\), not hard-thresholded.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineCrossEntropy {
+pub(crate) struct OnlineCrossEntropy {
     nll: f64,
     n: u64,
     updates: u64,
@@ -17454,12 +17454,12 @@ pub struct OnlineCrossEntropy {
 
 impl OnlineCrossEntropy {
     /// Empty cross-entropy accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current mean cross-entropy, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -17592,7 +17592,7 @@ fn window_entropy(buf: &[f64]) -> f64 {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingSkew {
+pub(crate) struct RollingSkew {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -17613,7 +17613,7 @@ impl Default for RollingSkew {
 
 impl RollingSkew {
     /// Rolling skewness with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(3),
             ..Self::default()
@@ -17621,7 +17621,7 @@ impl RollingSkew {
     }
 
     /// Current window skewness, or NaN during warmup.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         window_skew(&self.buf)
     }
 }
@@ -17674,7 +17674,7 @@ impl PartialFit for RollingSkew {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingKurtosis {
+pub(crate) struct RollingKurtosis {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -17695,7 +17695,7 @@ impl Default for RollingKurtosis {
 
 impl RollingKurtosis {
     /// Rolling kurtosis with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(4),
             ..Self::default()
@@ -17703,7 +17703,7 @@ impl RollingKurtosis {
     }
 
     /// Current excess kurtosis, or NaN during warmup.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         window_kurtosis(&self.buf)
     }
 }
@@ -17756,7 +17756,7 @@ impl PartialFit for RollingKurtosis {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingEntropy {
+pub(crate) struct RollingEntropy {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -17777,7 +17777,7 @@ impl Default for RollingEntropy {
 
 impl RollingEntropy {
     /// Rolling entropy with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             ..Self::default()
@@ -17785,7 +17785,7 @@ impl RollingEntropy {
     }
 
     /// Current entropy in nats, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         window_entropy(&self.buf)
     }
 }
@@ -17838,7 +17838,7 @@ impl PartialFit for RollingEntropy {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingCorr {
+pub(crate) struct RollingCorr {
     /// Window capacity.
     pub window: usize,
     xs: Vec<f64>,
@@ -17861,7 +17861,7 @@ impl Default for RollingCorr {
 
 impl RollingCorr {
     /// Rolling correlation with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             ..Self::default()
@@ -17869,7 +17869,7 @@ impl RollingCorr {
     }
 
     /// Current Pearson correlation, or NaN when the window is degenerate.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         let n = self.xs.len().min(self.ys.len());
         if n < 2 {
             return f64::NAN;
@@ -17955,7 +17955,7 @@ impl PartialFit for RollingCorr {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingMae {
+pub(crate) struct RollingMae {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -17976,7 +17976,7 @@ impl Default for RollingMae {
 
 impl RollingMae {
     /// Rolling MAE with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -17984,7 +17984,7 @@ impl RollingMae {
     }
 
     /// Current window MAE, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.buf.is_empty() {
             f64::NAN
         } else {
@@ -18050,7 +18050,7 @@ impl PartialFit for RollingMae {
 ///
 /// Window length is not identification `p`. Zeros in `y` are skipped.
 #[derive(Clone, Debug)]
-pub struct RollingMape {
+pub(crate) struct RollingMape {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -18071,7 +18071,7 @@ impl Default for RollingMape {
 
 impl RollingMape {
     /// Rolling MAPE with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -18079,7 +18079,7 @@ impl RollingMape {
     }
 
     /// Current window MAPE, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.buf.is_empty() {
             f64::NAN
         } else {
@@ -18156,7 +18156,7 @@ impl PartialFit for RollingMape {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingRmse {
+pub(crate) struct RollingRmse {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -18177,7 +18177,7 @@ impl Default for RollingRmse {
 
 impl RollingRmse {
     /// Rolling RMSE with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -18185,7 +18185,7 @@ impl RollingRmse {
     }
 
     /// Current window RMSE, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.buf.is_empty() {
             f64::NAN
         } else {
@@ -18250,7 +18250,7 @@ impl PartialFit for RollingRmse {
 
 /// Streaming Matthews correlation (river `metrics.MCC`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineMatthews {
+pub(crate) struct OnlineMatthews {
     tp: f64,
     tn: f64,
     fp: f64,
@@ -18260,12 +18260,12 @@ pub struct OnlineMatthews {
 
 impl OnlineMatthews {
     /// Empty MCC.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current MCC, or NaN when a margin is empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         let den = ((self.tp + self.fp)
             * (self.tp + self.fn_)
             * (self.tn + self.fp)
@@ -18348,7 +18348,7 @@ impl PartialFit for OnlineMatthews {
 ///
 /// Non-positive means or counts are skipped with a warning.
 #[derive(Clone, Debug, Default)]
-pub struct OnlinePoissonDeviance {
+pub(crate) struct OnlinePoissonDeviance {
     acc: f64,
     n: u64,
     updates: u64,
@@ -18356,12 +18356,12 @@ pub struct OnlinePoissonDeviance {
 
 impl OnlinePoissonDeviance {
     /// Empty Poisson deviance.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current mean deviance, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -18449,7 +18449,7 @@ impl PartialFit for OnlinePoissonDeviance {
 ///
 /// Non-positive pairs are skipped with a warning.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineGammaDeviance {
+pub(crate) struct OnlineGammaDeviance {
     acc: f64,
     n: u64,
     updates: u64,
@@ -18457,12 +18457,12 @@ pub struct OnlineGammaDeviance {
 
 impl OnlineGammaDeviance {
     /// Empty Gamma deviance.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current mean deviance, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -18545,7 +18545,7 @@ impl PartialFit for OnlineGammaDeviance {
 ///
 /// Hash-function count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MinHash {
+pub(crate) struct MinHash {
     /// Number of hash functions.
     pub k: usize,
     mins: Vec<u64>,
@@ -18566,7 +18566,7 @@ impl Default for MinHash {
 
 impl MinHash {
     /// `k`-wide MinHash of column 0.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k: k.max(1),
             ..Self::default()
@@ -18574,7 +18574,7 @@ impl MinHash {
     }
 
     /// Mean of the normalized minima, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n_seen == 0 || self.mins.is_empty() {
             f64::NAN
         } else {
@@ -18646,7 +18646,7 @@ impl PartialFit for MinHash {
 ///
 /// `y` is hard-thresholded at 0.5. Class count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct BernoulliProba {
+pub(crate) struct BernoulliProba {
     successes: u64,
     n: u64,
     updates: u64,
@@ -18654,12 +18654,12 @@ pub struct BernoulliProba {
 
 impl BernoulliProba {
     /// Empty Bernoulli accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// \(\hat p = n_1 / n\), or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -18668,7 +18668,7 @@ impl BernoulliProba {
     }
 
     /// \(\hat p(k)\) for \(k\in\{0,1\}\).
-    pub fn pmf(&self, k: i64) -> f64 {
+    pub(crate) fn pmf(&self, k: i64) -> f64 {
         let p = self.score();
         if !p.is_finite() {
             f64::NAN
@@ -18740,7 +18740,7 @@ impl PartialFit for BernoulliProba {
 ///
 /// Non-positive pairs are skipped with a warning.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineTweedieDeviance {
+pub(crate) struct OnlineTweedieDeviance {
     acc: f64,
     n: u64,
     updates: u64,
@@ -18748,12 +18748,12 @@ pub struct OnlineTweedieDeviance {
 
 impl OnlineTweedieDeviance {
     /// Empty Tweedie deviance (power 1.5).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current mean deviance, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -18886,7 +18886,7 @@ fn window_ranks(v: &[f64]) -> Vec<f64> {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingSpearman {
+pub(crate) struct RollingSpearman {
     /// Window capacity.
     pub window: usize,
     xs: Vec<f64>,
@@ -18909,7 +18909,7 @@ impl Default for RollingSpearman {
 
 impl RollingSpearman {
     /// Rolling Spearman with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             ..Self::default()
@@ -18917,7 +18917,7 @@ impl RollingSpearman {
     }
 
     /// Current Spearman correlation, or NaN when the window is degenerate.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         window_spearman(&self.xs, &self.ys)
     }
 }
@@ -18986,7 +18986,7 @@ impl PartialFit for RollingSpearman {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingMse {
+pub(crate) struct RollingMse {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -19007,7 +19007,7 @@ impl Default for RollingMse {
 
 impl RollingMse {
     /// Rolling MSE with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -19015,7 +19015,7 @@ impl RollingMse {
     }
 
     /// Current window mean squared error, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.buf.is_empty() {
             f64::NAN
         } else {
@@ -19083,7 +19083,7 @@ impl PartialFit for RollingMse {
 /// Window length is not identification `p`. Predictions are clipped to
 /// \((\varepsilon,1-\varepsilon)\).
 #[derive(Clone, Debug)]
-pub struct RollingLogLoss {
+pub(crate) struct RollingLogLoss {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -19104,7 +19104,7 @@ impl Default for RollingLogLoss {
 
 impl RollingLogLoss {
     /// Rolling log-loss with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -19112,7 +19112,7 @@ impl RollingLogLoss {
     }
 
     /// Current window mean log-loss, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.buf.is_empty() {
             f64::NAN
         } else {
@@ -19179,7 +19179,7 @@ impl PartialFit for RollingLogLoss {
 ///
 /// Window length and \(\tau\) are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingPinball {
+pub(crate) struct RollingPinball {
     /// Quantile \(\tau\in(0,1)\).
     pub tau: f64,
     /// Window capacity.
@@ -19203,7 +19203,7 @@ impl Default for RollingPinball {
 
 impl RollingPinball {
     /// Rolling pinball at quantile `tau` with capacity `window`.
-    pub fn new(window: usize, tau: f64) -> Self {
+    pub(crate) fn new(window: usize, tau: f64) -> Self {
         Self {
             tau,
             window: window.max(1),
@@ -19212,7 +19212,7 @@ impl RollingPinball {
     }
 
     /// Current window mean pinball, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.buf.is_empty() {
             f64::NAN
         } else {
@@ -19294,7 +19294,7 @@ impl PartialFit for RollingPinball {
 ///
 /// Window length and \(\delta\) are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingHuber {
+pub(crate) struct RollingHuber {
     /// Huber threshold.
     pub delta: f64,
     /// Window capacity.
@@ -19318,7 +19318,7 @@ impl Default for RollingHuber {
 
 impl RollingHuber {
     /// Rolling Huber with threshold `delta` and capacity `window`.
-    pub fn new(window: usize, delta: f64) -> Self {
+    pub(crate) fn new(window: usize, delta: f64) -> Self {
         Self {
             delta,
             window: window.max(1),
@@ -19327,7 +19327,7 @@ impl RollingHuber {
     }
 
     /// Current window mean Huber loss, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.buf.is_empty() {
             f64::NAN
         } else {
@@ -19413,7 +19413,7 @@ impl PartialFit for RollingHuber {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingLogCosh {
+pub(crate) struct RollingLogCosh {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -19434,7 +19434,7 @@ impl Default for RollingLogCosh {
 
 impl RollingLogCosh {
     /// Rolling log-cosh with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -19442,7 +19442,7 @@ impl RollingLogCosh {
     }
 
     /// Current window mean log-cosh, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.buf.is_empty() {
             f64::NAN
         } else {
@@ -19511,7 +19511,7 @@ impl PartialFit for RollingLogCosh {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingCrossEntropy {
+pub(crate) struct RollingCrossEntropy {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -19532,7 +19532,7 @@ impl Default for RollingCrossEntropy {
 
 impl RollingCrossEntropy {
     /// Rolling cross-entropy with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -19540,7 +19540,7 @@ impl RollingCrossEntropy {
     }
 
     /// Current window mean cross-entropy, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.buf.is_empty() {
             f64::NAN
         } else {
@@ -19614,7 +19614,7 @@ impl PartialFit for RollingCrossEntropy {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingAccuracy {
+pub(crate) struct RollingAccuracy {
     /// Window capacity.
     pub window: usize,
     buf: Vec<f64>,
@@ -19635,7 +19635,7 @@ impl Default for RollingAccuracy {
 
 impl RollingAccuracy {
     /// Rolling accuracy with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -19643,7 +19643,7 @@ impl RollingAccuracy {
     }
 
     /// Current window accuracy, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.buf.is_empty() {
             f64::NAN
         } else {
@@ -19981,7 +19981,7 @@ fn window_roc_auc(pairs: &[(f64, f64)]) -> f64 {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingF1 {
+pub(crate) struct RollingF1 {
     /// Window capacity.
     pub window: usize,
     pairs: Vec<(f64, f64)>,
@@ -20002,7 +20002,7 @@ impl Default for RollingF1 {
 
 impl RollingF1 {
     /// Rolling F1 with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -20010,7 +20010,7 @@ impl RollingF1 {
     }
 
     /// Current window F1, or NaN when unidentified.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         window_f1(&self.pairs)
     }
 }
@@ -20042,7 +20042,7 @@ impl PartialFit for RollingF1 {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingPrecision {
+pub(crate) struct RollingPrecision {
     /// Window capacity.
     pub window: usize,
     pairs: Vec<(f64, f64)>,
@@ -20063,7 +20063,7 @@ impl Default for RollingPrecision {
 
 impl RollingPrecision {
     /// Rolling precision with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -20071,7 +20071,7 @@ impl RollingPrecision {
     }
 
     /// Current window precision, or NaN when no positive predictions.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         window_precision(&self.pairs)
     }
 }
@@ -20103,7 +20103,7 @@ impl PartialFit for RollingPrecision {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingRecall {
+pub(crate) struct RollingRecall {
     /// Window capacity.
     pub window: usize,
     pairs: Vec<(f64, f64)>,
@@ -20124,7 +20124,7 @@ impl Default for RollingRecall {
 
 impl RollingRecall {
     /// Rolling recall with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -20132,7 +20132,7 @@ impl RollingRecall {
     }
 
     /// Current window recall, or NaN when no positive labels.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         window_recall(&self.pairs)
     }
 }
@@ -20164,7 +20164,7 @@ impl PartialFit for RollingRecall {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingR2 {
+pub(crate) struct RollingR2 {
     /// Window capacity.
     pub window: usize,
     pairs: Vec<(f64, f64)>,
@@ -20185,7 +20185,7 @@ impl Default for RollingR2 {
 
 impl RollingR2 {
     /// Rolling R² with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -20193,7 +20193,7 @@ impl RollingR2 {
     }
 
     /// Current window R², or NaN when unidentified.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         window_r2(&self.pairs)
     }
 }
@@ -20225,7 +20225,7 @@ impl PartialFit for RollingR2 {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingCohenKappa {
+pub(crate) struct RollingCohenKappa {
     /// Window capacity.
     pub window: usize,
     pairs: Vec<(f64, f64)>,
@@ -20246,7 +20246,7 @@ impl Default for RollingCohenKappa {
 
 impl RollingCohenKappa {
     /// Rolling κ with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -20254,7 +20254,7 @@ impl RollingCohenKappa {
     }
 
     /// Current window κ, or NaN when empty or chance agreement is 1.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         window_cohen(&self.pairs)
     }
 }
@@ -20286,7 +20286,7 @@ impl PartialFit for RollingCohenKappa {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingBalancedAccuracy {
+pub(crate) struct RollingBalancedAccuracy {
     /// Window capacity.
     pub window: usize,
     pairs: Vec<(f64, f64)>,
@@ -20307,7 +20307,7 @@ impl Default for RollingBalancedAccuracy {
 
 impl RollingBalancedAccuracy {
     /// Rolling balanced accuracy with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -20315,7 +20315,7 @@ impl RollingBalancedAccuracy {
     }
 
     /// Current window \((\mathrm{TPR}+\mathrm{TNR})/2\), or NaN before both classes appear.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         window_balanced(&self.pairs)
     }
 }
@@ -20348,7 +20348,7 @@ impl PartialFit for RollingBalancedAccuracy {
 /// Scores at or above `threshold` are classified as anomalous (`1`). The cutoff
 /// is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ConstantThresholder {
+pub(crate) struct ConstantThresholder {
     /// Anomaly cutoff.
     pub threshold: f64,
     n_seen: u64,
@@ -20367,7 +20367,7 @@ impl Default for ConstantThresholder {
 
 impl ConstantThresholder {
     /// Thresholder at `threshold`.
-    pub fn new(threshold: f64) -> Self {
+    pub(crate) fn new(threshold: f64) -> Self {
         Self {
             threshold,
             ..Self::default()
@@ -20453,7 +20453,7 @@ impl Transform for ConstantThresholder {
 ///
 /// Values below `threshold` become 0. The cutoff is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ThresholdFilter {
+pub(crate) struct ThresholdFilter {
     /// Minimum kept score.
     pub threshold: f64,
     n_seen: u64,
@@ -20472,7 +20472,7 @@ impl Default for ThresholdFilter {
 
 impl ThresholdFilter {
     /// Filter at `threshold`.
-    pub fn new(threshold: f64) -> Self {
+    pub(crate) fn new(threshold: f64) -> Self {
         Self {
             threshold,
             ..Self::default()
@@ -20559,7 +20559,7 @@ impl Transform for ThresholdFilter {
 ///
 /// Window length and β are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingFbeta {
+pub(crate) struct RollingFbeta {
     /// Window capacity.
     pub window: usize,
     /// β weight on recall.
@@ -20583,7 +20583,7 @@ impl Default for RollingFbeta {
 
 impl RollingFbeta {
     /// Rolling Fβ with capacity `window` and weight `beta`.
-    pub fn new(window: usize, beta: f64) -> Self {
+    pub(crate) fn new(window: usize, beta: f64) -> Self {
         Self {
             window: window.max(1),
             beta,
@@ -20592,7 +20592,7 @@ impl RollingFbeta {
     }
 
     /// Current window Fβ, or NaN when unidentified.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         let b = if self.beta.is_finite() && self.beta > 0.0 {
             self.beta
         } else {
@@ -20633,7 +20633,7 @@ impl PartialFit for RollingFbeta {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingJaccard {
+pub(crate) struct RollingJaccard {
     /// Window capacity.
     pub window: usize,
     pairs: Vec<(f64, f64)>,
@@ -20654,7 +20654,7 @@ impl Default for RollingJaccard {
 
 impl RollingJaccard {
     /// Rolling Jaccard with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -20662,7 +20662,7 @@ impl RollingJaccard {
     }
 
     /// Current window Jaccard, or NaN when the union is empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         window_jaccard(&self.pairs)
     }
 }
@@ -20694,7 +20694,7 @@ impl PartialFit for RollingJaccard {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingHamming {
+pub(crate) struct RollingHamming {
     /// Window capacity.
     pub window: usize,
     pairs: Vec<(f64, f64)>,
@@ -20715,7 +20715,7 @@ impl Default for RollingHamming {
 
 impl RollingHamming {
     /// Rolling Hamming with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -20723,7 +20723,7 @@ impl RollingHamming {
     }
 
     /// Current window Hamming loss, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         window_hamming(&self.pairs)
     }
 }
@@ -20755,7 +20755,7 @@ impl PartialFit for RollingHamming {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingSmape {
+pub(crate) struct RollingSmape {
     /// Window capacity.
     pub window: usize,
     pairs: Vec<(f64, f64)>,
@@ -20776,7 +20776,7 @@ impl Default for RollingSmape {
 
 impl RollingSmape {
     /// Rolling SMAPE with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -20784,7 +20784,7 @@ impl RollingSmape {
     }
 
     /// Current window SMAPE, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         window_smape(&self.pairs)
     }
 }
@@ -20816,7 +20816,7 @@ impl PartialFit for RollingSmape {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingMcc {
+pub(crate) struct RollingMcc {
     /// Window capacity.
     pub window: usize,
     pairs: Vec<(f64, f64)>,
@@ -20837,7 +20837,7 @@ impl Default for RollingMcc {
 
 impl RollingMcc {
     /// Rolling MCC with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -20845,7 +20845,7 @@ impl RollingMcc {
     }
 
     /// Current window MCC, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         window_mcc(&self.pairs)
     }
 }
@@ -20877,7 +20877,7 @@ impl PartialFit for RollingMcc {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RollingRocAuc {
+pub(crate) struct RollingRocAuc {
     /// Window capacity.
     pub window: usize,
     pairs: Vec<(f64, f64)>,
@@ -20898,7 +20898,7 @@ impl Default for RollingRocAuc {
 
 impl RollingRocAuc {
     /// Rolling ROC AUC with capacity `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
             ..Self::default()
@@ -20906,7 +20906,7 @@ impl RollingRocAuc {
     }
 
     /// Current window Mann–Whitney AUC, or NaN when one class is missing.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         window_roc_auc(&self.pairs)
     }
 }
@@ -20939,7 +20939,7 @@ impl PartialFit for RollingRocAuc {
 /// Scores at or above the empirical `q`-quantile of a 256-row window are
 /// classified as anomalous. `q` is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct QuantileThresholder {
+pub(crate) struct QuantileThresholder {
     /// Upper quantile in \((0, 1)\).
     pub q: f64,
     window: Vec<f64>,
@@ -20960,7 +20960,7 @@ impl Default for QuantileThresholder {
 
 impl QuantileThresholder {
     /// Thresholder at quantile `q`.
-    pub fn new(q: f64) -> Self {
+    pub(crate) fn new(q: f64) -> Self {
         Self {
             q,
             ..Self::default()
@@ -21068,7 +21068,7 @@ impl Transform for QuantileThresholder {
 /// A row is discarded (set to 0) when column 0 is below `threshold`. The cutoff
 /// is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Discard {
+pub(crate) struct Discard {
     /// Minimum kept score on column 0.
     pub threshold: f64,
     n_seen: u64,
@@ -21087,7 +21087,7 @@ impl Default for Discard {
 
 impl Discard {
     /// Discard rows with column 0 below `threshold`.
-    pub fn new(threshold: f64) -> Self {
+    pub(crate) fn new(threshold: f64) -> Self {
         Self {
             threshold,
             ..Self::default()
@@ -21171,7 +21171,7 @@ impl Transform for Discard {
 
 /// ADWIN-resetting bag of perceptrons (river `ensemble.ADWINBaggingClassifier`).
 #[derive(Clone, Debug)]
-pub struct AdwinBagging {
+pub(crate) struct AdwinBagging {
     /// Members.
     pub n_models: usize,
     models: Vec<Perceptron>,
@@ -21196,7 +21196,7 @@ impl Default for AdwinBagging {
 
 impl AdwinBagging {
     /// Bag of `n_models` perceptrons.
-    pub fn new(n_models: usize) -> Self {
+    pub(crate) fn new(n_models: usize) -> Self {
         Self {
             n_models: n_models.max(1),
             ..Self::default()
@@ -21323,7 +21323,7 @@ impl Predict for AdwinBagging {
 
 /// Streaming AdaBoost of perceptrons (river `ensemble.AdaBoostClassifier` lite).
 #[derive(Clone, Debug)]
-pub struct OnlineAdaBoost {
+pub(crate) struct OnlineAdaBoost {
     /// Members.
     pub n_models: usize,
     models: Vec<Perceptron>,
@@ -21346,7 +21346,7 @@ impl Default for OnlineAdaBoost {
 
 impl OnlineAdaBoost {
     /// Boosted committee of `n_models` perceptrons.
-    pub fn new(n_models: usize) -> Self {
+    pub(crate) fn new(n_models: usize) -> Self {
         Self {
             n_models: n_models.max(1),
             ..Self::default()
@@ -21453,7 +21453,7 @@ impl Predict for OnlineAdaBoost {
 ///
 /// Member count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct AdwinBoosting {
+pub(crate) struct AdwinBoosting {
     /// Members.
     pub n_models: usize,
     models: Vec<Perceptron>,
@@ -21478,7 +21478,7 @@ impl Default for AdwinBoosting {
 
 impl AdwinBoosting {
     /// Boosted committee of `n_models` perceptrons with per-member ADWIN.
-    pub fn new(n_models: usize) -> Self {
+    pub(crate) fn new(n_models: usize) -> Self {
         Self {
             n_models: n_models.max(1),
             ..Self::default()
@@ -21599,7 +21599,7 @@ impl Predict for AdwinBoosting {
 /// A member is updated only when the current committee is wrong on that row.
 /// Member count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct BoleClassifier {
+pub(crate) struct BoleClassifier {
     /// Members.
     pub n_models: usize,
     models: Vec<Perceptron>,
@@ -21622,7 +21622,7 @@ impl Default for BoleClassifier {
 
 impl BoleClassifier {
     /// BOLE of `n_models` perceptrons.
-    pub fn new(n_models: usize) -> Self {
+    pub(crate) fn new(n_models: usize) -> Self {
         Self {
             n_models: n_models.max(1),
             ..Self::default()
@@ -21737,7 +21737,7 @@ impl Predict for BoleClassifier {
 
 /// Streaming random oversampler (river `imblearn.RandomOverSampler`).
 #[derive(Clone, Debug, Default)]
-pub struct RandomOverSampler {
+pub(crate) struct RandomOverSampler {
     counts: HashMap<i64, u64>,
     n_seen: u64,
     updates: u64,
@@ -21745,7 +21745,7 @@ pub struct RandomOverSampler {
 
 impl RandomOverSampler {
     /// Empty oversampler.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -21815,7 +21815,7 @@ impl Transform for RandomOverSampler {
 
 /// Streaming random undersampler (river `imblearn.RandomUnderSampler`).
 #[derive(Clone, Debug)]
-pub struct RandomUnderSampler {
+pub(crate) struct RandomUnderSampler {
     counts: HashMap<i64, u64>,
     n_seen: u64,
     updates: u64,
@@ -21835,7 +21835,7 @@ impl Default for RandomUnderSampler {
 
 impl RandomUnderSampler {
     /// Empty undersampler.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -21914,7 +21914,7 @@ impl Transform for RandomUnderSampler {
 
 /// Streaming mean (river `stats.Mean`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineMean {
+pub(crate) struct OnlineMean {
     n: f64,
     mean: f64,
     updates: u64,
@@ -21922,12 +21922,12 @@ pub struct OnlineMean {
 
 impl OnlineMean {
     /// Empty mean accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current mean, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n <= 0.0 {
             f64::NAN
         } else {
@@ -21984,7 +21984,7 @@ impl PartialFit for OnlineMean {
 
 /// Streaming sum (river `stats.Sum`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineSum {
+pub(crate) struct OnlineSum {
     n: u64,
     sum: f64,
     updates: u64,
@@ -21992,12 +21992,12 @@ pub struct OnlineSum {
 
 impl OnlineSum {
     /// Empty sum.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current sum.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         self.sum
     }
 }
@@ -22044,7 +22044,7 @@ impl PartialFit for OnlineSum {
 
 /// Streaming variance (river `stats.Var`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineVar {
+pub(crate) struct OnlineVar {
     n: f64,
     mean: f64,
     m2: f64,
@@ -22053,12 +22053,12 @@ pub struct OnlineVar {
 
 impl OnlineVar {
     /// Empty variance accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current sample variance, or NaN during warmup.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n < 2.0 {
             f64::NAN
         } else {
@@ -22117,19 +22117,19 @@ impl PartialFit for OnlineVar {
 
 /// Streaming finite-count (river `stats.Count`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineCount {
+pub(crate) struct OnlineCount {
     n: u64,
     updates: u64,
 }
 
 impl OnlineCount {
     /// Empty counter.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current count.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         self.n as f64
     }
 }
@@ -22174,7 +22174,7 @@ impl PartialFit for OnlineCount {
 
 /// Streaming lag-1 autocorrelation (river `stats.AutoCorr`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineAutoCorr {
+pub(crate) struct OnlineAutoCorr {
     last: Option<f64>,
     n: f64,
     mx: f64,
@@ -22187,12 +22187,12 @@ pub struct OnlineAutoCorr {
 
 impl OnlineAutoCorr {
     /// Empty lag-1 accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current lag-1 correlation, or NaN during warmup.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n < 2.0 {
             return f64::NAN;
         }
@@ -22262,7 +22262,7 @@ impl PartialFit for OnlineAutoCorr {
 
 /// Streaming variance threshold (river `feature_selection.VarianceThreshold`).
 #[derive(Clone, Debug)]
-pub struct OnlineVarianceThreshold {
+pub(crate) struct OnlineVarianceThreshold {
     /// Keep columns with sample variance above this.
     pub threshold: f64,
     n: Vec<f64>,
@@ -22287,7 +22287,7 @@ impl Default for OnlineVarianceThreshold {
 
 impl OnlineVarianceThreshold {
     /// Threshold `t` (not identification `p`).
-    pub fn new(threshold: f64) -> Self {
+    pub(crate) fn new(threshold: f64) -> Self {
         Self {
             threshold,
             ..Self::default()
@@ -22407,7 +22407,7 @@ impl Transform for OnlineVarianceThreshold {
 /// Feature count is not identification `p`. A column is kept once a Uniform
 /// draw falls below \(1-e^{-\lambda}\).
 #[derive(Clone, Debug)]
-pub struct PoissonInclusion {
+pub(crate) struct PoissonInclusion {
     /// Inclusion rate \(\lambda\).
     pub rate: f64,
     keep: Vec<bool>,
@@ -22430,7 +22430,7 @@ impl Default for PoissonInclusion {
 
 impl PoissonInclusion {
     /// Inclusion rate `rate` (not identification `p`).
-    pub fn new(rate: f64) -> Self {
+    pub(crate) fn new(rate: f64) -> Self {
         Self {
             rate,
             ..Self::default()
@@ -22538,7 +22538,7 @@ impl Transform for PoissonInclusion {
 
 /// Streaming univariate Gaussian (river `proba.Gaussian`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineGaussian {
+pub(crate) struct OnlineGaussian {
     n: f64,
     mean: f64,
     m2: f64,
@@ -22547,12 +22547,12 @@ pub struct OnlineGaussian {
 
 impl OnlineGaussian {
     /// Empty Gaussian.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Density at `x`, or NaN during warmup.
-    pub fn pdf(&self, x: f64) -> f64 {
+    pub(crate) fn pdf(&self, x: f64) -> f64 {
         if self.n < 2.0 {
             return f64::NAN;
         }
@@ -22618,7 +22618,7 @@ impl PartialFit for OnlineGaussian {
 
 /// Hard-example buffer around a perceptron (river `imblearn.HardSamplingClassifier`).
 #[derive(Clone, Debug)]
-pub struct HardSamplingClassifier {
+pub(crate) struct HardSamplingClassifier {
     inner: Perceptron,
     buffer_x: Vec<Vec<f64>>,
     buffer_y: Vec<f64>,
@@ -22642,7 +22642,7 @@ impl Default for HardSamplingClassifier {
 
 impl HardSamplingClassifier {
     /// Buffer capacity `cap` (not identification `p`).
-    pub fn new(cap: usize) -> Self {
+    pub(crate) fn new(cap: usize) -> Self {
         Self {
             cap: cap.max(1),
             ..Self::default()
@@ -22742,7 +22742,7 @@ impl Predict for HardSamplingClassifier {
 
 /// Hard-example buffer around SGD regression (river `imblearn.HardSamplingRegressor`).
 #[derive(Clone, Debug)]
-pub struct HardSamplingRegressor {
+pub(crate) struct HardSamplingRegressor {
     inner: SgdRegressor,
     buffer_x: Vec<Vec<f64>>,
     buffer_y: Vec<f64>,
@@ -22766,7 +22766,7 @@ impl Default for HardSamplingRegressor {
 
 impl HardSamplingRegressor {
     /// Buffer capacity `cap` (not identification `p`).
-    pub fn new(cap: usize) -> Self {
+    pub(crate) fn new(cap: usize) -> Self {
         Self {
             cap: cap.max(1),
             ..Self::default()
@@ -22883,7 +22883,7 @@ impl Predict for HardSamplingRegressor {
 /// After a short warmup the tree draws one feature/threshold from the observed
 /// range. Tree depth and leaf counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MondrianTree {
+pub(crate) struct MondrianTree {
     mins: Vector,
     maxs: Vector,
     split_j: Option<usize>,
@@ -22913,7 +22913,7 @@ impl Default for MondrianTree {
 
 impl MondrianTree {
     /// Empty Mondrian tree.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -23065,7 +23065,7 @@ impl Predict for MondrianTree {
 
 /// Concatenate an online StandardScaler and MinMaxScaler (river `compose.TransformerUnion`).
 #[derive(Clone, Debug, Default)]
-pub struct TransformerUnion {
+pub(crate) struct TransformerUnion {
     standard: OnlineStandardScaler,
     minmax: OnlineMinMaxScaler,
     n_seen: u64,
@@ -23074,7 +23074,7 @@ pub struct TransformerUnion {
 
 impl TransformerUnion {
     /// Empty union of the two scalers.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -23142,7 +23142,7 @@ impl Transform for TransformerUnion {
 
 /// Online scaler → SGD pipeline (river `compose.Pipeline`).
 #[derive(Clone, Debug, Default)]
-pub struct ComposePipeline {
+pub(crate) struct ComposePipeline {
     scaler: OnlineStandardScaler,
     inner: SgdRegressor,
     n_seen: u64,
@@ -23151,7 +23151,7 @@ pub struct ComposePipeline {
 
 impl ComposePipeline {
     /// Empty scaler-then-SGD pipeline.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -23227,7 +23227,7 @@ impl Predict for ComposePipeline {
 
 /// Named elementwise map (river `compose.FuncTransformer`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ElementwiseMap {
+pub(crate) enum ElementwiseMap {
     /// \(\log(1+x)\) on \(x > -1\).
     Log1p,
     /// Absolute value.
@@ -23240,7 +23240,7 @@ pub enum ElementwiseMap {
 
 /// Streaming function transformer (river `compose.FuncTransformer`).
 #[derive(Clone, Debug)]
-pub struct FuncTransformer {
+pub(crate) struct FuncTransformer {
     /// Elementwise map.
     pub map: ElementwiseMap,
     n_seen: u64,
@@ -23259,7 +23259,7 @@ impl Default for FuncTransformer {
 
 impl FuncTransformer {
     /// Transformer for `map`.
-    pub fn new(map: ElementwiseMap) -> Self {
+    pub(crate) fn new(map: ElementwiseMap) -> Self {
         Self {
             map,
             ..Self::default()
@@ -23368,7 +23368,7 @@ impl Transform for FuncTransformer {
 /// Factor count is not identification `p`. A one-column design has no
 /// pairwise interactions and degrades to a linear SGD update.
 #[derive(Clone, Debug)]
-pub struct FactorizationMachine {
+pub(crate) struct FactorizationMachine {
     /// Latent factor width \(k\).
     pub n_factors: usize,
     /// SGD step.
@@ -23398,7 +23398,7 @@ impl Default for FactorizationMachine {
 
 impl FactorizationMachine {
     /// FM with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -23536,7 +23536,7 @@ impl Predict for FactorizationMachine {
 ///
 /// Field count is not identification `p`. Field of column `j` is `j mod n_fields`.
 #[derive(Clone, Debug)]
-pub struct FfmRegressor {
+pub(crate) struct FfmRegressor {
     /// Latent width \(k\).
     pub n_factors: usize,
     /// Number of fields.
@@ -23569,7 +23569,7 @@ impl Default for FfmRegressor {
 
 impl FfmRegressor {
     /// FFM with `k` factors and `n_fields` fields.
-    pub fn new(n_factors: usize, n_fields: usize) -> Self {
+    pub(crate) fn new(n_factors: usize, n_fields: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             n_fields: n_fields.max(1),
@@ -23737,7 +23737,7 @@ impl Predict for FfmRegressor {
 /// Each SGD step updates a random subset of factors. Factor / sample counts
 /// are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SfmRegressor {
+pub(crate) struct SfmRegressor {
     /// Latent width \(k\).
     pub n_factors: usize,
     /// Factors updated per row (not identification `p`).
@@ -23772,7 +23772,7 @@ impl Default for SfmRegressor {
 
 impl SfmRegressor {
     /// SFM with `k` factors, updating `sample_factors` of them each row.
-    pub fn new(n_factors: usize, sample_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize, sample_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             sample_factors: sample_factors.max(1),
@@ -23933,7 +23933,7 @@ impl Predict for SfmRegressor {
 /// Rows are treated as bag-of-words. Merge radius is cosine distance.
 /// Cluster count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct TextClust {
+pub(crate) struct TextClust {
     /// Cosine-distance merge radius.
     pub radius: f64,
     micros: Vec<(Vector, f64)>,
@@ -23954,7 +23954,7 @@ impl Default for TextClust {
 
 impl TextClust {
     /// TextClust with cosine merge radius `radius`.
-    pub fn new(radius: f64) -> Self {
+    pub(crate) fn new(radius: f64) -> Self {
         Self {
             radius,
             ..Self::default()
@@ -24079,7 +24079,7 @@ impl Predict for TextClust {
 ///
 /// Radius / micro count are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Dbstream {
+pub(crate) struct Dbstream {
     /// Merge radius.
     pub radius: f64,
     /// Per-step weight decay.
@@ -24103,7 +24103,7 @@ impl Default for Dbstream {
 
 impl Dbstream {
     /// DBSTREAM with merge radius `radius`.
-    pub fn new(radius: f64) -> Self {
+    pub(crate) fn new(radius: f64) -> Self {
         Self {
             radius,
             ..Self::default()
@@ -24252,7 +24252,7 @@ impl Predict for Dbstream {
 ///
 /// Hidden width is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MiniBatchMlp {
+pub(crate) struct MiniBatchMlp {
     inner: crate::neural::MLPRegressor,
 }
 
@@ -24269,7 +24269,7 @@ impl Default for MiniBatchMlp {
 
 impl MiniBatchMlp {
     /// MLP with `hidden` ReLU units.
-    pub fn new(hidden: usize) -> Self {
+    pub(crate) fn new(hidden: usize) -> Self {
         let mut s = Self::default();
         s.inner.hidden = hidden.max(1);
         s
@@ -24298,7 +24298,7 @@ impl Predict for MiniBatchMlp {
 ///
 /// Factor count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct FmReco {
+pub(crate) struct FmReco {
     inner: FactorizationMachine,
 }
 
@@ -24312,7 +24312,7 @@ impl Default for FmReco {
 
 impl FmReco {
     /// FM recommender with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             inner: FactorizationMachine::new(n_factors),
         }
@@ -24339,7 +24339,7 @@ impl Predict for FmReco {
 
 /// River `metrics.LogCosh` — online \(\log\cosh\) residual loss.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineLogCosh {
+pub(crate) struct OnlineLogCosh {
     acc: f64,
     n: u64,
     updates: u64,
@@ -24347,12 +24347,12 @@ pub struct OnlineLogCosh {
 
 impl OnlineLogCosh {
     /// Empty log-cosh metric.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current mean log-cosh, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -24394,7 +24394,7 @@ impl PartialFit for OnlineLogCosh {
 /// Same sufficient statistics as [`HoeffdingRegressor`], with a smaller
 /// `min_samples` and larger `tau` so splits fire earlier.
 #[derive(Clone, Debug)]
-pub struct EfdtRegressor {
+pub(crate) struct EfdtRegressor {
     inner: HoeffdingRegressor,
 }
 
@@ -24412,7 +24412,7 @@ impl Default for EfdtRegressor {
 
 impl EfdtRegressor {
     /// Eager Hoeffding regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -24449,7 +24449,7 @@ impl Predict for EfdtRegressor {
 ///
 /// Member count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineStacking {
+pub(crate) struct OnlineStacking {
     a: Perceptron,
     b: Perceptron,
     meta: Perceptron,
@@ -24459,7 +24459,7 @@ pub struct OnlineStacking {
 
 impl OnlineStacking {
     /// Empty stacked perceptrons.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -24532,7 +24532,7 @@ impl PartialFit for OnlineStacking {
 ///
 /// Neighborhood size `k` is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct AdwinKnn {
+pub(crate) struct AdwinKnn {
     knn: KnnClassifier,
     adwin: Adwin,
     n_seen: u64,
@@ -24552,7 +24552,7 @@ impl Default for AdwinKnn {
 
 impl AdwinKnn {
     /// kNN with ADWIN window reset.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             knn: KnnClassifier::new(k.max(1)),
             ..Self::default()
@@ -24664,7 +24664,7 @@ fn row_hash(x: &Matrix, i: usize, salt: u64) -> u64 {
 ///
 /// Depth / width are sketch sizes, not identification `p`.
 #[derive(Clone, Debug)]
-pub struct CountMinSketch {
+pub(crate) struct CountMinSketch {
     /// Hash rows.
     pub depth: usize,
     /// Buckets per row.
@@ -24682,7 +24682,7 @@ impl Default for CountMinSketch {
 
 impl CountMinSketch {
     /// `depth` × `width` sketch.
-    pub fn new(depth: usize, width: usize) -> Self {
+    pub(crate) fn new(depth: usize, width: usize) -> Self {
         let d = depth.max(1);
         let w = width.max(2);
         Self {
@@ -24702,7 +24702,7 @@ impl CountMinSketch {
     }
 
     /// Conservative count for a hashed key.
-    pub fn estimate(&self, key: u64) -> u64 {
+    pub(crate) fn estimate(&self, key: u64) -> u64 {
         let mut m = u64::MAX;
         for r in 0..self.depth {
             let j = (mix_hash(key as f64, r as u64 + 1) as usize) % self.width;
@@ -24753,7 +24753,7 @@ impl PartialFit for CountMinSketch {
 ///
 /// Bit / hash counts are sketch sizes, not identification `p`.
 #[derive(Clone, Debug)]
-pub struct BloomFilter {
+pub(crate) struct BloomFilter {
     /// Bit capacity.
     pub n_bits: usize,
     /// Independent hashes.
@@ -24771,7 +24771,7 @@ impl Default for BloomFilter {
 
 impl BloomFilter {
     /// `n_bits` filter with `n_hashes` probes.
-    pub fn new(n_bits: usize, n_hashes: usize) -> Self {
+    pub(crate) fn new(n_bits: usize, n_hashes: usize) -> Self {
         let bits = n_bits.max(64);
         Self {
             n_bits: bits,
@@ -24807,7 +24807,7 @@ impl BloomFilter {
     }
 
     /// Whether `key` may have been inserted.
-    pub fn maybe_contains(&self, key: u64) -> bool {
+    pub(crate) fn maybe_contains(&self, key: u64) -> bool {
         (0..self.n_hashes).all(|h| {
             let idx = (mix_hash(key as f64, h as u64 + 11) as usize) % self.n_bits;
             self.get_bit(idx)
@@ -24852,7 +24852,7 @@ impl PartialFit for BloomFilter {
 ///
 /// Register count \(2^{p}\) is a sketch size, not identification `p`.
 #[derive(Clone, Debug)]
-pub struct HyperLogLog {
+pub(crate) struct HyperLogLog {
     /// Precision bits (`4..=16`).
     pub precision: usize,
     registers: Vec<u8>,
@@ -24868,7 +24868,7 @@ impl Default for HyperLogLog {
 
 impl HyperLogLog {
     /// HyperLogLog with `precision` index bits.
-    pub fn new(precision: usize) -> Self {
+    pub(crate) fn new(precision: usize) -> Self {
         let p = precision.clamp(4, 16);
         Self {
             precision: p,
@@ -24890,7 +24890,7 @@ impl HyperLogLog {
     }
 
     /// Cardinality estimate.
-    pub fn estimate(&self) -> f64 {
+    pub(crate) fn estimate(&self) -> f64 {
         let m = self.registers.len() as f64;
         let mut s = 0.0;
         let mut zeros = 0usize;
@@ -24953,7 +24953,7 @@ impl PartialFit for HyperLogLog {
 ///
 /// Member count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineVoting {
+pub(crate) struct OnlineVoting {
     a: Perceptron,
     b: Perceptron,
     n_seen: u64,
@@ -24962,7 +24962,7 @@ pub struct OnlineVoting {
 
 impl OnlineVoting {
     /// Empty voting ensemble.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -25010,7 +25010,7 @@ impl PartialFit for OnlineVoting {
 ///
 /// Capacity `k` is a sketch size, not identification `p`.
 #[derive(Clone, Debug)]
-pub struct HeavyHitters {
+pub(crate) struct HeavyHitters {
     /// Maximum stored keys.
     pub k: usize,
     counts: HashMap<u64, u64>,
@@ -25026,7 +25026,7 @@ impl Default for HeavyHitters {
 
 impl HeavyHitters {
     /// Keep the `k` most frequent hashed rows.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k: k.max(1),
             counts: HashMap::new(),
@@ -25036,7 +25036,7 @@ impl HeavyHitters {
     }
 
     /// Current top keys (hash, count), highest count first.
-    pub fn top(&self) -> Vec<(u64, u64)> {
+    pub(crate) fn top(&self) -> Vec<(u64, u64)> {
         let mut v: Vec<(u64, u64)> = self.counts.iter().map(|(&k, &c)| (k, c)).collect();
         v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         v.truncate(self.k);
@@ -25086,7 +25086,7 @@ impl PartialFit for HeavyHitters {
 ///
 /// Class count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineOneVsRest {
+pub(crate) struct OnlineOneVsRest {
     members: HashMap<i64, Perceptron>,
     n_seen: u64,
     updates: u64,
@@ -25094,7 +25094,7 @@ pub struct OnlineOneVsRest {
 
 impl OnlineOneVsRest {
     /// Empty OvR ensemble.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -25163,7 +25163,7 @@ impl PartialFit for OnlineOneVsRest {
 ///
 /// Stored cardinality is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct SketchSet {
+pub(crate) struct SketchSet {
     keys: HashSet<u64>,
     n_seen: u64,
     updates: u64,
@@ -25171,12 +25171,12 @@ pub struct SketchSet {
 
 impl SketchSet {
     /// Empty set sketch.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Distinct hashed keys seen so far.
-    pub fn cardinality(&self) -> usize {
+    pub(crate) fn cardinality(&self) -> usize {
         self.keys.len()
     }
 }
@@ -25218,7 +25218,7 @@ impl PartialFit for SketchSet {
 ///
 /// Code-bit count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct OnlineOutputCode {
+pub(crate) struct OnlineOutputCode {
     bits: Vec<Perceptron>,
     n_seen: u64,
     updates: u64,
@@ -25236,7 +25236,7 @@ impl Default for OnlineOutputCode {
 
 impl OnlineOutputCode {
     /// Three-bit output code.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -25310,7 +25310,7 @@ fn row_aug(x: &Matrix, i: usize, fit_intercept: bool) -> Vector {
 
 /// AdaGrad linear regressor (river `optim.AdaGrad` + `linear_model.LinearRegression`).
 #[derive(Clone, Debug)]
-pub struct AdaGradRegressor {
+pub(crate) struct AdaGradRegressor {
     /// Global step \(\eta\).
     pub learning_rate: f64,
     /// Diagonal floor \(\varepsilon\).
@@ -25341,7 +25341,7 @@ impl Default for AdaGradRegressor {
 
 impl AdaGradRegressor {
     /// Default AdaGrad regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -25457,7 +25457,7 @@ impl Predict for AdaGradRegressor {
 
 /// Adam linear regressor (river `optim.Adam`).
 #[derive(Clone, Debug)]
-pub struct AdamRegressor {
+pub(crate) struct AdamRegressor {
     /// Step \(\eta\).
     pub learning_rate: f64,
     /// First-moment decay.
@@ -25498,7 +25498,7 @@ impl Default for AdamRegressor {
 
 impl AdamRegressor {
     /// Default Adam regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -25622,7 +25622,7 @@ impl Predict for AdamRegressor {
 
 /// RMSProp linear regressor (river `optim.RMSProp`).
 #[derive(Clone, Debug)]
-pub struct RmsPropRegressor {
+pub(crate) struct RmsPropRegressor {
     /// Step \(\eta\).
     pub learning_rate: f64,
     /// Second-moment decay \(\rho\).
@@ -25656,7 +25656,7 @@ impl Default for RmsPropRegressor {
 
 impl RmsPropRegressor {
     /// Default RMSProp regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -25774,7 +25774,7 @@ impl Predict for RmsPropRegressor {
 ///
 /// Neighbor count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct OnlineLof {
+pub(crate) struct OnlineLof {
     /// Neighbors used for the k-distance.
     pub k: usize,
     /// Window capacity.
@@ -25800,7 +25800,7 @@ impl Default for OnlineLof {
 
 impl OnlineLof {
     /// LOF memory with `k` neighbors.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k: k.max(1),
             ..Self::default()
@@ -25925,7 +25925,7 @@ impl Predict for OnlineLof {
 
 /// Streaming Beta (river `proba.Beta`) updated from a binary label stream.
 #[derive(Clone, Debug)]
-pub struct OnlineBeta {
+pub(crate) struct OnlineBeta {
     alpha: f64,
     beta: f64,
     n_seen: u64,
@@ -25945,12 +25945,12 @@ impl Default for OnlineBeta {
 
 impl OnlineBeta {
     /// Uniform Beta(1, 1) prior.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Posterior mean \(\alpha/(\alpha+\beta)\).
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         let z = self.alpha + self.beta;
         if z <= 0.0 {
             f64::NAN
@@ -26027,7 +26027,7 @@ impl PartialFit for OnlineBeta {
 
 /// Streaming Gamma via method of moments (river `proba.Gamma`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlineGamma {
+pub(crate) struct OnlineGamma {
     n: f64,
     mean: f64,
     m2: f64,
@@ -26036,12 +26036,12 @@ pub struct OnlineGamma {
 
 impl OnlineGamma {
     /// Empty Gamma accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Moment shape \(\mu^2 / s^2\), or NaN during warmup.
-    pub fn shape(&self) -> f64 {
+    pub(crate) fn shape(&self) -> f64 {
         if self.n < 2.0 {
             return f64::NAN;
         }
@@ -26121,7 +26121,7 @@ impl PartialFit for OnlineGamma {
 ///
 /// Column count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ColumnSelect {
+pub(crate) struct ColumnSelect {
     /// Columns to keep.
     pub cols: Vec<usize>,
     n_seen: u64,
@@ -26130,7 +26130,7 @@ pub struct ColumnSelect {
 
 impl ColumnSelect {
     /// Keep `cols`.
-    pub fn new(cols: Vec<usize>) -> Self {
+    pub(crate) fn new(cols: Vec<usize>) -> Self {
         Self {
             cols,
             n_seen: 0,
@@ -26206,7 +26206,7 @@ impl Transform for ColumnSelect {
 ///
 /// Column count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ColumnDiscard {
+pub(crate) struct ColumnDiscard {
     /// Columns to drop.
     pub cols: Vec<usize>,
     n_seen: u64,
@@ -26215,7 +26215,7 @@ pub struct ColumnDiscard {
 
 impl ColumnDiscard {
     /// Drop `cols`.
-    pub fn new(cols: Vec<usize>) -> Self {
+    pub(crate) fn new(cols: Vec<usize>) -> Self {
         Self {
             cols,
             n_seen: 0,
@@ -26277,7 +26277,7 @@ impl Transform for ColumnDiscard {
 
 /// FTRL-Proximal linear regressor (river `optim.FTRLProximal`).
 #[derive(Clone, Debug)]
-pub struct FtrlRegressor {
+pub(crate) struct FtrlRegressor {
     /// Learning-rate scale \(\alpha > 0\).
     pub alpha: f64,
     /// Learning-rate offset \(\beta > 0\).
@@ -26314,7 +26314,7 @@ impl Default for FtrlRegressor {
 
 impl FtrlRegressor {
     /// Default FTRL regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -26456,7 +26456,7 @@ impl Predict for FtrlRegressor {
 /// Gradient is \((\sigma(w^\top x)-y)x\). Feature count is identification
 /// width, not a substitute `p` from class count.
 #[derive(Clone, Debug)]
-pub struct FtrlClassifier {
+pub(crate) struct FtrlClassifier {
     /// Learning-rate scale \(\alpha > 0\).
     pub alpha: f64,
     /// Learning-rate offset \(\beta > 0\).
@@ -26493,7 +26493,7 @@ impl Default for FtrlClassifier {
 
 impl FtrlClassifier {
     /// Default FTRL classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -26632,7 +26632,7 @@ impl Predict for FtrlClassifier {
 
 /// AdaDelta linear regressor (river `optim.AdaDelta`).
 #[derive(Clone, Debug)]
-pub struct AdaDeltaRegressor {
+pub(crate) struct AdaDeltaRegressor {
     /// Second-moment decay \(\rho\).
     pub rho: f64,
     /// Diagonal floor.
@@ -26665,7 +26665,7 @@ impl Default for AdaDeltaRegressor {
 
 impl AdaDeltaRegressor {
     /// Default AdaDelta regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -26779,7 +26779,7 @@ impl Predict for AdaDeltaRegressor {
 
 /// Heavy-ball momentum linear regressor (river `optim.Momentum`).
 #[derive(Clone, Debug)]
-pub struct MomentumRegressor {
+pub(crate) struct MomentumRegressor {
     /// Step \(\eta\).
     pub learning_rate: f64,
     /// Momentum \(\mu \in [0, 1)\).
@@ -26810,7 +26810,7 @@ impl Default for MomentumRegressor {
 
 impl MomentumRegressor {
     /// Default momentum regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -26921,7 +26921,7 @@ impl Predict for MomentumRegressor {
 
 /// Streaming Poisson rate (river `proba.Poisson`).
 #[derive(Clone, Debug, Default)]
-pub struct OnlinePoisson {
+pub(crate) struct OnlinePoisson {
     n: f64,
     mean: f64,
     updates: u64,
@@ -26929,12 +26929,12 @@ pub struct OnlinePoisson {
 
 impl OnlinePoisson {
     /// Empty Poisson accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current rate \(\lambda\), or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.n <= 0.0 {
             f64::NAN
         } else {
@@ -27004,7 +27004,7 @@ impl PartialFit for OnlinePoisson {
 
 /// Nesterov accelerated gradient linear regressor (river `optim.NesterovMomentum`).
 #[derive(Clone, Debug)]
-pub struct NesterovRegressor {
+pub(crate) struct NesterovRegressor {
     /// Step \(\eta\).
     pub learning_rate: f64,
     /// Momentum \(\mu\).
@@ -27035,7 +27035,7 @@ impl Default for NesterovRegressor {
 
 impl NesterovRegressor {
     /// Default Nesterov regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -27149,7 +27149,7 @@ impl Predict for NesterovRegressor {
 ///
 /// Category count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct OnlineDirichlet {
+pub(crate) struct OnlineDirichlet {
     alpha: Vec<f64>,
     n_seen: u64,
     updates: u64,
@@ -27167,7 +27167,7 @@ impl Default for OnlineDirichlet {
 
 impl OnlineDirichlet {
     /// Symmetric Dirichlet prior over `k` categories.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             alpha: vec![1.0; k.max(2)],
             n_seen: 0,
@@ -27176,7 +27176,7 @@ impl OnlineDirichlet {
     }
 
     /// Posterior mean of category 1, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         let z: f64 = self.alpha.iter().sum();
         if z <= 0.0 || self.alpha.len() < 2 {
             f64::NAN
@@ -27245,7 +27245,7 @@ impl PartialFit for OnlineDirichlet {
 ///
 /// Factor count is not identification `p`. `X` is `[user, item]`.
 #[derive(Clone, Debug)]
-pub struct ImplicitMf {
+pub(crate) struct ImplicitMf {
     inner: FunkMf,
     /// Confidence scale on the implicit residual.
     pub confidence: f64,
@@ -27266,7 +27266,7 @@ impl Default for ImplicitMf {
 
 impl ImplicitMf {
     /// Implicit MF with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             inner: FunkMf::new(n_factors),
             ..Self::default()
@@ -27334,7 +27334,7 @@ impl PartialFit for ImplicitMf {
 /// Factor count is not identification `p`. `X` is `[user, item]`; each row is
 /// a positive pair. A negative item is sampled uniformly from items seen so far.
 #[derive(Clone, Debug)]
-pub struct Bpr {
+pub(crate) struct Bpr {
     /// Latent rank.
     pub n_factors: usize,
     /// SGD step.
@@ -27365,7 +27365,7 @@ impl Default for Bpr {
 
 impl Bpr {
     /// BPR with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -27505,7 +27505,7 @@ impl Predict for Bpr {
 /// `X` is `[user, item]`, `y` is the rating. Neighbourhood size is not
 /// identification `p`. Similarity is cosine of item rating vectors over users.
 #[derive(Clone, Debug)]
-pub struct ItemKnn {
+pub(crate) struct ItemKnn {
     /// Neighbours kept per query item. Not identification `p`.
     pub k: usize,
     ratings: HashMap<(u64, u64), f64>,
@@ -27526,7 +27526,7 @@ impl Default for ItemKnn {
 
 impl ItemKnn {
     /// Empty item-item neighbourhood.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -27701,7 +27701,7 @@ impl Predict for ItemKnn {
 /// `X` is `[user, item]`, `y` is the rating. Neighbourhood size is not
 /// identification `p`.
 #[derive(Clone, Debug)]
-pub struct UserKnn {
+pub(crate) struct UserKnn {
     /// Neighbours kept per query user. Not identification `p`.
     pub k: usize,
     ratings: HashMap<(u64, u64), f64>,
@@ -27722,7 +27722,7 @@ impl Default for UserKnn {
 
 impl UserKnn {
     /// Empty user-user neighbourhood.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -27876,7 +27876,7 @@ impl Predict for UserKnn {
 /// \( \hat y_{ui}=\mu+b_u+b_i+q_i^\top\bigl(p_u+|N(u)|^{-1/2}\sum_{j\in N(u)}y_j\bigr) \).
 /// Factor count is not identification `p`. `X` is `[user, item]`.
 #[derive(Clone, Debug)]
-pub struct SvdPp {
+pub(crate) struct SvdPp {
     /// Latent rank.
     pub n_factors: usize,
     /// SGD step.
@@ -27915,7 +27915,7 @@ impl Default for SvdPp {
 
 impl SvdPp {
     /// SVD++ with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -28101,7 +28101,7 @@ impl Predict for SvdPp {
 /// `X` is `[user, item]`, `y` is the rating. Deviation tables are not
 /// identification `p`.
 #[derive(Clone, Debug)]
-pub struct SlopeOne {
+pub(crate) struct SlopeOne {
     ratings: HashMap<(u64, u64), f64>,
     n_seen: u64,
     updates: u64,
@@ -28119,7 +28119,7 @@ impl Default for SlopeOne {
 
 impl SlopeOne {
     /// Empty Slope One table.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -28250,7 +28250,7 @@ impl Predict for SlopeOne {
 ///
 /// Predicts \(\mu\); the stored variance is only for the explanation.
 #[derive(Clone, Debug)]
-pub struct NormalPredictor {
+pub(crate) struct NormalPredictor {
     mean: f64,
     m2: f64,
     n_seen: u64,
@@ -28270,7 +28270,7 @@ impl Default for NormalPredictor {
 
 impl NormalPredictor {
     /// Empty Gaussian rating model.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -28348,7 +28348,7 @@ impl Predict for NormalPredictor {
 ///
 /// `X` is `[user, item]`. Factor count is not identification `p` (there are none).
 #[derive(Clone, Debug)]
-pub struct BaselineOnly {
+pub(crate) struct BaselineOnly {
     /// SGD step.
     pub learning_rate: f64,
     /// ℓ2 on biases.
@@ -28376,7 +28376,7 @@ impl Default for BaselineOnly {
 
 impl BaselineOnly {
     /// Empty user/item bias model.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -28505,7 +28505,7 @@ impl Predict for BaselineOnly {
 /// User/item cluster counts are not identification `p`. Clusters are
 /// `user % k` / `item % k`; cell means are Welford-updated.
 #[derive(Clone, Debug)]
-pub struct CoClustering {
+pub(crate) struct CoClustering {
     /// User clusters. Not identification `p`.
     pub n_user_clusters: usize,
     /// Item clusters. Not identification `p`.
@@ -28531,7 +28531,7 @@ impl Default for CoClustering {
 
 impl CoClustering {
     /// Default 4×4 hash co-clustering.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -28663,7 +28663,7 @@ impl Predict for CoClustering {
 /// Bin count is not identification `p`. Closest adjacent bins are merged when
 /// the capacity is exceeded.
 #[derive(Clone, Debug)]
-pub struct OnlineHistogram {
+pub(crate) struct OnlineHistogram {
     /// Maximum stored bins. Not identification `p`.
     pub max_bins: usize,
     bins: Vec<(f64, f64)>,
@@ -28679,7 +28679,7 @@ impl Default for OnlineHistogram {
 
 impl OnlineHistogram {
     /// Empty histogram with at most `max_bins` centroids.
-    pub fn new(max_bins: usize) -> Self {
+    pub(crate) fn new(max_bins: usize) -> Self {
         Self {
             max_bins: max_bins.max(1),
             bins: Vec::new(),
@@ -28689,7 +28689,7 @@ impl OnlineHistogram {
     }
 
     /// Current `(center, count)` bins, left to right.
-    pub fn bins(&self) -> &[(f64, f64)] {
+    pub(crate) fn bins(&self) -> &[(f64, f64)] {
         &self.bins
     }
 
@@ -28778,7 +28778,7 @@ impl PartialFit for OnlineHistogram {
 /// Shape \(\pi/(s\sqrt{6})\) from the log-scale sample sd. Shape is not
 /// identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineWeibull {
+pub(crate) struct OnlineWeibull {
     n: f64,
     mean_log: f64,
     m2_log: f64,
@@ -28787,12 +28787,12 @@ pub struct OnlineWeibull {
 
 impl OnlineWeibull {
     /// Empty Weibull accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Gumbel-moment shape, or NaN during warmup.
-    pub fn shape(&self) -> f64 {
+    pub(crate) fn shape(&self) -> f64 {
         if self.n < 2.0 {
             return f64::NAN;
         }
@@ -28878,7 +28878,7 @@ impl PartialFit for OnlineWeibull {
 ///
 /// Rate is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineExponential {
+pub(crate) struct OnlineExponential {
     n: f64,
     sum: f64,
     updates: u64,
@@ -28886,12 +28886,12 @@ pub struct OnlineExponential {
 
 impl OnlineExponential {
     /// Empty exponential accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// MLE rate, or NaN during warmup.
-    pub fn rate(&self) -> f64 {
+    pub(crate) fn rate(&self) -> f64 {
         if self.n < 1.0 || self.sum <= 0.0 {
             f64::NAN
         } else {
@@ -28973,7 +28973,7 @@ impl PartialFit for OnlineExponential {
 ///
 /// Log-mean is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct OnlineLogNormal {
+pub(crate) struct OnlineLogNormal {
     n: f64,
     mean_log: f64,
     m2_log: f64,
@@ -28982,12 +28982,12 @@ pub struct OnlineLogNormal {
 
 impl OnlineLogNormal {
     /// Empty log-normal accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Log-scale mean, or NaN during warmup.
-    pub fn mu(&self) -> f64 {
+    pub(crate) fn mu(&self) -> f64 {
         if self.n < 1.0 {
             f64::NAN
         } else {
@@ -29073,7 +29073,7 @@ impl PartialFit for OnlineLogNormal {
 /// \(\hat\alpha = n / \sum\log(x_i/\hat x_{\min})\). Shape is not identification
 /// `p`.
 #[derive(Clone, Debug, Default)]
-pub struct OnlinePareto {
+pub(crate) struct OnlinePareto {
     n: f64,
     sum_log: f64,
     xmin: f64,
@@ -29082,12 +29082,12 @@ pub struct OnlinePareto {
 
 impl OnlinePareto {
     /// Empty Pareto accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Hill shape, or NaN during warmup.
-    pub fn alpha(&self) -> f64 {
+    pub(crate) fn alpha(&self) -> f64 {
         if self.n < 1.0 || !self.xmin.is_finite() || self.xmin <= 0.0 {
             return f64::NAN;
         }
@@ -29176,7 +29176,7 @@ impl PartialFit for OnlinePareto {
 ///
 /// Infinity-norm second moment: \(u \leftarrow \max(\beta_2 u, |g|)\).
 #[derive(Clone, Debug)]
-pub struct AdaMaxRegressor {
+pub(crate) struct AdaMaxRegressor {
     /// Step \(\eta\).
     pub learning_rate: f64,
     /// First-moment decay.
@@ -29217,7 +29217,7 @@ impl Default for AdaMaxRegressor {
 
 impl AdaMaxRegressor {
     /// Default AdaMax regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -29342,7 +29342,7 @@ impl Predict for AdaMaxRegressor {
 ///
 /// Keeps the running maximum of the bias-corrected second moment.
 #[derive(Clone, Debug)]
-pub struct AMSGradRegressor {
+pub(crate) struct AMSGradRegressor {
     /// Step \(\eta\).
     pub learning_rate: f64,
     /// First-moment decay.
@@ -29385,7 +29385,7 @@ impl Default for AMSGradRegressor {
 
 impl AMSGradRegressor {
     /// Default AMSGrad regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -29516,7 +29516,7 @@ impl Predict for AMSGradRegressor {
 /// Window length is not identification `p`. Distinct from [`RollingQuantile`]
 /// by exposing an explicit sliding capacity.
 #[derive(Clone, Debug)]
-pub struct OnlineQuantile {
+pub(crate) struct OnlineQuantile {
     /// Quantile in \((0, 1)\).
     pub q: f64,
     /// Sliding window capacity (not a parameter count).
@@ -29540,7 +29540,7 @@ impl Default for OnlineQuantile {
 
 impl OnlineQuantile {
     /// Quantile `q` over a sliding window of `window` observations.
-    pub fn new(q: f64, window: usize) -> Self {
+    pub(crate) fn new(q: f64, window: usize) -> Self {
         Self {
             q,
             window: window.max(1),
@@ -29549,7 +29549,7 @@ impl OnlineQuantile {
     }
 
     /// Current order-statistic quantile, or NaN when empty.
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         if self.buf.is_empty() {
             return f64::NAN;
         }
@@ -29636,7 +29636,7 @@ impl PartialFit for OnlineQuantile {
 /// and SGD updates \(W[\mathrm{prev},\mathrm{item}]\). Item count is not
 /// identification `p`.
 #[derive(Clone, Debug)]
-pub struct SlimReco {
+pub(crate) struct SlimReco {
     /// SGD step.
     pub learning_rate: f64,
     last: HashMap<i64, usize>,
@@ -29659,7 +29659,7 @@ impl Default for SlimReco {
 
 impl SlimReco {
     /// Empty SLIM-lite recommender.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -29758,7 +29758,7 @@ impl PartialFit for SlimReco {
 ///
 /// Adam steps are clipped into a shrinking band around a final learning rate.
 #[derive(Clone, Debug)]
-pub struct AdaBoundRegressor {
+pub(crate) struct AdaBoundRegressor {
     /// Initial step \(\eta\).
     pub learning_rate: f64,
     /// Final learning-rate centre.
@@ -29805,7 +29805,7 @@ impl Default for AdaBoundRegressor {
 
 impl AdaBoundRegressor {
     /// Default AdaBound regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -29935,7 +29935,7 @@ impl PartialFit for AdaBoundRegressor {
 /// One Newton step on a quadratic loss is the Gram solve of the current
 /// mini-batch. Feature count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct NewtonRegressor {
+pub(crate) struct NewtonRegressor {
     /// Ridge floor on the batch Gram.
     pub alpha: f64,
     /// Prepend an intercept column.
@@ -29961,7 +29961,7 @@ impl Default for NewtonRegressor {
 
 impl NewtonRegressor {
     /// Default Newton regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -30112,7 +30112,7 @@ impl Predict for NewtonRegressor {
 /// `X` is `[user, item]`, `y` is the rating. Running mean / std of ratings
 /// are maintained globally and per item. Item count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct NormReco {
+pub(crate) struct NormReco {
     mean: f64,
     m2: f64,
     n_seen: u64,
@@ -30136,7 +30136,7 @@ impl Default for NormReco {
 
 impl NormReco {
     /// Empty Norm recommender.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -30263,7 +30263,7 @@ impl Predict for NormReco {
 ///
 /// Nesterov look-ahead on the Adam first moment.
 #[derive(Clone, Debug)]
-pub struct NadamRegressor {
+pub(crate) struct NadamRegressor {
     /// Step \(\eta\).
     pub learning_rate: f64,
     /// First-moment decay.
@@ -30304,7 +30304,7 @@ impl Default for NadamRegressor {
 
 impl NadamRegressor {
     /// Default Nadam regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -30419,7 +30419,7 @@ impl PartialFit for NadamRegressor {
 
 /// AdamW linear regressor (river `optim.Adam` with decoupled weight decay).
 #[derive(Clone, Debug)]
-pub struct AdamWRegressor {
+pub(crate) struct AdamWRegressor {
     /// Step \(\eta\).
     pub learning_rate: f64,
     /// Decoupled L2 decay.
@@ -30463,7 +30463,7 @@ impl Default for AdamWRegressor {
 
 impl AdamWRegressor {
     /// Default AdamW regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -30598,7 +30598,7 @@ impl PartialFit for AdamWRegressor {
 ///
 /// Feature count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct HogwildRegressor {
+pub(crate) struct HogwildRegressor {
     /// Step \(\eta\).
     pub learning_rate: f64,
     /// Prepend an intercept column.
@@ -30624,7 +30624,7 @@ impl Default for HogwildRegressor {
 
 impl HogwildRegressor {
     /// Default Hogwild regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -30724,7 +30724,7 @@ impl PartialFit for HogwildRegressor {
 /// `X` is `[user, item, …content]`, `y` is the rating. Item count is not
 /// identification `p`.
 #[derive(Clone, Debug)]
-pub struct ContentReco {
+pub(crate) struct ContentReco {
     /// SGD step on content weights.
     pub learning_rate: f64,
     user_mean: HashMap<i64, (f64, u64)>,
@@ -30749,7 +30749,7 @@ impl Default for ContentReco {
 
 impl ContentReco {
     /// Empty content recommender.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -30865,7 +30865,7 @@ impl PartialFit for ContentReco {
 ///
 /// Group count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct TargetAgg {
+pub(crate) struct TargetAgg {
     means: HashMap<i64, (f64, u64)>,
     n_seen: u64,
     updates: u64,
@@ -30883,7 +30883,7 @@ impl Default for TargetAgg {
 
 impl TargetAgg {
     /// Empty target aggregator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -30964,7 +30964,7 @@ impl PartialFit for TargetAgg {
 /// Factor count is not identification `p`. A design with fewer than three
 /// columns has no 3-way term.
 #[derive(Clone, Debug)]
-pub struct HoFm {
+pub(crate) struct HoFm {
     /// Pairwise factor width.
     pub n_factors: usize,
     /// SGD step.
@@ -30996,7 +30996,7 @@ impl Default for HoFm {
 
 impl HoFm {
     /// HoFM with `k` pairwise factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -31166,7 +31166,7 @@ impl Predict for AdaBoundRegressor {
 ///
 /// Second-moment updates subtract a signed increment so \(v\) can decrease.
 #[derive(Clone, Debug)]
-pub struct YogiRegressor {
+pub(crate) struct YogiRegressor {
     /// Step \(\eta\).
     pub learning_rate: f64,
     /// First-moment decay.
@@ -31207,7 +31207,7 @@ impl Default for YogiRegressor {
 
 impl YogiRegressor {
     /// Default Yogi regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -31314,7 +31314,7 @@ impl PartialFit for YogiRegressor {
 ///
 /// Sign of an interpolated momentum; no second-moment state.
 #[derive(Clone, Debug)]
-pub struct LionRegressor {
+pub(crate) struct LionRegressor {
     /// Step \(\eta\).
     pub learning_rate: f64,
     /// Momentum mix.
@@ -31345,7 +31345,7 @@ impl Default for LionRegressor {
 
 impl LionRegressor {
     /// Default Lion regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -31440,7 +31440,7 @@ impl PartialFit for LionRegressor {
 /// For a 1-d parameter the factored second moment reduces to RMSProp with a
 /// relative step \(\max(1,\mathrm{rms}(w))\).
 #[derive(Clone, Debug)]
-pub struct AdafactorRegressor {
+pub(crate) struct AdafactorRegressor {
     /// Step \(\eta\).
     pub learning_rate: f64,
     /// Second-moment decay.
@@ -31474,7 +31474,7 @@ impl Default for AdafactorRegressor {
 
 impl AdafactorRegressor {
     /// Default Adafactor regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -31576,7 +31576,7 @@ impl PartialFit for AdafactorRegressor {
 ///
 /// Second moment tracks \((g-m)^2\) rather than \(g^2\).
 #[derive(Clone, Debug)]
-pub struct AdaBeliefRegressor {
+pub(crate) struct AdaBeliefRegressor {
     /// Step \(\eta\).
     pub learning_rate: f64,
     /// First-moment decay.
@@ -31617,7 +31617,7 @@ impl Default for AdaBeliefRegressor {
 
 impl AdaBeliefRegressor {
     /// Default AdaBelief regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -31724,7 +31724,7 @@ impl PartialFit for AdaBeliefRegressor {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Fhddm {
+pub(crate) struct Fhddm {
     /// Confidence \(\delta\).
     pub delta: f64,
     /// Sliding window of 0/1 errors.
@@ -31750,7 +31750,7 @@ impl Default for Fhddm {
 
 impl Fhddm {
     /// Fresh FHDDM detector.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -31762,7 +31762,7 @@ impl Fhddm {
     }
 
     /// Update with a 0/1 error indicator.
-    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+    pub(crate) fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
         let mut ctx = FitCtx::with_session(session.child("update"));
         let e = if x > 0.5 { 1.0 } else { 0.0 };
         let w = self.window.max(2);
@@ -31844,7 +31844,7 @@ impl PartialFit for Fhddm {
 
 /// Expanding-window mean (river `stats.Mean` / `utils.Rolling` with infinite window).
 #[derive(Clone, Debug, Default)]
-pub struct ExpandingMean {
+pub(crate) struct ExpandingMean {
     n: f64,
     mean: f64,
     updates: u64,
@@ -31852,12 +31852,12 @@ pub struct ExpandingMean {
 
 impl ExpandingMean {
     /// Empty accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current mean, or NaN when empty.
-    pub fn mean(&self) -> f64 {
+    pub(crate) fn mean(&self) -> f64 {
         if self.n <= 0.0 {
             f64::NAN
         } else {
@@ -31914,7 +31914,7 @@ impl PartialFit for ExpandingMean {
 
 /// Running absolute maximum (river `stats.AbsMax`).
 #[derive(Clone, Debug)]
-pub struct AbsMax {
+pub(crate) struct AbsMax {
     max: f64,
     n: u64,
     updates: u64,
@@ -31932,12 +31932,12 @@ impl Default for AbsMax {
 
 impl AbsMax {
     /// Empty accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current \(|x|_{\max}\).
-    pub fn value(&self) -> f64 {
+    pub(crate) fn value(&self) -> f64 {
         if self.n == 0 {
             f64::NAN
         } else {
@@ -31997,7 +31997,7 @@ impl PartialFit for AbsMax {
 ///
 /// Window lengths are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Fhddms {
+pub(crate) struct Fhddms {
     short: Fhddm,
     long: Fhddm,
     n: u64,
@@ -32023,7 +32023,7 @@ impl Default for Fhddms {
 
 impl Fhddms {
     /// Fresh stacked FHDDM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -32076,7 +32076,7 @@ impl PartialFit for Fhddms {
 ///
 /// Coefficient count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct AveragerRegressor {
+pub(crate) struct AveragerRegressor {
     /// Instantaneous step \(\eta\).
     pub learning_rate: f64,
     /// Prepend an intercept column.
@@ -32104,7 +32104,7 @@ impl Default for AveragerRegressor {
 
 impl AveragerRegressor {
     /// Default Polyak averager.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -32200,7 +32200,7 @@ impl PartialFit for AveragerRegressor {
 /// identification `p`. Scratch Cholesky is not used — the Gram is diagonally
 /// loaded.
 #[derive(Clone, Debug)]
-pub struct BayesianLinearRegression {
+pub(crate) struct BayesianLinearRegression {
     /// Prior precision \(\lambda\).
     pub alpha: f64,
     /// Prepend an intercept column.
@@ -32230,7 +32230,7 @@ impl Default for BayesianLinearRegression {
 
 impl BayesianLinearRegression {
     /// Unit-precision prior.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -32354,7 +32354,7 @@ impl PartialFit for BayesianLinearRegression {
 
 /// Standard absolute deviation scorer (river `anomaly.StandardAbsoluteDeviation`).
 #[derive(Clone, Debug, Default)]
-pub struct StandardAbsoluteDeviation {
+pub(crate) struct StandardAbsoluteDeviation {
     n: f64,
     mean: f64,
     m2: f64,
@@ -32364,12 +32364,12 @@ pub struct StandardAbsoluteDeviation {
 
 impl StandardAbsoluteDeviation {
     /// Empty scorer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Latest \(|x-\bar x|/s\).
-    pub fn score(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         self.last
     }
 }
@@ -32439,7 +32439,7 @@ impl PartialFit for StandardAbsoluteDeviation {
 ///
 /// Two experts (expanding mean and last observation). Expert count is not `p`.
 #[derive(Clone, Debug)]
-pub struct HedgeRegressor {
+pub(crate) struct HedgeRegressor {
     /// Mix rate \(\eta\).
     pub learning_rate: f64,
     w_mean: f64,
@@ -32468,7 +32468,7 @@ impl Default for HedgeRegressor {
 
 impl HedgeRegressor {
     /// Default two-expert Hedge.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -32553,7 +32553,7 @@ impl PartialFit for HedgeRegressor {
 
 /// Named alias of [`AdwinKnn`] (river `neighbors.KNNADWINClassifier`).
 #[derive(Clone, Debug)]
-pub struct KnnAdwin {
+pub(crate) struct KnnAdwin {
     inner: AdwinKnn,
 }
 
@@ -32567,7 +32567,7 @@ impl Default for KnnAdwin {
 
 impl KnnAdwin {
     /// kNN + ADWIN with neighbourhood `k`.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             inner: AdwinKnn::new(k),
         }
@@ -32589,7 +32589,7 @@ impl PartialFit for KnnAdwin {
 ///
 /// STM window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SamKnn {
+pub(crate) struct SamKnn {
     /// Neighbourhood size.
     pub k: usize,
     /// Short-term memory length.
@@ -32619,7 +32619,7 @@ impl Default for SamKnn {
 
 impl SamKnn {
     /// STM of length `window` and neighbourhood `k`.
-    pub fn new(k: usize, window: usize) -> Self {
+    pub(crate) fn new(k: usize, window: usize) -> Self {
         Self {
             k: k.max(1),
             window: window.max(2),
@@ -32740,7 +32740,7 @@ impl Predict for SamKnn {
 ///
 /// Feature count is not identification `p` for a 1-row stream.
 #[derive(Clone, Debug)]
-pub struct OnlineOneClassSvm {
+pub(crate) struct OnlineOneClassSvm {
     /// Step \(\eta\).
     pub learning_rate: f64,
     /// Fraction of outliers \(\nu\).
@@ -32766,7 +32766,7 @@ impl Default for OnlineOneClassSvm {
 
 impl OnlineOneClassSvm {
     /// Default one-class stream.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -32843,7 +32843,7 @@ impl PartialFit for OnlineOneClassSvm {
 ///
 /// Factor / field counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct FwFmRegressor {
+pub(crate) struct FwFmRegressor {
     /// Latent width.
     pub n_factors: usize,
     /// SGD step.
@@ -32875,7 +32875,7 @@ impl Default for FwFmRegressor {
 
 impl FwFmRegressor {
     /// FwFM with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -33006,7 +33006,7 @@ impl PartialFit for FwFmRegressor {
 ///
 /// Dimension is not identification `p` for a 1-row stream.
 #[derive(Clone, Debug)]
-pub struct MultivariateGaussian {
+pub(crate) struct MultivariateGaussian {
     n: f64,
     mean: Vector,
     m2: Matrix,
@@ -33028,7 +33028,7 @@ impl Default for MultivariateGaussian {
 
 impl MultivariateGaussian {
     /// Empty accumulator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -33096,7 +33096,7 @@ impl PartialFit for MultivariateGaussian {
 ///
 /// Column count is not identification `p` for a 1-row stream.
 #[derive(Clone, Debug)]
-pub struct ScaleCovariances {
+pub(crate) struct ScaleCovariances {
     n: f64,
     mean: Vector,
     var: Vector,
@@ -33118,7 +33118,7 @@ impl Default for ScaleCovariances {
 
 impl ScaleCovariances {
     /// Empty scaler.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -33200,7 +33200,7 @@ impl Transform for ScaleCovariances {
 
 /// Named alias of [`AdaptiveModelRules`] (river `rules.VeryFastDecisionRulesClassifier`).
 #[derive(Clone, Debug)]
-pub struct VeryFastDecisionRules {
+pub(crate) struct VeryFastDecisionRules {
     inner: AdaptiveModelRules,
 }
 
@@ -33214,7 +33214,7 @@ impl Default for VeryFastDecisionRules {
 
 impl VeryFastDecisionRules {
     /// Default VFDR wrapper.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -33234,7 +33234,7 @@ impl PartialFit for VeryFastDecisionRules {
 ///
 /// Factor count is not identification `p`. Needs `[user, item]` columns.
 #[derive(Clone, Debug)]
-pub struct Snmf {
+pub(crate) struct Snmf {
     /// Embedding width.
     pub n_factors: usize,
     /// SGD step.
@@ -33266,7 +33266,7 @@ impl Default for Snmf {
 
 impl Snmf {
     /// SNMF with `k` latent factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -33435,7 +33435,7 @@ impl Predict for Snmf {
 ///
 /// Hash width is not identification `p`. Needs `[user, item]` columns.
 #[derive(Clone, Debug)]
-pub struct ContentRecommender {
+pub(crate) struct ContentRecommender {
     profiles: HashMap<i64, Vector>,
     counts: HashMap<i64, f64>,
     n_seen: u64,
@@ -33455,7 +33455,7 @@ impl Default for ContentRecommender {
 
 impl ContentRecommender {
     /// Empty content recommender.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -33583,7 +33583,7 @@ impl Predict for ContentRecommender {
 ///
 /// The exponent is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct InverseScalingRegressor {
+pub(crate) struct InverseScalingRegressor {
     /// Base step \(\eta_0\).
     pub eta0: f64,
     /// Decay exponent.
@@ -33611,7 +33611,7 @@ impl Default for InverseScalingRegressor {
 
 impl InverseScalingRegressor {
     /// Inverse-scaling SGD with \(\eta_0\) and exponent `power`.
-    pub fn new(eta0: f64, power: f64) -> Self {
+    pub(crate) fn new(eta0: f64, power: f64) -> Self {
         Self {
             eta0,
             power,
@@ -33744,7 +33744,7 @@ impl Predict for InverseScalingRegressor {
 ///
 /// Period length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct CosineAnnealingRegressor {
+pub(crate) struct CosineAnnealingRegressor {
     /// Peak step.
     pub eta_max: f64,
     /// Floor step.
@@ -33775,7 +33775,7 @@ impl Default for CosineAnnealingRegressor {
 
 impl CosineAnnealingRegressor {
     /// Cosine-annealed SGD with period `period`.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(1),
             ..Self::default()
@@ -33902,7 +33902,7 @@ impl Predict for CosineAnnealingRegressor {
 ///
 /// Pair count is not identification `p`. A 1-column design has no pair term.
 #[derive(Clone, Debug)]
-pub struct PolynomialFm {
+pub(crate) struct PolynomialFm {
     /// SGD step.
     pub learning_rate: f64,
     w0: f64,
@@ -33929,7 +33929,7 @@ impl Default for PolynomialFm {
 
 impl PolynomialFm {
     /// Empty polynomial FM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -34062,7 +34062,7 @@ impl Predict for PolynomialFm {
 ///
 /// Period \(T\) is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct LinearDecayRegressor {
+pub(crate) struct LinearDecayRegressor {
     /// Base step.
     pub eta0: f64,
     /// Decay period.
@@ -34090,7 +34090,7 @@ impl Default for LinearDecayRegressor {
 
 impl LinearDecayRegressor {
     /// Linear-decay SGD with period `period`.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(1),
             ..Self::default()
@@ -34211,7 +34211,7 @@ impl Predict for LinearDecayRegressor {
 ///
 /// Period length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct CyclicLrRegressor {
+pub(crate) struct CyclicLrRegressor {
     /// Peak step.
     pub eta_max: f64,
     /// Floor step.
@@ -34242,7 +34242,7 @@ impl Default for CyclicLrRegressor {
 
 impl CyclicLrRegressor {
     /// Cyclic triangular SGD with period `period`.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(1),
             ..Self::default()
@@ -34369,7 +34369,7 @@ impl Predict for CyclicLrRegressor {
 ///
 /// Period and exponent are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct PolynomialDecayRegressor {
+pub(crate) struct PolynomialDecayRegressor {
     /// Base step.
     pub eta0: f64,
     /// Decay exponent.
@@ -34400,7 +34400,7 @@ impl Default for PolynomialDecayRegressor {
 
 impl PolynomialDecayRegressor {
     /// Polynomial-decay SGD with period `period`.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(1),
             ..Self::default()
@@ -34532,7 +34532,7 @@ impl Predict for PolynomialDecayRegressor {
 ///
 /// Restart lengths are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct WarmRestartsRegressor {
+pub(crate) struct WarmRestartsRegressor {
     /// Peak step.
     pub eta_max: f64,
     /// Floor step.
@@ -34563,7 +34563,7 @@ impl Default for WarmRestartsRegressor {
 
 impl WarmRestartsRegressor {
     /// Warm-restart SGD with first cycle `t0`.
-    pub fn new(t0: usize) -> Self {
+    pub(crate) fn new(t0: usize) -> Self {
         Self {
             t0: t0.max(1),
             ..Self::default()
@@ -34697,7 +34697,7 @@ impl Predict for WarmRestartsRegressor {
 ///
 /// Cycle length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct OneCycleLrRegressor {
+pub(crate) struct OneCycleLrRegressor {
     /// Peak step.
     pub eta_max: f64,
     /// Floor step.
@@ -34728,7 +34728,7 @@ impl Default for OneCycleLrRegressor {
 
 impl OneCycleLrRegressor {
     /// One-cycle SGD with period `period`.
-    pub fn new(period: usize) -> Self {
+    pub(crate) fn new(period: usize) -> Self {
         Self {
             period: period.max(2),
             ..Self::default()
@@ -34856,7 +34856,7 @@ impl Predict for OneCycleLrRegressor {
 
 /// Rectified Adam (river `optim.RAdam`).
 #[derive(Clone, Debug)]
-pub struct RAdamRegressor {
+pub(crate) struct RAdamRegressor {
     /// Step \(\eta\).
     pub learning_rate: f64,
     /// First-moment decay.
@@ -34897,7 +34897,7 @@ impl Default for RAdamRegressor {
 
 impl RAdamRegressor {
     /// Default RAdam regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -35037,7 +35037,7 @@ impl Predict for RAdamRegressor {
 
 /// LAMB (You et al.) trust-ratio Adam (river `optim.LAMB`).
 #[derive(Clone, Debug)]
-pub struct LambRegressor {
+pub(crate) struct LambRegressor {
     /// Step \(\eta\).
     pub learning_rate: f64,
     /// First-moment decay.
@@ -35078,7 +35078,7 @@ impl Default for LambRegressor {
 
 impl LambRegressor {
     /// Default LAMB regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -35216,7 +35216,7 @@ impl Predict for LambRegressor {
 
 /// Named Hoeffding tree classifier (river `tree.HoeffdingTreeClassifier`).
 #[derive(Clone, Debug)]
-pub struct HoeffdingTreeClassifier {
+pub(crate) struct HoeffdingTreeClassifier {
     inner: HoeffdingTree,
 }
 
@@ -35230,7 +35230,7 @@ impl Default for HoeffdingTreeClassifier {
 
 impl HoeffdingTreeClassifier {
     /// Default VFDT classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -35255,7 +35255,7 @@ impl Predict for HoeffdingTreeClassifier {
 
 /// Named adaptive random forest classifier (river `ensemble.AdaptiveRandomForestClassifier`).
 #[derive(Clone, Debug)]
-pub struct AdaptiveRandomForestClassifier {
+pub(crate) struct AdaptiveRandomForestClassifier {
     inner: AdaptiveRandomForest,
 }
 
@@ -35269,7 +35269,7 @@ impl Default for AdaptiveRandomForestClassifier {
 
 impl AdaptiveRandomForestClassifier {
     /// Default ARF classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -35296,7 +35296,7 @@ impl Predict for AdaptiveRandomForestClassifier {
 ///
 /// Sync period is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct LookaheadRegressor {
+pub(crate) struct LookaheadRegressor {
     /// Inner step.
     pub eta: f64,
     /// Slow-weight blend \(\alpha\).
@@ -35331,7 +35331,7 @@ impl Default for LookaheadRegressor {
 
 impl LookaheadRegressor {
     /// Lookahead with sync period `k`.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k: k.max(1),
             ..Self::default()
@@ -35475,7 +35475,7 @@ impl Predict for LookaheadRegressor {
 
 /// Named ALMA classifier (river `linear_model.ALMAClassifier`).
 #[derive(Clone, Debug)]
-pub struct AlmaClassifier {
+pub(crate) struct AlmaClassifier {
     inner: Alma,
 }
 
@@ -35489,7 +35489,7 @@ impl Default for AlmaClassifier {
 
 impl AlmaClassifier {
     /// Default ALMA classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -35514,7 +35514,7 @@ impl Predict for AlmaClassifier {
 
 /// Named HAT classifier (river `tree.HoeffdingAdaptiveTreeClassifier`).
 #[derive(Clone, Debug)]
-pub struct HoeffdingAdaptiveTreeClassifier {
+pub(crate) struct HoeffdingAdaptiveTreeClassifier {
     inner: HoeffdingAdaptiveTree,
 }
 
@@ -35528,7 +35528,7 @@ impl Default for HoeffdingAdaptiveTreeClassifier {
 
 impl HoeffdingAdaptiveTreeClassifier {
     /// Default HAT classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -35553,7 +35553,7 @@ impl Predict for HoeffdingAdaptiveTreeClassifier {
 
 /// Named EFDT classifier (river `tree.ExtremelyFastDecisionTreeClassifier`).
 #[derive(Clone, Debug)]
-pub struct ExtremelyFastDecisionTreeClassifier {
+pub(crate) struct ExtremelyFastDecisionTreeClassifier {
     inner: ExtremelyFastDecisionTree,
 }
 
@@ -35567,7 +35567,7 @@ impl Default for ExtremelyFastDecisionTreeClassifier {
 
 impl ExtremelyFastDecisionTreeClassifier {
     /// Default EFDT classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -35592,7 +35592,7 @@ impl Predict for ExtremelyFastDecisionTreeClassifier {
 
 /// Named SRP classifier (river `ensemble.SRPClassifier`).
 #[derive(Clone, Debug)]
-pub struct StreamingRandomPatchesClassifier {
+pub(crate) struct StreamingRandomPatchesClassifier {
     inner: StreamingRandomPatches,
 }
 
@@ -35606,7 +35606,7 @@ impl Default for StreamingRandomPatchesClassifier {
 
 impl StreamingRandomPatchesClassifier {
     /// Default SRP classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -35631,7 +35631,7 @@ impl Predict for StreamingRandomPatchesClassifier {
 
 /// Named leveraging-bagging classifier (river `ensemble.LeveragingBaggingClassifier`).
 #[derive(Clone, Debug)]
-pub struct LeveragingBaggingClassifier {
+pub(crate) struct LeveragingBaggingClassifier {
     inner: LeveragingBagging,
 }
 
@@ -35645,7 +35645,7 @@ impl Default for LeveragingBaggingClassifier {
 
 impl LeveragingBaggingClassifier {
     /// Default leveraging-bagging classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -35670,7 +35670,7 @@ impl Predict for LeveragingBaggingClassifier {
 
 /// Named ADWIN bagging classifier (river `ensemble.ADWINBaggingClassifier`).
 #[derive(Clone, Debug)]
-pub struct AdwinBaggingClassifier {
+pub(crate) struct AdwinBaggingClassifier {
     inner: AdwinBagging,
 }
 
@@ -35684,7 +35684,7 @@ impl Default for AdwinBaggingClassifier {
 
 impl AdwinBaggingClassifier {
     /// Default ADWIN-bagging classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -35709,13 +35709,13 @@ impl Predict for AdwinBaggingClassifier {
 
 /// Named softmax classifier (river `linear_model.SoftmaxRegression`).
 #[derive(Clone, Debug, Default)]
-pub struct SoftmaxClassifier {
+pub(crate) struct SoftmaxClassifier {
     inner: SoftmaxRegression,
 }
 
 impl SoftmaxClassifier {
     /// Empty softmax classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -35740,13 +35740,13 @@ impl Predict for SoftmaxClassifier {
 
 /// Named Hoeffding tree regressor (river `tree.HoeffdingTreeRegressor`).
 #[derive(Clone, Debug, Default)]
-pub struct HoeffdingTreeRegressor {
+pub(crate) struct HoeffdingTreeRegressor {
     inner: HoeffdingRegressor,
 }
 
 impl HoeffdingTreeRegressor {
     /// Default Hoeffding regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -35771,7 +35771,7 @@ impl Predict for HoeffdingTreeRegressor {
 
 /// Named ARF regressor (river `forest.ARFRegressor`).
 #[derive(Clone, Debug)]
-pub struct ARFRegressor {
+pub(crate) struct ARFRegressor {
     inner: AdaptiveRandomForestRegressor,
 }
 
@@ -35785,7 +35785,7 @@ impl Default for ARFRegressor {
 
 impl ARFRegressor {
     /// Forest with `n_estimators` RLS leaves.
-    pub fn new(n_estimators: usize) -> Self {
+    pub(crate) fn new(n_estimators: usize) -> Self {
         Self {
             inner: AdaptiveRandomForestRegressor::new(n_estimators),
         }
@@ -35812,7 +35812,7 @@ impl Predict for ARFRegressor {
 
 /// Named SRP regressor (river `ensemble.SRPRegressor`).
 #[derive(Clone, Debug)]
-pub struct StreamingRandomPatchesRegressor {
+pub(crate) struct StreamingRandomPatchesRegressor {
     inner: SrpRegressor,
 }
 
@@ -35826,7 +35826,7 @@ impl Default for StreamingRandomPatchesRegressor {
 
 impl StreamingRandomPatchesRegressor {
     /// Forest with `n_estimators` patch trees.
-    pub fn new(n_estimators: usize) -> Self {
+    pub(crate) fn new(n_estimators: usize) -> Self {
         Self {
             inner: SrpRegressor::new(n_estimators),
         }
@@ -35855,7 +35855,7 @@ impl Predict for StreamingRandomPatchesRegressor {
 ///
 /// Split-threshold / sample-count are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ExtremelyFastDecisionTreeRegressor {
+pub(crate) struct ExtremelyFastDecisionTreeRegressor {
     tree: HoeffdingRegressor,
 }
 
@@ -35870,7 +35870,7 @@ impl Default for ExtremelyFastDecisionTreeRegressor {
 
 impl ExtremelyFastDecisionTreeRegressor {
     /// Eager VFDT regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -35905,7 +35905,7 @@ impl Predict for ExtremelyFastDecisionTreeRegressor {
 ///
 /// Estimator count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct LeveragingBaggingRegressor {
+pub(crate) struct LeveragingBaggingRegressor {
     /// Number of trees. Not identification `p`.
     pub n_estimators: usize,
     /// Poisson mean of the leverage weights. Not identification `p`.
@@ -35933,7 +35933,7 @@ impl Default for LeveragingBaggingRegressor {
 
 impl LeveragingBaggingRegressor {
     /// Forest with `n_estimators` Hoeffding regressors.
-    pub fn new(n_estimators: usize) -> Self {
+    pub(crate) fn new(n_estimators: usize) -> Self {
         Self {
             n_estimators: n_estimators.max(1),
             ..Self::default()
@@ -36032,7 +36032,7 @@ impl Predict for LeveragingBaggingRegressor {
 ///
 /// Member count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct AdwinBaggingRegressor {
+pub(crate) struct AdwinBaggingRegressor {
     /// Members. Not identification `p`.
     pub n_models: usize,
     models: Vec<HoeffdingRegressor>,
@@ -36057,7 +36057,7 @@ impl Default for AdwinBaggingRegressor {
 
 impl AdwinBaggingRegressor {
     /// Bag of `n_models` Hoeffding regressors.
-    pub fn new(n_models: usize) -> Self {
+    pub(crate) fn new(n_models: usize) -> Self {
         Self {
             n_models: n_models.max(1),
             ..Self::default()
@@ -36172,13 +36172,13 @@ impl Predict for AdwinBaggingRegressor {
 
 /// Named HAT regressor (river `tree.HoeffdingAdaptiveTreeRegressor`).
 #[derive(Clone, Debug, Default)]
-pub struct HATRegressor {
+pub(crate) struct HATRegressor {
     inner: HoeffdingAdaptiveTreeRegressor,
 }
 
 impl HATRegressor {
     /// Default HAT regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -36203,13 +36203,13 @@ impl Predict for HATRegressor {
 
 /// Named streaming AdaBoost (river `ensemble.AdaBoostClassifier`).
 #[derive(Clone, Debug, Default)]
-pub struct AdaBoostClassifier {
+pub(crate) struct AdaBoostClassifier {
     inner: OnlineAdaBoost,
 }
 
 impl AdaBoostClassifier {
     /// Default online AdaBoost.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -36234,13 +36234,13 @@ impl Predict for AdaBoostClassifier {
 
 /// Named streaming bagging (river `ensemble.BaggingClassifier`).
 #[derive(Clone, Debug, Default)]
-pub struct BaggingClassifier {
+pub(crate) struct BaggingClassifier {
     inner: OnlineBagging,
 }
 
 impl BaggingClassifier {
     /// Default online bagging.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -36268,7 +36268,7 @@ impl Predict for BaggingClassifier {
 /// Member count is not identification `p`. Each tree is the existing
 /// [`MondrianTree`]; Poisson(\(w\)) replay diversifies the random cut.
 #[derive(Clone, Debug)]
-pub struct MondrianForest {
+pub(crate) struct MondrianForest {
     /// Trees. Not identification `p`.
     pub n_trees: usize,
     /// Poisson leverage.
@@ -36294,7 +36294,7 @@ impl Default for MondrianForest {
 
 impl MondrianForest {
     /// Forest of `n_trees` Mondrian classifiers.
-    pub fn new(n_trees: usize) -> Self {
+    pub(crate) fn new(n_trees: usize) -> Self {
         Self {
             n_trees: n_trees.max(1),
             ..Self::default()
@@ -36402,7 +36402,7 @@ impl Predict for MondrianForest {
 
 /// Named Mondrian forest classifier.
 #[derive(Clone, Debug)]
-pub struct MondrianForestClassifier {
+pub(crate) struct MondrianForestClassifier {
     inner: MondrianForest,
 }
 
@@ -36416,7 +36416,7 @@ impl Default for MondrianForestClassifier {
 
 impl MondrianForestClassifier {
     /// Forest of `n_trees` Mondrian classifiers.
-    pub fn new(n_trees: usize) -> Self {
+    pub(crate) fn new(n_trees: usize) -> Self {
         Self {
             inner: MondrianForest::new(n_trees),
         }
@@ -36550,7 +36550,7 @@ impl MondrianRegTree {
 /// Member count is not identification `p`. Distinct from [`AmfRegressor`]
 /// (widest-range stump) by using a delayed random cut and Poisson bagging.
 #[derive(Clone, Debug)]
-pub struct MondrianForestRegressor {
+pub(crate) struct MondrianForestRegressor {
     /// Trees. Not identification `p`.
     pub n_trees: usize,
     trees: Vec<MondrianRegTree>,
@@ -36577,7 +36577,7 @@ impl Default for MondrianForestRegressor {
 
 impl MondrianForestRegressor {
     /// Forest of `n_trees` Mondrian regressors.
-    pub fn new(n_trees: usize) -> Self {
+    pub(crate) fn new(n_trees: usize) -> Self {
         Self {
             n_trees: n_trees.max(1),
             ..Self::default()
@@ -36701,13 +36701,13 @@ impl Predict for MondrianForestRegressor {
 
 /// Named aggregated Mondrian forest regressor (river `forest.AMFRegressor`).
 #[derive(Clone, Debug, Default)]
-pub struct AMFRegressor {
+pub(crate) struct AMFRegressor {
     inner: AmfRegressor,
 }
 
 impl AMFRegressor {
     /// AMF with `n_trees` Mondrian stumps.
-    pub fn new(n_trees: usize) -> Self {
+    pub(crate) fn new(n_trees: usize) -> Self {
         Self {
             inner: AmfRegressor::new(n_trees),
         }
@@ -36901,7 +36901,7 @@ fn sgt_predict(node: &SgtNode, x: &Matrix, i: usize) -> f64 {
 /// XGBoost-style gain. Split / bin counts are not identification `p`.
 /// Computationally distinct from the single-leaf [`SgtRegressor`].
 #[derive(Clone, Debug)]
-pub struct StreamingGradientTreeRegressor {
+pub(crate) struct StreamingGradientTreeRegressor {
     /// Newton / SGD step on the leaf score.
     pub learning_rate: f64,
     /// L2 on the Hessian denominator.
@@ -36937,7 +36937,7 @@ impl Default for StreamingGradientTreeRegressor {
 
 impl StreamingGradientTreeRegressor {
     /// Default streaming gradient tree.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -37060,7 +37060,7 @@ impl Predict for StreamingGradientTreeRegressor {
 /// machinery as [`StreamingGradientTreeRegressor`]. Distinct from the
 /// single-logit [`SgtClassifier`].
 #[derive(Clone, Debug)]
-pub struct StreamingGradientTreeClassifier {
+pub(crate) struct StreamingGradientTreeClassifier {
     /// Newton step on the leaf logit.
     pub learning_rate: f64,
     /// L2 on the Hessian denominator.
@@ -37094,7 +37094,7 @@ impl Default for StreamingGradientTreeClassifier {
 
 impl StreamingGradientTreeClassifier {
     /// Default streaming gradient tree classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -37218,13 +37218,13 @@ impl Predict for StreamingGradientTreeClassifier {
 
 /// Named passive-aggressive classifier (river `linear_model.PAClassifier`).
 #[derive(Clone, Debug, Default)]
-pub struct PaClassifier {
+pub(crate) struct PaClassifier {
     inner: PassiveAggressive,
 }
 
 impl PaClassifier {
     /// Default PA classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -37249,13 +37249,13 @@ impl Predict for PaClassifier {
 
 /// Named aggregated Mondrian forest classifier (river `forest.AMFClassifier`).
 #[derive(Clone, Debug, Default)]
-pub struct AMFClassifier {
+pub(crate) struct AMFClassifier {
     inner: AmfClassifier,
 }
 
 impl AMFClassifier {
     /// AMF with `n_trees` Mondrian stumps.
-    pub fn new(n_trees: usize) -> Self {
+    pub(crate) fn new(n_trees: usize) -> Self {
         Self {
             inner: AmfClassifier::new(n_trees),
         }
@@ -37285,7 +37285,7 @@ impl Predict for AMFClassifier {
 /// \(\varepsilon\)-insensitive residual; the step is capped at `c`.
 /// \(\varepsilon\) is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct PaRegressor {
+pub(crate) struct PaRegressor {
     /// Aggressiveness `C`.
     pub c: f64,
     /// Insensitive tube. Not identification `p`.
@@ -37313,7 +37313,7 @@ impl Default for PaRegressor {
 
 impl PaRegressor {
     /// PA-I regressor with aggressiveness `c`.
-    pub fn new(c: f64) -> Self {
+    pub(crate) fn new(c: f64) -> Self {
         Self {
             c,
             ..Self::default()
@@ -37442,7 +37442,7 @@ impl Predict for PaRegressor {
 
 /// Running majority-class dummy (river `dummy.NoChangeClassifier` sibling).
 #[derive(Clone, Debug, Default)]
-pub struct MajorityClass {
+pub(crate) struct MajorityClass {
     n_pos: u64,
     n_neg: u64,
     n_seen: u64,
@@ -37451,7 +37451,7 @@ pub struct MajorityClass {
 
 impl MajorityClass {
     /// Empty majority tracker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -37522,7 +37522,7 @@ impl Predict for MajorityClass {
 
 /// Predict the last observed label (river `dummy.NoChangeClassifier`).
 #[derive(Clone, Debug, Default)]
-pub struct NoChangeClassifier {
+pub(crate) struct NoChangeClassifier {
     last: Option<f64>,
     n_seen: u64,
     updates: u64,
@@ -37530,7 +37530,7 @@ pub struct NoChangeClassifier {
 
 impl NoChangeClassifier {
     /// Empty last-label tracker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -37597,7 +37597,7 @@ impl Predict for NoChangeClassifier {
 
 /// Predict the last observed target (river `dummy.NoChangeRegressor` / last-value).
 #[derive(Clone, Debug, Default)]
-pub struct LastValueRegressor {
+pub(crate) struct LastValueRegressor {
     last: Option<f64>,
     n_seen: u64,
     updates: u64,
@@ -37605,7 +37605,7 @@ pub struct LastValueRegressor {
 
 impl LastValueRegressor {
     /// Empty last-value tracker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -37672,13 +37672,13 @@ impl Predict for LastValueRegressor {
 
 /// Named prior / empirical-class dummy (river `dummy.Prior`).
 #[derive(Clone, Debug, Default)]
-pub struct PriorClassifier {
+pub(crate) struct PriorClassifier {
     inner: MajorityClass,
 }
 
 impl PriorClassifier {
     /// Empty prior tracker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -37755,7 +37755,7 @@ fn binary_gini(n: f64, pos: f64) -> f64 {
 /// from [`AdaptiveModelRules`] (SSE + RLS regression) and
 /// [`VeryFastDecisionRules`] (named wrapper of the regressor).
 #[derive(Clone, Debug)]
-pub struct AMRulesClassifier {
+pub(crate) struct AMRulesClassifier {
     /// SGD step.
     pub learning_rate: f64,
     /// Hoeffding \(\delta\).
@@ -37803,7 +37803,7 @@ impl Default for AMRulesClassifier {
 
 impl AMRulesClassifier {
     /// AMRules classifier with SGD step `learning_rate`.
-    pub fn new(learning_rate: f64) -> Self {
+    pub(crate) fn new(learning_rate: f64) -> Self {
         Self {
             learning_rate,
             ..Self::default()
@@ -38028,7 +38028,7 @@ impl Predict for AMRulesClassifier {
 /// (ε-insensitive) and [`OnlineQuantile`] (univariate tracker, no \(X\)).
 /// \(\tau\) is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct OnlineQuantileRegressor {
+pub(crate) struct OnlineQuantileRegressor {
     /// Quantile level in \((0,1)\).
     pub tau: f64,
     /// SGD step.
@@ -38056,7 +38056,7 @@ impl Default for OnlineQuantileRegressor {
 
 impl OnlineQuantileRegressor {
     /// Pinball regressor at quantile `tau`.
-    pub fn new(tau: f64) -> Self {
+    pub(crate) fn new(tau: f64) -> Self {
         Self {
             tau,
             ..Self::default()
@@ -38238,7 +38238,7 @@ fn online_glm_prepare<'a>(
 /// Log-link SGD on \(\exp(\eta)-y\eta\). Distinct from [`OnlinePoisson`]
 /// (univariate count tracker, no \(X\)).
 #[derive(Clone, Debug)]
-pub struct OnlinePoissonRegressor {
+pub(crate) struct OnlinePoissonRegressor {
     /// SGD step.
     pub learning_rate: f64,
     coef: Vector,
@@ -38263,7 +38263,7 @@ impl Default for OnlinePoissonRegressor {
 
 impl OnlinePoissonRegressor {
     /// Poisson GLM with step `learning_rate`.
-    pub fn new(learning_rate: f64) -> Self {
+    pub(crate) fn new(learning_rate: f64) -> Self {
         Self {
             learning_rate,
             ..Self::default()
@@ -38374,7 +38374,7 @@ impl Predict for OnlinePoissonRegressor {
 /// SGD on \(y e^{-\eta}+\eta\). Distinct from [`OnlineGamma`] (univariate
 /// tracker) and [`OnlinePoissonRegressor`] (count mean).
 #[derive(Clone, Debug)]
-pub struct OnlineGammaRegressor {
+pub(crate) struct OnlineGammaRegressor {
     /// SGD step.
     pub learning_rate: f64,
     coef: Vector,
@@ -38399,7 +38399,7 @@ impl Default for OnlineGammaRegressor {
 
 impl OnlineGammaRegressor {
     /// Gamma GLM with step `learning_rate`.
-    pub fn new(learning_rate: f64) -> Self {
+    pub(crate) fn new(learning_rate: f64) -> Self {
         Self {
             learning_rate,
             ..Self::default()
@@ -38510,7 +38510,7 @@ impl Predict for OnlineGammaRegressor {
 /// Power \(p\) is not identification `p`. Distinct from
 /// [`OnlineTweedieDeviance`] (metric) and [`OnlinePoissonRegressor`] (\(p=1\)).
 #[derive(Clone, Debug)]
-pub struct OnlineTweedieRegressor {
+pub(crate) struct OnlineTweedieRegressor {
     /// Tweedie power in \((1,2)\). Not identification `p`.
     pub power: f64,
     /// SGD step.
@@ -38538,7 +38538,7 @@ impl Default for OnlineTweedieRegressor {
 
 impl OnlineTweedieRegressor {
     /// Tweedie GLM with variance power `power`.
-    pub fn new(power: f64) -> Self {
+    pub(crate) fn new(power: f64) -> Self {
         Self {
             power,
             ..Self::default()
@@ -38656,7 +38656,7 @@ impl Predict for OnlineTweedieRegressor {
 /// SGD on the Huber piecewise loss. Distinct from [`OnlineHuber`] (rolling
 /// metric) and [`PaRegressor`] (ε-insensitive).
 #[derive(Clone, Debug)]
-pub struct OnlineHuberRegressor {
+pub(crate) struct OnlineHuberRegressor {
     /// Huber threshold \(\delta>0\). Not identification `p`.
     pub delta: f64,
     /// SGD step.
@@ -38684,7 +38684,7 @@ impl Default for OnlineHuberRegressor {
 
 impl OnlineHuberRegressor {
     /// Huber regressor with threshold `delta`.
-    pub fn new(delta: f64) -> Self {
+    pub(crate) fn new(delta: f64) -> Self {
         Self {
             delta,
             ..Self::default()
@@ -38808,7 +38808,7 @@ impl Predict for OnlineHuberRegressor {
 /// [`OnlinePoissonRegressor`] (equidispersion) — this is an overdispersed
 /// regression head on \(X\).
 #[derive(Clone, Debug)]
-pub struct OnlineNegBinRegressor {
+pub(crate) struct OnlineNegBinRegressor {
     /// NB2 dispersion \(r>0\). Not identification `p`.
     pub r: f64,
     /// SGD step.
@@ -38836,7 +38836,7 @@ impl Default for OnlineNegBinRegressor {
 
 impl OnlineNegBinRegressor {
     /// NB2 GLM with dispersion `r`.
-    pub fn new(r: f64) -> Self {
+    pub(crate) fn new(r: f64) -> Self {
         Self {
             r,
             ..Self::default()
@@ -38953,7 +38953,7 @@ impl Predict for OnlineNegBinRegressor {
 /// Distinct from [`OnlineBeta`] (univariate tracker) — this is a
 /// fractional-response GLM.
 #[derive(Clone, Debug)]
-pub struct OnlineBetaRegressor {
+pub(crate) struct OnlineBetaRegressor {
     /// SGD step.
     pub learning_rate: f64,
     coef: Vector,
@@ -38978,7 +38978,7 @@ impl Default for OnlineBetaRegressor {
 
 impl OnlineBetaRegressor {
     /// Beta GLM with step `learning_rate`.
-    pub fn new(learning_rate: f64) -> Self {
+    pub(crate) fn new(learning_rate: f64) -> Self {
         Self {
             learning_rate,
             ..Self::default()
@@ -39092,7 +39092,7 @@ impl Predict for OnlineBetaRegressor {
 /// SGD on \(\log\cosh(y-\eta)\). Distinct from [`OnlineHuberRegressor`]
 /// (piecewise) and [`OnlineQuantileRegressor`] (pinball).
 #[derive(Clone, Debug)]
-pub struct OnlineLogCoshRegressor {
+pub(crate) struct OnlineLogCoshRegressor {
     /// SGD step.
     pub learning_rate: f64,
     coef: Vector,
@@ -39117,7 +39117,7 @@ impl Default for OnlineLogCoshRegressor {
 
 impl OnlineLogCoshRegressor {
     /// Log-cosh regressor with step `learning_rate`.
-    pub fn new(learning_rate: f64) -> Self {
+    pub(crate) fn new(learning_rate: f64) -> Self {
         Self {
             learning_rate,
             ..Self::default()
@@ -39220,7 +39220,7 @@ impl Predict for OnlineLogCoshRegressor {
 /// from [`OnlineHuberRegressor`] (piecewise \(L_2/L_1\)) and
 /// [`OnlineLogCoshRegressor`] (log-cosh).
 #[derive(Clone, Debug)]
-pub struct OnlineCauchyRegressor {
+pub(crate) struct OnlineCauchyRegressor {
     /// Cauchy scale \(c>0\). Not identification `p`.
     pub scale: f64,
     /// SGD step.
@@ -39248,7 +39248,7 @@ impl Default for OnlineCauchyRegressor {
 
 impl OnlineCauchyRegressor {
     /// Cauchy regressor with scale `scale`.
-    pub fn new(scale: f64) -> Self {
+    pub(crate) fn new(scale: f64) -> Self {
         Self {
             scale,
             ..Self::default()
@@ -39357,7 +39357,7 @@ impl Predict for OnlineCauchyRegressor {
 /// from [`OnlineHuberRegressor`] (hard \(L_1\) tail) and
 /// [`OnlineCauchyRegressor`] (no hard zero).
 #[derive(Clone, Debug)]
-pub struct OnlineTukeyRegressor {
+pub(crate) struct OnlineTukeyRegressor {
     /// Biweight cutoff \(c>0\). Not identification `p`.
     pub cutoff: f64,
     /// SGD step.
@@ -39385,7 +39385,7 @@ impl Default for OnlineTukeyRegressor {
 
 impl OnlineTukeyRegressor {
     /// Tukey regressor with cutoff `cutoff`.
-    pub fn new(cutoff: f64) -> Self {
+    pub(crate) fn new(cutoff: f64) -> Self {
         Self {
             cutoff,
             ..Self::default()
@@ -39511,7 +39511,7 @@ impl Predict for OnlineTukeyRegressor {
 /// SGD on \(|y-\eta|\). Distinct from [`OnlineHuberRegressor`] (quadratic
 /// bowl) and [`OnlineQuantileRegressor`] (asymmetric pinball).
 #[derive(Clone, Debug)]
-pub struct OnlineLaplaceRegressor {
+pub(crate) struct OnlineLaplaceRegressor {
     /// SGD step.
     pub learning_rate: f64,
     coef: Vector,
@@ -39536,7 +39536,7 @@ impl Default for OnlineLaplaceRegressor {
 
 impl OnlineLaplaceRegressor {
     /// Laplace regressor with step `learning_rate`.
-    pub fn new(learning_rate: f64) -> Self {
+    pub(crate) fn new(learning_rate: f64) -> Self {
         Self {
             learning_rate,
             ..Self::default()
@@ -39644,7 +39644,7 @@ impl Predict for OnlineLaplaceRegressor {
 /// not identification `p`. Distinct from [`OnlineCauchyRegressor`]
 /// (\(\nu=1\) scale form) and [`OnlineHuberRegressor`] (piecewise).
 #[derive(Clone, Debug)]
-pub struct OnlineStudentTRegressor {
+pub(crate) struct OnlineStudentTRegressor {
     /// Degrees of freedom \(\nu>0\). Not identification `p`.
     pub df: f64,
     /// SGD step.
@@ -39672,7 +39672,7 @@ impl Default for OnlineStudentTRegressor {
 
 impl OnlineStudentTRegressor {
     /// Student-\(t\) regressor with `df` degrees of freedom.
-    pub fn new(df: f64) -> Self {
+    pub(crate) fn new(df: f64) -> Self {
         Self {
             df,
             ..Self::default()
@@ -39780,7 +39780,7 @@ impl Predict for OnlineStudentTRegressor {
 /// Distinct from [`OnlineHuberRegressor`] (hard \(L_1\) tail) and
 /// [`OnlineTukeyRegressor`] (hard zero).
 #[derive(Clone, Debug)]
-pub struct OnlineFairRegressor {
+pub(crate) struct OnlineFairRegressor {
     /// Fair scale \(c>0\). Not identification `p`.
     pub scale: f64,
     /// SGD step.
@@ -39808,7 +39808,7 @@ impl Default for OnlineFairRegressor {
 
 impl OnlineFairRegressor {
     /// Fair regressor with scale `scale`.
-    pub fn new(scale: f64) -> Self {
+    pub(crate) fn new(scale: f64) -> Self {
         Self {
             scale,
             ..Self::default()
@@ -39918,7 +39918,7 @@ impl Predict for OnlineFairRegressor {
 /// identification `p`. Distinct from [`OnlineTukeyRegressor`] (hard zero)
 /// and [`OnlineCauchyRegressor`] (log tails).
 #[derive(Clone, Debug)]
-pub struct OnlineWelschRegressor {
+pub(crate) struct OnlineWelschRegressor {
     /// Welsch scale \(c>0\). Not identification `p`.
     pub scale: f64,
     /// SGD step.
@@ -39946,7 +39946,7 @@ impl Default for OnlineWelschRegressor {
 
 impl OnlineWelschRegressor {
     /// Welsch regressor with scale `scale`.
-    pub fn new(scale: f64) -> Self {
+    pub(crate) fn new(scale: f64) -> Self {
         Self {
             scale,
             ..Self::default()
@@ -40056,7 +40056,7 @@ impl Predict for OnlineWelschRegressor {
 /// `p`. Distinct from [`OnlineQuantileRegressor`] (pinball) and
 /// [`OnlineHuberRegressor`] (piecewise \(L_2/L_1\)).
 #[derive(Clone, Debug)]
-pub struct OnlineExpectileRegressor {
+pub(crate) struct OnlineExpectileRegressor {
     /// Expectile level in \((0,1)\). Not identification `p`.
     pub tau: f64,
     /// SGD step.
@@ -40084,7 +40084,7 @@ impl Default for OnlineExpectileRegressor {
 
 impl OnlineExpectileRegressor {
     /// Expectile regressor at level `tau`.
-    pub fn new(tau: f64) -> Self {
+    pub(crate) fn new(tau: f64) -> Self {
         Self {
             tau,
             ..Self::default()
@@ -40194,7 +40194,7 @@ impl Predict for OnlineExpectileRegressor {
 /// `p`. Distinct from [`OnlineHuberRegressor`] (no hard zero) and
 /// [`OnlineTukeyRegressor`] (quartic bowl).
 #[derive(Clone, Debug)]
-pub struct OnlineHampelRegressor {
+pub(crate) struct OnlineHampelRegressor {
     /// Inner Huber radius. Not identification `p`.
     pub a: f64,
     /// Linear-to-descend hinge. Not identification `p`.
@@ -40228,7 +40228,7 @@ impl Default for OnlineHampelRegressor {
 
 impl OnlineHampelRegressor {
     /// Hampel regressor with inner cutoff `a`.
-    pub fn new(a: f64) -> Self {
+    pub(crate) fn new(a: f64) -> Self {
         Self {
             a,
             ..Self::default()
@@ -40363,7 +40363,7 @@ impl Predict for OnlineHampelRegressor {
 /// identification `p`. Distinct from [`OnlineHampelRegressor`] (linear
 /// middle) and [`OnlineTukeyRegressor`] (quartic).
 #[derive(Clone, Debug)]
-pub struct OnlineAndrewsRegressor {
+pub(crate) struct OnlineAndrewsRegressor {
     /// Andrews scale \(c>0\). Not identification `p`.
     pub scale: f64,
     /// SGD step.
@@ -40391,7 +40391,7 @@ impl Default for OnlineAndrewsRegressor {
 
 impl OnlineAndrewsRegressor {
     /// Andrews regressor with scale `scale`.
-    pub fn new(scale: f64) -> Self {
+    pub(crate) fn new(scale: f64) -> Self {
         Self {
             scale,
             ..Self::default()
@@ -40509,7 +40509,7 @@ impl Predict for OnlineAndrewsRegressor {
 /// Scale \(c\) is not identification `p`. Distinct from [`OnlineWelschRegressor`]
 /// (Gaussian-like) and [`OnlineTukeyRegressor`] (hard cutoff).
 #[derive(Clone, Debug)]
-pub struct OnlineGemanMcClureRegressor {
+pub(crate) struct OnlineGemanMcClureRegressor {
     /// Geman–McClure scale \(c>0\). Not identification `p`.
     pub scale: f64,
     /// SGD step.
@@ -40537,7 +40537,7 @@ impl Default for OnlineGemanMcClureRegressor {
 
 impl OnlineGemanMcClureRegressor {
     /// Geman–McClure regressor with scale `scale`.
-    pub fn new(scale: f64) -> Self {
+    pub(crate) fn new(scale: f64) -> Self {
         Self {
             scale,
             ..Self::default()
@@ -40646,7 +40646,7 @@ impl Predict for OnlineGemanMcClureRegressor {
 /// Radius \(a\) is not identification `p`. Distinct from [`OnlineHuberRegressor`]
 /// (linear tails) and [`OnlineHampelRegressor`] (three-part \(\psi\)).
 #[derive(Clone, Debug)]
-pub struct OnlineRamsayRegressor {
+pub(crate) struct OnlineRamsayRegressor {
     /// Ramsay decay \(a>0\). Not identification `p`.
     pub a: f64,
     /// SGD step.
@@ -40674,7 +40674,7 @@ impl Default for OnlineRamsayRegressor {
 
 impl OnlineRamsayRegressor {
     /// Ramsay regressor with decay `a`.
-    pub fn new(a: f64) -> Self {
+    pub(crate) fn new(a: f64) -> Self {
         Self {
             a,
             ..Self::default()
@@ -40785,7 +40785,7 @@ impl Predict for OnlineRamsayRegressor {
 /// Power is not identification `p`. Distinct from [`OnlineLaplaceRegressor`]
 /// (\(p=1\)) and ordinary least squares (\(p=2\)).
 #[derive(Clone, Debug)]
-pub struct OnlineLpRegressor {
+pub(crate) struct OnlineLpRegressor {
     /// Loss power \(p>0\). Not identification `p`.
     pub power: f64,
     /// SGD step.
@@ -40813,7 +40813,7 @@ impl Default for OnlineLpRegressor {
 
 impl OnlineLpRegressor {
     /// \(L_p\) regressor with loss power `power`.
-    pub fn new(power: f64) -> Self {
+    pub(crate) fn new(power: f64) -> Self {
         Self {
             power,
             ..Self::default()
@@ -40922,7 +40922,7 @@ impl Predict for OnlineLpRegressor {
 /// Scale \(c\) is not identification `p`. Distinct from [`OnlineHuberRegressor`]
 /// (piecewise) and [`OnlineLogCoshRegressor`] (log-cosh).
 #[derive(Clone, Debug)]
-pub struct OnlineCharbonnierRegressor {
+pub(crate) struct OnlineCharbonnierRegressor {
     /// Charbonnier scale \(c>0\). Not identification `p`.
     pub scale: f64,
     /// SGD step.
@@ -40950,7 +40950,7 @@ impl Default for OnlineCharbonnierRegressor {
 
 impl OnlineCharbonnierRegressor {
     /// Charbonnier regressor with scale `scale`.
-    pub fn new(scale: f64) -> Self {
+    pub(crate) fn new(scale: f64) -> Self {
         Self {
             scale,
             ..Self::default()
@@ -41059,7 +41059,7 @@ impl Predict for OnlineCharbonnierRegressor {
 /// Scale \(c\) is not identification `p`. Distinct from [`OnlineAndrewsRegressor`]
 /// (sine, hard zero) and [`OnlineHuberRegressor`] (linear then clip).
 #[derive(Clone, Debug)]
-pub struct OnlineTanhRegressor {
+pub(crate) struct OnlineTanhRegressor {
     /// Tanh scale \(c>0\). Not identification `p`.
     pub scale: f64,
     /// SGD step.
@@ -41087,7 +41087,7 @@ impl Default for OnlineTanhRegressor {
 
 impl OnlineTanhRegressor {
     /// Tanh regressor with scale `scale`.
-    pub fn new(scale: f64) -> Self {
+    pub(crate) fn new(scale: f64) -> Self {
         Self {
             scale,
             ..Self::default()
@@ -41195,7 +41195,7 @@ impl Predict for OnlineTanhRegressor {
 /// Scale \(c\) is not identification `p`. Distinct from [`OnlineCauchyRegressor`]
 /// (score \(r/(c^2+r^2)\)) and [`OnlineTanhRegressor`] (exponential tails).
 #[derive(Clone, Debug)]
-pub struct OnlineAtanRegressor {
+pub(crate) struct OnlineAtanRegressor {
     /// Arctan scale \(c>0\). Not identification `p`.
     pub scale: f64,
     /// SGD step.
@@ -41223,7 +41223,7 @@ impl Default for OnlineAtanRegressor {
 
 impl OnlineAtanRegressor {
     /// Arctan regressor with scale `scale`.
-    pub fn new(scale: f64) -> Self {
+    pub(crate) fn new(scale: f64) -> Self {
         Self {
             scale,
             ..Self::default()
@@ -41332,7 +41332,7 @@ impl Predict for OnlineAtanRegressor {
 /// \(\varepsilon\) is not identification `p`. Distinct from [`OnlineHuberRegressor`]
 /// (quadratic bowl) and [`OnlineLaplaceRegressor`] (no dead-zone).
 #[derive(Clone, Debug)]
-pub struct OnlineEpsilonInsensitiveRegressor {
+pub(crate) struct OnlineEpsilonInsensitiveRegressor {
     /// Dead-zone radius. Not identification `p`.
     pub epsilon: f64,
     /// SGD step.
@@ -41360,7 +41360,7 @@ impl Default for OnlineEpsilonInsensitiveRegressor {
 
 impl OnlineEpsilonInsensitiveRegressor {
     /// \(\varepsilon\)-insensitive regressor.
-    pub fn new(epsilon: f64) -> Self {
+    pub(crate) fn new(epsilon: f64) -> Self {
         Self {
             epsilon,
             ..Self::default()
@@ -41473,7 +41473,7 @@ impl Predict for OnlineEpsilonInsensitiveRegressor {
 /// Shape \(\alpha\) is not identification `p`. Distinct from [`OnlineCharbonnierRegressor`]
 /// (\(\alpha=1\)) and [`OnlineGemanMcClureRegressor`] (\(\alpha=-2\)).
 #[derive(Clone, Debug)]
-pub struct OnlineBarronRegressor {
+pub(crate) struct OnlineBarronRegressor {
     /// Barron shape. Not identification `p`.
     pub alpha: f64,
     /// Scale \(c>0\). Not identification `p`.
@@ -41504,7 +41504,7 @@ impl Default for OnlineBarronRegressor {
 
 impl OnlineBarronRegressor {
     /// Barron regressor with shape `alpha`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self {
             alpha,
             ..Self::default()
@@ -41628,7 +41628,7 @@ impl Predict for OnlineBarronRegressor {
 /// Projection count is not identification `p`. Distinct from [`HalfSpaceTrees`]
 /// (axis-aligned splits) and [`GaussianScorer`] (per-feature moments).
 #[derive(Clone, Debug)]
-pub struct Loda {
+pub(crate) struct Loda {
     /// Random projections. Not identification `p`.
     pub n_projections: usize,
     /// Histogram bins. Not identification `p`.
@@ -41660,7 +41660,7 @@ impl Default for Loda {
 
 impl Loda {
     /// LODA with `n_projections` histograms.
-    pub fn new(n_projections: usize) -> Self {
+    pub(crate) fn new(n_projections: usize) -> Self {
         Self {
             n_projections: n_projections.max(1),
             ..Self::default()
@@ -41803,7 +41803,7 @@ impl Predict for Loda {
 /// L2. Distinct from [`OnlineLaplaceRegressor`] (\(\rho=|r|\)) and
 /// [`OnlineCharbonnierRegressor`] (\(\sqrt{r^2+c^2}-c\)).
 #[derive(Clone, Debug)]
-pub struct OnlineSoftL1Regressor {
+pub(crate) struct OnlineSoftL1Regressor {
     /// SGD step.
     pub learning_rate: f64,
     coef: Vector,
@@ -41828,7 +41828,7 @@ impl Default for OnlineSoftL1Regressor {
 
 impl OnlineSoftL1Regressor {
     /// Soft-L1 SGD regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -41932,7 +41932,7 @@ impl Predict for OnlineSoftL1Regressor {
 /// \(\ell=\max(0,1-y\eta)^2\) on labels mapped to \(\{\pm 1\}\). Distinct from
 /// [`LogisticRegression`] (log-loss) and [`OnlineSvm`] (hinge / Pegasos).
 #[derive(Clone, Debug)]
-pub struct OnlineSquaredHingeClassifier {
+pub(crate) struct OnlineSquaredHingeClassifier {
     /// SGD step.
     pub learning_rate: f64,
     coef: Vector,
@@ -41957,7 +41957,7 @@ impl Default for OnlineSquaredHingeClassifier {
 
 impl OnlineSquaredHingeClassifier {
     /// Squared-hinge SGD classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -42066,7 +42066,7 @@ impl Predict for OnlineSquaredHingeClassifier {
 /// Focusing \(\gamma\) is not identification `p`. Distinct from
 /// [`LogisticRegression`] (\(\gamma=0\)) and [`OnlineSquaredHingeClassifier`].
 #[derive(Clone, Debug)]
-pub struct OnlineFocalClassifier {
+pub(crate) struct OnlineFocalClassifier {
     /// Focusing parameter. Not identification `p`.
     pub gamma: f64,
     /// SGD step.
@@ -42094,7 +42094,7 @@ impl Default for OnlineFocalClassifier {
 
 impl OnlineFocalClassifier {
     /// Focal classifier with focusing `gamma`.
-    pub fn new(gamma: f64) -> Self {
+    pub(crate) fn new(gamma: f64) -> Self {
         Self {
             gamma,
             ..Self::default()
@@ -42206,7 +42206,7 @@ impl Predict for OnlineFocalClassifier {
 /// Distinct from [`OnlineSquaredHingeClassifier`] (no linear far-tail) and
 /// [`OnlineHuberRegressor`] (regression residual).
 #[derive(Clone, Debug)]
-pub struct OnlineModifiedHuberClassifier {
+pub(crate) struct OnlineModifiedHuberClassifier {
     /// SGD step.
     pub learning_rate: f64,
     coef: Vector,
@@ -42231,7 +42231,7 @@ impl Default for OnlineModifiedHuberClassifier {
 
 impl OnlineModifiedHuberClassifier {
     /// Modified-Huber SGD classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -42351,7 +42351,7 @@ impl Predict for OnlineModifiedHuberClassifier {
 /// [`PassiveAggressive`] (no covariance) and [`Perceptron`] (no margin
 /// confidence).
 #[derive(Clone, Debug)]
-pub struct OnlineArowClassifier {
+pub(crate) struct OnlineArowClassifier {
     /// Confidence regularizer. Not identification `p`.
     pub r: f64,
     coef: Vector,
@@ -42380,7 +42380,7 @@ impl Default for OnlineArowClassifier {
 
 impl OnlineArowClassifier {
     /// AROW classifier with confidence `r`.
-    pub fn new(r: f64) -> Self {
+    pub(crate) fn new(r: f64) -> Self {
         Self {
             r,
             ..Self::default()
@@ -42505,7 +42505,7 @@ impl Predict for OnlineArowClassifier {
 /// Probability \(\varphi\) is not identification `p`. Distinct from
 /// [`OnlineArowClassifier`] (hard margin) and [`PassiveAggressive`].
 #[derive(Clone, Debug)]
-pub struct OnlineScwClassifier {
+pub(crate) struct OnlineScwClassifier {
     /// Target probability. Not identification `p`.
     pub phi: f64,
     /// Aggressiveness cap. Not identification `p`.
@@ -42537,7 +42537,7 @@ impl Default for OnlineScwClassifier {
 
 impl OnlineScwClassifier {
     /// SCW classifier with target probability `phi`.
-    pub fn new(phi: f64) -> Self {
+    pub(crate) fn new(phi: f64) -> Self {
         Self {
             phi,
             ..Self::default()
@@ -42669,7 +42669,7 @@ impl Predict for OnlineScwClassifier {
 /// [`OnlineArowClassifier`] (no \(\varphi\sqrt{v}\) constraint) and
 /// [`OnlineScwClassifier`] (soft cap).
 #[derive(Clone, Debug)]
-pub struct OnlineCwClassifier {
+pub(crate) struct OnlineCwClassifier {
     /// Target probability. Not identification `p`.
     pub phi: f64,
     coef: Vector,
@@ -42698,7 +42698,7 @@ impl Default for OnlineCwClassifier {
 
 impl OnlineCwClassifier {
     /// CW classifier with target probability `phi`.
-    pub fn new(phi: f64) -> Self {
+    pub(crate) fn new(phi: f64) -> Self {
         Self {
             phi,
             ..Self::default()
@@ -42830,7 +42830,7 @@ impl Predict for OnlineCwClassifier {
 /// Karhunen–Loève SVD on stacked batches). Component count is not
 /// identification `p` on a 1-row stream.
 #[derive(Clone, Debug)]
-pub struct OnlinePca {
+pub(crate) struct OnlinePca {
     /// Axes to track. Not identification `p` for a streaming update.
     pub n_components: usize,
     /// Base Oja step; effective rate is `lr / (n_seen + 1)`.
@@ -42858,7 +42858,7 @@ impl Default for OnlinePca {
 
 impl OnlinePca {
     /// Track `n_components` Oja axes.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(1),
             ..Self::default()
@@ -43047,7 +43047,7 @@ impl DwmExpert {
 /// and [`HedgeRegressor`] (no expert birth/death). `β` and `θ` are not
 /// identification `p`.
 #[derive(Clone, Debug)]
-pub struct DwmClassifier {
+pub(crate) struct DwmClassifier {
     /// Multiplicative penalty on an expert mistake.
     pub beta: f64,
     /// Removal threshold.
@@ -43078,7 +43078,7 @@ impl Default for DwmClassifier {
 
 impl DwmClassifier {
     /// DWM with mistake penalty `beta`.
-    pub fn new(beta: f64) -> Self {
+    pub(crate) fn new(beta: f64) -> Self {
         Self {
             beta,
             ..Self::default()
@@ -43257,7 +43257,7 @@ impl Predict for DwmClassifier {
 /// [`OnlinePca`] (second-order Oja axes). Component count is not identification
 /// `p` on a 1-row stream.
 #[derive(Clone, Debug)]
-pub struct OnlineIca {
+pub(crate) struct OnlineIca {
     /// Independent components. Not identification `p` for a streaming update.
     pub n_components: usize,
     /// Base natural-gradient step.
@@ -43285,7 +43285,7 @@ impl Default for OnlineIca {
 
 impl OnlineIca {
     /// Track `n_components` independent directions.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(1),
             ..Self::default()
@@ -43491,7 +43491,7 @@ impl NseExpert {
 /// decay and removal) and [`BoleClassifier`] (fixed pool). `β` is not
 /// identification `p`.
 #[derive(Clone, Debug)]
-pub struct LearnNseClassifier {
+pub(crate) struct LearnNseClassifier {
     /// Sigmoid slope on the error.
     pub beta: f64,
     /// Cap on the expert pool. Not identification `p`.
@@ -43517,7 +43517,7 @@ impl Default for LearnNseClassifier {
 
 impl LearnNseClassifier {
     /// Learn++.NSE with sigmoid slope `beta`.
-    pub fn new(beta: f64) -> Self {
+    pub(crate) fn new(beta: f64) -> Self {
         Self {
             beta,
             ..Self::default()
@@ -43662,7 +43662,7 @@ impl Predict for LearnNseClassifier {
 /// but are not pruned. Distinct from [`DwmClassifier`] (threshold death) and
 /// [`LearnNseClassifier`] (sigmoid EMA weights). `β` is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct AdditiveExpertClassifier {
+pub(crate) struct AdditiveExpertClassifier {
     /// Multiplicative penalty on an expert mistake.
     pub beta: f64,
     /// Cap on the expert pool. Not identification `p`.
@@ -43690,7 +43690,7 @@ impl Default for AdditiveExpertClassifier {
 
 impl AdditiveExpertClassifier {
     /// Additive experts with mistake penalty `beta`.
-    pub fn new(beta: f64) -> Self {
+    pub(crate) fn new(beta: f64) -> Self {
         Self {
             beta,
             ..Self::default()
@@ -43851,7 +43851,7 @@ impl Predict for AdditiveExpertClassifier {
 /// Distinct from [`crate::decompose::MiniBatchNmf`] (batched MU on stacked
 /// blocks). Component count is not identification `p` on a 1-row stream.
 #[derive(Clone, Debug)]
-pub struct OnlineNmf {
+pub(crate) struct OnlineNmf {
     /// Nonnegative components. Not identification `p` for a streaming update.
     pub n_components: usize,
     /// Additive step on the residual outer product.
@@ -43877,7 +43877,7 @@ impl Default for OnlineNmf {
 
 impl OnlineNmf {
     /// Track `n_components` nonnegative basis vectors.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(1),
             ..Self::default()
@@ -44033,7 +44033,7 @@ impl Transform for OnlineNmf {
 /// [`crate::decompose::Cca`] (batch SVD of the whitened cross-covariance).
 /// The single canonical pair is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct OnlineCca {
+pub(crate) struct OnlineCca {
     /// Oja step.
     pub learning_rate: f64,
     mean_x: Vector,
@@ -44062,7 +44062,7 @@ impl Default for OnlineCca {
 
 impl OnlineCca {
     /// Streaming CCA with Oja step `learning_rate`.
-    pub fn new(learning_rate: f64) -> Self {
+    pub(crate) fn new(learning_rate: f64) -> Self {
         Self {
             learning_rate,
             ..Self::default()
@@ -44222,7 +44222,7 @@ impl Transform for OnlineCca {
 /// [`OnlinePca`] (no unique-variance \(\psi\)). Factor count is not
 /// identification `p` on a 1-row stream.
 #[derive(Clone, Debug)]
-pub struct OnlineFa {
+pub(crate) struct OnlineFa {
     /// Latent factors. Not identification `p` for a streaming update.
     pub n_components: usize,
     /// Base Oja step; effective rate is `lr / (n_seen + 1)`.
@@ -44252,7 +44252,7 @@ impl Default for OnlineFa {
 
 impl OnlineFa {
     /// Track `n_components` factors with residual uniqueness.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(1),
             ..Self::default()
@@ -44408,7 +44408,7 @@ impl Transform for OnlineFa {
 /// (Oja decay on the weights). The single latent pair is not identification
 /// `p`.
 #[derive(Clone, Debug)]
-pub struct OnlinePls {
+pub(crate) struct OnlinePls {
     /// NIPALS step.
     pub learning_rate: f64,
     mean_x: Vector,
@@ -44437,7 +44437,7 @@ impl Default for OnlinePls {
 
 impl OnlinePls {
     /// Streaming PLS with NIPALS step `learning_rate`.
-    pub fn new(learning_rate: f64) -> Self {
+    pub(crate) fn new(learning_rate: f64) -> Self {
         Self {
             learning_rate,
             ..Self::default()
@@ -44587,7 +44587,7 @@ impl Transform for OnlinePls {
 /// pooled covariance) and [`OnlineGaussianNb`] (class-conditional diagonals
 /// without a shared scatter). The direction is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct OnlineFda {
+pub(crate) struct OnlineFda {
     mean0: Vector,
     mean1: Vector,
     var: Vector,
@@ -44617,7 +44617,7 @@ impl Default for OnlineFda {
 
 impl OnlineFda {
     /// Streaming two-class Fisher discriminant.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -44751,7 +44751,7 @@ impl Predict for OnlineFda {
 /// MU on stacked blocks) and [`OnlineNmf`] (nonnegative, no soft-threshold).
 /// Atom count is not identification `p` on a 1-row stream.
 #[derive(Clone, Debug)]
-pub struct OnlineDictionaryLearning {
+pub(crate) struct OnlineDictionaryLearning {
     /// Dictionary atoms. Not identification `p` for a streaming update.
     pub n_components: usize,
     /// ISTA threshold.
@@ -44780,7 +44780,7 @@ impl Default for OnlineDictionaryLearning {
 
 impl OnlineDictionaryLearning {
     /// Track `n_components` unit-norm atoms.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(1),
             ..Self::default()
@@ -44936,7 +44936,7 @@ impl Transform for OnlineDictionaryLearning {
 /// One-observation ridge updates of \(p_u\) then \(q_i\). Distinct from
 /// [`FunkMf`] (SGD) and [`BiasedMf`]. Rank is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct AlsReco {
+pub(crate) struct AlsReco {
     /// Latent rank.
     pub n_factors: usize,
     /// Ridge on the rank-1 Gram.
@@ -44962,7 +44962,7 @@ impl Default for AlsReco {
 
 impl AlsReco {
     /// ALS reco with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -45097,7 +45097,7 @@ impl PartialFit for AlsReco {
 /// Distinct from [`Bpr`] (one unweighted negative). Rank is not
 /// identification `p`.
 #[derive(Clone, Debug)]
-pub struct WarpReco {
+pub(crate) struct WarpReco {
     /// Latent rank.
     pub n_factors: usize,
     /// SGD step.
@@ -45128,7 +45128,7 @@ impl Default for WarpReco {
 
 impl WarpReco {
     /// WARP reco with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -45286,7 +45286,7 @@ impl Predict for WarpReco {
 /// [`crate::decompose::IncrementalPca`] (SKL sequential KL). Component count
 /// is not identification `p` on a 1-row stream.
 #[derive(Clone, Debug)]
-pub struct OnlineSvd {
+pub(crate) struct OnlineSvd {
     /// Singular vectors to track. Not identification `p` for a streaming update.
     pub n_components: usize,
     /// Base Oja step; effective rate is `lr / (n_seen + 1)`.
@@ -45312,7 +45312,7 @@ impl Default for OnlineSvd {
 
 impl OnlineSvd {
     /// Track `n_components` uncentered singular vectors.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(1),
             ..Self::default()
@@ -45494,7 +45494,7 @@ fn invert_ridge_gram(g: &[Vec<f64>], lam: f64) -> Option<Vec<Vec<f64>>> {
 /// Distinct from [`SlimReco`] (L1 sequential weights) and [`ItemKnn`]
 /// (cosine neighbourhood). Item count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct EaseReco {
+pub(crate) struct EaseReco {
     /// Ridge on the item Gram.
     pub l2: f64,
     ratings: HashMap<(u64, usize), f64>,
@@ -45517,7 +45517,7 @@ impl Default for EaseReco {
 
 impl EaseReco {
     /// Empty EASE recommender.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -45706,7 +45706,7 @@ fn rbf_landmarks(x: &Vector, landmarks: &[Vector], bw: f64) -> Vector {
 /// Distinct from [`OnlinePca`] (linear) and [`crate::kernel_pca::KernelPca`]
 /// (batch eigendecomposition). Landmark count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct OnlineKernelPca {
+pub(crate) struct OnlineKernelPca {
     /// Kernel-space axes / landmarks. Not identification `p` on a stream.
     pub n_components: usize,
     /// RBF bandwidth.
@@ -45737,7 +45737,7 @@ impl Default for OnlineKernelPca {
 
 impl OnlineKernelPca {
     /// Track `n_components` kernel axes.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(1),
             ..Self::default()
@@ -45913,7 +45913,7 @@ impl Transform for OnlineKernelPca {
 /// score window. Distinct from [`HalfSpaceTrees`] (no reset) and batch
 /// [`crate::anomaly::IsolationForest`]. Tree count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct IForestAsd {
+pub(crate) struct IForestAsd {
     /// Isolation trees. Not identification `p` on a stream.
     pub n_trees: usize,
     /// Maximum isolation depth.
@@ -45943,7 +45943,7 @@ impl Default for IForestAsd {
 
 impl IForestAsd {
     /// IForestASD with `n_trees` isolation trees.
-    pub fn new(n_trees: usize) -> Self {
+    pub(crate) fn new(n_trees: usize) -> Self {
         let n_trees = n_trees.max(1);
         Self {
             n_trees,
@@ -46050,7 +46050,7 @@ fn softmax_scores(xs: &[f64]) -> Vec<f64> {
 /// Distinct from [`Bpr`] (one pairwise negative) and [`WarpReco`]
 /// (sample-until-violation). Rank is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ListNet {
+pub(crate) struct ListNet {
     /// Latent rank.
     pub n_factors: usize,
     /// SGD step.
@@ -46079,7 +46079,7 @@ impl Default for ListNet {
 
 impl ListNet {
     /// ListNet with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -46228,7 +46228,7 @@ impl Predict for ListNet {
 /// Distinct from [`ListNet`] (top-1 softmax CE) and [`LambdaRank`]
 /// (λ-weighted pairwise). Rank is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ListMle {
+pub(crate) struct ListMle {
     /// Latent rank.
     pub n_factors: usize,
     /// SGD step.
@@ -46257,7 +46257,7 @@ impl Default for ListMle {
 
 impl ListMle {
     /// ListMLE with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -46420,7 +46420,7 @@ fn softrank_phi(z: f64) -> f64 {
 /// [`ListNet`] (top-1 softmax CE) and [`ListMle`] (Plackett–Luce). Bandwidth
 /// \(\sigma\) is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SoftRank {
+pub(crate) struct SoftRank {
     /// Latent rank.
     pub n_factors: usize,
     /// SGD step.
@@ -46452,7 +46452,7 @@ impl Default for SoftRank {
 
 impl SoftRank {
     /// SoftRank with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -46647,7 +46647,7 @@ impl Predict for SoftRank {
 /// [`SoftRank`] (Gaussian rank MSE) and [`LambdaRank`] (λ-pairwise).
 /// Temperature \(\tau\) is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ApproxNdcg {
+pub(crate) struct ApproxNdcg {
     /// Latent rank.
     pub n_factors: usize,
     /// SGD step.
@@ -46679,7 +46679,7 @@ impl Default for ApproxNdcg {
 
 impl ApproxNdcg {
     /// ApproxNDCG with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -46870,7 +46870,7 @@ impl Predict for ApproxNdcg {
 ///
 /// Distinct from [`ListNet`] (top-1 CE) and [`SoftRank`] (Gaussian rank MSE).
 #[derive(Clone, Debug)]
-pub struct RankCosine {
+pub(crate) struct RankCosine {
     /// Latent rank.
     pub n_factors: usize,
     /// SGD step.
@@ -46899,7 +46899,7 @@ impl Default for RankCosine {
 
 impl RankCosine {
     /// RankCosine with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -47058,7 +47058,7 @@ impl Predict for RankCosine {
 /// Distinct from [`RankNet`] (logistic pair loss) and [`Bpr`] (one unweighted
 /// negative). Rank is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RankSvm {
+pub(crate) struct RankSvm {
     /// Latent rank.
     pub n_factors: usize,
     /// SGD step.
@@ -47087,7 +47087,7 @@ impl Default for RankSvm {
 
 impl RankSvm {
     /// RankSVM with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -47246,7 +47246,7 @@ impl Predict for RankSvm {
 /// Distinct from [`RankNet`] (unweighted logistic), [`RankSvm`] (hinge), and
 /// [`LambdaMart`] (λ-tree boosting). Rank is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct AdaRank {
+pub(crate) struct AdaRank {
     /// Latent rank.
     pub n_factors: usize,
     /// SGD step.
@@ -47277,7 +47277,7 @@ impl Default for AdaRank {
 
 impl AdaRank {
     /// AdaRank with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -47454,7 +47454,7 @@ impl Predict for AdaRank {
 /// reweighting), [`RankNet`] (joint pair SGD), and [`ListNet`]. Rank is not
 /// identification `p`.
 #[derive(Clone, Debug)]
-pub struct CoordinateAscent {
+pub(crate) struct CoordinateAscent {
     /// Latent rank.
     pub n_factors: usize,
     /// SGD step.
@@ -47483,7 +47483,7 @@ impl Default for CoordinateAscent {
 
 impl CoordinateAscent {
     /// Coordinate ascent with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -47640,7 +47640,7 @@ impl Predict for CoordinateAscent {
 /// Distinct from [`AdaRank`] (query-level weights) and [`RankSvm`] (hinge).
 /// Rank is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RankBoost {
+pub(crate) struct RankBoost {
     /// Latent rank.
     pub n_factors: usize,
     /// SGD step.
@@ -47671,7 +47671,7 @@ impl Default for RankBoost {
 
 impl RankBoost {
     /// RankBoost with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -47831,7 +47831,7 @@ impl Predict for RankBoost {
 /// negative), and [`WarpReco`] (sample-until-violation). Rank is not
 /// identification `p`.
 #[derive(Clone, Debug)]
-pub struct RankNet {
+pub(crate) struct RankNet {
     /// Latent rank.
     pub n_factors: usize,
     /// SGD step.
@@ -47860,7 +47860,7 @@ impl Default for RankNet {
 
 impl RankNet {
     /// RankNet with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -48017,7 +48017,7 @@ impl Predict for RankNet {
 /// Distinct from [`AlsReco`] (ridge ALS), [`EaseReco`] (Gram inverse), and
 /// [`FunkMf`] (SGD). Nuclear-norm λ is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SoftImpute {
+pub(crate) struct SoftImpute {
     /// Soft-threshold on singular values.
     pub lambda: f64,
     observed: HashMap<(usize, usize), f64>,
@@ -48044,7 +48044,7 @@ impl Default for SoftImpute {
 
 impl SoftImpute {
     /// SoftImpute with default nuclear-norm threshold.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -48203,7 +48203,7 @@ impl Predict for SoftImpute {
 /// [`AlsReco`] (explicit ridge on the raw rating). Rank is not identification
 /// `p`.
 #[derive(Clone, Debug)]
-pub struct Wrmf {
+pub(crate) struct Wrmf {
     /// Latent rank.
     pub n_factors: usize,
     /// Confidence slope.
@@ -48232,7 +48232,7 @@ impl Default for Wrmf {
 
 impl Wrmf {
     /// WRMF with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -48404,7 +48404,7 @@ fn lambdarank_pair_weight(rel_a: f64, rel_b: f64, rank_a: f64, rank_b: f64, idcg
 /// Distinct from [`RankNet`] (unit pair weight) and [`ListNet`] (listwise
 /// softmax). Rank is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct LambdaRank {
+pub(crate) struct LambdaRank {
     /// Latent rank.
     pub n_factors: usize,
     /// SGD step.
@@ -48433,7 +48433,7 @@ impl Default for LambdaRank {
 
 impl LambdaRank {
     /// LambdaRank with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -48682,7 +48682,7 @@ fn rrcf_codisp(points: &[Vec<f64>], q: &[f64], rng: &mut Rng, max_depth: usize) 
 /// Distinct from [`HalfSpaceTrees`] (uniform axis) and [`IForestAsd`]
 /// (isolation + ADWIN). Tree count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Rrcf {
+pub(crate) struct Rrcf {
     /// Trees in the forest.
     pub n_trees: usize,
     /// Reservoir cap per tree.
@@ -48713,7 +48713,7 @@ impl Default for Rrcf {
 
 impl Rrcf {
     /// RRCF with `n_trees` random-cut trees.
-    pub fn new(n_trees: usize) -> Self {
+    pub(crate) fn new(n_trees: usize) -> Self {
         Self {
             n_trees: n_trees.max(1),
             ..Self::default()
@@ -48818,7 +48818,7 @@ fn xstream_dot(row: &[f64], dir: &[f64]) -> f64 {
 /// Chain count is not identification `p`. Distinct from [`HalfSpaceTrees`]
 /// (uniform axis) and [`Loda`] (projection histograms without chaining).
 #[derive(Clone, Debug)]
-pub struct XStream {
+pub(crate) struct XStream {
     /// Number of half-space chains.
     pub n_chains: usize,
     /// Cuts per chain.
@@ -48852,7 +48852,7 @@ impl Default for XStream {
 
 impl XStream {
     /// xStream with `n_chains` half-space chains.
-    pub fn new(n_chains: usize) -> Self {
+    pub(crate) fn new(n_chains: usize) -> Self {
         Self {
             n_chains: n_chains.max(1),
             ..Self::default()
@@ -49016,7 +49016,7 @@ fn kitnet_sgd(w: &mut [f64], x: &[f64], lr: f64) -> f64 {
 /// Ensemble size is not identification `p`. Distinct from [`Loda`] (histograms)
 /// and [`OnlineIsolationForest`].
 #[derive(Clone, Debug)]
-pub struct KitNet {
+pub(crate) struct KitNet {
     /// Number of ensemble autoencoders.
     pub n_ae: usize,
     /// SGD step.
@@ -49048,7 +49048,7 @@ impl Default for KitNet {
 
 impl KitNet {
     /// KitNET with `n_ae` ensemble autoencoders.
-    pub fn new(n_ae: usize) -> Self {
+    pub(crate) fn new(n_ae: usize) -> Self {
         Self {
             n_ae: n_ae.max(1),
             ..Self::default()
@@ -49233,7 +49233,7 @@ fn axgb_fit_stump(xs: &[Vec<f64>], res: &[f64], rng: &mut Rng) -> AxgbStump {
 /// Round count is not identification `p`. Distinct from
 /// [`AdaptiveRandomForest`] and [`AmfClassifier`].
 #[derive(Clone, Debug)]
-pub struct AdaptiveXgboost {
+pub(crate) struct AdaptiveXgboost {
     /// Boosting rounds kept in the windowed ensemble.
     pub n_rounds: usize,
     /// Sliding window cap.
@@ -49263,7 +49263,7 @@ impl Default for AdaptiveXgboost {
 
 impl AdaptiveXgboost {
     /// Adaptive XGBoost with `n_rounds` residual stumps.
-    pub fn new(n_rounds: usize) -> Self {
+    pub(crate) fn new(n_rounds: usize) -> Self {
         Self {
             n_rounds: n_rounds.max(1),
             ..Self::default()
@@ -49382,7 +49382,7 @@ impl Predict for AdaptiveXgboost {
 /// Distinct from [`LambdaRank`] (bilinear factors) and [`AdaptiveXgboost`]
 /// (squared residual, not ranking). Round count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct LambdaMart {
+pub(crate) struct LambdaMart {
     /// Boosting rounds.
     pub n_rounds: usize,
     /// Shrinkage.
@@ -49408,7 +49408,7 @@ impl Default for LambdaMart {
 
 impl LambdaMart {
     /// LambdaMART with `n_rounds` ranking stumps.
-    pub fn new(n_rounds: usize) -> Self {
+    pub(crate) fn new(n_rounds: usize) -> Self {
         Self {
             n_rounds: n_rounds.max(1),
             ..Self::default()
@@ -49588,7 +49588,7 @@ impl Predict for LambdaMart {
 /// Distinct from [`AdaBoostClassifier`] / [`OnlineAdaBoost`] (batch vote
 /// reweight, no Poisson replay). Member count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct OzaBoost {
+pub(crate) struct OzaBoost {
     /// Committee size.
     pub n_models: usize,
     models: Vec<Perceptron>,
@@ -49615,7 +49615,7 @@ impl Default for OzaBoost {
 
 impl OzaBoost {
     /// Oza boost with `n_models` perceptrons.
-    pub fn new(n_models: usize) -> Self {
+    pub(crate) fn new(n_models: usize) -> Self {
         Self {
             n_models: n_models.max(1),
             ..Self::default()
@@ -49742,7 +49742,7 @@ impl Predict for OzaBoost {
 /// Distinct from [`Bpr`] (one unweighted negative) and [`LambdaRank`]
 /// (\(|\Delta\mathrm{NDCG}|\)). Rank is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Climf {
+pub(crate) struct Climf {
     /// Latent rank.
     pub n_factors: usize,
     /// SGD step.
@@ -49771,7 +49771,7 @@ impl Default for Climf {
 
 impl Climf {
     /// CLiMF with `k` factors.
-    pub fn new(n_factors: usize) -> Self {
+    pub(crate) fn new(n_factors: usize) -> Self {
         Self {
             n_factors: n_factors.max(1),
             ..Self::default()
@@ -49940,7 +49940,7 @@ impl Predict for Climf {
 /// is not identification `p`. Distinct from [`MiniBatchMlp`] (SGD) and
 /// [`LinearRegression`] (no hidden map).
 #[derive(Clone, Debug)]
-pub struct OsElm {
+pub(crate) struct OsElm {
     /// Hidden units. Not identification `p`.
     pub n_hidden: usize,
     /// Initial inverse-Gram scale.
@@ -49972,7 +49972,7 @@ impl Default for OsElm {
 
 impl OsElm {
     /// OS-ELM with `n_hidden` tanh units.
-    pub fn new(n_hidden: usize) -> Self {
+    pub(crate) fn new(n_hidden: usize) -> Self {
         Self {
             n_hidden: n_hidden.max(1),
             ..Self::default()
@@ -50136,7 +50136,7 @@ impl Predict for OsElm {
 /// [`QuantileFilter`] (order statistic only) and [`Loda`] (projections).
 /// Init length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SpotAnomaly {
+pub(crate) struct SpotAnomaly {
     /// Tail probability \(q\in(0,1)\).
     pub q: f64,
     /// Warm-up length. Not identification `p`.
@@ -50168,7 +50168,7 @@ impl Default for SpotAnomaly {
 
 impl SpotAnomaly {
     /// SPOT with tail level `q`.
-    pub fn new(q: f64) -> Self {
+    pub(crate) fn new(q: f64) -> Self {
         Self {
             q,
             ..Self::default()
@@ -50357,7 +50357,7 @@ impl Predict for SpotAnomaly {
 /// (Hoeffding on a running error rate) and [`Kswin`] (KS). Window length is
 /// not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Mddm {
+pub(crate) struct Mddm {
     /// Window length. Not identification `p`.
     pub window_size: usize,
     /// Recent half used for the gap.
@@ -50384,7 +50384,7 @@ impl Default for Mddm {
 
 impl Mddm {
     /// MDDM with window `window_size`.
-    pub fn new(window_size: usize) -> Self {
+    pub(crate) fn new(window_size: usize) -> Self {
         Self {
             window_size: window_size.max(4),
             ..Self::default()
@@ -50392,7 +50392,7 @@ impl Mddm {
     }
 
     /// Consume one scalar.
-    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+    pub(crate) fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
         let mut ctx = FitCtx::with_session(session.child("update"));
         if x.is_finite() {
             self.window.push(x);
@@ -50497,7 +50497,7 @@ impl PartialFit for Mddm {
 /// (fading min/max of a single cumulative). Threshold is not identification
 /// `p`.
 #[derive(Clone, Debug)]
-pub struct CusumDrift {
+pub(crate) struct CusumDrift {
     /// Allowance \(k\).
     pub k: f64,
     /// Decision threshold \(h\).
@@ -50525,7 +50525,7 @@ impl Default for CusumDrift {
 
 impl CusumDrift {
     /// CUSUM with allowance `k` and threshold `h`.
-    pub fn new(k: f64, h: f64) -> Self {
+    pub(crate) fn new(k: f64, h: f64) -> Self {
         Self {
             k,
             h,
@@ -50534,7 +50534,7 @@ impl CusumDrift {
     }
 
     /// Consume one scalar.
-    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+    pub(crate) fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
         let mut ctx = FitCtx::with_session(session.child("update"));
         if !x.is_finite() {
             return ctx.finish(DriftDecision::Stable);
@@ -50623,7 +50623,7 @@ impl PartialFit for CusumDrift {
 /// [`GaussianScorer`] (per-coordinate z) and [`MultivariateGaussian`]
 /// (accumulator only). Dimension is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct OnlineMahalanobis {
+pub(crate) struct OnlineMahalanobis {
     mean: Vector,
     m2: Matrix,
     n: f64,
@@ -50647,7 +50647,7 @@ impl Default for OnlineMahalanobis {
 
 impl OnlineMahalanobis {
     /// Empty Mahalanobis scorer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -50779,7 +50779,7 @@ impl Predict for OnlineMahalanobis {
 /// from [`CusumDrift`] and [`EwMean`] (no limits). \(λ\) is not identification
 /// `p`.
 #[derive(Clone, Debug)]
-pub struct EwmaChart {
+pub(crate) struct EwmaChart {
     /// Smoothing \(λ\in(0,1]\).
     pub lambda: f64,
     /// Limit width \(L\).
@@ -50809,7 +50809,7 @@ impl Default for EwmaChart {
 
 impl EwmaChart {
     /// Chart with smoothing `lambda`.
-    pub fn new(lambda: f64) -> Self {
+    pub(crate) fn new(lambda: f64) -> Self {
         Self {
             lambda,
             ..Self::default()
@@ -50817,7 +50817,7 @@ impl EwmaChart {
     }
 
     /// Consume one scalar.
-    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+    pub(crate) fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
         let mut ctx = FitCtx::with_session(session.child("update"));
         if !x.is_finite() {
             return ctx.finish(DriftDecision::Stable);
@@ -50915,7 +50915,7 @@ impl PartialFit for EwmaChart {
 /// [`Ddm`] (p+s), [`Hddm`] (Hoeffding), and [`Kswin`] (KS). Window length is
 /// not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Stepd {
+pub(crate) struct Stepd {
     /// Length of each comparison window. Not identification `p`.
     pub window_size: usize,
     /// Two-sided type-I level.
@@ -50941,7 +50941,7 @@ impl Default for Stepd {
 
 impl Stepd {
     /// STEPD with per-window length `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window_size: window.max(2),
             ..Self::default()
@@ -50949,7 +50949,7 @@ impl Stepd {
     }
 
     /// Consume one scalar.
-    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+    pub(crate) fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
         let mut ctx = FitCtx::with_session(session.child("update"));
         if x.is_finite() {
             self.window.push(x);
@@ -51078,7 +51078,7 @@ impl PartialFit for Stepd {
 /// [`EwmaChart`] (Roberts on a continuous mean) and [`Ddm`] (\(p+s\)).
 /// \(\lambda\) is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Ecdd {
+pub(crate) struct Ecdd {
     /// Smoothing \(\lambda\in(0,1]\).
     pub lambda: f64,
     /// Limit width \(L\).
@@ -51108,7 +51108,7 @@ impl Default for Ecdd {
 
 impl Ecdd {
     /// ECDD with smoothing `lambda`.
-    pub fn new(lambda: f64) -> Self {
+    pub(crate) fn new(lambda: f64) -> Self {
         Self {
             lambda,
             ..Self::default()
@@ -51116,7 +51116,7 @@ impl Ecdd {
     }
 
     /// Consume one error indicator (thresholded at 0.5).
-    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+    pub(crate) fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
         let mut ctx = FitCtx::with_session(session.child("update"));
         if !x.is_finite() {
             return ctx.finish(DriftDecision::Stable);
@@ -51216,7 +51216,7 @@ impl PartialFit for Ecdd {
 /// thresholds, no streak) and [`Eddm`]. Thresholds are not identification
 /// `p`.
 #[derive(Clone, Debug)]
-pub struct Rddm {
+pub(crate) struct Rddm {
     /// Minimum instances before a decision.
     pub min_instances: u64,
     /// Warning-streak force length.
@@ -51248,7 +51248,7 @@ impl Default for Rddm {
 
 impl Rddm {
     /// RDDM with `min_instances`.
-    pub fn new(min_instances: u64) -> Self {
+    pub(crate) fn new(min_instances: u64) -> Self {
         Self {
             min_instances: min_instances.max(8),
             ..Self::default()
@@ -51256,7 +51256,7 @@ impl Rddm {
     }
 
     /// Consume one 0/1 error indicator.
-    pub fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
+    pub(crate) fn update(&mut self, x: f64, session: &Session) -> Result<Qualified<DriftDecision>> {
         let mut ctx = FitCtx::with_session(session.child("update"));
         if !x.is_finite() {
             return ctx.finish(DriftDecision::Stable);
@@ -51359,7 +51359,7 @@ impl PartialFit for Rddm {
 /// Score \(-\sum_j\log p_j(x_j)\). Distinct from [`Loda`] (random 1-d
 /// projections). Bin count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Hbos {
+pub(crate) struct Hbos {
     /// Histogram bins. Not identification `p`.
     pub n_bins: usize,
     lo: Vector,
@@ -51386,7 +51386,7 @@ impl Default for Hbos {
 
 impl Hbos {
     /// HBOS with `n_bins` per feature.
-    pub fn new(n_bins: usize) -> Self {
+    pub(crate) fn new(n_bins: usize) -> Self {
         Self {
             n_bins: n_bins.max(2),
             ..Self::default()
@@ -51519,7 +51519,7 @@ impl Predict for Hbos {
 /// Score \(-\sum_j\log(2\min\{F_j,1-F_j\})\). Distinct from [`Hbos`]
 /// (histogram density) and [`Loda`] (random projections).
 #[derive(Clone, Debug)]
-pub struct Ecod {
+pub(crate) struct Ecod {
     samples: Vec<Vec<f64>>,
     n_seen: u64,
     updates: u64,
@@ -51539,7 +51539,7 @@ impl Default for Ecod {
 
 impl Ecod {
     /// Empty ECOD detector.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -51652,7 +51652,7 @@ impl Predict for Ecod {
 /// Score \(-\log C_n(x)-\log C_n^{surv}(x)\) from the empirical copula.
 /// Distinct from [`Ecod`] (sum of univariate tails) and [`Hbos`].
 #[derive(Clone, Debug)]
-pub struct Copod {
+pub(crate) struct Copod {
     samples: Vec<Vec<f64>>,
     n_seen: u64,
     updates: u64,
@@ -51672,7 +51672,7 @@ impl Default for Copod {
 
 impl Copod {
     /// Empty COPOD detector.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -51805,7 +51805,7 @@ impl Predict for Copod {
 /// reservoir of stored points. Distinct from [`Hbos`] (histograms), [`Ecod`]
 /// (univariate tails), [`Copod`] (empirical copula), and [`Loda`].
 #[derive(Clone, Debug)]
-pub struct Abod {
+pub(crate) struct Abod {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -51827,7 +51827,7 @@ impl Default for Abod {
 
 impl Abod {
     /// Empty ABOD detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -51979,7 +51979,7 @@ impl Predict for Abod {
 /// neighbour; the score is the mean \(d(x,c)/r_c\). Distinct from [`Abod`]
 /// (angle variance), [`Loda`], and [`OnlineIsolationForest`].
 #[derive(Clone, Debug)]
-pub struct Inne {
+pub(crate) struct Inne {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -52001,7 +52001,7 @@ impl Default for Inne {
 
 impl Inne {
     /// Empty INNE detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -52156,7 +52156,7 @@ impl Predict for Inne {
 /// Score is the mean 1-NN distance in random axis-aligned subspaces of the
 /// reservoir. Distinct from [`Inne`] (full-space hyperspheres) and [`Abod`].
 #[derive(Clone, Debug)]
-pub struct Sod {
+pub(crate) struct Sod {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -52178,7 +52178,7 @@ impl Default for Sod {
 
 impl Sod {
     /// Empty SOD detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -52307,7 +52307,7 @@ impl Predict for Sod {
 /// Score is \(1-n_r(x)/\overline{n_r}(\mathcal N_r(x))\). Distinct from
 /// [`Sod`] (subspace 1-NN), [`Inne`], and [`Abod`].
 #[derive(Clone, Debug)]
-pub struct Loci {
+pub(crate) struct Loci {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -52329,7 +52329,7 @@ impl Default for Loci {
 
 impl Loci {
     /// Empty LOCI detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -52503,7 +52503,7 @@ impl Predict for Loci {
 /// two-means reservoir. Distinct from [`Sod`] (subspace 1-NN), [`Inne`], and
 /// [`Loci`] (MDEF).
 #[derive(Clone, Debug)]
-pub struct Cblof {
+pub(crate) struct Cblof {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -52533,7 +52533,7 @@ impl Default for Cblof {
 
 impl Cblof {
     /// Empty CBLOF detector (reservoir cap 64, two centres).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -52724,7 +52724,7 @@ impl Predict for Cblof {
 /// Score is the mean Euclidean distance to \(k=\min(5,n-1)\) neighbours.
 /// Distinct from [`Sod`] (axis-aligned 1-NN) and [`Loci`] (MDEF).
 #[derive(Clone, Debug)]
-pub struct KnnAnomaly {
+pub(crate) struct KnnAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -52746,7 +52746,7 @@ impl Default for KnnAnomaly {
 
 impl KnnAnomaly {
     /// Empty \(k\)-NN anomaly detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -52876,7 +52876,7 @@ impl Predict for KnnAnomaly {
 /// set-chaining distances. Distinct from [`OnlineLof`] (k-distance),
 /// [`KnnAnomaly`] (mean k-NN), and [`Loci`] (MDEF).
 #[derive(Clone, Debug)]
-pub struct Cof {
+pub(crate) struct Cof {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -52898,7 +52898,7 @@ impl Default for Cof {
 
 impl Cof {
     /// Empty COF detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -53123,7 +53123,7 @@ impl Predict for Cof {
 /// Score is mean density on the influence space \(k\mathrm{NN}\cup RN_k\)
 /// over own density. Distinct from [`OnlineLof`] (k-distance) and [`Cof`].
 #[derive(Clone, Debug)]
-pub struct Inflo {
+pub(crate) struct Inflo {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -53145,7 +53145,7 @@ impl Default for Inflo {
 
 impl Inflo {
     /// Empty INFLO detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -53317,7 +53317,7 @@ impl Predict for Inflo {
 /// Distinct from [`OnlineLof`] (k-distance), [`Cof`] (chaining), and
 /// [`Inflo`] (influence space).
 #[derive(Clone, Debug)]
-pub struct Loop {
+pub(crate) struct Loop {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -53339,7 +53339,7 @@ impl Default for Loop {
 
 impl Loop {
     /// Empty LoOP detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -53543,7 +53543,7 @@ impl Predict for Loop {
 /// Score is mean \(k\)-NN distance over mean pairwise distance among the
 /// neighbours. Distinct from [`KnnAnomaly`] (numerator only) and [`Cof`].
 #[derive(Clone, Debug)]
-pub struct Ldof {
+pub(crate) struct Ldof {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -53565,7 +53565,7 @@ impl Default for Ldof {
 
 impl Ldof {
     /// Empty LDOF detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -53728,7 +53728,7 @@ impl Predict for Ldof {
 /// Score is \((k-\min(\mathrm{in}\text{-}\mathrm{degree},k))/k\). Distinct from
 /// [`Inflo`] (density ratio) and [`KnnAnomaly`] (mean distance).
 #[derive(Clone, Debug)]
-pub struct Odin {
+pub(crate) struct Odin {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -53750,7 +53750,7 @@ impl Default for Odin {
 
 impl Odin {
     /// Empty ODIN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -53901,7 +53901,7 @@ impl Predict for Odin {
 /// Score is \(-\log\) of the mean RBF kernel. Distinct from [`GaussianScorer`]
 /// (one Gaussian) and [`Hbos`] (axis histograms).
 #[derive(Clone, Debug)]
-pub struct KdeAnomaly {
+pub(crate) struct KdeAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -53925,7 +53925,7 @@ impl Default for KdeAnomaly {
 
 impl KdeAnomaly {
     /// Empty KDE anomaly detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -54077,7 +54077,7 @@ impl Predict for KdeAnomaly {
 /// KDE. Distinct from [`Inflo`] (\(1/k\)-distance density) and
 /// [`KdeAnomaly`] (\(-\log\) global KDE).
 #[derive(Clone, Debug)]
-pub struct Rdos {
+pub(crate) struct Rdos {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -54099,7 +54099,7 @@ impl Default for Rdos {
 
 impl Rdos {
     /// Empty RDOS detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -54326,7 +54326,7 @@ impl Predict for Rdos {
 /// \(h(y)=k\)-distance of \(y\). Distinct from [`KdeAnomaly`] (global
 /// Silverman \(h\)) and [`Rdos`] (fixed \(h\), reverse neighbours).
 #[derive(Clone, Debug)]
-pub struct Ldf {
+pub(crate) struct Ldf {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -54348,7 +54348,7 @@ impl Default for Ldf {
 
 impl Ldf {
     /// Empty LDF detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -54546,7 +54546,7 @@ impl Predict for Ldf {
 /// in-degree \(\ge 1\). Score is \((k-\mathrm{in\text{-}degree})/k\).
 /// Distinct from [`Odin`] (fixed \(k=5\)).
 #[derive(Clone, Debug)]
-pub struct Nof {
+pub(crate) struct Nof {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -54568,7 +54568,7 @@ impl Default for Nof {
 
 impl Nof {
     /// Empty NOF detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -54745,7 +54745,7 @@ impl Predict for Nof {
 /// Variance of pairwise cosines is computed only among the query's \(k\)
 /// nearest reservoir points. Distinct from [`Abod`] (all pairs).
 #[derive(Clone, Debug)]
-pub struct FastAbod {
+pub(crate) struct FastAbod {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -54767,7 +54767,7 @@ impl Default for FastAbod {
 
 impl FastAbod {
     /// Empty FastABOD detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -54945,7 +54945,7 @@ impl Predict for FastAbod {
 /// power-method first axis. In one dimension it is \((x-\mu)^2\). Distinct
 /// from [`OnlinePca`] (Oja transform) and [`OnlineMahalanobis`].
 #[derive(Clone, Debug)]
-pub struct PcaAnomaly {
+pub(crate) struct PcaAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -54967,7 +54967,7 @@ impl Default for PcaAnomaly {
 
 impl PcaAnomaly {
     /// Empty PCA anomaly detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -55152,7 +55152,7 @@ impl Predict for PcaAnomaly {
 /// Distinct from [`KnnAnomaly`] (arithmetic mean) and [`Ldof`] (pairwise
 /// neighbour scale).
 #[derive(Clone, Debug)]
-pub struct Knnw {
+pub(crate) struct Knnw {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -55174,7 +55174,7 @@ impl Default for Knnw {
 
 impl Knnw {
     /// Empty weighted \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -55325,7 +55325,7 @@ fn rod_mad(xs: &[f64], med: f64) -> f64 {
 /// Distinct from [`GaussianScorer`] (mean/sd on raw coordinates) and
 /// [`PcaAnomaly`] (first-PC residual).
 #[derive(Clone, Debug)]
-pub struct Rod {
+pub(crate) struct Rod {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -55349,7 +55349,7 @@ impl Default for Rod {
 
 impl Rod {
     /// Empty ROD detector (reservoir cap 64, eight random projections).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -55502,7 +55502,7 @@ fn gmm_logpdf(y: f64, mu: f64, var: f64) -> f64 {
 ///
 /// Distinct from [`GaussianScorer`] (single Gaussian) and [`PcaAnomaly`].
 #[derive(Clone, Debug)]
-pub struct GmmAnomaly {
+pub(crate) struct GmmAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -55524,7 +55524,7 @@ impl Default for GmmAnomaly {
 
 impl GmmAnomaly {
     /// Empty two-component GMM detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -55695,7 +55695,7 @@ fn reservoir_first_coords(rows: &[Vec<f64>]) -> Vec<f64> {
 /// Score is \(|x-m|/\mathrm{IQR}\). Distinct from [`Rod`] (MAD on random
 /// projections) and [`GaussianScorer`] (mean/sd).
 #[derive(Clone, Debug)]
-pub struct IqrAnomaly {
+pub(crate) struct IqrAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -55717,7 +55717,7 @@ impl Default for IqrAnomaly {
 
 impl IqrAnomaly {
     /// Empty IQR detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -55839,7 +55839,7 @@ fn student_t_logpdf(y: f64, loc: f64, scale: f64, nu: f64) -> f64 {
 ///
 /// Distinct from [`GaussianScorer`] (normal mean/sd) and [`IqrAnomaly`].
 #[derive(Clone, Debug)]
-pub struct StudentTAnomaly {
+pub(crate) struct StudentTAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -55861,7 +55861,7 @@ impl Default for StudentTAnomaly {
 
 impl StudentTAnomaly {
     /// Empty Student-\(t\) detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -55967,7 +55967,7 @@ impl Predict for StudentTAnomaly {
 ///
 /// Distinct from [`KnnAnomaly`] (arithmetic mean) and [`Knnw`] (harmonic mean).
 #[derive(Clone, Debug)]
-pub struct KnnMedian {
+pub(crate) struct KnnMedian {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -55989,7 +55989,7 @@ impl Default for KnnMedian {
 
 impl KnnMedian {
     /// Empty median \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -56119,7 +56119,7 @@ impl Predict for KnnMedian {
 /// Score is \(-\log\min(\hat F(x),1-\hat F(x))\). Distinct from [`IqrAnomaly`]
 /// (IQR fence) and [`Hbos`] (histogram bins).
 #[derive(Clone, Debug)]
-pub struct QuantileAnomaly {
+pub(crate) struct QuantileAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -56141,7 +56141,7 @@ impl Default for QuantileAnomaly {
 
 impl QuantileAnomaly {
     /// Empty empirical-quantile detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -56249,7 +56249,7 @@ impl Predict for QuantileAnomaly {
 /// Distinct from [`KnnAnomaly`] (mean), [`Knnw`] (harmonic mean), and
 /// [`KnnMedian`] (median).
 #[derive(Clone, Debug)]
-pub struct KnnKth {
+pub(crate) struct KnnKth {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -56271,7 +56271,7 @@ impl Default for KnnKth {
 
 impl KnnKth {
     /// Empty \(k\)-distance detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -56406,7 +56406,7 @@ fn euclid_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Score is \(2\mathrm{E}\|x-Y\|-\mathrm{E}\|Y-Y'\|\). Distinct from
 /// [`KnnAnomaly`] (mean of \(k\) neighbours only).
 #[derive(Clone, Debug)]
-pub struct EnergyAnomaly {
+pub(crate) struct EnergyAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -56428,7 +56428,7 @@ impl Default for EnergyAnomaly {
 
 impl EnergyAnomaly {
     /// Empty energy-distance detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -56555,7 +56555,7 @@ impl Predict for EnergyAnomaly {
 /// Distinct from [`GaussianScorer`] (global mean/sd) and [`IqrAnomaly`]
 /// (full-reservoir IQR).
 #[derive(Clone, Debug)]
-pub struct WindowZscore {
+pub(crate) struct WindowZscore {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -56577,7 +56577,7 @@ impl Default for WindowZscore {
 
 impl WindowZscore {
     /// Empty windowed z-score detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -56692,7 +56692,7 @@ impl Predict for WindowZscore {
 /// Score is \(\sum_{i=1}^{k} d_{(i)}^2\). Distinct from [`KnnAnomaly`] (mean of
 /// \(d\)), [`KnnKth`] (\(k\)-distance), [`KnnMedian`], and [`Knnw`].
 #[derive(Clone, Debug)]
-pub struct SsdAnomaly {
+pub(crate) struct SsdAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -56714,7 +56714,7 @@ impl Default for SsdAnomaly {
 
 impl SsdAnomaly {
     /// Empty sum-of-squared \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -56839,7 +56839,7 @@ impl Predict for SsdAnomaly {
 /// Distinct from [`WindowZscore`] (mean/sd) and [`Rod`] (full-reservoir
 /// random projections).
 #[derive(Clone, Debug)]
-pub struct WindowMad {
+pub(crate) struct WindowMad {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -56861,7 +56861,7 @@ impl Default for WindowMad {
 
 impl WindowMad {
     /// Empty windowed MAD detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -56979,7 +56979,7 @@ fn chebyshev_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Score is the mean of the \(k\) smallest \(\max_j|x_j-y_j|\) distances.
 /// Distinct from [`KnnAnomaly`] (Euclidean mean).
 #[derive(Clone, Debug)]
-pub struct LinfAnomaly {
+pub(crate) struct LinfAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -57001,7 +57001,7 @@ impl Default for LinfAnomaly {
 
 impl LinfAnomaly {
     /// Empty Chebyshev \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -57126,7 +57126,7 @@ impl Predict for LinfAnomaly {
 /// Distinct from [`IqrAnomaly`] (full reservoir) and [`WindowMad`] (MAD, not
 /// IQR).
 #[derive(Clone, Debug)]
-pub struct WindowIqr {
+pub(crate) struct WindowIqr {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -57148,7 +57148,7 @@ impl Default for WindowIqr {
 
 impl WindowIqr {
     /// Empty windowed IQR detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -57273,7 +57273,7 @@ fn manhattan_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Score is the mean of the \(k\) smallest \(\sum_j|x_j-y_j|\) distances.
 /// Distinct from [`KnnAnomaly`] (Euclidean) and [`LinfAnomaly`] (Chebyshev).
 #[derive(Clone, Debug)]
-pub struct ManhattanAnomaly {
+pub(crate) struct ManhattanAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -57295,7 +57295,7 @@ impl Default for ManhattanAnomaly {
 
 impl ManhattanAnomaly {
     /// Empty Manhattan \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -57420,7 +57420,7 @@ impl Predict for ManhattanAnomaly {
 /// Score is \(|x-m|/(h-\ell)\) with \(m=(\ell+h)/2\). Distinct from
 /// [`WindowIqr`] (quartiles) and [`WindowMad`] (MAD).
 #[derive(Clone, Debug)]
-pub struct WindowRange {
+pub(crate) struct WindowRange {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -57442,7 +57442,7 @@ impl Default for WindowRange {
 
 impl WindowRange {
     /// Empty windowed range detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -57575,7 +57575,7 @@ fn minkowski3_rows(a: &[f64], b: &[f64]) -> f64 {
 /// distances. Distinct from [`KnnAnomaly`] (\(p=2\)), [`ManhattanAnomaly`]
 /// (\(p=1\)), and [`LinfAnomaly`] (\(p=\infty\)).
 #[derive(Clone, Debug)]
-pub struct MinkowskiAnomaly {
+pub(crate) struct MinkowskiAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -57597,7 +57597,7 @@ impl Default for MinkowskiAnomaly {
 
 impl MinkowskiAnomaly {
     /// Empty Minkowski-\(p=3\) \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -57723,7 +57723,7 @@ impl Predict for MinkowskiAnomaly {
 /// eight first-coordinates. Distinct from [`WindowZscore`] (divides by
 /// local SD) and [`WindowRange`] (min-max span).
 #[derive(Clone, Debug)]
-pub struct WindowCv {
+pub(crate) struct WindowCv {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -57745,7 +57745,7 @@ impl Default for WindowCv {
 
 impl WindowCv {
     /// Empty windowed CV detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -57863,7 +57863,7 @@ impl Predict for WindowCv {
 /// Euclidean distances. Distinct from [`KnnAnomaly`] (arithmetic mean),
 /// [`SsdAnomaly`] (sum of squares), and [`EnergyAnomaly`].
 #[derive(Clone, Debug)]
-pub struct GeometricAnomaly {
+pub(crate) struct GeometricAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -57885,7 +57885,7 @@ impl Default for GeometricAnomaly {
 
 impl GeometricAnomaly {
     /// Empty geometric-mean \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -58011,7 +58011,7 @@ impl Predict for GeometricAnomaly {
 /// Distinct from [`WindowZscore`] (centred SD) and [`WindowCv`] (relative
 /// to the local mean).
 #[derive(Clone, Debug)]
-pub struct WindowRms {
+pub(crate) struct WindowRms {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -58033,7 +58033,7 @@ impl Default for WindowRms {
 
 impl WindowRms {
     /// Empty windowed RMS detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -58151,7 +58151,7 @@ impl Predict for WindowRms {
 /// distances. Distinct from [`KnnAnomaly`] (arithmetic) and
 /// [`GeometricAnomaly`] (exp-mean-log).
 #[derive(Clone, Debug)]
-pub struct HarmonicAnomaly {
+pub(crate) struct HarmonicAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -58173,7 +58173,7 @@ impl Default for HarmonicAnomaly {
 
 impl HarmonicAnomaly {
     /// Empty harmonic-mean \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -58302,7 +58302,7 @@ impl Predict for HarmonicAnomaly {
 /// then scores \(|x-\bar x_{\mathrm{trim}}|/s_{\mathrm{trim}}\). Distinct
 /// from [`WindowZscore`] (no trim) and [`WindowIqr`] (quartile scale).
 #[derive(Clone, Debug)]
-pub struct WindowTrimmed {
+pub(crate) struct WindowTrimmed {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -58324,7 +58324,7 @@ impl Default for WindowTrimmed {
 
 impl WindowTrimmed {
     /// Empty windowed trimmed-mean detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -58462,7 +58462,7 @@ fn canberra_rows(a: &[f64], b: &[f64]) -> f64 {
 /// distances. Distinct from [`ManhattanAnomaly`] (raw \(\ell_1\)) and
 /// [`MinkowskiAnomaly`].
 #[derive(Clone, Debug)]
-pub struct CanberraAnomaly {
+pub(crate) struct CanberraAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -58484,7 +58484,7 @@ impl Default for CanberraAnomaly {
 
 impl CanberraAnomaly {
     /// Empty Canberra \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -58610,7 +58610,7 @@ impl Predict for CanberraAnomaly {
 /// Distinct from [`WindowZscore`] (unsquared) and [`WindowTrimmed`]
 /// (trimmed location).
 #[derive(Clone, Debug)]
-pub struct WindowSkew {
+pub(crate) struct WindowSkew {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -58632,7 +58632,7 @@ impl Default for WindowSkew {
 
 impl WindowSkew {
     /// Empty windowed cubed-z detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -58765,7 +58765,7 @@ fn lorentzian_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Score is the mean of the \(k\) smallest \(\sum_j\ln(1+|x_j-y_j|)\)
 /// distances. Distinct from [`ManhattanAnomaly`] and [`CanberraAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LorentzianAnomaly {
+pub(crate) struct LorentzianAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -58787,7 +58787,7 @@ impl Default for LorentzianAnomaly {
 
 impl LorentzianAnomaly {
     /// Empty Lorentzian \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -58912,7 +58912,7 @@ impl Predict for LorentzianAnomaly {
 /// Score is \(|(x-\bar x_w)/s_w|^4\) on the trailing eight first-coordinates.
 /// Distinct from [`WindowSkew`] (\(|z|^3\)) and [`WindowZscore`].
 #[derive(Clone, Debug)]
-pub struct WindowKurt {
+pub(crate) struct WindowKurt {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -58934,7 +58934,7 @@ impl Default for WindowKurt {
 
 impl WindowKurt {
     /// Empty windowed kurtosis detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -59072,7 +59072,7 @@ fn hassanat_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\sum_j(1-(1+\min|x_j|,|y_j|)/(1+\max|x_j|,|y_j|))\) distances.
 /// Distinct from [`CanberraAnomaly`] and [`LorentzianAnomaly`].
 #[derive(Clone, Debug)]
-pub struct HassanatAnomaly {
+pub(crate) struct HassanatAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -59094,7 +59094,7 @@ impl Default for HassanatAnomaly {
 
 impl HassanatAnomaly {
     /// Empty Hassanat \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -59219,7 +59219,7 @@ impl Predict for HassanatAnomaly {
 /// Score is \(|x|/\max_i|w_i|\) on the trailing eight first-coordinates.
 /// Distinct from [`WindowRange`] (midrange over signed span) and [`WindowRms`].
 #[derive(Clone, Debug)]
-pub struct WindowPeak {
+pub(crate) struct WindowPeak {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -59241,7 +59241,7 @@ impl Default for WindowPeak {
 
 impl WindowPeak {
     /// Empty windowed peak-ratio detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -59372,7 +59372,7 @@ fn angular_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Score is the mean of the \(k\) smallest \(\arccos(\hat x\cdot\hat y)/\pi\)
 /// distances. Distinct from [`HassanatAnomaly`] and [`LorentzianAnomaly`].
 #[derive(Clone, Debug)]
-pub struct AngularAnomaly {
+pub(crate) struct AngularAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -59394,7 +59394,7 @@ impl Default for AngularAnomaly {
 
 impl AngularAnomaly {
     /// Empty angular \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -59520,7 +59520,7 @@ impl Predict for AngularAnomaly {
 /// first-coordinates. Distinct from [`WindowZscore`] (no slope) and
 /// [`WindowTrimmed`].
 #[derive(Clone, Debug)]
-pub struct WindowSlope {
+pub(crate) struct WindowSlope {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -59542,7 +59542,7 @@ impl Default for WindowSlope {
 
 impl WindowSlope {
     /// Empty windowed slope-residual detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -59691,7 +59691,7 @@ fn dice_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(1-2\langle x,y\rangle/(\|x\|^2+\|y\|^2)\) distances.
 /// Distinct from [`AngularAnomaly`] and [`HassanatAnomaly`].
 #[derive(Clone, Debug)]
-pub struct DiceAnomaly {
+pub(crate) struct DiceAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -59713,7 +59713,7 @@ impl Default for DiceAnomaly {
 
 impl DiceAnomaly {
     /// Empty Dice \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -59839,7 +59839,7 @@ impl Predict for DiceAnomaly {
 /// Gini of the trailing eight absolute first-coordinates.
 /// Distinct from [`WindowCv`] (uses \(s/\bar x\)) and [`WindowMad`].
 #[derive(Clone, Debug)]
-pub struct WindowGini {
+pub(crate) struct WindowGini {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -59861,7 +59861,7 @@ impl Default for WindowGini {
 
 impl WindowGini {
     /// Empty windowed Gini detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -60004,7 +60004,7 @@ fn tanimoto_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(1-\langle x,y\rangle/(\|x\|^2+\|y\|^2-\langle x,y\rangle)\) distances.
 /// Distinct from [`DiceAnomaly`] and [`AngularAnomaly`].
 #[derive(Clone, Debug)]
-pub struct TanimotoAnomaly {
+pub(crate) struct TanimotoAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -60026,7 +60026,7 @@ impl Default for TanimotoAnomaly {
 
 impl TanimotoAnomaly {
     /// Empty Tanimoto \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -60152,7 +60152,7 @@ impl Predict for TanimotoAnomaly {
 /// eight absolute first-coordinates. Distinct from [`WindowRms`] (quadratic
 /// mean) and [`HarmonicAnomaly`] (harmonic-mean \(k\)-NN).
 #[derive(Clone, Debug)]
-pub struct WindowHarmonic {
+pub(crate) struct WindowHarmonic {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -60174,7 +60174,7 @@ impl Default for WindowHarmonic {
 
 impl WindowHarmonic {
     /// Empty windowed harmonic-mean detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -60305,7 +60305,7 @@ fn clark_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\sqrt{\sum((x_j-y_j)/(|x_j|+|y_j|))^2}\) distances.
 /// Distinct from [`CanberraAnomaly`] and [`TanimotoAnomaly`].
 #[derive(Clone, Debug)]
-pub struct ClarkAnomaly {
+pub(crate) struct ClarkAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -60327,7 +60327,7 @@ impl Default for ClarkAnomaly {
 
 impl ClarkAnomaly {
     /// Empty Clark \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -60453,7 +60453,7 @@ impl Predict for ClarkAnomaly {
 /// absolute first-coordinates. Distinct from [`WindowMad`] (deviation from
 /// the median) and [`OnlineMedian`] (global running median).
 #[derive(Clone, Debug)]
-pub struct WindowMedian {
+pub(crate) struct WindowMedian {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -60475,7 +60475,7 @@ impl Default for WindowMedian {
 
 impl WindowMedian {
     /// Empty windowed median detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -60603,7 +60603,7 @@ fn wave_hedges_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\sum |x_j-y_j|/\max(|x_j|,|y_j|)\) distances.
 /// Distinct from [`CanberraAnomaly`] and [`GeometricAnomaly`].
 #[derive(Clone, Debug)]
-pub struct WaveHedgesAnomaly {
+pub(crate) struct WaveHedgesAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -60625,7 +60625,7 @@ impl Default for WaveHedgesAnomaly {
 
 impl WaveHedgesAnomaly {
     /// Empty Wave Hedges \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -60770,7 +60770,7 @@ pub struct WindowLag {
 
 /// Hard ceiling on [`WindowLag::order`]. `Policy::max_difference_order` cannot
 /// raise the allowed order above this (AGENTS.md §4.4).
-pub const MAX_DIFFERENCE_ORDER: usize = 20;
+pub(crate) const MAX_DIFFERENCE_ORDER: usize = 20;
 
 /// v0.1 score scale floor. This is not a density floor (R7).
 const MEAN_ABS_FLOOR: f64 = 1e-12;
@@ -60780,7 +60780,7 @@ impl WindowLag {
     ///
     /// Construction always succeeds; [`PartialFit::partial_fit`] and
     /// [`Predict::predict`] fail when `order` exceeds the active policy.
-    pub fn new(order: NonZeroUsize, window: NonZeroUsize) -> Self {
+    pub(crate) fn new(order: NonZeroUsize, window: NonZeroUsize) -> Self {
         let cap = window.get().saturating_add(order.get()).max(64);
         Self {
             order,
@@ -60795,7 +60795,7 @@ impl WindowLag {
     }
 
     /// Trailing window of 8, matching v0.1 `WindowLag1..8`.
-    pub fn order(order: NonZeroUsize) -> Self {
+    pub(crate) fn order(order: NonZeroUsize) -> Self {
         Self::new(order, NonZeroUsize::new(8).expect("8 ≠ 0"))
     }
 
@@ -61002,7 +61002,7 @@ fn kulczynski_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\sum|x_j-y_j|/\sum\min(|x_j|,|y_j|)\) distances.
 /// Distinct from [`CanberraAnomaly`] and [`WaveHedgesAnomaly`].
 #[derive(Clone, Debug)]
-pub struct KulczynskiAnomaly {
+pub(crate) struct KulczynskiAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -61024,7 +61024,7 @@ impl Default for KulczynskiAnomaly {
 
 impl KulczynskiAnomaly {
     /// Empty Kulczynski \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -61163,7 +61163,7 @@ fn ruzicka_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(1-\sum\min(|x_j|,|y_j|)/\sum\max(|x_j|,|y_j|)\) distances.
 /// Distinct from [`KulczynskiAnomaly`] and [`TanimotoAnomaly`].
 #[derive(Clone, Debug)]
-pub struct RuzickaAnomaly {
+pub(crate) struct RuzickaAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -61185,7 +61185,7 @@ impl Default for RuzickaAnomaly {
 
 impl RuzickaAnomaly {
     /// Empty Ružička \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -61311,7 +61311,7 @@ impl Predict for RuzickaAnomaly {
 /// absolute first-coordinates. Distinct from [`WindowPeak`] (max ratio),
 /// [`WindowMedian`], and [`WindowRange`].
 #[derive(Clone, Debug)]
-pub struct WindowMin {
+pub(crate) struct WindowMin {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -61333,7 +61333,7 @@ impl Default for WindowMin {
 
 impl WindowMin {
     /// Empty windowed min-ratio detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -61462,7 +61462,7 @@ fn taneja_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from [`taneja_distance`] (which \(\ell_1\)-normalises first) and
 /// [`RuzickaAnomaly`].
 #[derive(Clone, Debug)]
-pub struct TanejaAnomaly {
+pub(crate) struct TanejaAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -61484,7 +61484,7 @@ impl Default for TanejaAnomaly {
 
 impl TanejaAnomaly {
     /// Empty Taneja \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -61610,7 +61610,7 @@ impl Predict for TanejaAnomaly {
 /// where \(\mathrm{MAD}_1\) is the mean absolute deviation from the window mean.
 /// Distinct from [`WindowMad`] (median / MAD) and [`WindowZscore`] (mean / SD).
 #[derive(Clone, Debug)]
-pub struct WindowAbsdev {
+pub(crate) struct WindowAbsdev {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -61632,7 +61632,7 @@ impl Default for WindowAbsdev {
 
 impl WindowAbsdev {
     /// Empty windowed mean-absolute-deviation detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -61764,7 +61764,7 @@ fn kumar_johnson_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from the \(\ell_1\)-normalised Kumar–Johnson metric and
 /// [`TanejaAnomaly`].
 #[derive(Clone, Debug)]
-pub struct KumarJohnsonAnomaly {
+pub(crate) struct KumarJohnsonAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -61786,7 +61786,7 @@ impl Default for KumarJohnsonAnomaly {
 
 impl KumarJohnsonAnomaly {
     /// Empty Kumar–Johnson \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -61924,7 +61924,7 @@ fn additive_symmetric_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from the \(\ell_1\)-normalised additive-symmetric metric and
 /// [`KumarJohnsonAnomaly`].
 #[derive(Clone, Debug)]
-pub struct AdditiveSymmetricAnomaly {
+pub(crate) struct AdditiveSymmetricAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -61946,7 +61946,7 @@ impl Default for AdditiveSymmetricAnomaly {
 
 impl AdditiveSymmetricAnomaly {
     /// Empty additive-symmetric \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -62073,7 +62073,7 @@ impl Predict for AdditiveSymmetricAnomaly {
 /// Distinct from [`WindowHarmonic`] (harmonic mean) and [`WindowRms`]
 /// (quadratic mean).
 #[derive(Clone, Debug)]
-pub struct WindowGeom {
+pub(crate) struct WindowGeom {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -62095,7 +62095,7 @@ impl Default for WindowGeom {
 
 impl WindowGeom {
     /// Empty windowed geometric-mean detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -62222,7 +62222,7 @@ fn vicis_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from the \(\ell_1\)-normalised Vicis metric and
 /// [`AdditiveSymmetricAnomaly`].
 #[derive(Clone, Debug)]
-pub struct VicisAnomaly {
+pub(crate) struct VicisAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -62244,7 +62244,7 @@ impl Default for VicisAnomaly {
 
 impl VicisAnomaly {
     /// Empty Vicis-symmetric \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -62370,7 +62370,7 @@ impl Predict for VicisAnomaly {
 /// Distinct from [`WindowZscore`] (\(|x-\bar x|/s\)) and [`WindowAbsdev`]
 /// (\(|x-\bar x|/\mathrm{MAD}_1\)).
 #[derive(Clone, Debug)]
-pub struct WindowVar {
+pub(crate) struct WindowVar {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -62392,7 +62392,7 @@ impl Default for WindowVar {
 
 impl WindowVar {
     /// Empty windowed variance detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -62525,7 +62525,7 @@ fn topsoe_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from the \(\ell_1\)-normalised Topsøe metric and
 /// [`VicisAnomaly`].
 #[derive(Clone, Debug)]
-pub struct TopsoeAnomaly {
+pub(crate) struct TopsoeAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -62547,7 +62547,7 @@ impl Default for TopsoeAnomaly {
 
 impl TopsoeAnomaly {
     /// Empty Topsøe \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -62684,7 +62684,7 @@ fn jeffreys_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from the \(\ell_1\)-normalised Jeffreys metric and
 /// [`TopsoeAnomaly`].
 #[derive(Clone, Debug)]
-pub struct JeffreysAnomaly {
+pub(crate) struct JeffreysAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -62706,7 +62706,7 @@ impl Default for JeffreysAnomaly {
 
 impl JeffreysAnomaly {
     /// Empty Jeffreys \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -62843,7 +62843,7 @@ fn k_divergence_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from the \(\ell_1\)-normalised \(K\)-divergence and
 /// [`JeffreysAnomaly`].
 #[derive(Clone, Debug)]
-pub struct KDivergenceAnomaly {
+pub(crate) struct KDivergenceAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -62865,7 +62865,7 @@ impl Default for KDivergenceAnomaly {
 
 impl KDivergenceAnomaly {
     /// Empty \(K\)-divergence \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -62991,7 +62991,7 @@ impl Predict for KDivergenceAnomaly {
 /// first-coordinates. Distinct from [`WindowAbsdev`] (MAD1) and
 /// [`WindowPeak`] (max absolute level).
 #[derive(Clone, Debug)]
-pub struct WindowMaxdev {
+pub(crate) struct WindowMaxdev {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -63013,7 +63013,7 @@ impl Default for WindowMaxdev {
 
 impl WindowMaxdev {
     /// Empty windowed max-deviation detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -63147,7 +63147,7 @@ fn hellinger_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from the \(\ell_1\)-normalised Hellinger metric and
 /// [`KDivergenceAnomaly`].
 #[derive(Clone, Debug)]
-pub struct HellingerAnomaly {
+pub(crate) struct HellingerAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -63169,7 +63169,7 @@ impl Default for HellingerAnomaly {
 
 impl HellingerAnomaly {
     /// Empty Hellinger \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -63295,7 +63295,7 @@ impl Predict for HellingerAnomaly {
 /// \\(\\ell_1\\) normalisation of absolute levels.
 /// Distinct from [`WindowGini`] (Gini) and [`WindowCv`] (coefficient of variation).
 #[derive(Clone, Debug)]
-pub struct WindowEntropy {
+pub(crate) struct WindowEntropy {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -63317,7 +63317,7 @@ impl Default for WindowEntropy {
 
 impl WindowEntropy {
     /// Empty windowed entropy detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -63451,7 +63451,7 @@ fn jensen_shannon_rows(a: &[f64], b: &[f64]) -> f64 {
 /// divergences. Distinct from the \\(\\ell_1\\)-normalised JS *distance*
 /// and [`HellingerAnomaly`].
 #[derive(Clone, Debug)]
-pub struct JensenShannonAnomaly {
+pub(crate) struct JensenShannonAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -63473,7 +63473,7 @@ impl Default for JensenShannonAnomaly {
 
 impl JensenShannonAnomaly {
     /// Empty Jensen–Shannon \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -63611,7 +63611,7 @@ fn squared_chord_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from the \(\ell_1\)-normalised squared-chord metric and
 /// [`HellingerAnomaly`] (square-root of half the same sum).
 #[derive(Clone, Debug)]
-pub struct SquaredChordAnomaly {
+pub(crate) struct SquaredChordAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -63633,7 +63633,7 @@ impl Default for SquaredChordAnomaly {
 
 impl SquaredChordAnomaly {
     /// Empty squared-chord \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -63772,7 +63772,7 @@ fn pearson_chi_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from the \(\ell_1\)-normalised Pearson \(\chi^2\) metric and
 /// [`SquaredChordAnomaly`].
 #[derive(Clone, Debug)]
-pub struct PearsonChiAnomaly {
+pub(crate) struct PearsonChiAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -63794,7 +63794,7 @@ impl Default for PearsonChiAnomaly {
 
 impl PearsonChiAnomaly {
     /// Empty Pearson \(\chi^2\) \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -63932,7 +63932,7 @@ fn neyman_chi_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from the \(\ell_1\)-normalised Pearson \(\chi^2\) metric and
 /// [`SquaredChordAnomaly`].
 #[derive(Clone, Debug)]
-pub struct NeymanChiAnomaly {
+pub(crate) struct NeymanChiAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -63954,7 +63954,7 @@ impl Default for NeymanChiAnomaly {
 
 impl NeymanChiAnomaly {
     /// Empty Neyman \(\chi^2\) \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -64092,7 +64092,7 @@ fn symmetric_chi_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from [`PearsonChiAnomaly`] (denominator \(x+y\)) and
 /// [`NeymanChiAnomaly`] (denominator \(x\)).
 #[derive(Clone, Debug)]
-pub struct SymmetricChiAnomaly {
+pub(crate) struct SymmetricChiAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -64114,7 +64114,7 @@ impl Default for SymmetricChiAnomaly {
 
 impl SymmetricChiAnomaly {
     /// Empty symmetric \(\chi^2\) \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -64253,7 +64253,7 @@ fn squared_hellinger_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from [`HellingerAnomaly`] (square-root form) and
 /// [`SquaredChordAnomaly`].
 #[derive(Clone, Debug)]
-pub struct SquaredHellingerAnomaly {
+pub(crate) struct SquaredHellingerAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -64275,7 +64275,7 @@ impl Default for SquaredHellingerAnomaly {
 
 impl SquaredHellingerAnomaly {
     /// Empty squared-Hellinger \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -64417,7 +64417,7 @@ fn max_symmetric_chi_rows(a: &[f64], b: &[f64]) -> f64 {
 /// normalisation. Distinct from [`NeymanChiAnomaly`] (denominator \(x\) only)
 /// and [`SymmetricChiAnomaly`].
 #[derive(Clone, Debug)]
-pub struct MaxSymmetricChiAnomaly {
+pub(crate) struct MaxSymmetricChiAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -64439,7 +64439,7 @@ impl Default for MaxSymmetricChiAnomaly {
 
 impl MaxSymmetricChiAnomaly {
     /// Empty max-symmetric \(\chi^2\) \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -64581,7 +64581,7 @@ fn min_symmetric_chi_rows(a: &[f64], b: &[f64]) -> f64 {
 /// normalisation. Distinct from [`MaxSymmetricChiAnomaly`] and
 /// [`NeymanChiAnomaly`].
 #[derive(Clone, Debug)]
-pub struct MinSymmetricChiAnomaly {
+pub(crate) struct MinSymmetricChiAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -64603,7 +64603,7 @@ impl Default for MinSymmetricChiAnomaly {
 
 impl MinSymmetricChiAnomaly {
     /// Empty min-symmetric \(\chi^2\) \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -64742,7 +64742,7 @@ fn jensen_difference_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\ell_1\) normalisation or the outer Jensen–Shannon square root.
 /// Distinct from [`JensenShannonAnomaly`].
 #[derive(Clone, Debug)]
-pub struct JensenDifferenceAnomaly {
+pub(crate) struct JensenDifferenceAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -64764,7 +64764,7 @@ impl Default for JensenDifferenceAnomaly {
 
 impl JensenDifferenceAnomaly {
     /// Empty Jensen-difference \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -64901,7 +64901,7 @@ fn itakura_saito_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\sum(x/y-\ln(x/y)-1)\) without \(\ell_1\) normalisation.
 /// Distinct from [`JeffreysAnomaly`] (symmetrised KL after \(\ell_1\)).
 #[derive(Clone, Debug)]
-pub struct ItakuraSaitoAnomaly {
+pub(crate) struct ItakuraSaitoAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -64923,7 +64923,7 @@ impl Default for ItakuraSaitoAnomaly {
 
 impl ItakuraSaitoAnomaly {
     /// Empty Itakura–Saito \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -65061,7 +65061,7 @@ fn triangular_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\sum(x-y)^2/(x+y)\) without \(\ell_1\) normalisation.
 /// Distinct from [`PearsonChiAnomaly`] (denominator \(x\)) and [`SymmetricChiAnomaly`].
 #[derive(Clone, Debug)]
-pub struct TriangularAnomaly {
+pub(crate) struct TriangularAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -65083,7 +65083,7 @@ impl Default for TriangularAnomaly {
 
 impl TriangularAnomaly {
     /// Empty triangular-discrimination \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -65219,7 +65219,7 @@ fn idivergence_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\sum(x\ln(x/y)-x+y)\) without \(\ell_1\) normalisation.
 /// Distinct from [`ItakuraSaitoAnomaly`] and [`JeffreysAnomaly`].
 #[derive(Clone, Debug)]
-pub struct IDivergenceAnomaly {
+pub(crate) struct IDivergenceAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -65241,7 +65241,7 @@ impl Default for IDivergenceAnomaly {
 
 impl IDivergenceAnomaly {
     /// Empty I-divergence \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -65378,7 +65378,7 @@ fn log_euclidean_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\sum(\ln|x|-\ln|y|)^2\) without \(\ell_1\) normalisation.
 /// Distinct from [`ManhattanAnomaly`] and [`IDivergenceAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogEuclideanAnomaly {
+pub(crate) struct LogEuclideanAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -65400,7 +65400,7 @@ impl Default for LogEuclideanAnomaly {
 
 impl LogEuclideanAnomaly {
     /// Empty log-Euclidean \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -65541,7 +65541,7 @@ fn bray_curtis_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\sum|x-y|/\sum(x+y)\) without \(\ell_1\) normalisation.
 /// Distinct from [`ManhattanAnomaly`] (no denominator) and Whittaker after \(\ell_1\).
 #[derive(Clone, Debug)]
-pub struct BrayCurtisAnomaly {
+pub(crate) struct BrayCurtisAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -65563,7 +65563,7 @@ impl Default for BrayCurtisAnomaly {
 
 impl BrayCurtisAnomaly {
     /// Empty Bray–Curtis \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -65702,7 +65702,7 @@ fn log_chebyshev_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\max|\ln|x|-\ln|y||\) without \(\ell_1\) normalisation.
 /// Distinct from [`LinfAnomaly`] (raw max gap) and [`LogEuclideanAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogChebyshevAnomaly {
+pub(crate) struct LogChebyshevAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -65724,7 +65724,7 @@ impl Default for LogChebyshevAnomaly {
 
 impl LogChebyshevAnomaly {
     /// Empty log-Chebyshev \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -65860,7 +65860,7 @@ fn log_manhattan_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\sum|\ln|x|-\ln|y||\) without \(\ell_1\) normalisation.
 /// Distinct from [`LogEuclideanAnomaly`] (squared log gaps) and [`LogChebyshevAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogManhattanAnomaly {
+pub(crate) struct LogManhattanAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -65882,7 +65882,7 @@ impl Default for LogManhattanAnomaly {
 
 impl LogManhattanAnomaly {
     /// Empty log-Manhattan \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -66017,7 +66017,7 @@ fn log_canberra_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\sum|\ln|x|-\ln|y||/(|\ln|x||+|\ln|y||)\) without \(\ell_1\) normalisation.
 /// Distinct from [`CanberraAnomaly`] (raw levels) and [`LogManhattanAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogCanberraAnomaly {
+pub(crate) struct LogCanberraAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -66039,7 +66039,7 @@ impl Default for LogCanberraAnomaly {
 
 impl LogCanberraAnomaly {
     /// Empty log-Canberra \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -66174,7 +66174,7 @@ fn log_lorentzian_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\sum\ln(1+|\ln|x|-\ln|y||)\) without \(\ell_1\) normalisation.
 /// Distinct from [`LorentzianAnomaly`] (raw gaps) and [`LogManhattanAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogLorentzianAnomaly {
+pub(crate) struct LogLorentzianAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -66196,7 +66196,7 @@ impl Default for LogLorentzianAnomaly {
 
 impl LogLorentzianAnomaly {
     /// Empty log-Lorentzian \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -66331,7 +66331,7 @@ fn log_wave_hedges_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\sum|\ln|x|-\ln|y||/\max(|\ln|x||,|\ln|y||)\) without \(\ell_1\) normalisation.
 /// Distinct from [`WaveHedgesAnomaly`] (raw levels) and [`LogCanberraAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogWaveHedgesAnomaly {
+pub(crate) struct LogWaveHedgesAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -66353,7 +66353,7 @@ impl Default for LogWaveHedgesAnomaly {
 
 impl LogWaveHedgesAnomaly {
     /// Empty log-Wave-Hedges \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -66492,7 +66492,7 @@ fn log_hassanat_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\sum(1-(1+\min|\ln|x||,|\ln|y||)/(1+\max|\ln|x||,|\ln|y||))\) without \(\ell_1\)
 /// normalisation. Distinct from [`HassanatAnomaly`] (raw levels) and [`LogCanberraAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogHassanatAnomaly {
+pub(crate) struct LogHassanatAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -66514,7 +66514,7 @@ impl Default for LogHassanatAnomaly {
 
 impl LogHassanatAnomaly {
     /// Empty log-Hassanat \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -66657,7 +66657,7 @@ fn log_dice_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(1-2\langle\ln|x|,\ln|y|\rangle/(\|\ln|x|\|^2+\|\ln|y|\|^2)\) without \(\ell_1\)
 /// normalisation. Distinct from [`DiceAnomaly`] (raw levels) and [`LogEuclideanAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogDiceAnomaly {
+pub(crate) struct LogDiceAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -66679,7 +66679,7 @@ impl Default for LogDiceAnomaly {
 
 impl LogDiceAnomaly {
     /// Empty log-Dice \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -66823,7 +66823,7 @@ fn log_tanimoto_rows(a: &[f64], b: &[f64]) -> f64 {
 /// without \(\ell_1\) normalisation. Distinct from [`TanimotoAnomaly`] (raw levels)
 /// and [`LogDiceAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogTanimotoAnomaly {
+pub(crate) struct LogTanimotoAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -66845,7 +66845,7 @@ impl Default for LogTanimotoAnomaly {
 
 impl LogTanimotoAnomaly {
     /// Empty log-Tanimoto \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -66986,7 +66986,7 @@ fn log_ruzicka_rows(a: &[f64], b: &[f64]) -> f64 {
 /// without \(\ell_1\) normalisation. Distinct from [`RuzickaAnomaly`] (raw levels)
 /// and [`LogTanimotoAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogRuzickaAnomaly {
+pub(crate) struct LogRuzickaAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -67008,7 +67008,7 @@ impl Default for LogRuzickaAnomaly {
 
 impl LogRuzickaAnomaly {
     /// Empty log-Ružička \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -67150,7 +67150,7 @@ fn log_kulczynski_rows(a: &[f64], b: &[f64]) -> f64 {
 /// without \(\ell_1\) normalisation. Distinct from [`KulczynskiAnomaly`] (raw levels)
 /// and [`LogRuzickaAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogKulczynskiAnomaly {
+pub(crate) struct LogKulczynskiAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -67172,7 +67172,7 @@ impl Default for LogKulczynskiAnomaly {
 
 impl LogKulczynskiAnomaly {
     /// Empty log-Kulczynski \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -67313,7 +67313,7 @@ fn log_clark_rows(a: &[f64], b: &[f64]) -> f64 {
 /// without \(\ell_1\) normalisation. Distinct from [`ClarkAnomaly`] (raw levels)
 /// and [`LogKulczynskiAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogClarkAnomaly {
+pub(crate) struct LogClarkAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -67335,7 +67335,7 @@ impl Default for LogClarkAnomaly {
 
 impl LogClarkAnomaly {
     /// Empty log-Clark \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -67477,7 +67477,7 @@ fn log_bray_curtis_rows(a: &[f64], b: &[f64]) -> f64 {
 /// without \(\ell_1\) normalisation. Distinct from [`BrayCurtisAnomaly`] (raw levels)
 /// and [`LogClarkAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogBrayCurtisAnomaly {
+pub(crate) struct LogBrayCurtisAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -67499,7 +67499,7 @@ impl Default for LogBrayCurtisAnomaly {
 
 impl LogBrayCurtisAnomaly {
     /// Empty log-Bray–Curtis \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -67637,7 +67637,7 @@ fn log_taneja_rows(a: &[f64], b: &[f64]) -> f64 {
 /// on \(|\ln|x||\) without \(\ell_1\) normalisation. Distinct from [`TanejaAnomaly`]
 /// (raw levels) and [`LogBrayCurtisAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogTanejaAnomaly {
+pub(crate) struct LogTanejaAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -67659,7 +67659,7 @@ impl Default for LogTanejaAnomaly {
 
 impl LogTanejaAnomaly {
     /// Empty log-Taneja \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -67802,7 +67802,7 @@ fn log_motyka_rows(a: &[f64], b: &[f64]) -> f64 {
 /// normalisation. Distinct from [`LogBrayCurtisAnomaly`] (absolute-difference
 /// form) and [`LogRuzickaAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogMotykaAnomaly {
+pub(crate) struct LogMotykaAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -67824,7 +67824,7 @@ impl Default for LogMotykaAnomaly {
 
 impl LogMotykaAnomaly {
     /// Empty log-Motyka $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -67961,7 +67961,7 @@ fn log_hellinger_rows(a: &[f64], b: &[f64]) -> f64 {
 /// $|\ln|x||$ without $\ell_1$ normalisation. Distinct from [`HellingerAnomaly`]
 /// (raw levels) and [`LogMotykaAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogHellingerAnomaly {
+pub(crate) struct LogHellingerAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -67983,7 +67983,7 @@ impl Default for LogHellingerAnomaly {
 
 impl LogHellingerAnomaly {
     /// Empty log-Hellinger $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -68119,7 +68119,7 @@ fn log_fidelity_rows(a: &[f64], b: &[f64]) -> f64 {
 /// $p-\sum\sqrt{|\ln|x||\,|\ln|y||}$ without $\ell_1$ normalisation.
 /// Distinct from [`LogHellingerAnomaly`] and [`LogMotykaAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogFidelityAnomaly {
+pub(crate) struct LogFidelityAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -68141,7 +68141,7 @@ impl Default for LogFidelityAnomaly {
 
 impl LogFidelityAnomaly {
     /// Empty log-fidelity $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -68280,7 +68280,7 @@ fn log_pearson_chi_rows(a: &[f64], b: &[f64]) -> f64 {
 /// normalisation. Distinct from [`PearsonChiAnomaly`] (raw levels) and
 /// [`LogFidelityAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogPearsonChiAnomaly {
+pub(crate) struct LogPearsonChiAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -68302,7 +68302,7 @@ impl Default for LogPearsonChiAnomaly {
 
 impl LogPearsonChiAnomaly {
     /// Empty log-Pearson $\chi^2$ $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -68439,7 +68439,7 @@ fn log_js_rows(a: &[f64], b: &[f64]) -> f64 {
 /// without $\ell_1$ normalisation. Distinct from [`JensenShannonAnomaly`]
 /// (raw levels) and [`LogPearsonChiAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogJensenShannonAnomaly {
+pub(crate) struct LogJensenShannonAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -68461,7 +68461,7 @@ impl Default for LogJensenShannonAnomaly {
 
 impl LogJensenShannonAnomaly {
     /// Empty log-JS $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -68598,7 +68598,7 @@ fn log_jeffreys_rows(a: &[f64], b: &[f64]) -> f64 {
 /// $\sum(u-v)\ln(u/v)$ on $|\ln|x||$ without $\ell_1$ normalisation.
 /// Distinct from [`JeffreysAnomaly`] (raw levels) and [`LogJensenShannonAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogJeffreysAnomaly {
+pub(crate) struct LogJeffreysAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -68620,7 +68620,7 @@ impl Default for LogJeffreysAnomaly {
 
 impl LogJeffreysAnomaly {
     /// Empty log-Jeffreys $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -68761,7 +68761,7 @@ fn log_kumar_hassebrook_rows(a: &[f64], b: &[f64]) -> f64 {
 /// $1-\sum uv/\sum(u^2+v^2-uv)$ on $|\ln|x||$ without $\ell_1$
 /// normalisation. Distinct from [`LogTanimotoAnomaly`] and [`LogJeffreysAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogKumarHassebrookAnomaly {
+pub(crate) struct LogKumarHassebrookAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -68783,7 +68783,7 @@ impl Default for LogKumarHassebrookAnomaly {
 
 impl LogKumarHassebrookAnomaly {
     /// Empty log-Kumar–Hassebrook $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -68921,7 +68921,7 @@ fn log_additive_symmetric_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from [`AdditiveSymmetricAnomaly`] (raw levels, $(u-v)^2/(u+v)$)
 /// and [`LogJeffreysAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogAdditiveSymmetricAnomaly {
+pub(crate) struct LogAdditiveSymmetricAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -68943,7 +68943,7 @@ impl Default for LogAdditiveSymmetricAnomaly {
 
 impl LogAdditiveSymmetricAnomaly {
     /// Empty log-additive-symmetric $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -69079,7 +69079,7 @@ fn log_k_divergence_rows(a: &[f64], b: &[f64]) -> f64 {
 /// $\sum u\ln(2u/(u+v))$ on $|\ln|x||$ without $\ell_1$ normalisation.
 /// Distinct from [`KDivergenceAnomaly`] (raw levels) and [`LogJeffreysAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogKDivergenceAnomaly {
+pub(crate) struct LogKDivergenceAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -69101,7 +69101,7 @@ impl Default for LogKDivergenceAnomaly {
 
 impl LogKDivergenceAnomaly {
     /// Empty log-K-divergence $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -69245,7 +69245,7 @@ fn log_cosine_rows(a: &[f64], b: &[f64]) -> f64 {
 /// $1-\langle u,v\rangle/(\|u\|\|v\|)$ on $|\ln|x||$ without $\ell_1$
 /// normalisation. Distinct from [`LogEuclideanAnomaly`] and [`LogJeffreysAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogCosineAnomaly {
+pub(crate) struct LogCosineAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -69267,7 +69267,7 @@ impl Default for LogCosineAnomaly {
 
 impl LogCosineAnomaly {
     /// Empty log-cosine $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -69410,7 +69410,7 @@ fn log_jaccard_rows(a: &[f64], b: &[f64]) -> f64 {
 /// normalisation and without the Tanimoto $-uv$ denominator term. Distinct from
 /// [`LogTanimotoAnomaly`] and [`LogKumarHassebrookAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogJaccardAnomaly {
+pub(crate) struct LogJaccardAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -69432,7 +69432,7 @@ impl Default for LogJaccardAnomaly {
 
 impl LogJaccardAnomaly {
     /// Empty log-Jaccard $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -69571,7 +69571,7 @@ fn log_divergence_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from [`LogClarkAnomaly`] (root-sum of squared relative gaps) and
 /// [`LogPearsonChiAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogDivergenceAnomaly {
+pub(crate) struct LogDivergenceAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -69593,7 +69593,7 @@ impl Default for LogDivergenceAnomaly {
 
 impl LogDivergenceAnomaly {
     /// Empty log-divergence $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -69735,7 +69735,7 @@ fn log_czekanowski_rows(a: &[f64], b: &[f64]) -> f64 {
 /// normalisation. Distinct from [`LogDiceAnomaly`] (inner-product form) and
 /// [`LogRuzickaAnomaly`] ($\sum\min/\sum\max$).
 #[derive(Clone, Debug)]
-pub struct LogCzekanowskiAnomaly {
+pub(crate) struct LogCzekanowskiAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -69757,7 +69757,7 @@ impl Default for LogCzekanowskiAnomaly {
 
 impl LogCzekanowskiAnomaly {
     /// Empty log-Czekanowski $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -69896,7 +69896,7 @@ fn log_kumar_johnson_rows(a: &[f64], b: &[f64]) -> f64 {
 /// normalisation. Distinct from [`LogKumarHassebrookAnomaly`] and
 /// [`LogJeffreysAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogKumarJohnsonAnomaly {
+pub(crate) struct LogKumarJohnsonAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -69918,7 +69918,7 @@ impl Default for LogKumarJohnsonAnomaly {
 
 impl LogKumarJohnsonAnomaly {
     /// Empty log-Kumar–Johnson $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -70057,7 +70057,7 @@ fn log_average_rows(a: &[f64], b: &[f64]) -> f64 {
 /// $(\sum|u-v|+\sqrt{\sum(u-v)^2})/2$ on $|\ln|x||$ without $\ell_1$
 /// normalisation. Distinct from [`LogManhattanAnomaly`] and [`LogEuclideanAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogAverageAnomaly {
+pub(crate) struct LogAverageAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -70079,7 +70079,7 @@ impl Default for LogAverageAnomaly {
 
 impl LogAverageAnomaly {
     /// Empty log-average $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -70216,7 +70216,7 @@ fn log_neyman_rows(a: &[f64], b: &[f64]) -> f64 {
 /// on $|\ln|x||$ without $\ell_1$ normalisation. Distinct from
 /// [`LogPearsonChiAnomaly`] ($\sum(u-v)^2/(u+v)$) and [`LogDivergenceAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogNeymanAnomaly {
+pub(crate) struct LogNeymanAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -70238,7 +70238,7 @@ impl Default for LogNeymanAnomaly {
 
 impl LogNeymanAnomaly {
     /// Empty log-Neyman $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -70376,7 +70376,7 @@ fn log_vicis_rows(a: &[f64], b: &[f64]) -> f64 {
 /// on $|\ln|x||$ without $\ell_1$ normalisation. Distinct from
 /// [`LogNeymanAnomaly`] ($\sum(u-v)^2/u$) and [`LogPearsonChiAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogVicisAnomaly {
+pub(crate) struct LogVicisAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -70398,7 +70398,7 @@ impl Default for LogVicisAnomaly {
 
 impl LogVicisAnomaly {
     /// Empty log-Vicis $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -70535,7 +70535,7 @@ fn log_max_chi_rows(a: &[f64], b: &[f64]) -> f64 {
 /// on $|\ln|x||$ without $\ell_1$ normalisation. Distinct from
 /// [`LogNeymanAnomaly`] ($\sum(u-v)^2/u$) and [`LogVicisAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogMaxChiAnomaly {
+pub(crate) struct LogMaxChiAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -70557,7 +70557,7 @@ impl Default for LogMaxChiAnomaly {
 
 impl LogMaxChiAnomaly {
     /// Empty log-max-chi $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -70695,7 +70695,7 @@ fn log_min_chi_rows(a: &[f64], b: &[f64]) -> f64 {
 /// [`LogMaxChiAnomaly`] ($\sum(u-v)^2/\max(u,v)$) and [`LogVicisAnomaly`]
 /// ($\sum(u-v)^2/\min(u,v)^2$).
 #[derive(Clone, Debug)]
-pub struct LogMinChiAnomaly {
+pub(crate) struct LogMinChiAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -70717,7 +70717,7 @@ impl Default for LogMinChiAnomaly {
 
 impl LogMinChiAnomaly {
     /// Empty log-min-chi $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -70859,7 +70859,7 @@ fn log_bhattacharyya_rows(a: &[f64], b: &[f64]) -> f64 {
 /// on $|\ln|x||$ without $\ell_1$ normalisation. Distinct from
 /// [`LogHellingerAnomaly`] and [`LogFidelityAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogBhattacharyyaAnomaly {
+pub(crate) struct LogBhattacharyyaAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -70881,7 +70881,7 @@ impl Default for LogBhattacharyyaAnomaly {
 
 impl LogBhattacharyyaAnomaly {
     /// Empty log-Bhattacharyya $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -71018,7 +71018,7 @@ fn log_vicis_wave_hedges_rows(a: &[f64], b: &[f64]) -> f64 {
 /// [`LogWaveHedgesAnomaly`] ($\sum|u-v|/\max(u,v)$) and
 /// [`LogKulczynskiAnomaly`] ($\sum|u-v|/\sum\min$).
 #[derive(Clone, Debug)]
-pub struct LogVicisWaveHedgesAnomaly {
+pub(crate) struct LogVicisWaveHedgesAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -71040,7 +71040,7 @@ impl Default for LogVicisWaveHedgesAnomaly {
 
 impl LogVicisWaveHedgesAnomaly {
     /// Empty log-Vicis–Wave-Hedges $k$-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -71177,7 +71177,7 @@ fn log_kl_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from [`LogJeffreysAnomaly`] (symmetrised) and
 /// [`LogKDivergenceAnomaly`] (\(\sum u\ln(2u/(u+v))\)).
 #[derive(Clone, Debug)]
-pub struct LogKLAnomaly {
+pub(crate) struct LogKLAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -71199,7 +71199,7 @@ impl Default for LogKLAnomaly {
 
 impl LogKLAnomaly {
     /// Empty log-KL \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -71336,7 +71336,7 @@ fn log_reverse_kl_rows(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from [`LogKLAnomaly`] (forward \(\sum u\ln(u/v)\)) and
 /// [`LogJeffreysAnomaly`] (the sum of both directions).
 #[derive(Clone, Debug)]
-pub struct LogReverseKLAnomaly {
+pub(crate) struct LogReverseKLAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -71358,7 +71358,7 @@ impl Default for LogReverseKLAnomaly {
 
 impl LogReverseKLAnomaly {
     /// Empty log reverse-KL \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -71494,7 +71494,7 @@ fn log_itakura_saito_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\sum(u/v-\ln(u/v)-1)\) on \(|\ln|x||\) without \(\ell_1\) normalisation.
 /// Distinct from [`ItakuraSaitoAnomaly`] (raw scale) and [`LogKLAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogItakuraSaitoAnomaly {
+pub(crate) struct LogItakuraSaitoAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -71516,7 +71516,7 @@ impl Default for LogItakuraSaitoAnomaly {
 
 impl LogItakuraSaitoAnomaly {
     /// Empty log Itakura–Saito \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -71652,7 +71652,7 @@ fn log_reverse_itakura_saito_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\sum(v/u-\ln(v/u)-1)\) on \(|\ln|x||\) without \(\ell_1\) normalisation.
 /// Distinct from [`LogItakuraSaitoAnomaly`] (forward) and [`LogReverseKLAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogReverseItakuraSaitoAnomaly {
+pub(crate) struct LogReverseItakuraSaitoAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -71674,7 +71674,7 @@ impl Default for LogReverseItakuraSaitoAnomaly {
 
 impl LogReverseItakuraSaitoAnomaly {
     /// Empty log reverse Itakura–Saito \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -71815,7 +71815,7 @@ fn log_angular_rows(a: &[f64], b: &[f64]) -> f64 {
 /// \(\arccos(\langle u,v\rangle/(\|u\|\|v\|))\) on \(|\ln|x||\) without
 /// \(\ell_1\) normalisation. Distinct from [`LogCosineAnomaly`] (\(1-\cos\)).
 #[derive(Clone, Debug)]
-pub struct LogAngularAnomaly {
+pub(crate) struct LogAngularAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -71837,7 +71837,7 @@ impl Default for LogAngularAnomaly {
 
 impl LogAngularAnomaly {
     /// Empty log-angular \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -71974,7 +71974,7 @@ fn log_harmonic_rows(a: &[f64], b: &[f64]) -> f64 {
 /// on \(|\ln|x||\) without \(\ell_1\) normalisation. Distinct from
 /// [`LogNeymanAnomaly`] (\(\sum(u-v)^2/u\)) and [`LogPearsonChiAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogHarmonicAnomaly {
+pub(crate) struct LogHarmonicAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -71996,7 +71996,7 @@ impl Default for LogHarmonicAnomaly {
 
 impl LogHarmonicAnomaly {
     /// Empty log-harmonic \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -72132,7 +72132,7 @@ fn log_ratio_rows(a: &[f64], b: &[f64]) -> f64 {
 /// on \(|\ln|x||\) without \(\ell_1\) normalisation. Distinct from
 /// [`LogManhattanAnomaly`] (\(\sum|u-v|\)) and [`LogChebyshevAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogRatioAnomaly {
+pub(crate) struct LogRatioAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -72154,7 +72154,7 @@ impl Default for LogRatioAnomaly {
 
 impl LogRatioAnomaly {
     /// Empty log-ratio \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -72290,7 +72290,7 @@ fn log_maxmin_rows(a: &[f64], b: &[f64]) -> f64 {
 /// on \(|\ln|x||\) without \(\ell_1\) normalisation. Distinct from
 /// [`LogRatioAnomaly`] (\(\sum|\ln(u/v)|\)) and [`LogChebyshevAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogMaxMinAnomaly {
+pub(crate) struct LogMaxMinAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -72312,7 +72312,7 @@ impl Default for LogMaxMinAnomaly {
 
 impl LogMaxMinAnomaly {
     /// Empty log max/min \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -72449,7 +72449,7 @@ fn log_squared_ratio_rows(a: &[f64], b: &[f64]) -> f64 {
 /// on \(|\ln|x||\) without \(\ell_1\) normalisation. Distinct from
 /// [`LogRatioAnomaly`] (\(\sum|\ln(u/v)|\)) and [`LogEuclideanAnomaly`].
 #[derive(Clone, Debug)]
-pub struct LogSquaredRatioAnomaly {
+pub(crate) struct LogSquaredRatioAnomaly {
     rows: Vec<Vec<f64>>,
     ncols: usize,
     n_seen: u64,
@@ -72471,7 +72471,7 @@ impl Default for LogSquaredRatioAnomaly {
 
 impl LogSquaredRatioAnomaly {
     /// Empty log squared-ratio \(k\)-NN detector (reservoir cap 64).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 

@@ -123,12 +123,7 @@ impl Predict for FittedLinear {
 
 impl Fit for LinearRegression {
     type Fitted = FittedLinear;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedLinear>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLinear>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         if ctx.report.contains(IssueCode::ConstantTarget)
@@ -488,7 +483,7 @@ fn hat_and_cook(design: &Matrix, resid: &Vector, sigma2: f64, p: usize) -> (Vect
 
 /// Weighted least squares.
 #[derive(Clone, Debug)]
-pub struct Wls {
+pub(crate) struct Wls {
     /// Prepend intercept.
     pub fit_intercept: bool,
 }
@@ -503,12 +498,12 @@ impl Default for Wls {
 
 impl Wls {
     /// Default WLS.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit with observation weights (sqrt-transform).
-    pub fn fit_weighted(
+    pub(crate) fn fit_weighted(
         &mut self,
         x: &Matrix,
         y: &Vector,
@@ -568,7 +563,7 @@ impl Wls {
 
 /// Ridge regression (ℓ₂).
 #[derive(Clone, Debug)]
-pub struct Ridge {
+pub(crate) struct Ridge {
     /// Penalty λ ≥ 0 (applied to slopes; intercept is not penalized).
     pub alpha: f64,
     /// Prepend intercept.
@@ -586,7 +581,7 @@ impl Default for Ridge {
 
 impl Ridge {
     /// Ridge with the given λ.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self {
             alpha,
             fit_intercept: true,
@@ -596,7 +591,7 @@ impl Ridge {
 
 /// Fitted ridge / lasso / elastic-net (prediction only; inference is not the OLS estimand).
 #[derive(Clone, Debug)]
-pub struct FittedPenalized {
+pub(crate) struct FittedPenalized {
     /// Slopes.
     pub coef: Vector,
     /// Intercept.
@@ -628,12 +623,7 @@ impl Predict for FittedPenalized {
 
 impl Fit for Ridge {
     type Fitted = FittedPenalized;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedPenalized>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedPenalized>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let (xc, xmean) = x.centered();
@@ -677,7 +667,7 @@ impl Fit for Ridge {
 
 /// Lasso via cyclic coordinate descent.
 #[derive(Clone, Debug)]
-pub struct Lasso {
+pub(crate) struct Lasso {
     /// λ ≥ 0 on the ℓ1 penalty (on slopes).
     pub alpha: f64,
     /// Max coordinate cycles.
@@ -701,7 +691,7 @@ impl Default for Lasso {
 
 impl Lasso {
     /// Lasso with the given λ.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self {
             alpha,
             ..Self::default()
@@ -807,12 +797,7 @@ fn elastic_net_cd(
 
 impl Fit for Lasso {
     type Fitted = FittedPenalized;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedPenalized>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedPenalized>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let (xc, xmean) = x.centered();
@@ -835,7 +820,7 @@ impl Fit for Lasso {
 
 /// Elastic net.
 #[derive(Clone, Debug)]
-pub struct ElasticNet {
+pub(crate) struct ElasticNet {
     /// Combined penalty strength.
     pub alpha: f64,
     /// Mixing: 1 = lasso, 0 = ridge.
@@ -862,7 +847,7 @@ impl Default for ElasticNet {
 
 impl ElasticNet {
     /// Elastic net with α and ℓ1 ratio.
-    pub fn new(alpha: f64, l1_ratio: f64) -> Self {
+    pub(crate) fn new(alpha: f64, l1_ratio: f64) -> Self {
         Self {
             alpha,
             l1_ratio,
@@ -873,12 +858,7 @@ impl ElasticNet {
 
 impl Fit for ElasticNet {
     type Fitted = FittedPenalized;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedPenalized>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedPenalized>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         if !(0.0..=1.0).contains(&self.l1_ratio) {
@@ -916,7 +896,7 @@ impl Fit for ElasticNet {
 
 /// Binary / multinomial logistic regression via IRLS (Newton–Raphson).
 #[derive(Clone, Debug)]
-pub struct LogisticRegression {
+pub(crate) struct LogisticRegression {
     /// ℓ₂ penalty (0 = unregularized MLE).
     pub c_inv: f64,
     /// Max IRLS iterations.
@@ -940,14 +920,14 @@ impl Default for LogisticRegression {
 
 impl LogisticRegression {
     /// Unregularized logistic.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted logistic model.
 #[derive(Clone, Debug)]
-pub struct FittedLogistic {
+pub(crate) struct FittedLogistic {
     /// Slopes of the last-vs-rest (binary) or first non-reference (softmax) block.
     pub coef: Vector,
     /// Intercept of that same block.
@@ -972,12 +952,7 @@ fn sigmoid(z: f64) -> f64 {
 
 impl Fit for LogisticRegression {
     type Fitted = FittedLogistic;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedLogistic>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLogistic>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = crate::validate::inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -1144,7 +1119,7 @@ impl Predict for FittedLogistic {
 
 /// Mini-batch / streaming SGD for linear regression (also the river-style online linear model).
 #[derive(Clone, Debug)]
-pub struct SgdRegressor {
+pub(crate) struct SgdRegressor {
     /// Learning rate.
     pub learning_rate: f64,
     /// ℓ2 penalty.
@@ -1175,17 +1150,17 @@ impl Default for SgdRegressor {
 
 impl SgdRegressor {
     /// Default SGD regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Current slopes.
-    pub fn coef(&self) -> &Vector {
+    pub(crate) fn coef(&self) -> &Vector {
         &self.coef
     }
 
     /// Current intercept.
-    pub fn intercept(&self) -> f64 {
+    pub(crate) fn intercept(&self) -> f64 {
         self.intercept
     }
 }
@@ -1342,7 +1317,7 @@ impl Predict for SgdRegressor {
 
 /// Huber IRLS (robust M-estimator).
 #[derive(Clone, Debug)]
-pub struct HuberRegressor {
+pub(crate) struct HuberRegressor {
     /// Huber threshold.
     pub epsilon: f64,
     /// Max IRLS iterations.
@@ -1363,19 +1338,14 @@ impl Default for HuberRegressor {
 
 impl HuberRegressor {
     /// Default Huber.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for HuberRegressor {
     type Fitted = FittedLinear;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedLinear>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLinear>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let design = if self.fit_intercept {
@@ -1458,19 +1428,19 @@ fn median_abs(xs: &[f64]) -> f64 {
 
 /// Isotonic regression (PAVA).
 #[derive(Clone, Debug, Default)]
-pub struct IsotonicRegression {
+pub(crate) struct IsotonicRegression {
     /// If true, fit an increasing step function.
     pub increasing: bool,
 }
 
 impl IsotonicRegression {
     /// Increasing isotonic.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { increasing: true }
     }
 
     /// Fit against a 1-d feature stored as `x` column 0, or against the index if p=0.
-    pub fn fit_1d(
+    pub(crate) fn fit_1d(
         &mut self,
         x: &Vector,
         y: &Vector,
@@ -1532,7 +1502,7 @@ impl IsotonicRegression {
 
 /// Fitted isotonic step function.
 #[derive(Clone, Debug)]
-pub struct FittedIsotonic {
+pub(crate) struct FittedIsotonic {
     /// Sorted unique-ish x.
     pub xs: Vector,
     /// Isotonic y.
@@ -1543,7 +1513,7 @@ pub struct FittedIsotonic {
 
 impl FittedIsotonic {
     /// Predict by left-constant interpolation on the fitted steps.
-    pub fn predict_1d(&self, x: &Vector) -> Vector {
+    pub(crate) fn predict_1d(&self, x: &Vector) -> Vector {
         Vector::from_iter(x.as_slice().iter().map(|&xi| {
             if self.xs.is_empty() {
                 return f64::NAN;
@@ -1563,7 +1533,7 @@ impl FittedIsotonic {
 
 /// Kernel ridge (RBF) via faer Cholesky on the regularized Gram.
 #[derive(Clone, Debug)]
-pub struct KernelRidge {
+pub(crate) struct KernelRidge {
     /// Ridge on the kernel Gram.
     pub alpha: f64,
     /// RBF length scale.
@@ -1581,14 +1551,14 @@ impl Default for KernelRidge {
 
 impl KernelRidge {
     /// Default RBF kernel ridge.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted kernel ridge.
 #[derive(Clone, Debug)]
-pub struct FittedKernelRidge {
+pub(crate) struct FittedKernelRidge {
     /// Training features.
     pub x_train: Matrix,
     /// Dual coefficients.
@@ -1600,7 +1570,7 @@ pub struct FittedKernelRidge {
 impl Fit for KernelRidge {
     type Fitted = FittedKernelRidge;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -1673,7 +1643,7 @@ impl Predict for FittedKernelRidge {
 
 /// NIPALS PLS regression (single or multiple latent directions).
 #[derive(Clone, Debug)]
-pub struct PlsRegression {
+pub(crate) struct PlsRegression {
     /// Latent directions.
     pub n_components: usize,
 }
@@ -1686,14 +1656,14 @@ impl Default for PlsRegression {
 
 impl PlsRegression {
     /// PLS with `k` components.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self { n_components }
     }
 }
 
 /// Fitted PLS.
 #[derive(Clone, Debug)]
-pub struct FittedPls {
+pub(crate) struct FittedPls {
     /// X mean.
     pub x_mean: Vector,
     /// y mean.
@@ -1704,7 +1674,7 @@ pub struct FittedPls {
 
 impl Fit for PlsRegression {
     type Fitted = FittedPls;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedPls>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedPls>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let (mut xs, xmean) = x.centered();
@@ -1787,7 +1757,7 @@ impl Predict for FittedPls {
 
 /// Two-block PLS (sklearn `PLSCanonical`): NIPALS on `X` and a matrix `Y`.
 #[derive(Clone, Debug)]
-pub struct PlsCanonical {
+pub(crate) struct PlsCanonical {
     /// Latent directions.
     pub n_components: usize,
 }
@@ -1800,15 +1770,15 @@ impl Default for PlsCanonical {
 
 impl PlsCanonical {
     /// `k` canonical PLS directions.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(1),
         }
     }
 
     /// Fit on two views. Do not pass `n_components` as identification `p`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Matrix,
         session: &Session,
@@ -1897,7 +1867,7 @@ impl PlsCanonical {
 
 /// Fitted two-block PLS.
 #[derive(Clone, Debug)]
-pub struct FittedPlsCanonical {
+pub(crate) struct FittedPlsCanonical {
     /// `X` weights (`p_x` × `k`).
     pub x_weights: Matrix,
     /// `Y` weights (`p_y` × `k`).
@@ -1927,7 +1897,7 @@ impl Transform for FittedPlsCanonical {
 ///
 /// Component count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct PlsSvd {
+pub(crate) struct PlsSvd {
     /// Latent directions.
     pub n_components: usize,
 }
@@ -1940,15 +1910,15 @@ impl Default for PlsSvd {
 
 impl PlsSvd {
     /// `k` SVD directions of `XᵀY`.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(1),
         }
     }
 
     /// Fit on two views.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Matrix,
         session: &Session,
@@ -2012,7 +1982,7 @@ impl PlsSvd {
 
 /// Quantile regression via IRLS (asymmetric Laplace / weighted LS).
 #[derive(Clone, Debug)]
-pub struct QuantileRegressor {
+pub(crate) struct QuantileRegressor {
     /// Quantile in (0, 1).
     pub q: f64,
     /// Max IRLS iterations.
@@ -2033,7 +2003,7 @@ impl Default for QuantileRegressor {
 
 impl QuantileRegressor {
     /// Median regression by default.
-    pub fn new(q: f64) -> Self {
+    pub(crate) fn new(q: f64) -> Self {
         Self {
             q,
             ..Self::default()
@@ -2043,12 +2013,7 @@ impl QuantileRegressor {
 
 impl Fit for QuantileRegressor {
     type Fitted = FittedLinear;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedLinear>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLinear>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         if !(0.0..=1.0).contains(&self.q) || self.q == 0.0 || self.q == 1.0 {
@@ -2106,7 +2071,7 @@ impl Fit for QuantileRegressor {
 /// Weight is `τ` on positive residuals and `1−τ` on negative residuals.
 /// Inner least-squares issues of the residual kind are not promoted.
 #[derive(Clone, Debug)]
-pub struct ExpectileRegressor {
+pub(crate) struct ExpectileRegressor {
     /// Expectile in (0, 1).
     pub tau: f64,
     /// Max IRLS iterations.
@@ -2127,7 +2092,7 @@ impl Default for ExpectileRegressor {
 
 impl ExpectileRegressor {
     /// Expectile `tau`.
-    pub fn new(tau: f64) -> Self {
+    pub(crate) fn new(tau: f64) -> Self {
         Self {
             tau,
             ..Self::default()
@@ -2137,12 +2102,7 @@ impl ExpectileRegressor {
 
 impl Fit for ExpectileRegressor {
     type Fitted = FittedLinear;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedLinear>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLinear>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let tau = if self.tau.is_finite() && self.tau > 0.0 && self.tau < 1.0 {
@@ -2205,7 +2165,7 @@ impl Fit for ExpectileRegressor {
 
 /// Poisson GLM (log link) via IRLS.
 #[derive(Clone, Debug)]
-pub struct PoissonRegressor {
+pub(crate) struct PoissonRegressor {
     /// ℓ₂ penalty.
     pub alpha: f64,
     /// Max IRLS iterations.
@@ -2226,19 +2186,14 @@ impl Default for PoissonRegressor {
 
 impl PoissonRegressor {
     /// Unregularized Poisson GLM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for PoissonRegressor {
     type Fitted = FittedLinear;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedLinear>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLinear>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         for (i, &yi) in y.as_slice().iter().enumerate() {
@@ -2301,14 +2256,14 @@ impl Fit for PoissonRegressor {
 
 /// Dummy mean / majority baseline (sklearn Dummy*).
 #[derive(Clone, Debug)]
-pub struct DummyRegressor {
+pub(crate) struct DummyRegressor {
     /// Strategy: `"mean"` or `"median"`.
     pub strategy: DummyStrategy,
 }
 
 /// Dummy strategy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DummyStrategy {
+pub(crate) enum DummyStrategy {
     /// Predict the training mean.
     Mean,
     /// Predict the training median.
@@ -2325,14 +2280,14 @@ impl Default for DummyRegressor {
 
 /// Fitted dummy.
 #[derive(Clone, Debug)]
-pub struct FittedDummy {
+pub(crate) struct FittedDummy {
     /// Constant prediction.
     pub value: f64,
 }
 
 impl Fit for DummyRegressor {
     type Fitted = FittedDummy;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedDummy>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedDummy>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         ctx.push(
@@ -2371,7 +2326,7 @@ impl Predict for FittedDummy {
 /// variable’s correlation catches up. Asking for more non-zeros than
 /// \(\min(n-1, p)\) is overparameterized.
 #[derive(Clone, Debug)]
-pub struct Lars {
+pub(crate) struct Lars {
     /// Stop after this many variables (`None` ⇒ \(\min(n-1, p)\)).
     pub n_nonzero: Option<usize>,
     /// Center \(X\) and \(y\).
@@ -2389,14 +2344,14 @@ impl Default for Lars {
 
 impl Lars {
     /// Full LARS path (capped at \(\min(n-1, p)\)).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted LARS model (last path step).
 #[derive(Clone, Debug)]
-pub struct FittedLars {
+pub(crate) struct FittedLars {
     /// Slopes on the original (uncentered) scale.
     pub coef: Vector,
     /// Training mean of \(y\) (0 if `fit_intercept` is false).
@@ -2407,7 +2362,7 @@ pub struct FittedLars {
 
 impl Fit for Lars {
     type Fitted = FittedLars;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLars>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLars>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         if ctx.report.contains(IssueCode::ConstantTarget)
@@ -2564,7 +2519,7 @@ impl Predict for FittedLars {
 /// LARS-Lasso: the LARS path with the Efron sign-drop modification, stopped
 /// when the equiangular correlation falls to `alpha`.
 #[derive(Clone, Debug)]
-pub struct LassoLars {
+pub(crate) struct LassoLars {
     /// Soft threshold on the LARS correlation (`0` ⇒ full path).
     pub alpha: f64,
     /// Center \(X\) and \(y\).
@@ -2582,7 +2537,7 @@ impl Default for LassoLars {
 
 impl LassoLars {
     /// LassoLars with correlation floor `alpha`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self {
             alpha,
             ..Self::default()
@@ -2592,7 +2547,7 @@ impl LassoLars {
 
 impl Fit for LassoLars {
     type Fitted = FittedLars;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLars>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLars>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         if !self.alpha.is_finite() || self.alpha < 0.0 {
@@ -2737,7 +2692,7 @@ impl Fit for LassoLars {
 
 /// Information criterion used by [`LassoLarsIc`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IcKind {
+pub(crate) enum IcKind {
     /// AIC: \(n\log(\mathrm{SSE}/n)+2k\).
     Aic,
     /// BIC: \(n\log(\mathrm{SSE}/n)+k\log n\).
@@ -2748,7 +2703,7 @@ pub enum IcKind {
 ///
 /// The grid is a documented compromise versus the exact LARS knots.
 #[derive(Clone, Debug)]
-pub struct LassoLarsIc {
+pub(crate) struct LassoLarsIc {
     /// AIC or BIC.
     pub criterion: IcKind,
 }
@@ -2763,14 +2718,14 @@ impl Default for LassoLarsIc {
 
 impl LassoLarsIc {
     /// AIC-scored LassoLars.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for LassoLarsIc {
     type Fitted = FittedLars;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLars>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLars>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         if ctx.report.contains(IssueCode::ConstantTarget) {
@@ -2839,7 +2794,7 @@ impl Fit for LassoLarsIc {
 /// Poisson–Gamma. A non-positive response with \(p \ge 1\) is not in the
 /// support and aborts.
 #[derive(Clone, Debug)]
-pub struct TweedieRegressor {
+pub(crate) struct TweedieRegressor {
     /// Variance power \(p\).
     pub power: f64,
     /// ℓ₂ penalty.
@@ -2863,19 +2818,14 @@ impl Default for TweedieRegressor {
 
 impl TweedieRegressor {
     /// Compound Poisson–Gamma Tweedie (\(p=1.5\)).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for TweedieRegressor {
     type Fitted = FittedLinear;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedLinear>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLinear>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         if self.power >= 1.0 {
@@ -2973,7 +2923,7 @@ impl Fit for TweedieRegressor {
 
 /// Multi-task lasso: \(\|Y-XW\|_F^2 + \alpha\|W\|_{2,1}\) by block coordinate descent.
 #[derive(Clone, Debug)]
-pub struct MultiTaskLasso {
+pub(crate) struct MultiTaskLasso {
     /// Group-ℓ1 penalty on each feature's coefficient vector across tasks.
     pub alpha: f64,
     /// Coordinate cycles.
@@ -2994,7 +2944,7 @@ impl Default for MultiTaskLasso {
 
 impl MultiTaskLasso {
     /// Multi-task lasso with the given group penalty.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self {
             alpha,
             ..Self::default()
@@ -3002,8 +2952,8 @@ impl MultiTaskLasso {
     }
 
     /// Fit `Y ~ X` for a multi-column response.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Matrix,
         session: &Session,
@@ -3136,7 +3086,7 @@ impl MultiTaskLasso {
 
 /// Fitted multi-task lasso.
 #[derive(Clone, Debug)]
-pub struct FittedMultiTask {
+pub(crate) struct FittedMultiTask {
     /// Coefficient matrix (`p` × `n_tasks`).
     pub coef: Matrix,
     /// Intercept per task.
@@ -3147,7 +3097,11 @@ pub struct FittedMultiTask {
 
 impl FittedMultiTask {
     /// Predict a multi-column response.
-    pub fn predict_matrix(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn predict_matrix(
+        &self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         if x.ncols() != self.coef.nrows() {
@@ -3175,7 +3129,7 @@ impl FittedMultiTask {
 
 /// Multi-task elastic net: group-ℓ1 plus Frobenius ℓ2 on \(W\).
 #[derive(Clone, Debug)]
-pub struct MultiTaskElasticNet {
+pub(crate) struct MultiTaskElasticNet {
     /// Combined penalty.
     pub alpha: f64,
     /// Mixing: 1 = multi-task lasso, 0 = multi-task ridge.
@@ -3199,7 +3153,7 @@ impl Default for MultiTaskElasticNet {
 
 impl MultiTaskElasticNet {
     /// Multi-task elastic net with `alpha` and `l1_ratio`.
-    pub fn new(alpha: f64, l1_ratio: f64) -> Self {
+    pub(crate) fn new(alpha: f64, l1_ratio: f64) -> Self {
         Self {
             alpha,
             l1_ratio,
@@ -3208,8 +3162,8 @@ impl MultiTaskElasticNet {
     }
 
     /// Fit `Y ~ X` for a multi-column response.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Matrix,
         session: &Session,
@@ -3342,7 +3296,7 @@ impl MultiTaskElasticNet {
 
 /// Target map applied before a linear fit (sklearn `TransformedTargetRegressor`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TargetTransform {
+pub(crate) enum TargetTransform {
     /// Identity (plain OLS).
     Identity,
     /// `log(y)` / `exp` inverse. Requires `y > 0`.
@@ -3351,7 +3305,7 @@ pub enum TargetTransform {
 
 /// OLS on a transformed target, with the inverse applied at predict time.
 #[derive(Clone, Debug)]
-pub struct TransformedTargetRegressor {
+pub(crate) struct TransformedTargetRegressor {
     /// Target map.
     pub transform: TargetTransform,
 }
@@ -3366,14 +3320,14 @@ impl Default for TransformedTargetRegressor {
 
 impl TransformedTargetRegressor {
     /// Log-target OLS.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted transformed-target regressor.
 #[derive(Clone, Debug)]
-pub struct FittedTtr {
+pub(crate) struct FittedTtr {
     /// Inner OLS on the transformed scale.
     pub inner: FittedLinear,
     /// Map that was applied.
@@ -3397,7 +3351,7 @@ impl Predict for FittedTtr {
 
 impl Fit for TransformedTargetRegressor {
     type Fitted = FittedTtr;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedTtr>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedTtr>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let yt = match self.transform {
@@ -3441,7 +3395,7 @@ impl Fit for TransformedTargetRegressor {
 
 /// Rolling-window OLS (statsmodels `RollingOLS`).
 #[derive(Clone, Debug)]
-pub struct RollingOls {
+pub(crate) struct RollingOls {
     /// Window length.
     pub window: usize,
     /// Prepend an intercept.
@@ -3459,7 +3413,7 @@ impl Default for RollingOls {
 
 impl RollingOls {
     /// Rolling OLS with the given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             fit_intercept: true,
@@ -3467,19 +3421,19 @@ impl RollingOls {
     }
 
     /// Fit a coefficient path, one row per complete window.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedRollingOls>> {
-        rolling_path(&mut *self, x, y, false, session)
+        rolling_path(self, x, y, false, session)
     }
 }
 
 /// Expanding-window OLS (statsmodels `ExpandingOLS`).
 #[derive(Clone, Debug)]
-pub struct ExpandingOls {
+pub(crate) struct ExpandingOls {
     /// Minimum observations before the first estimate.
     pub min_n: usize,
     /// Prepend an intercept.
@@ -3497,7 +3451,7 @@ impl Default for ExpandingOls {
 
 impl ExpandingOls {
     /// Expanding OLS with the given burn-in.
-    pub fn new(min_n: usize) -> Self {
+    pub(crate) fn new(min_n: usize) -> Self {
         Self {
             min_n: min_n.max(2),
             fit_intercept: true,
@@ -3505,8 +3459,8 @@ impl ExpandingOls {
     }
 
     /// Fit a coefficient path from `min_n` through `n`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -3515,7 +3469,7 @@ impl ExpandingOls {
             window: self.min_n,
             fit_intercept: self.fit_intercept,
         };
-        rolling_path(&mut roll, x, y, true, session)
+        rolling_path(&roll, x, y, true, session)
     }
 }
 
@@ -3524,7 +3478,7 @@ impl ExpandingOls {
 /// Window length is not identification `p`. Inner windows use a scratch
 /// report so a single singular slice does not abort the path.
 #[derive(Clone, Debug)]
-pub struct RollingWls {
+pub(crate) struct RollingWls {
     /// Window length.
     pub window: usize,
     /// Prepend an intercept.
@@ -3542,7 +3496,7 @@ impl Default for RollingWls {
 
 impl RollingWls {
     /// Rolling WLS with the given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             fit_intercept: true,
@@ -3550,8 +3504,8 @@ impl RollingWls {
     }
 
     /// Fit a weighted coefficient path, one row per complete window.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         weights: &Vector,
@@ -3726,7 +3680,7 @@ impl RollingWls {
 /// Each prefix OLS uses a scratch report. Prefix length is not passed as
 /// identification `p` on short windows.
 #[derive(Clone, Debug)]
-pub struct RecursiveLs {
+pub(crate) struct RecursiveLs {
     /// Minimum observations before the first residual.
     pub min_n: usize,
 }
@@ -3739,15 +3693,15 @@ impl Default for RecursiveLs {
 
 impl RecursiveLs {
     /// Recursive residuals with the given burn-in.
-    pub fn new(min_n: usize) -> Self {
+    pub(crate) fn new(min_n: usize) -> Self {
         Self {
             min_n: min_n.max(3),
         }
     }
 
     /// Fit the recursive residual path.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -3805,7 +3759,7 @@ impl RecursiveLs {
 
 /// Fitted recursive least squares.
 #[derive(Clone, Debug)]
-pub struct FittedRecursiveLs {
+pub(crate) struct FittedRecursiveLs {
     /// Last expanding-window slopes.
     pub coef: Vector,
     /// Last intercept.
@@ -3816,7 +3770,7 @@ pub struct FittedRecursiveLs {
 
 /// Coefficient path from a rolling or expanding OLS.
 #[derive(Clone, Debug)]
-pub struct FittedRollingOls {
+pub(crate) struct FittedRollingOls {
     /// Slopes (`n_windows` × `p`).
     pub coef: Matrix,
     /// Intercept per window.
@@ -3828,7 +3782,7 @@ pub struct FittedRollingOls {
 }
 
 fn rolling_path(
-    spec: &mut RollingOls,
+    spec: &RollingOls,
     x: &Matrix,
     y: &Vector,
     expanding: bool,
@@ -3928,7 +3882,7 @@ fn rolling_path(
 
 /// Cochrane–Orcutt GLS with an AR(1) residual (statsmodels `GLSAR`).
 #[derive(Clone, Debug)]
-pub struct Glsar {
+pub(crate) struct Glsar {
     /// Prepend an intercept.
     pub fit_intercept: bool,
     /// ρ / β iterations.
@@ -3946,14 +3900,14 @@ impl Default for Glsar {
 
 impl Glsar {
     /// Default Cochrane–Orcutt GLSAR.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted GLSAR.
 #[derive(Clone, Debug)]
-pub struct FittedGlsar {
+pub(crate) struct FittedGlsar {
     /// Slopes on the original scale.
     pub coef: Vector,
     /// Intercept.
@@ -3985,7 +3939,7 @@ impl Predict for FittedGlsar {
 
 impl Fit for Glsar {
     type Fitted = FittedGlsar;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlsar>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlsar>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let design = if self.fit_intercept {
@@ -4098,7 +4052,7 @@ impl Fit for Glsar {
 /// Distinct from [`PlsRegression`] (dense NIPALS) and
 /// [`crate::decompose::SparsePca`] (unsupervised).
 #[derive(Clone, Debug)]
-pub struct SparsePls {
+pub(crate) struct SparsePls {
     /// Latent directions. Not identification `p`.
     pub n_components: usize,
     /// Soft-threshold on the weights.
@@ -4116,7 +4070,7 @@ impl Default for SparsePls {
 
 impl SparsePls {
     /// Sparse PLS with `k` components.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components,
             ..Self::default()
@@ -4126,7 +4080,7 @@ impl SparsePls {
 
 /// Fitted sparse PLS.
 #[derive(Clone, Debug)]
-pub struct FittedSparsePls {
+pub(crate) struct FittedSparsePls {
     /// X mean.
     pub x_mean: Vector,
     /// y mean.
@@ -4137,12 +4091,7 @@ pub struct FittedSparsePls {
 
 impl Fit for SparsePls {
     type Fitted = FittedSparsePls;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedSparsePls>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSparsePls>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
@@ -4184,7 +4133,9 @@ impl Fit for SparsePls {
             if wn <= ctx.policy.near_zero_variance {
                 ctx.push(
                     Issue::builder(IssueCode::UpdateWithZeroInformation)
-                        .message("sparse NIPALS weight vanished; remaining components are unidentified")
+                        .message(
+                            "sparse NIPALS weight vanished; remaining components are unidentified",
+                        )
                         .build(),
                 );
                 break;

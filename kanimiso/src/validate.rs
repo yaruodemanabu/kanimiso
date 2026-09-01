@@ -7,7 +7,7 @@ use signlred::{
 };
 
 /// Scan `X` (and optional `y`) and push data-quality issues into `report`.
-pub fn inspect_xy(report: &mut Report, x: &Matrix, y: Option<&Vector>, policy: &Policy) {
+pub(crate) fn inspect_xy(report: &mut Report, x: &Matrix, y: Option<&Vector>, policy: &Policy) {
     let (n, p) = x.shape();
     report.set_sample_shape(n, p);
 
@@ -81,7 +81,7 @@ pub fn inspect_xy(report: &mut Report, x: &Matrix, y: Option<&Vector>, policy: &
 }
 
 /// Unregularized identification check: `n` vs `p` (after intercept).
-pub fn inspect_identification(report: &mut Report, n: usize, p: usize, policy: &Policy) {
+pub(crate) fn inspect_identification(report: &mut Report, n: usize, p: usize, policy: &Policy) {
     report.set_n_parameters(p);
     if let Some(issue) = insufficient_sample(n, p, policy) {
         report.push_with_policy(policy.clone(), issue);
@@ -89,7 +89,7 @@ pub fn inspect_identification(report: &mut Report, n: usize, p: usize, policy: &
 }
 
 /// Pairwise |corr| scan for collinearity (O(p² n)).
-pub fn inspect_collinearity(report: &mut Report, x: &Matrix, policy: &Policy) {
+pub(crate) fn inspect_collinearity(report: &mut Report, x: &Matrix, policy: &Policy) {
     let (n, p) = x.shape();
     if n < 3 || p < 2 {
         return;
@@ -159,7 +159,11 @@ fn pearson(a: &[f64], sa: SliceStats, b: &[f64], sb: SliceStats) -> f64 {
 }
 
 /// Class-count diagnostics for classification.
-pub fn inspect_classes(report: &mut Report, y: &Vector, policy: &Policy) -> Vec<(i64, usize)> {
+pub(crate) fn inspect_classes(
+    report: &mut Report,
+    y: &Vector,
+    policy: &Policy,
+) -> Vec<(i64, usize)> {
     let mut counts: Vec<(i64, usize)> = Vec::new();
     for &v in y.as_slice() {
         if !v.is_finite() {

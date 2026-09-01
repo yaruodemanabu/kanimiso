@@ -18,7 +18,7 @@ use signlred::{
 
 /// One-vs-rest ridge reduction.
 #[derive(Clone, Debug)]
-pub struct OneVsRestClassifier {
+pub(crate) struct OneVsRestClassifier {
     /// Shared ridge `α`.
     pub alpha: f64,
 }
@@ -31,14 +31,14 @@ impl Default for OneVsRestClassifier {
 
 impl OneVsRestClassifier {
     /// OvR with ridge `α`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self { alpha }
     }
 }
 
 /// Fitted OvR: one binary ridge per class.
 #[derive(Clone, Debug)]
-pub struct FittedOvr {
+pub(crate) struct FittedOvr {
     /// Class ids in the same order as [`Self::estimators`].
     pub classes: Vec<i64>,
     /// One vs-rest ridge per class.
@@ -47,7 +47,7 @@ pub struct FittedOvr {
 
 impl Fit for OneVsRestClassifier {
     type Fitted = FittedOvr;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedOvr>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedOvr>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -148,7 +148,7 @@ impl Predict for FittedOvr {
 
 /// One-vs-one ridge reduction.
 #[derive(Clone, Debug)]
-pub struct OneVsOneClassifier {
+pub(crate) struct OneVsOneClassifier {
     /// Shared ridge `α`.
     pub alpha: f64,
 }
@@ -161,14 +161,14 @@ impl Default for OneVsOneClassifier {
 
 impl OneVsOneClassifier {
     /// OvO with ridge `α`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self { alpha }
     }
 }
 
 /// One pairwise estimator.
 #[derive(Clone, Debug)]
-pub struct OvoPair {
+pub(crate) struct OvoPair {
     /// Left class.
     pub a: i64,
     /// Right class.
@@ -179,7 +179,7 @@ pub struct OvoPair {
 
 /// Fitted OvO vote.
 #[derive(Clone, Debug)]
-pub struct FittedOvo {
+pub(crate) struct FittedOvo {
     /// Training classes.
     pub classes: Vec<i64>,
     /// Pairwise ridges.
@@ -188,7 +188,7 @@ pub struct FittedOvo {
 
 impl Fit for OneVsOneClassifier {
     type Fitted = FittedOvo;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedOvo>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedOvo>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -306,7 +306,7 @@ impl Predict for FittedOvo {
 /// Each class is a random `±1` codeword. One ridge is fit per bit. Do not
 /// pass `n_bits` as identification `p`.
 #[derive(Clone, Debug)]
-pub struct OutputCodeClassifier {
+pub(crate) struct OutputCodeClassifier {
     /// Shared ridge `α`.
     pub alpha: f64,
     /// Code length. `0` picks `⌈log₂ K⌉ + 1`.
@@ -327,7 +327,7 @@ impl Default for OutputCodeClassifier {
 
 impl OutputCodeClassifier {
     /// ECOC with ridge `α`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self {
             alpha,
             ..Self::default()
@@ -337,7 +337,7 @@ impl OutputCodeClassifier {
 
 /// Fitted ECOC codebook plus one ridge per bit.
 #[derive(Clone, Debug)]
-pub struct FittedOutputCode {
+pub(crate) struct FittedOutputCode {
     /// Class ids.
     pub classes: Vec<i64>,
     /// `n_classes × n_bits` codebook of `±1`.
@@ -349,7 +349,7 @@ pub struct FittedOutputCode {
 impl Fit for OutputCodeClassifier {
     type Fitted = FittedOutputCode;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,

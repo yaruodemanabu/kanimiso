@@ -19,22 +19,22 @@ use signlred::{
 
 /// Two-stage least squares: \(X\) endogenous, \(Z\) instruments.
 #[derive(Clone, Debug, Default)]
-pub struct TwoSls {
+pub(crate) struct TwoSls {
     /// Include an intercept in both stages.
     pub fit_intercept: bool,
 }
 
 impl TwoSls {
     /// Default 2SLS.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             fit_intercept: true,
         }
     }
 
     /// Fit `y` on `x` using instruments `z`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         z: &Matrix,
@@ -160,7 +160,7 @@ impl TwoSls {
 
 /// Fitted 2SLS.
 #[derive(Clone, Debug)]
-pub struct FittedTwoSls {
+pub(crate) struct FittedTwoSls {
     /// Second-stage slopes.
     pub coef: Vector,
     /// Intercept.
@@ -201,22 +201,22 @@ fn empty_2sls(x: &Matrix) -> FittedTwoSls {
 /// from the residual regression on `Z`. Residual-kind inner failures are not
 /// promoted.
 #[derive(Clone, Debug, Default)]
-pub struct IvGmm {
+pub(crate) struct IvGmm {
     /// Include an intercept in both stages.
     pub fit_intercept: bool,
 }
 
 impl IvGmm {
     /// Default IV-GMM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             fit_intercept: true,
         }
     }
 
     /// Fit `y` on `x` using instruments `z`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         z: &Matrix,
@@ -392,7 +392,7 @@ impl IvGmm {
 
 /// Fitted IV-GMM.
 #[derive(Clone, Debug)]
-pub struct FittedIvGmm {
+pub(crate) struct FittedIvGmm {
     /// Structural slopes.
     pub coef: Vector,
     /// Intercept.
@@ -415,22 +415,22 @@ pub struct FittedIvGmm {
 /// \(W=(Z'\Omega Z)^{-1}\) with \(\Omega=\mathrm{diag}(e_i^2)\). The
 /// Windmeijer (2005) finite-sample variance correction is **not** applied.
 #[derive(Clone, Debug, Default)]
-pub struct TwoStepGmm {
+pub(crate) struct TwoStepGmm {
     /// Include an intercept in both stages.
     pub fit_intercept: bool,
 }
 
 impl TwoStepGmm {
     /// Default two-step IV-GMM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             fit_intercept: true,
         }
     }
 
     /// Fit `y` on `x` using instruments `z`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         z: &Matrix,
@@ -694,7 +694,7 @@ impl TwoStepGmm {
 
 /// Fitted two-step IV-GMM.
 #[derive(Clone, Debug)]
-pub struct FittedTwoStepGmm {
+pub(crate) struct FittedTwoStepGmm {
     /// Structural slopes.
     pub coef: Vector,
     /// Intercept.
@@ -717,22 +717,22 @@ pub struct FittedTwoStepGmm {
 /// that point and replaces the usual \((G'WG)^{-1}\) sandwich with
 /// \(V+D+D'\), where \(D\) is the analytic \(\partial S/\partial\beta\) term.
 #[derive(Clone, Debug, Default)]
-pub struct WindmeijerGmm {
+pub(crate) struct WindmeijerGmm {
     /// Include an intercept in both stages.
     pub fit_intercept: bool,
 }
 
 impl WindmeijerGmm {
     /// Default Windmeijer-corrected two-step GMM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             fit_intercept: true,
         }
     }
 
     /// Fit `y` on `x` using instruments `z`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         z: &Matrix,
@@ -1008,7 +1008,7 @@ impl WindmeijerGmm {
 
 /// Fitted Windmeijer-corrected two-step GMM.
 #[derive(Clone, Debug)]
-pub struct FittedWindmeijerGmm {
+pub(crate) struct FittedWindmeijerGmm {
     /// Structural slopes (same point as [`TwoStepGmm`]).
     pub coef: Vector,
     /// Intercept.
@@ -1033,22 +1033,22 @@ pub struct FittedWindmeijerGmm {
 /// the 2×2 Anderson eigenvalue; wider `X` falls back to 2SLS with a
 /// compromise note.
 #[derive(Clone, Debug, Default)]
-pub struct Liml {
+pub(crate) struct Liml {
     /// Include an intercept in both stages.
     pub fit_intercept: bool,
 }
 
 impl Liml {
     /// Default LIML.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             fit_intercept: true,
         }
     }
 
     /// Fit `y` on `x` using instruments `z`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         y: &Vector,
         z: &Matrix,
@@ -1205,22 +1205,22 @@ fn stage1_xhat(ctx: &mut FitCtx, x: &Matrix, zdes: &Matrix, fit_intercept: bool)
 /// Each equation is 2SLS-projected, the residual covariance \(\Sigma\) is
 /// formed, and the stacked system is GLS-solved with \(\Sigma^{-1}\).
 #[derive(Clone, Debug, Default)]
-pub struct ThreeSls {
+pub(crate) struct ThreeSls {
     /// Intercept in both stages.
     pub fit_intercept: bool,
 }
 
 impl ThreeSls {
     /// Default 3SLS.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             fit_intercept: true,
         }
     }
 
     /// Fit `(y1, x1)` and `(y2, x2)` with instruments `z1`, `z2`.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         y1: &Vector,
         x1: &Matrix,
         z1: &Matrix,
@@ -1392,7 +1392,7 @@ impl ThreeSls {
 
 /// Fitted two-equation 3SLS.
 #[derive(Clone, Debug)]
-pub struct FittedThreeSls {
+pub(crate) struct FittedThreeSls {
     /// First equation.
     pub eq1: FittedTwoSls,
     /// Second equation.
@@ -1406,16 +1406,16 @@ pub struct FittedThreeSls {
 /// Each equation is OLS; the residual correlation is then used in a stacked
 /// GLS step. Small `n` skips identification on the stacked parameter count.
 #[derive(Clone, Debug, Default)]
-pub struct Sur;
+pub(crate) struct Sur;
 
 impl Sur {
     /// Default SUR.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit `(y1, x1)` and `(y2, x2)`.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y1: &Vector,
         x1: &Matrix,
@@ -1500,7 +1500,11 @@ impl Sur {
 /// Returns a \(p \times p\) matrix. The OLS Hessian inverse is **not** applied;
 /// callers who want \(\mathrm{Var}(\hat\beta)\) should sandwich this between
 /// \((X'X)^{-1}\).
-pub fn newey_west(scores: &Matrix, lags: usize, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn newey_west(
+    scores: &Matrix,
+    lags: usize,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, scores, None, &ctx.policy);
     let (n, p) = scores.shape();
@@ -1564,13 +1568,17 @@ pub fn newey_west(scores: &Matrix, lags: usize, session: &Session) -> Result<Qua
 ///
 /// With one cross-section this is Newey–West on the score rows. Lag count is
 /// not identification `p`.
-pub fn driscoll_kraay(scores: &Matrix, lags: usize, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn driscoll_kraay(
+    scores: &Matrix,
+    lags: usize,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
     newey_west(scores, lags, session)
 }
 
 /// Engle–Granger residual-based cointegration test.
 #[derive(Clone, Debug)]
-pub struct CointEngleGranger {
+pub(crate) struct CointEngleGranger {
     /// ADF lags (`None` ⇒ Schwert).
     pub lags: Option<usize>,
 }
@@ -1583,12 +1591,17 @@ impl Default for CointEngleGranger {
 
 impl CointEngleGranger {
     /// Default Engle–Granger test.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// OLS `y` on `x` (with intercept), then ADF on the residual.
-    pub fn fit(&self, y: &Vector, x: &Vector, session: &Session) -> Result<Qualified<CointResult>> {
+    pub(crate) fn fit(
+        &self,
+        y: &Vector,
+        x: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<CointResult>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let xm = Matrix::from_vector(x).with_intercept();
         inspect_xy(&mut ctx.report, &xm, Some(y), &ctx.policy);
@@ -1639,7 +1652,7 @@ impl CointEngleGranger {
 /// are the same MacKinnon approximation as ADF, **not** the PO tables —
 /// recorded as a compromise.
 #[derive(Clone, Debug)]
-pub struct PhillipsOuliarisCoint {
+pub(crate) struct PhillipsOuliarisCoint {
     /// Newey–West lags (`None` ⇒ default PP lag).
     pub lags: Option<usize>,
 }
@@ -1652,12 +1665,17 @@ impl Default for PhillipsOuliarisCoint {
 
 impl PhillipsOuliarisCoint {
     /// Default Phillips–Ouliaris test.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// OLS `y` on `x` (with intercept), then Phillips–Perron on the residual.
-    pub fn fit(&self, y: &Vector, x: &Vector, session: &Session) -> Result<Qualified<CointResult>> {
+    pub(crate) fn fit(
+        &self,
+        y: &Vector,
+        x: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<CointResult>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let xm = Matrix::from_vector(x).with_intercept();
         inspect_xy(&mut ctx.report, &xm, Some(y), &ctx.policy);
@@ -1719,7 +1737,7 @@ impl PhillipsOuliarisCoint {
 
 /// Engle–Granger result.
 #[derive(Clone, Debug)]
-pub struct CointResult {
+pub(crate) struct CointResult {
     /// OLS slope of \(y\) on \(x\).
     pub coef: f64,
     /// OLS intercept.
@@ -1732,7 +1750,7 @@ pub struct CointResult {
 
 /// Eicker–Huber–White sandwich kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SandwichKind {
+pub(crate) enum SandwichKind {
     /// HC0: \(\mathrm{meat} = \sum e_i^2 x_i x_i'\).
     Hc0,
     /// HC1: HC0 times \(n/(n-p)\).
@@ -1748,7 +1766,7 @@ pub enum SandwichKind {
 /// OLS sandwich covariance \((X'X)^{-1} \mathrm{meat} (X'X)^{-1}\).
 ///
 /// `x` must already include an intercept column if one was used in the fit.
-pub fn sandwich_hc(
+pub(crate) fn sandwich_hc(
     x: &Matrix,
     resid: &Vector,
     kind: SandwichKind,
@@ -1905,27 +1923,27 @@ pub fn sandwich_hc(
 }
 
 /// HC0 sandwich.
-pub fn hc0(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn hc0(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
     sandwich_hc(x, resid, SandwichKind::Hc0, session)
 }
 
 /// HC1 sandwich.
-pub fn hc1(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn hc1(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
     sandwich_hc(x, resid, SandwichKind::Hc1, session)
 }
 
 /// HC2 sandwich.
-pub fn hc2(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn hc2(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
     sandwich_hc(x, resid, SandwichKind::Hc2, session)
 }
 
 /// HC3 sandwich.
-pub fn hc3(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn hc3(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
     sandwich_hc(x, resid, SandwichKind::Hc3, session)
 }
 
 /// HC4 sandwich.
-pub fn hc4(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn hc4(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
     sandwich_hc(x, resid, SandwichKind::Hc4, session)
 }
 
@@ -1933,7 +1951,7 @@ pub fn hc4(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Ma
 ///
 /// Meat is \(\sum_g (X_g^\top e_g)(X_g^\top e_g)^\top\). Cluster count is not
 /// identification `p`. `x` should already include an intercept if one was used.
-pub fn cov_cluster(
+pub(crate) fn cov_cluster(
     x: &Matrix,
     resid: &Vector,
     groups: &Vector,
@@ -2064,7 +2082,11 @@ pub fn cov_cluster(
 }
 
 /// White / HC0 sandwich (statsmodels `cov_white`).
-pub fn cov_white(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cov_white(
+    x: &Matrix,
+    resid: &Vector,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
     hc0(x, resid, session)
 }
 
@@ -2072,7 +2094,7 @@ pub fn cov_white(x: &Matrix, resid: &Vector, session: &Session) -> Result<Qualif
 ///
 /// Lag count is not identification `p`. `x` should already include an intercept
 /// if one was used. Failed bread Cholesky is a warning, not a fatal abort.
-pub fn cov_hac(
+pub(crate) fn cov_hac(
     x: &Matrix,
     resid: &Vector,
     lags: usize,
@@ -2181,7 +2203,7 @@ pub fn cov_hac(
 /// Coefficient count is the design width including the intercept. Failed bread
 /// Cholesky is a warning, not a fatal abort.
 #[derive(Clone, Debug)]
-pub struct RobustCovResults {
+pub(crate) struct RobustCovResults {
     /// Intercept then slopes.
     pub params: Vector,
     /// HC0 standard errors.
@@ -2197,7 +2219,7 @@ pub struct RobustCovResults {
 }
 
 /// Fit OLS and report HC0 sandwich inference.
-pub fn get_robustcov_results(
+pub(crate) fn get_robustcov_results(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -2283,7 +2305,11 @@ pub fn get_robustcov_results(
         let e2 = resid[i] * resid[i];
         for a in 0..p {
             for b in 0..p {
-                meat.set(a, b, meat.get(a, b) + e2 * design.get(i, a) * design.get(i, b));
+                meat.set(
+                    a,
+                    b,
+                    meat.get(a, b) + e2 * design.get(i, a) * design.get(i, b),
+                );
             }
         }
     }
@@ -2338,7 +2364,7 @@ pub fn get_robustcov_results(
 /// Regresses 2SLS residuals on the instrument design. The statistic is
 /// \(n R^2\) against \(\chi^2_{k_z-k_x}\). Instrument count is not
 /// identification `p`. Just-identified systems have df 0.
-pub fn sargan(
+pub(crate) fn sargan(
     x: &Matrix,
     y: &Vector,
     z: &Matrix,
@@ -2444,7 +2470,7 @@ pub fn sargan(
 ///
 /// \(F\) from OLS of `y` on the instrument design. Instrument count is not
 /// identification `p`. Inner OLS failures are not promoted as fatal Cholesky.
-pub fn anderson_rubin(
+pub(crate) fn anderson_rubin(
     y: &Vector,
     z: &Matrix,
     session: &Session,
@@ -2517,7 +2543,7 @@ pub fn anderson_rubin(
 ///
 /// Instrument count is not identification `p`. A perfect first stage reports
 /// \(+\infty\). Inner OLS failures are warnings, not fatal Cholesky.
-pub fn cragg_donald(
+pub(crate) fn cragg_donald(
     x: &Matrix,
     z: &Matrix,
     session: &Session,
@@ -2575,7 +2601,9 @@ pub fn cragg_donald(
         ctx.push(
             Issue::builder(IssueCode::CausalClaimUnidentified)
                 .severity(Severity::Advisory)
-                .message("cragg_donald reports the first-column first-stage F, not min-eigenvalue CD")
+                .message(
+                    "cragg_donald reports the first-column first-stage F, not min-eigenvalue CD",
+                )
                 .compromise(NumericalCompromise::new(
                     "Cragg–Donald min eigenvalue of X'P_Z X / σ²",
                     "first-stage F of column 0 on Z",
@@ -2598,7 +2626,7 @@ pub fn cragg_donald(
 /// First-stage residual of `x` column 0 on `z` is included in OLS of `y`.
 /// Instrument count is not identification `p`. Inner Cholesky failures are
 /// warnings.
-pub fn wu_hausman(
+pub(crate) fn wu_hausman(
     x: &Matrix,
     y: &Vector,
     z: &Matrix,
@@ -2633,7 +2661,8 @@ pub fn wu_hausman(
         return ctx.finish(nan());
     }
     let fit1 = zdes.matvec(&g);
-    let resid = Vector::from_iter((0..n).map(|i| xj[i] - if i < fit1.len() { fit1[i] } else { 0.0 }));
+    let resid =
+        Vector::from_iter((0..n).map(|i| xj[i] - if i < fit1.len() { fit1[i] } else { 0.0 }));
     if resid.as_slice().iter().all(|e| e.abs() <= 1e-12) {
         ctx.push(
             Issue::builder(IssueCode::DegenerateDistribution)

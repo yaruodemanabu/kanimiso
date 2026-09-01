@@ -102,11 +102,11 @@ fn project_centered(xc: &Matrix, components: &Matrix) -> Matrix {
     matmul_nt(xc, components)
 }
 
-pub use crate::kernel_pca::{FittedKernelPca, KernelPca};
+pub(crate) use crate::kernel_pca::{FittedKernelPca, KernelPca};
 
 /// Principal component analysis via a thin SVD of column-centered `X`.
 #[derive(Clone, Debug)]
-pub struct Pca {
+pub(crate) struct Pca {
     /// Number of components requested.
     pub n_components: usize,
 }
@@ -119,19 +119,19 @@ impl Default for Pca {
 
 impl Pca {
     /// Keep `n_components` axes.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self { n_components }
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedPca>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedPca>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Fitted PCA.
 #[derive(Clone, Debug)]
-pub struct FittedPca {
+pub(crate) struct FittedPca {
     /// Principal axes (`k` × `p`).
     pub components: Matrix,
     /// Column means of the training design.
@@ -176,7 +176,7 @@ impl Transform for FittedPca {
 
 impl FitUnsupervised for Pca {
     type Fitted = FittedPca;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedPca>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedPca>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         inspect_identification(
@@ -279,7 +279,7 @@ impl FitUnsupervised for Pca {
 /// centered batch (and a mean-correction row) and re-factorizes, then emits
 /// [`IncrementalExplain`].
 #[derive(Clone, Debug)]
-pub struct IncrementalPca {
+pub(crate) struct IncrementalPca {
     /// Number of components to retain.
     pub n_components: usize,
     n_seen: u64,
@@ -307,7 +307,7 @@ impl Default for IncrementalPca {
 
 impl IncrementalPca {
     /// Keep `n_components` online axes.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components,
             ..Self::default()
@@ -315,17 +315,17 @@ impl IncrementalPca {
     }
 
     /// Current mean, if any batch has been seen.
-    pub fn mean(&self) -> Option<&Vector> {
+    pub(crate) fn mean(&self) -> Option<&Vector> {
         self.mean.as_ref()
     }
 
     /// Current components (`k` × `p`).
-    pub fn components(&self) -> Option<&Matrix> {
+    pub(crate) fn components(&self) -> Option<&Matrix> {
         self.components.as_ref()
     }
 
     /// Fit alias (one SKL step on the whole matrix).
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedPca>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedPca>> {
         self.fit_unsupervised(x, session)
     }
 
@@ -357,20 +357,21 @@ impl IncrementalPca {
 
 impl FitUnsupervised for IncrementalPca {
     type Fitted = FittedPca;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedPca>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedPca>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         inspect_identification(
             &mut ctx.report,
             x.nrows(),
-            self.n_components.max(1),
+            this.n_components.max(1),
             &ctx.policy,
         );
         if x.nrows() == 0 || x.ncols() == 0 {
-            return ctx.finish(self.to_fitted(x.ncols()));
+            return ctx.finish(this.to_fitted(x.ncols()));
         }
-        let _ = self.partial_fit(x, None, &session.child("ipca_init"));
-        ctx.finish(self.to_fitted(x.ncols()))
+        let _ = this.partial_fit(x, None, &session.child("ipca_init"));
+        ctx.finish(this.to_fitted(x.ncols()))
     }
 }
 
@@ -554,7 +555,7 @@ impl PartialFit for IncrementalPca {
 
 /// Thin SVD of the (optionally uncentered) design, truncated to `n_components`.
 #[derive(Clone, Debug)]
-pub struct TruncatedSvd {
+pub(crate) struct TruncatedSvd {
     /// Number of singular triples to keep.
     pub n_components: usize,
 }
@@ -567,19 +568,23 @@ impl Default for TruncatedSvd {
 
 impl TruncatedSvd {
     /// Keep `n_components` triples.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self { n_components }
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedTruncatedSvd>> {
+    pub(crate) fn fit(
+        &self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedTruncatedSvd>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Fitted truncated SVD.
 #[derive(Clone, Debug)]
-pub struct FittedTruncatedSvd {
+pub(crate) struct FittedTruncatedSvd {
     /// Right singular vectors as rows (`k` × `p`).
     pub components: Matrix,
     /// Singular values.
@@ -601,7 +606,7 @@ impl Transform for FittedTruncatedSvd {
 impl FitUnsupervised for TruncatedSvd {
     type Fitted = FittedTruncatedSvd;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedTruncatedSvd>> {
@@ -666,7 +671,7 @@ impl FitUnsupervised for TruncatedSvd {
 
 /// Non-negative matrix factorization by multiplicative updates.
 #[derive(Clone, Debug)]
-pub struct Nmf {
+pub(crate) struct Nmf {
     /// Number of latent components.
     pub n_components: usize,
     /// Multiplicative-update iterations.
@@ -687,7 +692,7 @@ impl Default for Nmf {
 
 impl Nmf {
     /// `k` nonnegative factors.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components,
             ..Self::default()
@@ -695,14 +700,14 @@ impl Nmf {
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedNmf>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedNmf>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Fitted NMF: `X ≈ W H` with `W` (`n` × `k`) and `H` (`k` × `p`) nonnegative.
 #[derive(Clone, Debug)]
-pub struct FittedNmf {
+pub(crate) struct FittedNmf {
     /// Left nonnegative factor.
     pub w: Matrix,
     /// Right nonnegative factor.
@@ -734,7 +739,7 @@ impl Transform for FittedNmf {
 
 impl FitUnsupervised for Nmf {
     type Fitted = FittedNmf;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedNmf>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedNmf>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         inspect_identification(
@@ -828,7 +833,7 @@ impl FitUnsupervised for Nmf {
 
 /// Mini-batch NMF: multiplicative updates of `H` on successive batches.
 #[derive(Clone, Debug)]
-pub struct MiniBatchNmf {
+pub(crate) struct MiniBatchNmf {
     /// Number of latent components.
     pub n_components: usize,
     /// Rows per update.
@@ -855,7 +860,7 @@ impl Default for MiniBatchNmf {
 
 impl MiniBatchNmf {
     /// Mini-batch NMF with `k` components.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components,
             ..Self::default()
@@ -863,7 +868,7 @@ impl MiniBatchNmf {
     }
 
     /// Current right factor, if initialized.
-    pub fn h(&self) -> Option<&Matrix> {
+    pub(crate) fn h(&self) -> Option<&Matrix> {
         self.h.as_ref()
     }
 }
@@ -950,15 +955,16 @@ impl PartialFit for MiniBatchNmf {
 
 impl FitUnsupervised for MiniBatchNmf {
     type Fitted = FittedNmf;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedNmf>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedNmf>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        let bs = self.batch_size.max(1);
+        let bs = this.batch_size.max(1);
         let n = x.nrows();
         if n == 0 {
             return ctx.finish(FittedNmf {
-                w: Matrix::zeros(0, self.n_components),
-                h: Matrix::zeros(self.n_components, x.ncols()),
+                w: Matrix::zeros(0, this.n_components),
+                h: Matrix::zeros(this.n_components, x.ncols()),
                 reconstruction_err: f64::NAN,
             });
         }
@@ -966,7 +972,7 @@ impl FitUnsupervised for MiniBatchNmf {
         while start < n {
             let end = (start + bs).min(n);
             let batch = Matrix::from_fn(end - start, x.ncols(), |i, j| x.get(start + i, j));
-            match self.partial_fit(&batch, None, &session.child("mb")) {
+            match this.partial_fit(&batch, None, &session.child("mb")) {
                 Ok(q) => {
                     for issue in q.report.issues() {
                         if issue.code == IssueCode::WarmupIncomplete {
@@ -979,10 +985,10 @@ impl FitUnsupervised for MiniBatchNmf {
             }
             start = end;
         }
-        let h = self
+        let h = this
             .h
             .clone()
-            .unwrap_or_else(|| Matrix::zeros(self.n_components.max(1), x.ncols()));
+            .unwrap_or_else(|| Matrix::zeros(this.n_components.max(1), x.ncols()));
         let mut nmf = FittedNmf {
             w: Matrix::zeros(n, h.nrows()),
             h: h.clone(),
@@ -1007,7 +1013,7 @@ impl FitUnsupervised for MiniBatchNmf {
 
 /// FastICA: SVD whitening plus one-unit deflation with `g = tanh`.
 #[derive(Clone, Debug)]
-pub struct FastIca {
+pub(crate) struct FastIca {
     /// Number of independent components.
     pub n_components: usize,
     /// Fixed-point iterations per unit.
@@ -1028,7 +1034,7 @@ impl Default for FastIca {
 
 impl FastIca {
     /// `k` independent components.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components,
             ..Self::default()
@@ -1036,14 +1042,14 @@ impl FastIca {
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedFastIca>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedFastIca>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Fitted FastICA.
 #[derive(Clone, Debug)]
-pub struct FittedFastIca {
+pub(crate) struct FittedFastIca {
     /// Unmixing rows (`k` × `p`) in the original (centered) space.
     pub components: Matrix,
     /// Column means.
@@ -1065,11 +1071,7 @@ impl Transform for FittedFastIca {
 
 impl FitUnsupervised for FastIca {
     type Fitted = FittedFastIca;
-    fn fit_unsupervised(
-        &mut self,
-        x: &Matrix,
-        session: &Session,
-    ) -> Result<Qualified<FittedFastIca>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedFastIca>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         inspect_identification(
@@ -1221,7 +1223,7 @@ impl FitUnsupervised for FastIca {
 
 /// Factor analysis: SVD / EM-style uniqueness model `cov ≈ ΛΛᵀ + diag(ψ)`.
 #[derive(Clone, Debug)]
-pub struct FactorAnalysis {
+pub(crate) struct FactorAnalysis {
     /// Number of latent factors.
     pub n_components: usize,
     /// EM iterations (0 = SVD approximation only).
@@ -1239,7 +1241,7 @@ impl Default for FactorAnalysis {
 
 impl FactorAnalysis {
     /// `k` factors.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components,
             ..Self::default()
@@ -1247,8 +1249,8 @@ impl FactorAnalysis {
     }
 
     /// Fit alias.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedFactorAnalysis>> {
@@ -1258,7 +1260,7 @@ impl FactorAnalysis {
 
 /// Fitted factor-analysis model.
 #[derive(Clone, Debug)]
-pub struct FittedFactorAnalysis {
+pub(crate) struct FittedFactorAnalysis {
     /// Loadings `Λ` (`p` × `k`).
     pub loadings: Matrix,
     /// Uniqueness / specific variances (`p`).
@@ -1313,7 +1315,7 @@ impl Transform for FittedFactorAnalysis {
 impl FitUnsupervised for FactorAnalysis {
     type Fitted = FittedFactorAnalysis;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedFactorAnalysis>> {
@@ -1424,7 +1426,7 @@ impl FitUnsupervised for FactorAnalysis {
 /// `Σ_{xx}^{-1/2} Σ_{xy} Σ_{yy}^{-1/2}` (here `y` is univariate so the SVD
 /// is a single right/left vector).
 #[derive(Clone, Debug)]
-pub struct Cca {
+pub(crate) struct Cca {
     /// Number of canonical pairs requested (at most 1 when `y` is a vector).
     pub n_components: usize,
 }
@@ -1437,14 +1439,14 @@ impl Default for Cca {
 
 impl Cca {
     /// Request `n_components` canonical pairs.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self { n_components }
     }
 }
 
 /// Fitted CCA.
 #[derive(Clone, Debug)]
-pub struct FittedCca {
+pub(crate) struct FittedCca {
     /// Weights for `X` (`p` × `k`).
     pub x_weights: Matrix,
     /// Weights for `y` (length `k`).
@@ -1477,7 +1479,7 @@ impl Transform for FittedCca {
 
 impl Fit for Cca {
     type Fitted = FittedCca;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedCca>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedCca>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_identification(
@@ -1606,7 +1608,7 @@ impl Fit for Cca {
 
 /// Sparse PCA by iterative soft-thresholding of the loadings (deflation).
 #[derive(Clone, Debug)]
-pub struct SparsePca {
+pub(crate) struct SparsePca {
     /// Number of sparse components.
     pub n_components: usize,
     /// Soft-threshold level applied to loadings.
@@ -1627,7 +1629,7 @@ impl Default for SparsePca {
 
 impl SparsePca {
     /// `k` sparse axes.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components,
             ..Self::default()
@@ -1635,14 +1637,14 @@ impl SparsePca {
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedSparsePca>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedSparsePca>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Fitted sparse PCA.
 #[derive(Clone, Debug)]
-pub struct FittedSparsePca {
+pub(crate) struct FittedSparsePca {
     /// Sparse principal axes (`k` × `p`).
     pub components: Matrix,
     /// Column means.
@@ -1673,7 +1675,7 @@ fn soft_threshold(v: f64, alpha: f64) -> f64 {
 impl FitUnsupervised for SparsePca {
     type Fitted = FittedSparsePca;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedSparsePca>> {
@@ -1760,7 +1762,7 @@ impl FitUnsupervised for SparsePca {
 /// Each `partial_fit` takes one ISTA step on the batch Gram and must emit
 /// [`IncrementalExplain`]. Do not pass `n_components` as identification `p`.
 #[derive(Clone, Debug)]
-pub struct MiniBatchSparsePca {
+pub(crate) struct MiniBatchSparsePca {
     /// Number of sparse components.
     pub n_components: usize,
     /// Soft-threshold level.
@@ -1791,7 +1793,7 @@ impl Default for MiniBatchSparsePca {
 
 impl MiniBatchSparsePca {
     /// `k` sparse axes.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(1),
             ..Self::default()
@@ -1799,12 +1801,13 @@ impl MiniBatchSparsePca {
     }
 
     /// Offline alias: one `partial_fit` on the full design.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedSparsePca>> {
-        self.partial_fit(x, None, session)?;
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedSparsePca>> {
+        let mut this = self.clone();
+        this.partial_fit(x, None, session)?;
         let mut ctx = FitCtx::with_session(session.child("finish"));
         ctx.finish(FittedSparsePca {
-            components: self.components.clone(),
-            mean: self.mean.clone(),
+            components: this.components.clone(),
+            mean: this.mean.clone(),
         })
     }
 }
@@ -1911,7 +1914,7 @@ impl PartialFit for MiniBatchSparsePca {
 
 /// Dictionary learning (a few MOD / ISTA iterations).
 #[derive(Clone, Debug)]
-pub struct DictionaryLearning {
+pub(crate) struct DictionaryLearning {
     /// Number of atoms.
     pub n_components: usize,
     /// Alternating iterations.
@@ -1935,7 +1938,7 @@ impl Default for DictionaryLearning {
 
 impl DictionaryLearning {
     /// `k` atoms.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components,
             ..Self::default()
@@ -1943,14 +1946,14 @@ impl DictionaryLearning {
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedDictionary>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedDictionary>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Fitted dictionary: `X ≈ codes * dictionary` with unit-norm atoms as rows.
 #[derive(Clone, Debug)]
-pub struct FittedDictionary {
+pub(crate) struct FittedDictionary {
     /// Dictionary (`k` × `p`), rows are atoms.
     pub dictionary: Matrix,
     /// Sparse codes (`n` × `k`).
@@ -1996,7 +1999,7 @@ fn ista_codes(x: &Matrix, dict: &Matrix, alpha: f64, iters: usize) -> Matrix {
 impl FitUnsupervised for DictionaryLearning {
     type Fitted = FittedDictionary;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedDictionary>> {
@@ -2105,7 +2108,7 @@ impl FitUnsupervised for DictionaryLearning {
 /// Each `partial_fit` takes one ISTA / MOD step and must emit
 /// [`IncrementalExplain`]. Atom count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MiniBatchDictionaryLearning {
+pub(crate) struct MiniBatchDictionaryLearning {
     /// Number of atoms.
     pub n_components: usize,
     /// Soft-threshold on codes.
@@ -2131,7 +2134,7 @@ impl Default for MiniBatchDictionaryLearning {
 
 impl MiniBatchDictionaryLearning {
     /// `k` atoms.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(1),
             ..Self::default()
@@ -2139,7 +2142,7 @@ impl MiniBatchDictionaryLearning {
     }
 
     /// Current dictionary (`k` × `p`), if initialized.
-    pub fn dictionary(&self) -> Option<&Matrix> {
+    pub(crate) fn dictionary(&self) -> Option<&Matrix> {
         if self.initialized {
             Some(&self.dictionary)
         } else {
@@ -2247,7 +2250,7 @@ impl PartialFit for MiniBatchDictionaryLearning {
 ///
 /// Atom count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SparseCoder {
+pub(crate) struct SparseCoder {
     /// Soft-threshold on codes.
     pub alpha: f64,
     dictionary: Matrix,
@@ -2266,7 +2269,7 @@ impl Default for SparseCoder {
 
 impl SparseCoder {
     /// Coder with the given atoms (`k` × `p`).
-    pub fn new(dictionary: Matrix) -> Self {
+    pub(crate) fn new(dictionary: Matrix) -> Self {
         Self {
             dictionary,
             fitted: true,
@@ -2299,7 +2302,7 @@ impl Transform for SparseCoder {
 /// Dual size is not identification `p`. Distinct from [`Cca`] (linear
 /// whitened cross-covariance).
 #[derive(Clone, Debug)]
-pub struct KernelCca {
+pub(crate) struct KernelCca {
     /// RBF \(\gamma\). Not identification `p`.
     pub gamma: f64,
     /// Dual ridge. Not identification `p`.
@@ -2317,7 +2320,7 @@ impl Default for KernelCca {
 
 impl KernelCca {
     /// Kernel CCA with RBF `gamma`.
-    pub fn new(gamma: f64) -> Self {
+    pub(crate) fn new(gamma: f64) -> Self {
         Self {
             gamma,
             ..Self::default()
@@ -2327,7 +2330,7 @@ impl KernelCca {
 
 /// Fitted kernel CCA.
 #[derive(Clone, Debug)]
-pub struct FittedKernelCca {
+pub(crate) struct FittedKernelCca {
     /// Dual coefficients on the centered training kernel.
     pub alpha: Vector,
     /// Canonical correlation.
@@ -2355,7 +2358,9 @@ impl Transform for FittedKernelCca {
             let mut s = 0.0_f64;
             for j in 0..m.min(self.alpha.len()) {
                 let kij = rbf_rows(x, i, &self.train, j, self.gamma);
-                let kc = kij - self.k_mean.as_slice().get(j).copied().unwrap_or(0.0) - self.row_mean(x, i)
+                let kc = kij
+                    - self.k_mean.as_slice().get(j).copied().unwrap_or(0.0)
+                    - self.row_mean(x, i)
                     + self.k_grand;
                 s += kc * self.alpha[j];
             }
@@ -2396,12 +2401,7 @@ fn rbf_rows(x: &Matrix, i: usize, other: &Matrix, j: usize, gamma: f64) -> f64 {
 
 impl Fit for KernelCca {
     type Fitted = FittedKernelCca;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedKernelCca>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedKernelCca>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
@@ -2536,7 +2536,7 @@ impl Fit for KernelCca {
 /// one and is not identification `p`. Distinct from [`FactorAnalysis`]
 /// (exploratory multi-factor SVD/EM).
 #[derive(Clone, Debug)]
-pub struct ConfirmatoryFactor {
+pub(crate) struct ConfirmatoryFactor {
     /// Communality iterations.
     pub max_iter: usize,
 }
@@ -2549,13 +2549,13 @@ impl Default for ConfirmatoryFactor {
 
 impl ConfirmatoryFactor {
     /// Default one-factor CFA.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit alias.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedConfirmatoryFactor>> {
@@ -2565,7 +2565,7 @@ impl ConfirmatoryFactor {
 
 /// Fitted one-factor CFA.
 #[derive(Clone, Debug)]
-pub struct FittedConfirmatoryFactor {
+pub(crate) struct FittedConfirmatoryFactor {
     /// Loadings \(\lambda\) (`p`).
     pub loadings: Vector,
     /// Uniqueness \(\psi_j=1-\lambda_j^2\).
@@ -2586,15 +2586,34 @@ impl Transform for FittedConfirmatoryFactor {
         let pc = self.mean.len().min(p).min(self.loadings.len());
         let mut denom = 0.0_f64;
         for j in 0..pc {
-            let psi = self.uniqueness.as_slice().get(j).copied().unwrap_or(1.0).max(1e-8);
+            let psi = self
+                .uniqueness
+                .as_slice()
+                .get(j)
+                .copied()
+                .unwrap_or(1.0)
+                .max(1e-8);
             denom += self.loadings[j] * self.loadings[j] / psi;
         }
         let den = denom.max(1e-8);
         let out = Matrix::from_fn(n, 1, |i, _| {
             let mut s = 0.0_f64;
             for j in 0..pc {
-                let psi = self.uniqueness.as_slice().get(j).copied().unwrap_or(1.0).max(1e-8);
-                let z = (x.get(i, j) - self.mean[j]) / self.scale.as_slice().get(j).copied().unwrap_or(1.0).max(1e-8);
+                let psi = self
+                    .uniqueness
+                    .as_slice()
+                    .get(j)
+                    .copied()
+                    .unwrap_or(1.0)
+                    .max(1e-8);
+                let z = (x.get(i, j) - self.mean[j])
+                    / self
+                        .scale
+                        .as_slice()
+                        .get(j)
+                        .copied()
+                        .unwrap_or(1.0)
+                        .max(1e-8);
                 s += self.loadings[j] * z / psi;
             }
             s / den
@@ -2606,7 +2625,7 @@ impl Transform for FittedConfirmatoryFactor {
 impl FitUnsupervised for ConfirmatoryFactor {
     type Fitted = FittedConfirmatoryFactor;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedConfirmatoryFactor>> {
@@ -2634,7 +2653,8 @@ impl FitUnsupervised for ConfirmatoryFactor {
             }
             s / df
         });
-        let mut lam = Vector::from_iter((0..p).map(|j| (corr.get(j, j).abs().sqrt() * 0.5).clamp(0.1, 0.9)));
+        let mut lam =
+            Vector::from_iter((0..p).map(|j| (corr.get(j, j).abs().sqrt() * 0.5).clamp(0.1, 0.9)));
         for _ in 0..self.max_iter.max(1) {
             let mut nxt = Vector::zeros(p);
             for j in 0..p {
@@ -2655,7 +2675,8 @@ impl FitUnsupervised for ConfirmatoryFactor {
             }
             lam = nxt;
         }
-        let uniqueness = Vector::from_iter((0..p).map(|j| (1.0 - lam[j] * lam[j]).clamp(1e-4, 1.0)));
+        let uniqueness =
+            Vector::from_iter((0..p).map(|j| (1.0 - lam[j] * lam[j]).clamp(1e-4, 1.0)));
         let mut rss = 0.0_f64;
         for i in 0..p {
             for j in (i + 1)..p {
@@ -2690,16 +2711,16 @@ impl FitUnsupervised for ConfirmatoryFactor {
 /// Factor count is not identification `p`. Distinct from [`ConfirmatoryFactor`]
 /// (no structural equation) and ordinary OLS (no latent).
 #[derive(Clone, Debug, Default)]
-pub struct Lisrel;
+pub(crate) struct Lisrel;
 
 impl Lisrel {
     /// Default one-factor LISREL.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit CFA scores of \(X\), then OLS of \(y\) on the factor.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -2796,7 +2817,7 @@ impl Lisrel {
 
 /// Fitted LISREL-lite model.
 #[derive(Clone, Debug)]
-pub struct FittedLisrel {
+pub(crate) struct FittedLisrel {
     /// Measurement loadings.
     pub loadings: Vector,
     /// Uniqueness.
@@ -2815,7 +2836,7 @@ pub struct FittedLisrel {
 
 impl FittedLisrel {
     /// Predict \(y\) from new indicators via the stored measurement model.
-    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let cfa = FittedConfirmatoryFactor {
@@ -2829,9 +2850,9 @@ impl FittedLisrel {
             Ok(q) => q.value,
             Err(_) => Matrix::zeros(x.nrows(), 1),
         };
-        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
-            self.intercept + self.slope * z.get(i, 0)
-        })))
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.intercept + self.slope * z.get(i, 0)),
+        ))
     }
 }
 
@@ -2862,17 +2883,17 @@ fn latent_growth_row(x: &Matrix, i: usize) -> (f64, f64) {
 /// Occasion count is not identification `p`. Distinct from
 /// [`ConfirmatoryFactor`] (no time coding) and [`Lisrel`] (no per-row slope).
 #[derive(Clone, Debug, Default)]
-pub struct LatentGrowth;
+pub(crate) struct LatentGrowth;
 
 impl LatentGrowth {
     /// Empty growth-curve fitter.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit alias.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedLatentGrowth>> {
@@ -2882,7 +2903,7 @@ impl LatentGrowth {
 
 /// Fitted latent growth curves.
 #[derive(Clone, Debug)]
-pub struct FittedLatentGrowth {
+pub(crate) struct FittedLatentGrowth {
     /// Per-row intercepts.
     pub intercepts: Vector,
     /// Per-row slopes on occasion \(t=0,\ldots,p-1\).
@@ -2911,7 +2932,7 @@ impl Transform for FittedLatentGrowth {
 impl FitUnsupervised for LatentGrowth {
     type Fitted = FittedLatentGrowth;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedLatentGrowth>> {
@@ -2960,7 +2981,7 @@ impl FitUnsupervised for LatentGrowth {
 /// Cause count is not identification `p`. Distinct from [`Lisrel`] (no
 /// cause/indicator split) and [`ConfirmatoryFactor`] (no structural \(y\)).
 #[derive(Clone, Debug)]
-pub struct Mimic {
+pub(crate) struct Mimic {
     /// Number of leading cause columns. Not identification `p`.
     pub n_causes: usize,
 }
@@ -2973,14 +2994,14 @@ impl Default for Mimic {
 
 impl Mimic {
     /// MIMIC with `n_causes` leading columns of \(X\).
-    pub fn new(n_causes: usize) -> Self {
+    pub(crate) fn new(n_causes: usize) -> Self {
         Self {
             n_causes: n_causes.max(1),
         }
     }
 
     /// Score remaining columns of \(X\), then OLS of \(y\) on causes and the factor.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -3102,9 +3123,9 @@ impl Mimic {
             mean: q.value.mean.clone(),
             scale: q.value.scale.clone(),
             intercept: coef.as_slice().first().copied().unwrap_or(0.0),
-            coef_causes: Vector::from_iter((0..nc).map(|j| {
-                coef.as_slice().get(1 + j).copied().unwrap_or(0.0)
-            })),
+            coef_causes: Vector::from_iter(
+                (0..nc).map(|j| coef.as_slice().get(1 + j).copied().unwrap_or(0.0)),
+            ),
             slope_factor: coef.as_slice().get(1 + nc).copied().unwrap_or(0.0),
             scores,
             n_causes: nc,
@@ -3114,7 +3135,7 @@ impl Mimic {
 
 /// Fitted MIMIC sketch.
 #[derive(Clone, Debug)]
-pub struct FittedMimic {
+pub(crate) struct FittedMimic {
     /// Indicator loadings.
     pub loadings: Vector,
     /// Uniqueness.
@@ -3136,14 +3157,12 @@ pub struct FittedMimic {
 
 impl FittedMimic {
     /// Predict \(y\) from new causes and indicators.
-    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let nc = self.n_causes;
         let n_ind = self.mean.len();
-        let ind = Matrix::from_fn(x.nrows(), n_ind, |i, j| {
-            x.get(i, nc + j)
-        });
+        let ind = Matrix::from_fn(x.nrows(), n_ind, |i, j| x.get(i, nc + j));
         let cfa = FittedConfirmatoryFactor {
             loadings: self.loadings.clone(),
             uniqueness: self.uniqueness.clone(),
@@ -3170,16 +3189,16 @@ impl FittedMimic {
 /// Path count is not identification `p`. Distinct from [`Lisrel`] (latent
 /// measurement) and [`Mimic`] (cause/indicator split).
 #[derive(Clone, Debug, Default)]
-pub struct PathAnalysis;
+pub(crate) struct PathAnalysis;
 
 impl PathAnalysis {
     /// Empty path analysis.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// OLS of \(y\) on \(X\), plus each column of \(X\) on the others.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -3190,13 +3209,7 @@ impl PathAnalysis {
         inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
         let n = x.nrows().min(y.len());
         let p = x.ncols();
-        let design = Matrix::from_fn(n, 1 + p, |i, j| {
-            if j == 0 {
-                1.0
-            } else {
-                x.get(i, j - 1)
-            }
-        });
+        let design = Matrix::from_fn(n, 1 + p, |i, j| if j == 0 { 1.0 } else { x.get(i, j - 1) });
         let mut scratch = Report::new("path", "y");
         let coef = least_squares(&mut scratch, &design, y, &ctx.policy)
             .unwrap_or_else(|| Vector::from_slice(&[y.mean()]));
@@ -3247,9 +3260,9 @@ impl PathAnalysis {
         );
         ctx.finish(FittedPathAnalysis {
             intercept: coef.as_slice().first().copied().unwrap_or(0.0),
-            coef_y: Vector::from_iter((0..p).map(|j| {
-                coef.as_slice().get(1 + j).copied().unwrap_or(0.0)
-            })),
+            coef_y: Vector::from_iter(
+                (0..p).map(|j| coef.as_slice().get(1 + j).copied().unwrap_or(0.0)),
+            ),
             paths,
         })
     }
@@ -3257,7 +3270,7 @@ impl PathAnalysis {
 
 /// Fitted observed-path model.
 #[derive(Clone, Debug)]
-pub struct FittedPathAnalysis {
+pub(crate) struct FittedPathAnalysis {
     /// Structural intercept.
     pub intercept: f64,
     /// Structural slopes on \(X\).
@@ -3268,7 +3281,7 @@ pub struct FittedPathAnalysis {
 
 impl FittedPathAnalysis {
     /// Structural prediction \(\hat y=a+X\beta\).
-    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
@@ -3288,16 +3301,16 @@ impl FittedPathAnalysis {
 /// regressors would collapse to OLS). Equation count is not identification
 /// `p`. Distinct from ordinary OLS and [`PathAnalysis`] (no GLS).
 #[derive(Clone, Debug, Default)]
-pub struct SeeminglyUnrelated;
+pub(crate) struct SeeminglyUnrelated;
 
 impl SeeminglyUnrelated {
     /// Empty SUR.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit two-equation FGLS SUR.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -3309,26 +3322,15 @@ impl SeeminglyUnrelated {
         let n = x.nrows().min(y.len());
         let p = x.ncols();
         let q1 = 1 + p.saturating_sub(1);
-        let z1 = Matrix::from_fn(n, q1, |i, j| {
-            if j == 0 {
-                1.0
-            } else {
-                x.get(i, j)
-            }
-        });
+        let z1 = Matrix::from_fn(n, q1, |i, j| if j == 0 { 1.0 } else { x.get(i, j) });
         let q2 = 1 + p.saturating_sub(2);
-        let z2 = Matrix::from_fn(n, q2, |i, j| {
-            if j == 0 {
-                1.0
-            } else {
-                x.get(i, j + 1)
-            }
-        });
+        let z2 = Matrix::from_fn(n, q2, |i, j| if j == 0 { 1.0 } else { x.get(i, j + 1) });
         let x0 = Vector::from_iter((0..n).map(|i| x.get(i, 0)));
         let mut sc1 = Report::new("sur", "eq1");
         let b1 = least_squares(&mut sc1, &z1, y, &ctx.policy).unwrap_or_else(|| Vector::zeros(q1));
         let mut sc2 = Report::new("sur", "eq2");
-        let b2 = least_squares(&mut sc2, &z2, &x0, &ctx.policy).unwrap_or_else(|| Vector::zeros(q2));
+        let b2 =
+            least_squares(&mut sc2, &z2, &x0, &ctx.policy).unwrap_or_else(|| Vector::zeros(q2));
         for issue in sc1.issues().iter().chain(sc2.issues()) {
             if matches!(
                 issue.code,
@@ -3444,11 +3446,13 @@ impl SeeminglyUnrelated {
         );
         ctx.finish(FittedSeeminglyUnrelated {
             intercept: beta.as_slice().first().copied().unwrap_or(0.0),
-            coef_y: Vector::from_iter((1..q1).map(|j| beta.as_slice().get(j).copied().unwrap_or(0.0))),
+            coef_y: Vector::from_iter(
+                (1..q1).map(|j| beta.as_slice().get(j).copied().unwrap_or(0.0)),
+            ),
             intercept_eq2: beta.as_slice().get(q1).copied().unwrap_or(0.0),
-            coef_eq2: Vector::from_iter((1..q2).map(|j| {
-                beta.as_slice().get(q1 + j).copied().unwrap_or(0.0)
-            })),
+            coef_eq2: Vector::from_iter(
+                (1..q2).map(|j| beta.as_slice().get(q1 + j).copied().unwrap_or(0.0)),
+            ),
             sigma11: s11,
             sigma12: s12,
             sigma22: s22,
@@ -3458,7 +3462,7 @@ impl SeeminglyUnrelated {
 
 /// Fitted two-equation SUR.
 #[derive(Clone, Debug)]
-pub struct FittedSeeminglyUnrelated {
+pub(crate) struct FittedSeeminglyUnrelated {
     /// Equation-1 intercept.
     pub intercept: f64,
     /// Equation-1 slopes on \(X_{\setminus 0}\).
@@ -3477,7 +3481,7 @@ pub struct FittedSeeminglyUnrelated {
 
 impl FittedSeeminglyUnrelated {
     /// Predict equation 1.
-    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
@@ -3497,17 +3501,17 @@ impl FittedSeeminglyUnrelated {
 /// Occasion count is not identification `p`. Distinct from [`LatentGrowth`]
 /// (no intercept/slope covariance) and [`ConfirmatoryFactor`] (no time coding).
 #[derive(Clone, Debug, Default)]
-pub struct GrowthCurve;
+pub(crate) struct GrowthCurve;
 
 impl GrowthCurve {
     /// Empty random-effects growth curve.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit alias.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedGrowthCurve>> {
@@ -3517,7 +3521,7 @@ impl GrowthCurve {
 
 /// Fitted random-effects growth curve.
 #[derive(Clone, Debug)]
-pub struct FittedGrowthCurve {
+pub(crate) struct FittedGrowthCurve {
     /// Per-row intercepts.
     pub intercepts: Vector,
     /// Per-row slopes.
@@ -3537,7 +3541,7 @@ pub struct FittedGrowthCurve {
 impl FitUnsupervised for GrowthCurve {
     type Fitted = FittedGrowthCurve;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedGrowthCurve>> {
@@ -3606,16 +3610,16 @@ impl FitUnsupervised for GrowthCurve {
 /// observed \(X\) in the structural equation) and [`Mimic`] (cause/indicator
 /// split).
 #[derive(Clone, Debug, Default)]
-pub struct StructuralEquation;
+pub(crate) struct StructuralEquation;
 
 impl StructuralEquation {
     /// Empty SEM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// CFA scores of \(X\), then OLS of \(y\) on \([1,X,f]\).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -3696,7 +3700,9 @@ impl StructuralEquation {
         ctx.push(
             Issue::builder(IssueCode::CausalClaimUnidentified)
                 .severity(Severity::Advisory)
-                .message("StructuralEquation is CFA scores plus OLS on [1, X, f], not published LISREL")
+                .message(
+                    "StructuralEquation is CFA scores plus OLS on [1, X, f], not published LISREL",
+                )
                 .compromise(NumericalCompromise::new(
                     "LISREL / SEM",
                     "MINRES scores of X, then OLS of y on [1, X, f]",
@@ -3707,9 +3713,9 @@ impl StructuralEquation {
         );
         ctx.finish(FittedStructuralEquation {
             intercept: coef.as_slice().first().copied().unwrap_or(0.0),
-            coef_x: Vector::from_iter((0..p).map(|j| {
-                coef.as_slice().get(1 + j).copied().unwrap_or(0.0)
-            })),
+            coef_x: Vector::from_iter(
+                (0..p).map(|j| coef.as_slice().get(1 + j).copied().unwrap_or(0.0)),
+            ),
             slope_factor: coef.as_slice().get(1 + p).copied().unwrap_or(0.0),
             scores,
         })
@@ -3718,7 +3724,7 @@ impl StructuralEquation {
 
 /// Fitted observed-plus-latent SEM.
 #[derive(Clone, Debug)]
-pub struct FittedStructuralEquation {
+pub(crate) struct FittedStructuralEquation {
     /// Structural intercept.
     pub intercept: f64,
     /// Slopes on the observed columns of \(X\).
@@ -3731,7 +3737,7 @@ pub struct FittedStructuralEquation {
 
 impl FittedStructuralEquation {
     /// Predict \(y\) from new \(X\) using stored CFA scores of the new rows.
-    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {

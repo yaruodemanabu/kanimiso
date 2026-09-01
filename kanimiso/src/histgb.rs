@@ -15,7 +15,7 @@ use signlred::{Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified
 
 /// Histogram gradient-boosting regressor (squared error).
 #[derive(Clone, Debug)]
-pub struct HistGradientBoostingRegressor {
+pub(crate) struct HistGradientBoostingRegressor {
     /// Boosting rounds.
     pub max_iter: usize,
     /// Shrinkage \(\nu\).
@@ -45,14 +45,14 @@ impl Default for HistGradientBoostingRegressor {
 
 impl HistGradientBoostingRegressor {
     /// Default histogram GBDT regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Histogram gradient-boosting classifier (binary logistic or softmax).
 #[derive(Clone, Debug)]
-pub struct HistGradientBoostingClassifier {
+pub(crate) struct HistGradientBoostingClassifier {
     /// Boosting rounds.
     pub max_iter: usize,
     /// Shrinkage \(\nu\).
@@ -82,14 +82,14 @@ impl Default for HistGradientBoostingClassifier {
 
 impl HistGradientBoostingClassifier {
     /// Default histogram GBDT classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted histogram GBDT (regression or a single score).
 #[derive(Clone, Debug)]
-pub struct FittedHistGbr {
+pub(crate) struct FittedHistGbr {
     trees: Vec<HNode>,
     /// Training intercept (mean of \(y\)).
     pub intercept: f64,
@@ -101,7 +101,7 @@ pub struct FittedHistGbr {
 
 /// Fitted histogram GBDT classifier.
 #[derive(Clone, Debug)]
-pub struct FittedHistGbc {
+pub(crate) struct FittedHistGbc {
     /// One tree sequence per class (softmax); length 1 is binary logistic.
     trees: Vec<Vec<HNode>>,
     /// Per-class intercepts.
@@ -335,12 +335,7 @@ fn build_edges(ctx: &mut FitCtx, x: &Matrix, max_bins: usize) -> Vec<Vec<f64>> {
 
 impl Fit for HistGradientBoostingRegressor {
     type Fitted = FittedHistGbr;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedHistGbr>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedHistGbr>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         if ctx.report.contains(IssueCode::ConstantTarget)
@@ -417,12 +412,7 @@ impl Predict for FittedHistGbr {
 
 impl Fit for HistGradientBoostingClassifier {
     type Fitted = FittedHistGbc;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedHistGbc>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedHistGbc>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);

@@ -45,7 +45,7 @@ fn warn_jl(ctx: &mut FitCtx, n: usize, k: usize, eps: f64, what: &str) {
 
 /// Dense Gaussian random projection.
 #[derive(Clone, Debug)]
-pub struct GaussianRandomProjection {
+pub(crate) struct GaussianRandomProjection {
     /// Target dimension.
     pub n_components: usize,
     /// JL distortion `ε` used only for the warning bound.
@@ -70,7 +70,7 @@ impl Default for GaussianRandomProjection {
 
 impl GaussianRandomProjection {
     /// Project to `n_components`.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(1),
             ..Self::default()
@@ -80,18 +80,19 @@ impl GaussianRandomProjection {
 
 impl FitUnsupervised for GaussianRandomProjection {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        let k = self.n_components.max(1);
+        let k = this.n_components.max(1);
         // Do not inspect_identification(n, k): k is a sketch size, not a model order.
-        warn_jl(&mut ctx, x.nrows(), k, self.eps, "GaussianRandomProjection");
+        warn_jl(&mut ctx, x.nrows(), k, this.eps, "GaussianRandomProjection");
         let p = x.ncols();
-        let mut rng = Rng::new(self.seed | 1);
+        let mut rng = Rng::new(this.seed | 1);
         let scale = 1.0 / (k as f64).sqrt();
-        self.components = Matrix::from_fn(p, k, |_, _| rng.standard_normal() * scale);
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.components = Matrix::from_fn(p, k, |_, _| rng.standard_normal() * scale);
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -123,7 +124,7 @@ impl Transform for GaussianRandomProjection {
 
 /// Achlioptas sparse random projection.
 #[derive(Clone, Debug)]
-pub struct SparseRandomProjection {
+pub(crate) struct SparseRandomProjection {
     /// Target dimension.
     pub n_components: usize,
     /// Density `1/s` (`s = √p` when `None`).
@@ -151,7 +152,7 @@ impl Default for SparseRandomProjection {
 
 impl SparseRandomProjection {
     /// Project to `n_components`.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(1),
             ..Self::default()
@@ -161,13 +162,14 @@ impl SparseRandomProjection {
 
 impl FitUnsupervised for SparseRandomProjection {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        let k = self.n_components.max(1);
-        warn_jl(&mut ctx, x.nrows(), k, self.eps, "SparseRandomProjection");
+        let k = this.n_components.max(1);
+        warn_jl(&mut ctx, x.nrows(), k, this.eps, "SparseRandomProjection");
         let p = x.ncols().max(1);
-        let s = if let Some(d) = self.density {
+        let s = if let Some(d) = this.density {
             if !d.is_finite() || d <= 0.0 || d > 1.0 {
                 ctx.push(
                     Issue::builder(IssueCode::InvalidWeight)
@@ -182,10 +184,10 @@ impl FitUnsupervised for SparseRandomProjection {
         } else {
             (p as f64).sqrt().max(1.0)
         };
-        let mut rng = Rng::new(self.seed | 3);
+        let mut rng = Rng::new(this.seed | 3);
         let scale = (s / k as f64).sqrt();
         let inv_s = 1.0 / s;
-        self.components = Matrix::from_fn(x.ncols(), k, |_, _| {
+        this.components = Matrix::from_fn(x.ncols(), k, |_, _| {
             let u = rng.uniform();
             if u < inv_s / 2.0 {
                 scale
@@ -195,8 +197,8 @@ impl FitUnsupervised for SparseRandomProjection {
                 0.0
             }
         });
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 

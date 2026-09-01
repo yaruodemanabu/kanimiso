@@ -167,7 +167,7 @@ fn warn_stress(ctx: &mut FitCtx, stress: f64) {
 
 /// Classical multidimensional scaling from a distance matrix or from Euclidean `X`.
 #[derive(Clone, Debug)]
-pub struct MDS {
+pub(crate) struct MDS {
     /// Embedding dimension.
     pub n_components: usize,
 }
@@ -180,12 +180,12 @@ impl Default for MDS {
 
 impl MDS {
     /// MDS onto `k` coordinates.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self { n_components }
     }
 
     /// Embed a symmetric distance matrix.
-    pub fn fit_distances(
+    pub(crate) fn fit_distances(
         &self,
         dist: &Matrix,
         session: &Session,
@@ -212,7 +212,7 @@ impl MDS {
 
 /// Fitted manifold coordinates plus Kruskal stress.
 #[derive(Clone, Debug)]
-pub struct FittedEmbedding {
+pub(crate) struct FittedEmbedding {
     /// Embedded coordinates (`n × k`).
     pub embedding: Matrix,
     /// Kruskal stress (NaN when undefined).
@@ -222,7 +222,7 @@ pub struct FittedEmbedding {
 impl FitUnsupervised for MDS {
     type Fitted = FittedEmbedding;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedEmbedding>> {
@@ -274,7 +274,7 @@ fn floyd(n: usize, edges: &[(usize, usize, f64)]) -> Matrix {
 
 /// Isomap: k-NN geodesic distances (Floyd–Warshall) + classical MDS.
 #[derive(Clone, Debug)]
-pub struct Isomap {
+pub(crate) struct Isomap {
     /// Neighbors per point.
     pub n_neighbors: usize,
     /// Embedding dimension.
@@ -292,7 +292,7 @@ impl Default for Isomap {
 
 impl Isomap {
     /// Isomap with `k` neighbors onto `d` coordinates.
-    pub fn new(n_neighbors: usize, n_components: usize) -> Self {
+    pub(crate) fn new(n_neighbors: usize, n_components: usize) -> Self {
         Self {
             n_neighbors,
             n_components,
@@ -303,7 +303,7 @@ impl Isomap {
 impl FitUnsupervised for Isomap {
     type Fitted = FittedEmbedding;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedEmbedding>> {
@@ -376,7 +376,7 @@ fn rbf_affinity(x: &Matrix, gamma: f64) -> Mat<f64> {
 
 /// Laplacian eigenmaps (normalized spectral embedding).
 #[derive(Clone, Debug)]
-pub struct SpectralEmbedding {
+pub(crate) struct SpectralEmbedding {
     /// Embedding dimension (skips the constant eigenvector).
     pub n_components: usize,
     /// RBF `γ` in `exp(−γ ‖x−x'‖²)`.
@@ -394,7 +394,7 @@ impl Default for SpectralEmbedding {
 
 impl SpectralEmbedding {
     /// Spectral embedding onto `k` coordinates.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components,
             ..Self::default()
@@ -405,7 +405,7 @@ impl SpectralEmbedding {
 impl FitUnsupervised for SpectralEmbedding {
     type Fitted = FittedEmbedding;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedEmbedding>> {
@@ -469,7 +469,7 @@ impl FitUnsupervised for SpectralEmbedding {
 
 /// Locally linear embedding.
 #[derive(Clone, Debug)]
-pub struct LocallyLinearEmbedding {
+pub(crate) struct LocallyLinearEmbedding {
     /// Neighbors per point.
     pub n_neighbors: usize,
     /// Embedding dimension.
@@ -487,7 +487,7 @@ impl Default for LocallyLinearEmbedding {
 
 impl LocallyLinearEmbedding {
     /// LLE with `k` neighbors onto `d` coordinates.
-    pub fn new(n_neighbors: usize, n_components: usize) -> Self {
+    pub(crate) fn new(n_neighbors: usize, n_components: usize) -> Self {
         Self {
             n_neighbors,
             n_components,
@@ -498,7 +498,7 @@ impl LocallyLinearEmbedding {
 impl FitUnsupervised for LocallyLinearEmbedding {
     type Fitted = FittedEmbedding;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedEmbedding>> {
@@ -645,12 +645,7 @@ fn orthonormalize_columns(a: &mut Matrix) {
     }
 }
 
-fn embed_smallest_eigs(
-    ctx: &mut FitCtx,
-    m: &Mat<f64>,
-    n: usize,
-    n_components: usize,
-) -> Matrix {
+fn embed_smallest_eigs(ctx: &mut FitCtx, m: &Mat<f64>, n: usize, n_components: usize) -> Matrix {
     let k = n_components.max(1);
     let Some((vals, vecs)) = symmetric_eigen(&mut ctx.report, m, &ctx.policy) else {
         return Matrix::zeros(n, k);
@@ -676,7 +671,7 @@ fn embed_smallest_eigs(
 ///
 /// Neighbor / Hessian-monomial counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct HessianLle {
+pub(crate) struct HessianLle {
     /// Neighbors per point (expanded to the quadratic design width when needed).
     pub n_neighbors: usize,
     /// Embedding dimension.
@@ -694,7 +689,7 @@ impl Default for HessianLle {
 
 impl HessianLle {
     /// Hessian LLE with `k` neighbors onto `d` coordinates.
-    pub fn new(n_neighbors: usize, n_components: usize) -> Self {
+    pub(crate) fn new(n_neighbors: usize, n_components: usize) -> Self {
         Self {
             n_neighbors,
             n_components,
@@ -705,7 +700,7 @@ impl HessianLle {
 impl FitUnsupervised for HessianLle {
     type Fitted = FittedEmbedding;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedEmbedding>> {
@@ -787,7 +782,9 @@ impl FitUnsupervised for HessianLle {
         ctx.push(
             Issue::builder(IssueCode::CausalClaimUnidentified)
                 .severity(Severity::Advisory)
-                .message("HessianLle is a Gram–Schmidt Hessian sketch, not sklearn's exact eigenmaps")
+                .message(
+                    "HessianLle is a Gram–Schmidt Hessian sketch, not sklearn's exact eigenmaps",
+                )
                 .compromise(NumericalCompromise::new(
                     "Donoho–Grimes Hessian eigenmaps",
                     "local PCA plus orthonormalized quadratic monomials",
@@ -809,7 +806,7 @@ impl FitUnsupervised for HessianLle {
 /// Uses the local Gram null space rather than \(G^{-1}\mathbf{1}\). Neighbor
 /// count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ModifiedLle {
+pub(crate) struct ModifiedLle {
     /// Neighbors per point.
     pub n_neighbors: usize,
     /// Embedding dimension.
@@ -827,7 +824,7 @@ impl Default for ModifiedLle {
 
 impl ModifiedLle {
     /// Modified LLE with `k` neighbors onto `d` coordinates.
-    pub fn new(n_neighbors: usize, n_components: usize) -> Self {
+    pub(crate) fn new(n_neighbors: usize, n_components: usize) -> Self {
         Self {
             n_neighbors,
             n_components,
@@ -838,7 +835,7 @@ impl ModifiedLle {
 impl FitUnsupervised for ModifiedLle {
     type Fitted = FittedEmbedding;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedEmbedding>> {
@@ -877,7 +874,8 @@ impl FitUnsupervised for ModifiedLle {
                         .enumerate()
                         .map(|(i, v)| (v, i))
                         .collect();
-                    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                    pairs
+                        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
                     let sdim = k.saturating_sub(d).max(1).min(pairs.len());
                     let mut raw = vec![0.0; k];
                     for &(_, idx) in pairs.iter().take(sdim) {
@@ -936,7 +934,7 @@ impl FitUnsupervised for ModifiedLle {
 ///
 /// Neighbor count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Ltsa {
+pub(crate) struct Ltsa {
     /// Neighbors per point.
     pub n_neighbors: usize,
     /// Embedding dimension.
@@ -954,7 +952,7 @@ impl Default for Ltsa {
 
 impl Ltsa {
     /// LTSA with `k` neighbors onto `d` coordinates.
-    pub fn new(n_neighbors: usize, n_components: usize) -> Self {
+    pub(crate) fn new(n_neighbors: usize, n_components: usize) -> Self {
         Self {
             n_neighbors,
             n_components,
@@ -965,7 +963,7 @@ impl Ltsa {
 impl FitUnsupervised for Ltsa {
     type Fitted = FittedEmbedding;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedEmbedding>> {
@@ -987,13 +985,18 @@ impl FitUnsupervised for Ltsa {
             };
             let dd = u.ncols();
             let kf = (k as f64).sqrt();
-            let mut gi = Matrix::from_fn(k, 1 + dd, |a, c| {
-                if c == 0 {
-                    1.0 / kf
-                } else {
-                    u.get(a, c - 1)
-                }
-            });
+            let mut gi =
+                Matrix::from_fn(
+                    k,
+                    1 + dd,
+                    |a, c| {
+                        if c == 0 {
+                            1.0 / kf
+                        } else {
+                            u.get(a, c - 1)
+                        }
+                    },
+                );
             orthonormalize_columns(&mut gi);
             let q = gi.ncols();
             for a in 0..k {
@@ -1042,7 +1045,7 @@ impl FitUnsupervised for Ltsa {
 
 /// Exact t-SNE for small `n` (student-t affinities, early exaggeration).
 #[derive(Clone, Debug)]
-pub struct TSNE {
+pub(crate) struct TSNE {
     /// Embedding dimension (2 or 3).
     pub n_components: usize,
     /// Perplexity target for the input Gaussians.
@@ -1075,7 +1078,7 @@ impl Default for TSNE {
 
 impl TSNE {
     /// Small-n exact t-SNE.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components,
             ..Self::default()
@@ -1119,7 +1122,7 @@ fn binary_search_sigma(d2: &[f64], perplexity: f64) -> f64 {
 impl FitUnsupervised for TSNE {
     type Fitted = FittedEmbedding;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedEmbedding>> {

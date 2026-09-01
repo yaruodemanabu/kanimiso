@@ -87,7 +87,7 @@ fn log_normal(x: f64, mean: f64, var: f64) -> f64 {
 
 /// Gaussian Naive Bayes with online (Welford) class-conditional updates.
 #[derive(Clone, Debug)]
-pub struct GaussianNB {
+pub(crate) struct GaussianNB {
     /// Fraction of the global feature variance added to every class variance.
     pub var_smoothing: f64,
     n_features: Option<usize>,
@@ -122,29 +122,29 @@ impl Default for GaussianNB {
 
 impl GaussianNB {
     /// Default Gaussian NB (`var_smoothing = 1e-9`).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Effective sample size after all `partial_fit` / `fit` calls.
-    pub fn n_eff(&self) -> f64 {
+    pub(crate) fn n_eff(&self) -> f64 {
         self.n_seen as f64
     }
 
     /// Sorted labels seen so far.
-    pub fn classes(&self) -> &[i64] {
+    pub(crate) fn classes(&self) -> &[i64] {
         &self.classes
     }
 
     /// Class-conditional means (`K × p`), or `None` before the first update.
-    pub fn class_means(&self) -> Option<Matrix> {
+    pub(crate) fn class_means(&self) -> Option<Matrix> {
         let p = self.n_features?;
         let k = self.classes.len();
         Some(Matrix::from_fn(k, p, |c, j| self.mean[c][j]))
     }
 
     /// Smoothed class-conditional variances (`K × p`).
-    pub fn class_vars(&self) -> Option<Matrix> {
+    pub(crate) fn class_vars(&self) -> Option<Matrix> {
         let p = self.n_features?;
         let k = self.classes.len();
         let smooth = self.smoothing();
@@ -253,7 +253,7 @@ impl GaussianNB {
 
 /// Batch-fitted Gaussian NB (also produced by [`GaussianNB::fit`]).
 #[derive(Clone, Debug)]
-pub struct FittedGaussianNB {
+pub(crate) struct FittedGaussianNB {
     /// Sorted unique labels.
     pub classes: Vec<i64>,
     /// Class priors.
@@ -307,12 +307,12 @@ impl Predict for GaussianNB {
 impl Fit for GaussianNB {
     type Fitted = FittedGaussianNB;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedGaussianNB>> {
-        *self = GaussianNB {
+        let mut this = GaussianNB {
             var_smoothing: self.var_smoothing,
             ..GaussianNB::default()
         };
@@ -321,24 +321,24 @@ impl Fit for GaussianNB {
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
         inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
         if counts.len() < 2 {
-            return ctx.finish(self.to_fitted());
+            return ctx.finish(this.to_fitted());
         }
         // Drive the same Welford path as partial_fit so n_eff / means stay consistent.
-        let expl = apply_welford(self, x, y, &mut ctx, false);
+        let expl = apply_welford(&mut this, x, y, &mut ctx, false);
         let _ = expl;
-        for (c, n) in self.class_n.iter().enumerate() {
+        for (c, n) in this.class_n.iter().enumerate() {
             if *n < 2.0 {
                 ctx.push(
                     Issue::builder(IssueCode::DegenerateDistribution)
                         .message(format!(
                             "class {} has n_eff={n}; class-conditional variance is unidentified before smoothing",
-                            self.classes[c]
+                            this.classes[c]
                         ))
                         .build(),
                 );
             }
         }
-        let fitted = self.to_fitted();
+        let fitted = this.to_fitted();
         let pred = fitted.predict_vec(x);
         diagnose_constant_predictions(&mut ctx, &pred, y);
         ctx.finish(fitted)
@@ -533,7 +533,7 @@ impl PartialFit for GaussianNB {
 
 /// Multinomial Naive Bayes (count features, Laplace / Lidstone smoothing).
 #[derive(Clone, Debug)]
-pub struct MultinomialNB {
+pub(crate) struct MultinomialNB {
     /// Additive smoothing \(\alpha \ge 0\).
     pub alpha: f64,
 }
@@ -546,14 +546,14 @@ impl Default for MultinomialNB {
 
 impl MultinomialNB {
     /// Multinomial NB with the given smoothing.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self { alpha }
     }
 }
 
 /// Fitted multinomial / complement / Bernoulli NB.
 #[derive(Clone, Debug)]
-pub struct FittedDiscreteNB {
+pub(crate) struct FittedDiscreteNB {
     /// Sorted unique labels.
     pub classes: Vec<i64>,
     /// Log class priors.
@@ -698,7 +698,7 @@ fn fit_count_nb(
 impl Fit for MultinomialNB {
     type Fitted = FittedDiscreteNB;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -716,7 +716,7 @@ impl Fit for MultinomialNB {
 
 /// Bernoulli Naive Bayes (binary features).
 #[derive(Clone, Debug)]
-pub struct BernoulliNB {
+pub(crate) struct BernoulliNB {
     /// Additive smoothing.
     pub alpha: f64,
     /// Values strictly above this threshold are treated as 1.
@@ -734,14 +734,14 @@ impl Default for BernoulliNB {
 
 impl BernoulliNB {
     /// Default Bernoulli NB.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted Bernoulli NB (stores log \(\theta\) and log \(1-\theta\)).
 #[derive(Clone, Debug)]
-pub struct FittedBernoulliNB {
+pub(crate) struct FittedBernoulliNB {
     /// Sorted unique labels.
     pub classes: Vec<i64>,
     /// Log class priors.
@@ -788,7 +788,7 @@ impl Predict for FittedBernoulliNB {
 impl Fit for BernoulliNB {
     type Fitted = FittedBernoulliNB;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -852,7 +852,7 @@ impl Fit for BernoulliNB {
 
 /// Complement Naive Bayes (Rennie et al.) for skewed class priors.
 #[derive(Clone, Debug)]
-pub struct ComplementNB {
+pub(crate) struct ComplementNB {
     /// Additive smoothing.
     pub alpha: f64,
 }
@@ -865,7 +865,7 @@ impl Default for ComplementNB {
 
 impl ComplementNB {
     /// Complement NB with the given smoothing.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self { alpha }
     }
 }
@@ -873,7 +873,7 @@ impl ComplementNB {
 impl Fit for ComplementNB {
     type Fitted = FittedDiscreteNB;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -891,7 +891,7 @@ impl Fit for ComplementNB {
 
 /// Categorical Naive Bayes (integer feature codes).
 #[derive(Clone, Debug)]
-pub struct CategoricalNB {
+pub(crate) struct CategoricalNB {
     /// Additive smoothing \(\alpha \ge 0\).
     pub alpha: f64,
 }
@@ -904,14 +904,14 @@ impl Default for CategoricalNB {
 
 impl CategoricalNB {
     /// Categorical NB with the given smoothing.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self { alpha }
     }
 }
 
 /// Fitted categorical NB.
 #[derive(Clone, Debug)]
-pub struct FittedCategoricalNB {
+pub(crate) struct FittedCategoricalNB {
     /// Sorted unique labels.
     pub classes: Vec<i64>,
     /// Log class priors.
@@ -959,7 +959,7 @@ impl Predict for FittedCategoricalNB {
 impl Fit for CategoricalNB {
     type Fitted = FittedCategoricalNB;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,

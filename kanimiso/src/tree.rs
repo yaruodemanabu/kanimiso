@@ -19,7 +19,7 @@ const EULER_GAMMA: f64 = 0.5772156649015329;
 /// Average unsuccessful BST path length \(c(n)\) (Liu et al., Isolation Forest).
 ///
 /// The anomaly module reuses this offset when it scores path lengths.
-pub fn isolation_c_factor(n: f64) -> f64 {
+pub(crate) fn isolation_c_factor(n: f64) -> f64 {
     if n <= 1.0 {
         0.0
     } else if n <= 2.0 {
@@ -739,7 +739,7 @@ fn predict_shape_guard(ctx: &mut FitCtx, x: &Matrix, n_features: usize) {
 
 /// CART classifier using Gini impurity.
 #[derive(Clone, Debug)]
-pub struct DecisionTreeClassifier {
+pub(crate) struct DecisionTreeClassifier {
     /// Maximum tree depth (root is depth 0; `0` yields a stump leaf).
     pub max_depth: usize,
     /// Minimum samples required to attempt a split.
@@ -763,14 +763,14 @@ impl Default for DecisionTreeClassifier {
 
 impl DecisionTreeClassifier {
     /// Default Gini tree (`max_depth = 8`).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted CART classifier.
 #[derive(Clone, Debug)]
-pub struct FittedTreeClassifier {
+pub(crate) struct FittedTreeClassifier {
     root: ClassNode,
     /// Sorted unique training labels.
     pub classes: Vec<i64>,
@@ -780,7 +780,7 @@ pub struct FittedTreeClassifier {
 
 impl FittedTreeClassifier {
     /// Class-probability vector for row `i` of `x` (aligned with [`Self::classes`]).
-    pub fn predict_proba_row(&self, x: &Matrix, i: usize) -> Vec<f64> {
+    pub(crate) fn predict_proba_row(&self, x: &Matrix, i: usize) -> Vec<f64> {
         predict_class_proba(&self.root, x, i, self.classes.len())
     }
 }
@@ -797,7 +797,7 @@ impl Predict for FittedTreeClassifier {
 impl Fit for DecisionTreeClassifier {
     type Fitted = FittedTreeClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -859,7 +859,7 @@ impl Fit for DecisionTreeClassifier {
 
 /// CART regressor using mean-squared-error impurity.
 #[derive(Clone, Debug)]
-pub struct DecisionTreeRegressor {
+pub(crate) struct DecisionTreeRegressor {
     /// Maximum tree depth.
     pub max_depth: usize,
     /// Minimum samples required to attempt a split.
@@ -883,14 +883,14 @@ impl Default for DecisionTreeRegressor {
 
 impl DecisionTreeRegressor {
     /// Default MSE tree.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted CART regressor.
 #[derive(Clone, Debug)]
-pub struct FittedTreeRegressor {
+pub(crate) struct FittedTreeRegressor {
     root: RegNode,
     /// Training feature count.
     pub n_features: usize,
@@ -908,7 +908,7 @@ impl Predict for FittedTreeRegressor {
 impl Fit for DecisionTreeRegressor {
     type Fitted = FittedTreeRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -944,7 +944,7 @@ impl Fit for DecisionTreeRegressor {
 
 /// Bootstrap-aggregated Gini trees with per-node feature subsample.
 #[derive(Clone, Debug)]
-pub struct RandomForestClassifier {
+pub(crate) struct RandomForestClassifier {
     /// Number of trees.
     pub n_estimators: usize,
     /// Maximum tree depth.
@@ -971,14 +971,14 @@ impl Default for RandomForestClassifier {
 
 impl RandomForestClassifier {
     /// Default random forest classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted classification forest (random forest or extra-trees).
 #[derive(Clone, Debug)]
-pub struct FittedForestClassifier {
+pub(crate) struct FittedForestClassifier {
     trees: Vec<ClassNode>,
     /// Sorted unique training labels.
     pub classes: Vec<i64>,
@@ -1071,7 +1071,7 @@ fn grow_forest_class(
 impl Fit for RandomForestClassifier {
     type Fitted = FittedForestClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -1114,7 +1114,7 @@ impl Fit for RandomForestClassifier {
 
 /// Bootstrap-aggregated MSE trees with per-node feature subsample.
 #[derive(Clone, Debug)]
-pub struct RandomForestRegressor {
+pub(crate) struct RandomForestRegressor {
     /// Number of trees.
     pub n_estimators: usize,
     /// Maximum tree depth.
@@ -1141,14 +1141,14 @@ impl Default for RandomForestRegressor {
 
 impl RandomForestRegressor {
     /// Default random forest regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted regression forest.
 #[derive(Clone, Debug)]
-pub struct FittedForestRegressor {
+pub(crate) struct FittedForestRegressor {
     trees: Vec<RegNode>,
     /// Training feature count.
     pub n_features: usize,
@@ -1178,7 +1178,7 @@ impl Predict for FittedForestRegressor {
 impl Fit for RandomForestRegressor {
     type Fitted = FittedForestRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -1237,7 +1237,7 @@ impl Fit for RandomForestRegressor {
 
 /// Extremely randomized Gini trees (random thresholds, full sample).
 #[derive(Clone, Debug)]
-pub struct ExtraTreesClassifier {
+pub(crate) struct ExtraTreesClassifier {
     /// Number of trees.
     pub n_estimators: usize,
     /// Maximum tree depth.
@@ -1264,7 +1264,7 @@ impl Default for ExtraTreesClassifier {
 
 impl ExtraTreesClassifier {
     /// Default extra-trees classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -1272,7 +1272,7 @@ impl ExtraTreesClassifier {
 impl Fit for ExtraTreesClassifier {
     type Fitted = FittedForestClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -1317,7 +1317,7 @@ impl Fit for ExtraTreesClassifier {
 /// This is [`ExtraTreesClassifier`] with one tree. Feature subsample size is
 /// not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ExtraTreeClassifier {
+pub(crate) struct ExtraTreeClassifier {
     /// Maximum tree depth.
     pub max_depth: usize,
     /// Minimum samples required to attempt a split.
@@ -1341,7 +1341,7 @@ impl Default for ExtraTreeClassifier {
 
 impl ExtraTreeClassifier {
     /// Default single extra-tree classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -1349,7 +1349,7 @@ impl ExtraTreeClassifier {
 impl Fit for ExtraTreeClassifier {
     type Fitted = FittedForestClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -1367,7 +1367,7 @@ impl Fit for ExtraTreeClassifier {
 
 /// Extremely randomized MSE trees (random thresholds, full sample).
 #[derive(Clone, Debug)]
-pub struct ExtraTreesRegressor {
+pub(crate) struct ExtraTreesRegressor {
     /// Number of trees.
     pub n_estimators: usize,
     /// Maximum tree depth.
@@ -1394,7 +1394,7 @@ impl Default for ExtraTreesRegressor {
 
 impl ExtraTreesRegressor {
     /// Default extra-trees regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -1402,7 +1402,7 @@ impl ExtraTreesRegressor {
 impl Fit for ExtraTreesRegressor {
     type Fitted = FittedForestRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -1460,7 +1460,7 @@ impl Fit for ExtraTreesRegressor {
 /// This is [`ExtraTreesRegressor`] with one tree. Feature subsample size is
 /// not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ExtraTreeRegressor {
+pub(crate) struct ExtraTreeRegressor {
     /// Maximum tree depth.
     pub max_depth: usize,
     /// Minimum samples required to attempt a split.
@@ -1484,7 +1484,7 @@ impl Default for ExtraTreeRegressor {
 
 impl ExtraTreeRegressor {
     /// Default single extra-tree regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -1492,7 +1492,7 @@ impl ExtraTreeRegressor {
 impl Fit for ExtraTreeRegressor {
     type Fitted = FittedForestRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -1510,7 +1510,7 @@ impl Fit for ExtraTreeRegressor {
 
 /// Friedman gradient boosting for squared error.
 #[derive(Clone, Debug)]
-pub struct GradientBoostingRegressor {
+pub(crate) struct GradientBoostingRegressor {
     /// Number of sequential trees.
     pub n_estimators: usize,
     /// Shrinkage \(\nu\).
@@ -1537,14 +1537,14 @@ impl Default for GradientBoostingRegressor {
 
 impl GradientBoostingRegressor {
     /// Default squared-error gradient booster.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted squared-error gradient booster.
 #[derive(Clone, Debug)]
-pub struct FittedGbr {
+pub(crate) struct FittedGbr {
     /// Initial constant (training mean).
     pub intercept: f64,
     trees: Vec<RegNode>,
@@ -1577,7 +1577,7 @@ impl Predict for FittedGbr {
 
 impl Fit for GradientBoostingRegressor {
     type Fitted = FittedGbr;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGbr>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGbr>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let intercept = y.mean();
@@ -1639,7 +1639,7 @@ impl Fit for GradientBoostingRegressor {
 
 /// Friedman gradient boosting for binomial / multinomial log-loss.
 #[derive(Clone, Debug)]
-pub struct GradientBoostingClassifier {
+pub(crate) struct GradientBoostingClassifier {
     /// Number of sequential stages.
     pub n_estimators: usize,
     /// Shrinkage \(\nu\).
@@ -1666,14 +1666,14 @@ impl Default for GradientBoostingClassifier {
 
 impl GradientBoostingClassifier {
     /// Default log-loss gradient booster.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted log-loss gradient booster.
 #[derive(Clone, Debug)]
-pub struct FittedGbc {
+pub(crate) struct FittedGbc {
     /// Sorted unique training labels.
     pub classes: Vec<i64>,
     /// Per-class initial scores (log-odds / zero-mean log-prior).
@@ -1773,7 +1773,7 @@ impl Predict for FittedGbc {
 
 impl Fit for GradientBoostingClassifier {
     type Fitted = FittedGbc;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGbc>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGbc>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -1895,7 +1895,7 @@ impl Fit for GradientBoostingClassifier {
 
 /// AdaBoost label-update scheme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AdaBoostAlgorithm {
+pub(crate) enum AdaBoostAlgorithm {
     /// Discrete SAMME (Zhu et al.).
     Samme,
     /// Real SAMME.R using class probabilities.
@@ -1904,7 +1904,7 @@ pub enum AdaBoostAlgorithm {
 
 /// SAMME / SAMME.R AdaBoost classifier.
 #[derive(Clone, Debug)]
-pub struct AdaBoostClassifier {
+pub(crate) struct AdaBoostClassifier {
     /// Number of weak learners.
     pub n_estimators: usize,
     /// Shrinkage on the additive model.
@@ -1931,14 +1931,14 @@ impl Default for AdaBoostClassifier {
 
 impl AdaBoostClassifier {
     /// Default SAMME.R AdaBoost.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted AdaBoost model.
 #[derive(Clone, Debug)]
-pub struct FittedAdaBoost {
+pub(crate) struct FittedAdaBoost {
     trees: Vec<ClassNode>,
     /// SAMME weights (`α_m`); empty when using SAMME.R.
     pub alphas: Vec<f64>,
@@ -1998,12 +1998,7 @@ impl Predict for FittedAdaBoost {
 
 impl Fit for AdaBoostClassifier {
     type Fitted = FittedAdaBoost;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedAdaBoost>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedAdaBoost>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -2131,7 +2126,7 @@ impl Fit for AdaBoostClassifier {
 
 /// AdaBoost.R2 regressor (Drucker 1997).
 #[derive(Clone, Debug)]
-pub struct AdaBoostRegressor {
+pub(crate) struct AdaBoostRegressor {
     /// Number of weak learners.
     pub n_estimators: usize,
     /// Shrinkage on \(\ln(1/\beta)\).
@@ -2155,14 +2150,14 @@ impl Default for AdaBoostRegressor {
 
 impl AdaBoostRegressor {
     /// Default AdaBoost.R2.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted AdaBoost.R2 model.
 #[derive(Clone, Debug)]
-pub struct FittedAdaBoostRegressor {
+pub(crate) struct FittedAdaBoostRegressor {
     trees: Vec<RegNode>,
     /// Stage weights \(\ln(1/\beta_m)\).
     pub alphas: Vec<f64>,
@@ -2208,7 +2203,7 @@ impl Predict for FittedAdaBoostRegressor {
 impl Fit for AdaBoostRegressor {
     type Fitted = FittedAdaBoostRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -2324,7 +2319,7 @@ impl Fit for AdaBoostRegressor {
 ///
 /// The later `anomaly` module reuses [`FittedIsolationForest`] scores.
 #[derive(Clone, Debug)]
-pub struct IsolationForest {
+pub(crate) struct IsolationForest {
     /// Number of isolation trees.
     pub n_trees: usize,
     /// PRNG seed.
@@ -2342,14 +2337,14 @@ impl Default for IsolationForest {
 
 impl IsolationForest {
     /// Isolation forest with `n_trees` trees.
-    pub fn new(n_trees: usize) -> Self {
+    pub(crate) fn new(n_trees: usize) -> Self {
         Self { n_trees, seed: 0 }
     }
 }
 
 /// Fitted isolation forest.
 #[derive(Clone, Debug)]
-pub struct FittedIsolationForest {
+pub(crate) struct FittedIsolationForest {
     trees: Vec<IsoNode>,
     /// Subsample size used to grow each tree (and in \(c(n)\)).
     pub max_samples: usize,
@@ -2361,7 +2356,7 @@ pub struct FittedIsolationForest {
 
 impl FittedIsolationForest {
     /// Mean path length of row `i`.
-    pub fn average_path_length(&self, x: &Matrix, i: usize) -> f64 {
+    pub(crate) fn average_path_length(&self, x: &Matrix, i: usize) -> f64 {
         if self.trees.is_empty() {
             return 0.0;
         }
@@ -2373,7 +2368,7 @@ impl FittedIsolationForest {
     }
 
     /// Liu et al. anomaly score \(s(x,n)=2^{-E(h)/c(n)}\) (higher = more anomalous).
-    pub fn score_samples(&self, x: &Matrix) -> Vector {
+    pub(crate) fn score_samples(&self, x: &Matrix) -> Vector {
         let c = if self.c_norm > 0.0 { self.c_norm } else { 1.0 };
         Vector::from_iter((0..x.nrows()).map(|i| {
             let eh = self.average_path_length(x, i);
@@ -2394,7 +2389,7 @@ impl Predict for FittedIsolationForest {
 impl FitUnsupervised for IsolationForest {
     type Fitted = FittedIsolationForest;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedIsolationForest>> {
@@ -2480,7 +2475,7 @@ fn iso_leaf_code(node: &IsoNode, x: &Matrix, i: usize) -> u64 {
 ///
 /// Tree count and hash width are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RandomTreesEmbedding {
+pub(crate) struct RandomTreesEmbedding {
     /// Number of random trees.
     pub n_estimators: usize,
     /// Hashed leaf-code width.
@@ -2501,7 +2496,7 @@ impl Default for RandomTreesEmbedding {
 
 impl RandomTreesEmbedding {
     /// Embedding with `n_estimators` trees and `n_components` hash bins.
-    pub fn new(n_estimators: usize, n_components: usize) -> Self {
+    pub(crate) fn new(n_estimators: usize, n_components: usize) -> Self {
         Self {
             n_estimators,
             n_components,
@@ -2512,7 +2507,7 @@ impl RandomTreesEmbedding {
 
 /// Fitted random-tree leaf embedding.
 #[derive(Clone, Debug)]
-pub struct FittedRandomTreesEmbedding {
+pub(crate) struct FittedRandomTreesEmbedding {
     trees: Vec<IsoNode>,
     n_components: usize,
     n_features: usize,
@@ -2521,7 +2516,7 @@ pub struct FittedRandomTreesEmbedding {
 impl FitUnsupervised for RandomTreesEmbedding {
     type Fitted = FittedRandomTreesEmbedding;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedRandomTreesEmbedding>> {

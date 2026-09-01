@@ -379,7 +379,7 @@ fn logsumexp(xs: &[f64]) -> f64 {
 
 /// Batch k-means with k-means++ initialization and Lloyd updates.
 #[derive(Clone, Debug)]
-pub struct KMeans {
+pub(crate) struct KMeans {
     /// Number of clusters.
     pub k: usize,
     /// Lloyd iteration cap per restart.
@@ -403,7 +403,7 @@ impl Default for KMeans {
 
 impl KMeans {
     /// `k` clusters with default iteration / restart policy.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k,
             ..Self::default()
@@ -411,14 +411,14 @@ impl KMeans {
     }
 
     /// Fit alias for [`FitUnsupervised::fit_unsupervised`].
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKMeans>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKMeans>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Fitted centroid model (k-means family).
 #[derive(Clone, Debug)]
-pub struct FittedKMeans {
+pub(crate) struct FittedKMeans {
     /// Cluster id per row (`0 .. k-1` as `f64`).
     pub labels: Vector,
     /// `k` × `p` matrix of centroids.
@@ -454,11 +454,7 @@ impl Predict for FittedKMeans {
 
 impl FitUnsupervised for KMeans {
     type Fitted = FittedKMeans;
-    fn fit_unsupervised(
-        &mut self,
-        x: &Matrix,
-        session: &Session,
-    ) -> Result<Qualified<FittedKMeans>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKMeans>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         inspect_identification(&mut ctx.report, x.nrows(), self.k.max(1), &ctx.policy);
@@ -528,7 +524,7 @@ impl FitUnsupervised for KMeans {
 
 /// Mini-batch k-means with mandatory incremental explainability.
 #[derive(Clone, Debug)]
-pub struct MiniBatchKMeans {
+pub(crate) struct MiniBatchKMeans {
     /// Number of clusters.
     pub k: usize,
     /// Passes over sampled mini-batches when using [`FitUnsupervised`].
@@ -562,7 +558,7 @@ impl Default for MiniBatchKMeans {
 
 impl MiniBatchKMeans {
     /// `k` clusters.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k,
             ..Self::default()
@@ -570,7 +566,7 @@ impl MiniBatchKMeans {
     }
 
     /// Current centroids, if initialized.
-    pub fn centroids(&self) -> Option<&Matrix> {
+    pub(crate) fn centroids(&self) -> Option<&Matrix> {
         self.centroids.as_ref()
     }
 
@@ -649,31 +645,28 @@ impl MiniBatchKMeans {
 
 impl FitUnsupervised for MiniBatchKMeans {
     type Fitted = FittedKMeans;
-    fn fit_unsupervised(
-        &mut self,
-        x: &Matrix,
-        session: &Session,
-    ) -> Result<Qualified<FittedKMeans>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKMeans>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        inspect_identification(&mut ctx.report, x.nrows(), self.k.max(1), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), this.k.max(1), &ctx.policy);
         if x.nrows() == 0 || x.ncols() == 0 {
-            return ctx.finish(empty_kmeans(self.k, x.ncols(), x.nrows()));
+            return ctx.finish(empty_kmeans(this.k, x.ncols(), x.nrows()));
         }
-        let mut rng = Rng::new(self.seed);
-        let bs = self.batch_size.max(1).min(x.nrows());
-        for _ in 0..self.max_iter.max(1) {
+        let mut rng = Rng::new(this.seed);
+        let bs = this.batch_size.max(1).min(x.nrows());
+        for _ in 0..this.max_iter.max(1) {
             let idx = rng.sample_indices(x.nrows(), bs);
             let batch = Self::take_batch(x, &idx);
-            let _ = self.apply_batch(&mut ctx, &batch);
+            let _ = this.apply_batch(&mut ctx, &batch);
         }
-        let centers = self
+        let centers = this
             .centroids
             .clone()
-            .unwrap_or_else(|| Matrix::zeros(self.k, x.ncols()));
+            .unwrap_or_else(|| Matrix::zeros(this.k, x.ncols()));
         let (labels, counts, inertia) = assign_lloyd(x, &centers);
         let fitted =
-            finish_centroid_fit(&mut ctx, x, centers, labels, counts, inertia, self.max_iter);
+            finish_centroid_fit(&mut ctx, x, centers, labels, counts, inertia, this.max_iter);
         ctx.finish(fitted)
     }
 }
@@ -754,7 +747,7 @@ impl PartialFit for MiniBatchKMeans {
 
 /// STREAM-style weighted online k-means (chunk means + count weights).
 #[derive(Clone, Debug)]
-pub struct StreamKMeans {
+pub(crate) struct StreamKMeans {
     /// Number of clusters.
     pub k: usize,
     /// PRNG seed used for the first initializing chunk.
@@ -782,7 +775,7 @@ impl Default for StreamKMeans {
 
 impl StreamKMeans {
     /// `k` streaming centers.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k,
             ..Self::default()
@@ -790,34 +783,31 @@ impl StreamKMeans {
     }
 
     /// Current centers.
-    pub fn centroids(&self) -> Option<&Matrix> {
+    pub(crate) fn centroids(&self) -> Option<&Matrix> {
         self.centroids.as_ref()
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKMeans>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKMeans>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 impl FitUnsupervised for StreamKMeans {
     type Fitted = FittedKMeans;
-    fn fit_unsupervised(
-        &mut self,
-        x: &Matrix,
-        session: &Session,
-    ) -> Result<Qualified<FittedKMeans>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKMeans>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        inspect_identification(&mut ctx.report, x.nrows(), self.k.max(1), &ctx.policy);
+        inspect_identification(&mut ctx.report, x.nrows(), this.k.max(1), &ctx.policy);
         if x.nrows() == 0 || x.ncols() == 0 {
-            return ctx.finish(empty_kmeans(self.k, x.ncols(), x.nrows()));
+            return ctx.finish(empty_kmeans(this.k, x.ncols(), x.nrows()));
         }
-        let _ = self.partial_fit(x, None, &session.child("stream_init"));
-        let centers = self
+        let _ = this.partial_fit(x, None, &session.child("stream_init"));
+        let centers = this
             .centroids
             .clone()
-            .unwrap_or_else(|| Matrix::zeros(self.k, x.ncols()));
+            .unwrap_or_else(|| Matrix::zeros(this.k, x.ncols()));
         let (labels, counts, inertia) = assign_lloyd(x, &centers);
         let fitted = finish_centroid_fit(&mut ctx, x, centers, labels, counts, inertia, 1);
         ctx.finish(fitted)
@@ -960,7 +950,7 @@ impl Predict for StreamKMeans {
 
 /// DBSCAN (Ester et al.): density-connected components plus noise (`-1`).
 #[derive(Clone, Debug)]
-pub struct Dbscan {
+pub(crate) struct Dbscan {
     /// Neighborhood radius.
     pub eps: f64,
     /// Minimum neighborhood size (including the point itself) to be a core point.
@@ -978,19 +968,19 @@ impl Default for Dbscan {
 
 impl Dbscan {
     /// DBSCAN with the given radius and core-point threshold.
-    pub fn new(eps: f64, min_samples: usize) -> Self {
+    pub(crate) fn new(eps: f64, min_samples: usize) -> Self {
         Self { eps, min_samples }
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedDbscan>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedDbscan>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Fitted DBSCAN partition.
 #[derive(Clone, Debug)]
-pub struct FittedDbscan {
+pub(crate) struct FittedDbscan {
     /// Cluster ids; noise is `-1.0`.
     pub labels: Vector,
     /// Number of non-noise clusters.
@@ -1001,11 +991,7 @@ pub struct FittedDbscan {
 
 impl FitUnsupervised for Dbscan {
     type Fitted = FittedDbscan;
-    fn fit_unsupervised(
-        &mut self,
-        x: &Matrix,
-        session: &Session,
-    ) -> Result<Qualified<FittedDbscan>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedDbscan>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         inspect_identification(&mut ctx.report, x.nrows(), 1, &ctx.policy);
@@ -1106,7 +1092,7 @@ impl FitUnsupervised for Dbscan {
 /// `min_cluster_size` are labelled noise (`-1`). Cluster count is **not**
 /// passed to [`inspect_identification`].
 #[derive(Clone, Debug)]
-pub struct Hdbscan {
+pub(crate) struct Hdbscan {
     /// Neighbours used for the core distance.
     pub min_samples: usize,
     /// Minimum component size to keep as a cluster.
@@ -1124,7 +1110,7 @@ impl Default for Hdbscan {
 
 impl Hdbscan {
     /// HDBSCAN with the given core-distance and cluster-size floors.
-    pub fn new(min_samples: usize, min_cluster_size: usize) -> Self {
+    pub(crate) fn new(min_samples: usize, min_cluster_size: usize) -> Self {
         Self {
             min_samples: min_samples.max(1),
             min_cluster_size: min_cluster_size.max(1),
@@ -1132,14 +1118,14 @@ impl Hdbscan {
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedHdbscan>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedHdbscan>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Fitted HDBSCAN partition.
 #[derive(Clone, Debug)]
-pub struct FittedHdbscan {
+pub(crate) struct FittedHdbscan {
     /// Cluster ids; noise is `-1.0`.
     pub labels: Vector,
     /// Number of non-noise clusters.
@@ -1148,11 +1134,7 @@ pub struct FittedHdbscan {
 
 impl FitUnsupervised for Hdbscan {
     type Fitted = FittedHdbscan;
-    fn fit_unsupervised(
-        &mut self,
-        x: &Matrix,
-        session: &Session,
-    ) -> Result<Qualified<FittedHdbscan>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedHdbscan>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         inspect_identification(&mut ctx.report, x.nrows(), 1, &ctx.policy);
@@ -1284,7 +1266,7 @@ impl FitUnsupervised for Hdbscan {
 
 /// Hierarchical linkage rule on pairwise Euclidean distances.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Linkage {
+pub(crate) enum Linkage {
     /// Unweighted average of cross-pair distances (UPGMA).
     Average,
     /// Maximum cross-pair distance (complete / farthest neighbor).
@@ -1297,7 +1279,7 @@ pub enum Linkage {
 
 /// Agglomerative clustering on the full Euclidean distance matrix.
 #[derive(Clone, Debug)]
-pub struct Agglomerative {
+pub(crate) struct Agglomerative {
     /// Requested number of clusters.
     pub n_clusters: usize,
     /// Linkage.
@@ -1315,7 +1297,7 @@ impl Default for Agglomerative {
 
 impl Agglomerative {
     /// `n_clusters` with average linkage.
-    pub fn new(n_clusters: usize) -> Self {
+    pub(crate) fn new(n_clusters: usize) -> Self {
         Self {
             n_clusters,
             linkage: Linkage::Average,
@@ -1323,14 +1305,18 @@ impl Agglomerative {
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedAgglomerative>> {
+    pub(crate) fn fit(
+        &self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedAgglomerative>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Named sklearn `AgglomerativeClustering` (default Ward linkage).
 #[derive(Clone, Debug)]
-pub struct AgglomerativeClustering {
+pub(crate) struct AgglomerativeClustering {
     inner: Agglomerative,
 }
 
@@ -1347,7 +1333,7 @@ impl Default for AgglomerativeClustering {
 
 impl AgglomerativeClustering {
     /// Ward agglomeration into `n_clusters` groups.
-    pub fn new(n_clusters: usize) -> Self {
+    pub(crate) fn new(n_clusters: usize) -> Self {
         Self {
             inner: Agglomerative {
                 n_clusters: n_clusters.max(1),
@@ -1357,7 +1343,11 @@ impl AgglomerativeClustering {
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedAgglomerative>> {
+    pub(crate) fn fit(
+        &self,
+        x: &Matrix,
+        session: &Session,
+    ) -> Result<Qualified<FittedAgglomerative>> {
         self.inner.fit(x, session)
     }
 }
@@ -1365,7 +1355,7 @@ impl AgglomerativeClustering {
 impl FitUnsupervised for AgglomerativeClustering {
     type Fitted = FittedAgglomerative;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedAgglomerative>> {
@@ -1375,7 +1365,7 @@ impl FitUnsupervised for AgglomerativeClustering {
 
 /// Fitted agglomerative partition.
 #[derive(Clone, Debug)]
-pub struct FittedAgglomerative {
+pub(crate) struct FittedAgglomerative {
     /// Cluster id per row.
     pub labels: Vector,
     /// Linkage that produced the tree.
@@ -1441,7 +1431,7 @@ fn cluster_link(a: &[usize], b: &[usize], dist: &Matrix, linkage: Linkage) -> f6
 impl FitUnsupervised for Agglomerative {
     type Fitted = FittedAgglomerative;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedAgglomerative>> {
@@ -1538,7 +1528,7 @@ impl FitUnsupervised for Agglomerative {
 
 /// Diagonal-covariance Gaussian mixture via EM.
 #[derive(Clone, Debug)]
-pub struct GaussianMixture {
+pub(crate) struct GaussianMixture {
     /// Number of mixture components.
     pub n_components: usize,
     /// EM iteration cap.
@@ -1559,7 +1549,7 @@ impl Default for GaussianMixture {
 
 impl GaussianMixture {
     /// `k` components.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components,
             ..Self::default()
@@ -1567,14 +1557,14 @@ impl GaussianMixture {
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmm>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmm>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Fitted diagonal Gaussian mixture.
 #[derive(Clone, Debug)]
-pub struct FittedGmm {
+pub(crate) struct FittedGmm {
     /// Hard labels (`argmax` responsibility).
     pub labels: Vector,
     /// Mixing weights (length `k`).
@@ -1601,7 +1591,7 @@ fn diag_gauss_logpdf(x: &Matrix, i: usize, mean: &Matrix, c: usize, var: &Matrix
 
 impl FitUnsupervised for GaussianMixture {
     type Fitted = FittedGmm;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmm>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         inspect_identification(
@@ -1828,7 +1818,7 @@ impl Predict for FittedGmm {
 /// numerical compromise. Do not pass `n_components` as `p` to
 /// [`inspect_identification`]: a 2-component mixture on 40 rows is identified.
 #[derive(Clone, Debug)]
-pub struct BayesianGaussianMixture {
+pub(crate) struct BayesianGaussianMixture {
     /// Number of mixture components.
     pub n_components: usize,
     /// Dirichlet concentration (`α₀`).
@@ -1852,7 +1842,7 @@ impl Default for BayesianGaussianMixture {
 
 impl BayesianGaussianMixture {
     /// `k` components with `α₀ = 1`.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components,
             ..Self::default()
@@ -1860,14 +1850,14 @@ impl BayesianGaussianMixture {
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmm>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmm>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 impl FitUnsupervised for BayesianGaussianMixture {
     type Fitted = FittedGmm;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmm>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGmm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let (n, p) = x.shape();
@@ -2009,7 +1999,7 @@ impl FitUnsupervised for BayesianGaussianMixture {
 
 /// Spectral clustering: Gaussian affinity → Laplacian eigenmap → k-means.
 #[derive(Clone, Debug)]
-pub struct SpectralClustering {
+pub(crate) struct SpectralClustering {
     /// Number of clusters / eigenvectors kept.
     pub n_clusters: usize,
     /// Seed for the k-means stage.
@@ -2030,7 +2020,7 @@ impl Default for SpectralClustering {
 
 impl SpectralClustering {
     /// `n_clusters` with automatic RBF bandwidth.
-    pub fn new(n_clusters: usize) -> Self {
+    pub(crate) fn new(n_clusters: usize) -> Self {
         Self {
             n_clusters,
             ..Self::default()
@@ -2038,14 +2028,14 @@ impl SpectralClustering {
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedSpectral>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedSpectral>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Fitted spectral embedding and labels.
 #[derive(Clone, Debug)]
-pub struct FittedSpectral {
+pub(crate) struct FittedSpectral {
     /// Cluster id per row.
     pub labels: Vector,
     /// Rows are the Laplacian eigenvectors used as features.
@@ -2054,11 +2044,7 @@ pub struct FittedSpectral {
 
 impl FitUnsupervised for SpectralClustering {
     type Fitted = FittedSpectral;
-    fn fit_unsupervised(
-        &mut self,
-        x: &Matrix,
-        session: &Session,
-    ) -> Result<Qualified<FittedSpectral>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedSpectral>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         inspect_identification(
@@ -2205,7 +2191,7 @@ impl FitUnsupervised for SpectralClustering {
 
 /// Simplified affinity propagation (Frey & Dueck): responsibility / availability.
 #[derive(Clone, Debug)]
-pub struct AffinityPropagation {
+pub(crate) struct AffinityPropagation {
     /// Message-passing iteration cap.
     pub max_iter: usize,
     /// Damping in `(0, 1)` (higher is more conservative).
@@ -2226,19 +2212,19 @@ impl Default for AffinityPropagation {
 
 impl AffinityPropagation {
     /// Default preference (median similarity) and damping.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedAffinity>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedAffinity>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Fitted affinity-propagation exemplars.
 #[derive(Clone, Debug)]
-pub struct FittedAffinity {
+pub(crate) struct FittedAffinity {
     /// Cluster id per row (exemplar index, remapped to `0 .. n_exemplars-1`).
     pub labels: Vector,
     /// Exemplar row indices as `f64`.
@@ -2247,11 +2233,7 @@ pub struct FittedAffinity {
 
 impl FitUnsupervised for AffinityPropagation {
     type Fitted = FittedAffinity;
-    fn fit_unsupervised(
-        &mut self,
-        x: &Matrix,
-        session: &Session,
-    ) -> Result<Qualified<FittedAffinity>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedAffinity>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         inspect_identification(&mut ctx.report, x.nrows(), 1, &ctx.policy);
@@ -2381,7 +2363,7 @@ impl FitUnsupervised for AffinityPropagation {
 
 /// Mean-shift clustering (flat kernel).
 #[derive(Clone, Debug)]
-pub struct MeanShift {
+pub(crate) struct MeanShift {
     /// Kernel bandwidth.
     pub bandwidth: f64,
     /// Max shift iterations.
@@ -2402,7 +2384,7 @@ impl Default for MeanShift {
 
 impl MeanShift {
     /// Mean-shift with the given bandwidth.
-    pub fn new(bandwidth: f64) -> Self {
+    pub(crate) fn new(bandwidth: f64) -> Self {
         Self {
             bandwidth,
             ..Self::default()
@@ -2410,7 +2392,7 @@ impl MeanShift {
     }
 
     /// Fit.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedMeanShift>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedMeanShift>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
@@ -2513,7 +2495,7 @@ impl MeanShift {
 
 /// Fitted mean-shift.
 #[derive(Clone, Debug)]
-pub struct FittedMeanShift {
+pub(crate) struct FittedMeanShift {
     /// Labels.
     pub labels: Vector,
     /// Distinct modes.
@@ -2522,7 +2504,7 @@ pub struct FittedMeanShift {
 
 /// OPTICS reachability (simplified; extracts DBSCAN-like clusters from the ordering).
 #[derive(Clone, Debug)]
-pub struct Optics {
+pub(crate) struct Optics {
     /// Neighborhood radius.
     pub eps: f64,
     /// Min points to be a core.
@@ -2540,12 +2522,12 @@ impl Default for Optics {
 
 impl Optics {
     /// OPTICS with `eps` and `min_samples`.
-    pub fn new(eps: f64, min_samples: usize) -> Self {
+    pub(crate) fn new(eps: f64, min_samples: usize) -> Self {
         Self { eps, min_samples }
     }
 
     /// Fit: produce an ordering and extract clusters where reachability ≤ eps.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedOptics>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedOptics>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let n = x.nrows();
@@ -2640,7 +2622,7 @@ impl Optics {
 /// an undefined radius and are kept as singleton CFs. Asking for more clusters
 /// than CFs is overparameterized.
 #[derive(Clone, Debug)]
-pub struct Birch {
+pub(crate) struct Birch {
     /// Radius threshold \(T\).
     pub threshold: f64,
     /// Global clusters after the CF pass (`None` keeps every CF).
@@ -2658,7 +2640,7 @@ impl Default for Birch {
 
 impl Birch {
     /// BIRCH with radius `threshold` and optional global `k`.
-    pub fn new(threshold: f64, n_clusters: Option<usize>) -> Self {
+    pub(crate) fn new(threshold: f64, n_clusters: Option<usize>) -> Self {
         Self {
             threshold,
             n_clusters,
@@ -2736,11 +2718,8 @@ impl ClusteringFeature {
 
 impl FitUnsupervised for Birch {
     type Fitted = FittedBirch;
-    fn fit_unsupervised(
-        &mut self,
-        x: &Matrix,
-        session: &Session,
-    ) -> Result<Qualified<FittedBirch>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedBirch>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         if x.nrows() == 0 || x.ncols() == 0 {
@@ -2750,12 +2729,12 @@ impl FitUnsupervised for Birch {
                 n_cf: 0,
             });
         }
-        if self.threshold < 0.0 || !self.threshold.is_finite() {
+        if this.threshold < 0.0 || !this.threshold.is_finite() {
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
                     .message(format!(
                         "BIRCH threshold={} is not a finite ≥0 radius",
-                        self.threshold
+                        this.threshold
                     ))
                     .build(),
             );
@@ -2777,7 +2756,7 @@ impl FitUnsupervised for Birch {
                 }
             }
             match best {
-                Some(k) if cfs[k].radius_after(x, i) <= self.threshold => {
+                Some(k) if cfs[k].radius_after(x, i) <= this.threshold => {
                     cfs[k].absorb(x, i);
                 }
                 _ => cfs.push(ClusteringFeature::from_row(x, i)),
@@ -2802,7 +2781,7 @@ impl FitUnsupervised for Birch {
             );
         }
         let cf_cent = Matrix::from_fn(n_cf, x.ncols(), |i, j| cfs[i].centroid()[j]);
-        let k_req = self.n_clusters.unwrap_or(n_cf).max(1);
+        let k_req = this.n_clusters.unwrap_or(n_cf).max(1);
         let k = k_req.min(n_cf);
         if k < k_req {
             ctx.push(
@@ -2838,14 +2817,14 @@ impl FitUnsupervised for Birch {
 
 impl Birch {
     /// Fit alias for [`FitUnsupervised::fit_unsupervised`].
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedBirch>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedBirch>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Fitted BIRCH partition.
 #[derive(Clone, Debug)]
-pub struct FittedBirch {
+pub(crate) struct FittedBirch {
     /// Cluster id per row.
     pub labels: Vector,
     /// Global centroids (`k` × `p`).
@@ -2877,7 +2856,7 @@ impl Predict for FittedBirch {
 
 /// Fitted OPTICS.
 #[derive(Clone, Debug)]
-pub struct FittedOptics {
+pub(crate) struct FittedOptics {
     /// Cluster labels (−1 = noise).
     pub labels: Vector,
     /// Processing order (indices).
@@ -2888,7 +2867,7 @@ pub struct FittedOptics {
 
 /// Bisecting k-means: recursively split the highest-SSE cluster with 2-means.
 #[derive(Clone, Debug)]
-pub struct BisectingKMeans {
+pub(crate) struct BisectingKMeans {
     /// Target number of clusters.
     pub k: usize,
     /// Lloyd iterations per bisection.
@@ -2909,7 +2888,7 @@ impl Default for BisectingKMeans {
 
 impl BisectingKMeans {
     /// Bisect until `k` clusters.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k,
             ..Self::default()
@@ -2917,18 +2896,14 @@ impl BisectingKMeans {
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKMeans>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKMeans>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 impl FitUnsupervised for BisectingKMeans {
     type Fitted = FittedKMeans;
-    fn fit_unsupervised(
-        &mut self,
-        x: &Matrix,
-        session: &Session,
-    ) -> Result<Qualified<FittedKMeans>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedKMeans>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let (n, p) = x.shape();
@@ -3070,7 +3045,7 @@ impl FitUnsupervised for BisectingKMeans {
 /// `n_clusters` is not passed to [`inspect_identification`]. An all-zero
 /// table is vacuous.
 #[derive(Clone, Debug)]
-pub struct SpectralCoclustering {
+pub(crate) struct SpectralCoclustering {
     /// Number of row/column clusters.
     pub n_clusters: usize,
     /// PRNG seed for the k-means stage.
@@ -3088,7 +3063,7 @@ impl Default for SpectralCoclustering {
 
 impl SpectralCoclustering {
     /// `k` co-clusters.
-    pub fn new(n_clusters: usize) -> Self {
+    pub(crate) fn new(n_clusters: usize) -> Self {
         Self {
             n_clusters: n_clusters.max(2),
             ..Self::default()
@@ -3096,14 +3071,14 @@ impl SpectralCoclustering {
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedCocluster>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedCocluster>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Fitted spectral co-clustering.
 #[derive(Clone, Debug)]
-pub struct FittedCocluster {
+pub(crate) struct FittedCocluster {
     /// Row labels.
     pub row_labels: Vector,
     /// Column labels.
@@ -3158,7 +3133,7 @@ fn local_kmeans(x: &Matrix, k: usize, seed: u64) -> Vector {
 impl FitUnsupervised for SpectralCoclustering {
     type Fitted = FittedCocluster;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedCocluster>> {
@@ -3247,7 +3222,7 @@ impl FitUnsupervised for SpectralCoclustering {
 /// Rows and columns are clustered independently in the SVD embedding.
 /// Cluster count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SpectralBiclustering {
+pub(crate) struct SpectralBiclustering {
     /// Number of row clusters.
     pub n_clusters: usize,
     /// PRNG seed.
@@ -3265,7 +3240,7 @@ impl Default for SpectralBiclustering {
 
 impl SpectralBiclustering {
     /// `k` row/column clusters.
-    pub fn new(n_clusters: usize) -> Self {
+    pub(crate) fn new(n_clusters: usize) -> Self {
         Self {
             n_clusters: n_clusters.max(2),
             ..Self::default()
@@ -3273,7 +3248,7 @@ impl SpectralBiclustering {
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedCocluster>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedCocluster>> {
         self.fit_unsupervised(x, session)
     }
 }
@@ -3281,7 +3256,7 @@ impl SpectralBiclustering {
 impl FitUnsupervised for SpectralBiclustering {
     type Fitted = FittedCocluster;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedCocluster>> {
@@ -3350,7 +3325,7 @@ impl FitUnsupervised for SpectralBiclustering {
 /// Quantile of pairwise Euclidean distances (sklearn `estimate_bandwidth`).
 ///
 /// `quantile` is not identification `p`. Neighbor count is not `p`.
-pub fn estimate_bandwidth(
+pub(crate) fn estimate_bandwidth(
     x: &Matrix,
     quantile: f64,
     session: &Session,
@@ -3363,7 +3338,9 @@ pub fn estimate_bandwidth(
         ctx.push(
             Issue::builder(IssueCode::InvalidWeight)
                 .severity(Severity::Warning)
-                .message(format!("estimate_bandwidth quantile={quantile} not in (0,1); using 0.3"))
+                .message(format!(
+                    "estimate_bandwidth quantile={quantile} not in (0,1); using 0.3"
+                ))
                 .build(),
         );
         0.3

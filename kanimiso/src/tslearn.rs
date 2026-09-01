@@ -58,7 +58,7 @@ pub fn dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> 
 ///
 /// Optional Sakoe–Chiba `band` (`None` ⇒ full). Similarity is
 /// \(\mathrm{LCS}/\max(n,m)\).
-pub fn lcss(
+pub(crate) fn lcss(
     a: &Vector,
     b: &Vector,
     eps: f64,
@@ -95,7 +95,7 @@ pub fn lcss(
 /// Weighted DTW (tslearn `wdtw`, Jeong logistic weights).
 ///
 /// \(w(|i-j|)=1/(1+\exp(-g(|i-j|-m_c)))\) with \(m_c=\max(n,m)/2\).
-pub fn wdtw(a: &Vector, b: &Vector, g: f64, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn wdtw(a: &Vector, b: &Vector, g: f64, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("wdtw.a") {
         ctx.push(issue);
@@ -164,7 +164,7 @@ fn ddtw_deriv(s: &[f64]) -> Vec<f64> {
 }
 
 /// Derivative DTW (Keogh / tslearn `ddtw`).
-pub fn ddtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn ddtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("ddtw.a") {
         ctx.push(issue);
@@ -190,7 +190,7 @@ pub fn ddtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>>
 /// Applies [`wdtw`] to first-difference descriptors. Distinct from [`ddtw`]
 /// (unweighted) and [`wdtw`] (levels). Logistic slope `g` is not
 /// identification `p`.
-pub fn wddtw(a: &Vector, b: &Vector, g: f64, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn wddtw(a: &Vector, b: &Vector, g: f64, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("wddtw.a") {
         ctx.push(issue);
@@ -237,7 +237,7 @@ fn shape_desc(s: &[f64]) -> Vec<f64> {
 }
 
 /// Shape DTW: DTW on local first differences (tslearn / Zhao `shape_dtw`).
-pub fn shape_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn shape_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("shape_dtw.a") {
         ctx.push(issue);
@@ -259,7 +259,7 @@ pub fn shape_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<
 /// Global alignment kernel between two series (tslearn `gak`).
 ///
 /// Bandwidth \(\sigma\) is not identification `p`.
-pub fn gak(a: &Vector, b: &Vector, sigma: f64, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn gak(a: &Vector, b: &Vector, sigma: f64, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("gak.a") {
         ctx.push(issue);
@@ -301,7 +301,7 @@ fn zscore_series(s: &[f64]) -> Vec<f64> {
 /// Shape-based distance (Paparrizos / tslearn `sbd`).
 ///
 /// \(1 - \max_w \mathrm{NCC}_w(\tilde a,\tilde b)\). Identical series score 0.
-pub fn sbd(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn sbd(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("sbd.a") {
         ctx.push(issue);
@@ -348,7 +348,7 @@ fn sbd_raw(a: &[f64], b: &[f64]) -> f64 {
 /// Pairwise shape-based distance (tslearn `cdist_sbd`).
 ///
 /// Series / pair counts are not identification `p`.
-pub fn cdist_sbd(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_sbd(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -361,7 +361,7 @@ pub fn cdist_sbd(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<
 }
 
 /// Pairwise canonical time warping (tslearn `ctw`).
-pub fn ctw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn ctw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     canonical_time_warping(a, b, session)
 }
 
@@ -394,7 +394,7 @@ fn frechet_raw(a: &[f64], b: &[f64]) -> f64 {
 /// Pairwise discrete Fréchet (tslearn `cdist` with Fréchet).
 ///
 /// Series / pair counts are not identification `p`.
-pub fn cdist_frechet(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_frechet(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -409,7 +409,7 @@ pub fn cdist_frechet(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualif
 /// Hausdorff distance between two series as point sets (tslearn `hausdorff`).
 ///
 /// Identical series score 0.
-pub fn hausdorff(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn hausdorff(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("hausdorff.a") {
         ctx.push(issue);
@@ -470,7 +470,7 @@ fn hausdorff_raw(a: &[f64], b: &[f64]) -> f64 {
 /// Pairwise Hausdorff distance (tslearn `cdist` with Hausdorff).
 ///
 /// Series / pair counts are not identification `p`.
-pub fn cdist_hausdorff(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_hausdorff(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -486,7 +486,7 @@ pub fn cdist_hausdorff(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qual
 ///
 /// Series / pair counts are not identification `p`. `ε` is not identification
 /// `p`. Distinct from [`cdist_dtw`] (real cost) and [`cdist_lcss`] (similarity).
-pub fn cdist_edr(
+pub(crate) fn cdist_edr(
     a: &Matrix,
     b: &Matrix,
     eps: f64,
@@ -518,7 +518,7 @@ pub fn cdist_edr(
 ///
 /// Series / pair counts are not identification `p`. `ω` is not identification
 /// `p`. Distinct from [`cdist_dtw`] (`ω = 0`) and [`cdist_wdtw`].
-pub fn cdist_adtw(
+pub(crate) fn cdist_adtw(
     a: &Matrix,
     b: &Matrix,
     omega: f64,
@@ -550,7 +550,7 @@ pub fn cdist_adtw(
 ///
 /// Series / pair counts are not identification `p`. Distinct from
 /// [`cdist_ddtw`] and [`cdist_wdtw`].
-pub fn cdist_wddtw(
+pub(crate) fn cdist_wddtw(
     a: &Matrix,
     b: &Matrix,
     g: f64,
@@ -584,7 +584,7 @@ pub fn cdist_wddtw(
 ///
 /// Series / pair counts are not identification `p`. Distinct from
 /// [`cdist_dtw`] and [`cdist_ddtw`].
-pub fn cdist_shape_dtw(
+pub(crate) fn cdist_shape_dtw(
     a: &Matrix,
     b: &Matrix,
     session: &Session,
@@ -632,7 +632,7 @@ fn cid_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Correction factor \(\max(CE,CE')/\min(CE,CE')\) times Euclidean.
 /// Distinct from [`dtw`] and [`sbd`]. Length is not identification `p`.
-pub fn cid(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn cid(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("cid.a") {
         ctx.push(issue);
@@ -655,7 +655,7 @@ pub fn cid(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> 
 ///
 /// Series / pair counts are not identification `p`. Distinct from
 /// [`cdist_dtw`] and [`cdist_sbd`].
-pub fn cdist_cid(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_cid(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -750,7 +750,7 @@ fn lb_improved_raw(query: &[f64], candidate: &[f64], r: usize) -> f64 {
 /// Pairwise LB_Keogh (tslearn-style `cdist` with [`lb_keogh`]).
 ///
 /// Window width is not identification `p`. Distinct from [`cdist_dtw`].
-pub fn cdist_lb_keogh(
+pub(crate) fn cdist_lb_keogh(
     a: &Matrix,
     b: &Matrix,
     r: usize,
@@ -770,7 +770,7 @@ pub fn cdist_lb_keogh(
 /// Pairwise LB_Improved (tslearn-style `cdist` with [`lb_improved`]).
 ///
 /// Window width is not identification `p`. Distinct from [`cdist_lb_keogh`].
-pub fn cdist_lb_improved(
+pub(crate) fn cdist_lb_improved(
     a: &Matrix,
     b: &Matrix,
     r: usize,
@@ -791,7 +791,7 @@ pub fn cdist_lb_improved(
 ///
 /// Match radius is not identification `p`. Distinct from [`cdist_lcss`]
 /// and [`cdist_edr`].
-pub fn cdist_swale(
+pub(crate) fn cdist_swale(
     a: &Matrix,
     b: &Matrix,
     eps: f64,
@@ -812,7 +812,7 @@ pub fn cdist_swale(
 /// Pairwise LB_Kim (tslearn-style `cdist` with [`lb_kim`]).
 ///
 /// Feature count is not identification `p`. Distinct from [`cdist_lb_keogh`].
-pub fn cdist_lb_kim(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_lb_kim(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -879,7 +879,7 @@ fn mpdist_raw(a: &[f64], b: &[f64], window: usize) -> f64 {
 /// Pairwise matrix-profile distance (tslearn-style `cdist` with [`mpdist`]).
 ///
 /// Window length is not identification `p`. Distinct from [`cdist_dtw`].
-pub fn cdist_mpdist(
+pub(crate) fn cdist_mpdist(
     a: &Matrix,
     b: &Matrix,
     window: usize,
@@ -937,7 +937,7 @@ fn kdtw_raw(a: &[f64], b: &[f64], nu: f64) -> f64 {
 ///
 /// Distinct from [`softdtw`] (softmin cost) and [`gak`] (`exp(-soft-DTW/σ)`
 /// in this crate). \(\nu\) is not identification `p`.
-pub fn kdtw(a: &Vector, b: &Vector, nu: f64, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn kdtw(a: &Vector, b: &Vector, nu: f64, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("kdtw.a") {
         ctx.push(issue);
@@ -970,7 +970,7 @@ pub fn kdtw(a: &Vector, b: &Vector, nu: f64, session: &Session) -> Result<Qualif
 /// Pairwise kernel DTW (tslearn-style `cdist` with [`kdtw`]).
 ///
 /// \(\nu\) is not identification `p`. Distinct from [`cdist_softdtw`].
-pub fn cdist_kdtw(
+pub(crate) fn cdist_kdtw(
     a: &Matrix,
     b: &Matrix,
     nu: f64,
@@ -1094,7 +1094,7 @@ fn fastdtw_raw(a: &[f64], b: &[f64], radius: usize) -> f64 {
 /// FastDTW (Salvador–Chan): multilevel coarsen, project, refine.
 ///
 /// Distinct from exact [`dtw`]. Radius is not identification `p`.
-pub fn fast_dtw(
+pub(crate) fn fast_dtw(
     a: &Vector,
     b: &Vector,
     radius: usize,
@@ -1121,7 +1121,7 @@ pub fn fast_dtw(
 /// Pairwise FastDTW (tslearn-style `cdist` with [`fast_dtw`]).
 ///
 /// Radius is not identification `p`. Distinct from [`cdist_dtw`].
-pub fn cdist_fast_dtw(
+pub(crate) fn cdist_fast_dtw(
     a: &Matrix,
     b: &Matrix,
     radius: usize,
@@ -1172,7 +1172,7 @@ fn dtw_subsequence_raw(query: &[f64], series: &[f64]) -> f64 {
 ///
 /// Distinct from closed-end [`dtw`] and [`mpdist`]. Query length is not
 /// identification `p`.
-pub fn dtw_subsequence(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn dtw_subsequence(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("dtw_subsequence.a") {
         ctx.push(issue);
@@ -1199,7 +1199,7 @@ pub fn dtw_subsequence(a: &Vector, b: &Vector, session: &Session) -> Result<Qual
 /// Pairwise subsequence DTW (tslearn-style `cdist`).
 ///
 /// Distinct from [`cdist_dtw`].
-pub fn cdist_dtw_subsequence(
+pub(crate) fn cdist_dtw_subsequence(
     a: &Matrix,
     b: &Matrix,
     session: &Session,
@@ -1242,7 +1242,7 @@ fn lb_yi_raw(a: &[f64], b: &[f64]) -> f64 {
 /// LB_Yi (Yi–Jagadish–Faloutsos): \(|\max-\max|+|\min-\min|\).
 ///
 /// Distinct from [`lb_kim`] (max of four endpoint/extrema terms).
-pub fn lb_yi(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn lb_yi(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("lb_yi.a") {
         ctx.push(issue);
@@ -1262,7 +1262,7 @@ pub fn lb_yi(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>
 }
 
 /// Pairwise LB_Yi.
-pub fn cdist_lb_yi(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_lb_yi(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -1310,7 +1310,7 @@ fn itakura_dtw_raw(a: &[f64], b: &[f64]) -> f64 {
 /// Itakura-parallelogram DTW (not a Sakoe–Chiba band).
 ///
 /// Distinct from unconstrained [`dtw`] and multilevel [`fast_dtw`].
-pub fn itakura_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn itakura_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("itakura_dtw.a") {
         ctx.push(issue);
@@ -1330,7 +1330,7 @@ pub fn itakura_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualifie
 }
 
 /// Pairwise Itakura DTW.
-pub fn cdist_itakura_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_itakura_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -1377,7 +1377,7 @@ fn sakoe_chiba_dtw_raw(a: &[f64], b: &[f64], radius: usize) -> f64 {
 ///
 /// Distinct from unconstrained [`dtw`] and parallelogram [`itakura_dtw`].
 /// Radius is not identification `p`.
-pub fn sakoe_chiba_dtw(
+pub(crate) fn sakoe_chiba_dtw(
     a: &Vector,
     b: &Vector,
     radius: usize,
@@ -1405,7 +1405,7 @@ pub fn sakoe_chiba_dtw(
 ///
 /// Radius is not identification `p`. Distinct from [`cdist_dtw`] and
 /// [`cdist_itakura_dtw`].
-pub fn cdist_sakoe_chiba_dtw(
+pub(crate) fn cdist_sakoe_chiba_dtw(
     a: &Matrix,
     b: &Matrix,
     radius: usize,
@@ -1443,7 +1443,7 @@ fn cyclic_dtw_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`dtw`] (no rotation) and [`dtw_subsequence`] (open ends,
 /// no wrap). Shift search is not identification `p`.
-pub fn cyclic_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn cyclic_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("cyclic_dtw.a") {
         ctx.push(issue);
@@ -1465,7 +1465,7 @@ pub fn cyclic_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified
 /// Pairwise cyclic DTW.
 ///
 /// Distinct from [`cdist_dtw`] and [`cdist_dtw_subsequence`].
-pub fn cdist_cyclic_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_cyclic_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -1508,7 +1508,7 @@ fn obe_dtw_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`dtw`] (closed ends) and [`dtw_subsequence`] (open on one
 /// series only).
-pub fn obe_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn obe_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("obe_dtw.a") {
         ctx.push(issue);
@@ -1530,7 +1530,7 @@ pub fn obe_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f6
 /// Pairwise open-begin-end DTW.
 ///
 /// Distinct from [`cdist_dtw`] and [`cdist_dtw_subsequence`].
-pub fn cdist_obe_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_obe_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -1583,7 +1583,7 @@ fn amss_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Local cost is \(1-\cos\) of consecutive increment vectors. Distinct from
 /// [`dtw`] (level cost) and [`ddtw`] (derivative magnitude).
-pub fn amss(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn amss(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("amss.a") {
         ctx.push(issue);
@@ -1605,7 +1605,7 @@ pub fn amss(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>>
 /// Pairwise AMSS.
 ///
 /// Distinct from [`cdist_dtw`] and [`cdist_ddtw`].
-pub fn cdist_amss(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_amss(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -1641,7 +1641,7 @@ fn decay_euclidean_raw(a: &[f64], b: &[f64], gamma: f64) -> f64 {
 ///
 /// Distinct from [`wdtw`] (warped) and unconstrained Euclidean. Decay
 /// \(\gamma\) is not identification `p`.
-pub fn decay_euclidean(
+pub(crate) fn decay_euclidean(
     a: &Vector,
     b: &Vector,
     gamma: f64,
@@ -1668,7 +1668,7 @@ pub fn decay_euclidean(
 /// Pairwise time-decay Euclidean.
 ///
 /// Distinct from [`cdist_wdtw`].
-pub fn cdist_decay_euclidean(
+pub(crate) fn cdist_decay_euclidean(
     a: &Matrix,
     b: &Matrix,
     gamma: f64,
@@ -1708,7 +1708,7 @@ fn shape_euclidean_raw(a: &[f64], b: &[f64]) -> f64 {
 /// Euclidean distance on first differences (no warping).
 ///
 /// Distinct from [`ddtw`] (warped derivatives) and [`amss`] (angular cost).
-pub fn shape_euclidean(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn shape_euclidean(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("shape_euclidean.a") {
         ctx.push(issue);
@@ -1730,7 +1730,7 @@ pub fn shape_euclidean(a: &Vector, b: &Vector, session: &Session) -> Result<Qual
 /// Pairwise first-difference Euclidean.
 ///
 /// Distinct from [`cdist_ddtw`] and [`cdist_amss`].
-pub fn cdist_shape_euclidean(
+pub(crate) fn cdist_shape_euclidean(
     a: &Matrix,
     b: &Matrix,
     session: &Session,
@@ -1772,7 +1772,7 @@ fn open_begin_dtw_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`dtw`] (closed–closed), [`obe_dtw`] (open–open), and
 /// [`dtw_subsequence`] (open end on the longer series).
-pub fn open_begin_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn open_begin_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("open_begin_dtw.a") {
         ctx.push(issue);
@@ -1795,7 +1795,7 @@ pub fn open_begin_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Quali
 ///
 /// Distinct from [`cdist_dtw`], [`cdist_obe_dtw`], and
 /// [`cdist_dtw_subsequence`].
-pub fn cdist_open_begin_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_open_begin_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -1836,7 +1836,7 @@ fn open_end_dtw_raw(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from [`dtw`] (closed–closed), [`open_begin_dtw`] (free start),
 /// [`obe_dtw`] (open–open), and [`dtw_subsequence`] (open on the longer
 /// series only).
-pub fn open_end_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn open_end_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("open_end_dtw.a") {
         ctx.push(issue);
@@ -1859,7 +1859,7 @@ pub fn open_end_dtw(a: &Vector, b: &Vector, session: &Session) -> Result<Qualifi
 ///
 /// Distinct from [`cdist_dtw`], [`cdist_open_begin_dtw`], and
 /// [`cdist_dtw_subsequence`].
-pub fn cdist_open_end_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_open_end_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -1916,7 +1916,7 @@ fn correlation_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 /// Pearson correlation distance \(1-r\) on aligned prefixes (no lag search).
 ///
 /// Distinct from [`sbd`] (max NCC over shifts). Identical series score 0.
-pub fn correlation_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn correlation_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("correlation_distance.a") {
         ctx.push(issue);
@@ -1938,7 +1938,7 @@ pub fn correlation_distance(a: &Vector, b: &Vector, session: &Session) -> Result
 /// Pairwise Pearson correlation distance.
 ///
 /// Distinct from [`cdist_sbd`].
-pub fn cdist_correlation(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_correlation(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -1974,7 +1974,7 @@ fn cosine_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// No mean-centering. Distinct from [`correlation_distance`] (Pearson) and
 /// [`sbd`] (max NCC over shifts). Identical series score 0.
-pub fn cosine_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn cosine_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("cosine_distance.a") {
         ctx.push(issue);
@@ -1996,7 +1996,7 @@ pub fn cosine_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qual
 /// Pairwise cosine distance.
 ///
 /// Distinct from [`cdist_correlation`] and [`cdist_sbd`].
-pub fn cdist_cosine(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_cosine(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -2038,7 +2038,7 @@ fn manhattan_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 /// Chebyshev (\(L^\infty\)) distance on aligned prefixes.
 ///
 /// Distinct from [`dtw`] (warped \(L^1\)) and [`decay_euclidean`].
-pub fn chebyshev_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn chebyshev_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("chebyshev_distance.a") {
         ctx.push(issue);
@@ -2058,7 +2058,7 @@ pub fn chebyshev_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Q
 }
 
 /// Pairwise Chebyshev distance.
-pub fn cdist_chebyshev(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_chebyshev(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -2073,7 +2073,7 @@ pub fn cdist_chebyshev(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qual
 /// Manhattan (\(L^1\)) distance on aligned prefixes (no warping).
 ///
 /// Distinct from [`dtw`] (warped \(L^1\)) and [`chebyshev_distance`].
-pub fn manhattan_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn manhattan_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("manhattan_distance.a") {
         ctx.push(issue);
@@ -2093,7 +2093,7 @@ pub fn manhattan_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Q
 }
 
 /// Pairwise Manhattan distance.
-pub fn cdist_manhattan(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_manhattan(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -2141,7 +2141,7 @@ fn braycurtis_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`manhattan_distance`] (no per-coordinate scale) and
 /// [`correlation_distance`].
-pub fn canberra_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn canberra_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("canberra_distance.a") {
         ctx.push(issue);
@@ -2161,7 +2161,7 @@ pub fn canberra_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qu
 }
 
 /// Pairwise Canberra distance.
-pub fn cdist_canberra(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_canberra(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -2176,7 +2176,7 @@ pub fn cdist_canberra(a: &Matrix, b: &Matrix, session: &Session) -> Result<Quali
 /// Bray–Curtis dissimilarity \(\sum|a-b|/\sum|a+b|\) on aligned prefixes.
 ///
 /// Distinct from [`manhattan_distance`] and [`canberra_distance`].
-pub fn braycurtis_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn braycurtis_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("braycurtis_distance.a") {
         ctx.push(issue);
@@ -2196,7 +2196,7 @@ pub fn braycurtis_distance(a: &Vector, b: &Vector, session: &Session) -> Result<
 }
 
 /// Pairwise Bray–Curtis dissimilarity.
-pub fn cdist_braycurtis(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_braycurtis(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -2244,7 +2244,7 @@ fn angular_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`manhattan_distance`] (no log) and [`canberra_distance`].
 /// Identical series score 0.
-pub fn lorentzian_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn lorentzian_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("lorentzian_distance.a") {
         ctx.push(issue);
@@ -2264,7 +2264,7 @@ pub fn lorentzian_distance(a: &Vector, b: &Vector, session: &Session) -> Result<
 }
 
 /// Pairwise Lorentzian distance.
-pub fn cdist_lorentzian(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_lorentzian(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -2279,7 +2279,7 @@ pub fn cdist_lorentzian(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qua
 /// Angular distance \(\arccos(\mathrm{clamp}(\cos,-1,1))/\pi\) on aligned prefixes.
 ///
 /// Distinct from [`cosine_distance`] (\(1-\cos\)). Identical series score 0.
-pub fn angular_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn angular_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("angular_distance.a") {
         ctx.push(issue);
@@ -2299,7 +2299,7 @@ pub fn angular_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qua
 }
 
 /// Pairwise angular distance.
-pub fn cdist_angular(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_angular(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -2344,7 +2344,7 @@ fn clark_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`manhattan_distance`] (\(p=1\)) and [`chebyshev_distance`]
 /// (\(p=\infty\)). Identical series score 0.
-pub fn minkowski3_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski3_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski3_distance.a") {
         ctx.push(issue);
@@ -2364,7 +2364,7 @@ pub fn minkowski3_distance(a: &Vector, b: &Vector, session: &Session) -> Result<
 }
 
 /// Pairwise Minkowski \(p=3\) distance.
-pub fn cdist_minkowski3(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski3(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -2379,7 +2379,7 @@ pub fn cdist_minkowski3(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qua
 /// Clark distance \(\sqrt{\sum((a_i-b_i)/(|a_i|+|b_i|))^2}\) on aligned prefixes.
 ///
 /// Distinct from [`canberra_distance`] (no square/sqrt). Identical series score 0.
-pub fn clark_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn clark_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("clark_distance.a") {
         ctx.push(issue);
@@ -2399,7 +2399,7 @@ pub fn clark_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Quali
 }
 
 /// Pairwise Clark distance.
-pub fn cdist_clark(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_clark(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -2448,7 +2448,7 @@ fn dice_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski3_distance`] and [`decay_euclidean`]. Identical
 /// series score 0.
-pub fn squared_euclidean_distance(
+pub(crate) fn squared_euclidean_distance(
     a: &Vector,
     b: &Vector,
     session: &Session,
@@ -2474,7 +2474,7 @@ pub fn squared_euclidean_distance(
 }
 
 /// Pairwise squared Euclidean distance.
-pub fn cdist_squared_euclidean(
+pub(crate) fn cdist_squared_euclidean(
     a: &Matrix,
     b: &Matrix,
     session: &Session,
@@ -2494,7 +2494,7 @@ pub fn cdist_squared_euclidean(
 ///
 /// Distinct from [`cosine_distance`] (geometric mean in the denominator) and
 /// [`braycurtis_distance`]. Identical series score 0.
-pub fn dice_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn dice_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("dice_distance.a") {
         ctx.push(issue);
@@ -2514,7 +2514,7 @@ pub fn dice_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualif
 }
 
 /// Pairwise Dice distance.
-pub fn cdist_dice(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_dice(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -2566,7 +2566,7 @@ fn wave_hedges_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`dice_distance`] (factor 2 in the numerator) and
 /// [`cosine_distance`]. Identical series score 0.
-pub fn tanimoto_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn tanimoto_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("tanimoto_distance.a") {
         ctx.push(issue);
@@ -2586,7 +2586,7 @@ pub fn tanimoto_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qu
 }
 
 /// Pairwise Tanimoto distance.
-pub fn cdist_tanimoto(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_tanimoto(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -2602,7 +2602,7 @@ pub fn cdist_tanimoto(a: &Matrix, b: &Matrix, session: &Session) -> Result<Quali
 ///
 /// Distinct from [`canberra_distance`] (sum in the denominator) and
 /// [`clark_distance`]. Identical series score 0.
-pub fn wave_hedges_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn wave_hedges_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("wave_hedges_distance.a") {
         ctx.push(issue);
@@ -2622,7 +2622,7 @@ pub fn wave_hedges_distance(a: &Vector, b: &Vector, session: &Session) -> Result
 }
 
 /// Pairwise Wave Hedges distance.
-pub fn cdist_wave_hedges(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_wave_hedges(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -2672,7 +2672,7 @@ fn ruzicka_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`wave_hedges_distance`] (per-coordinate max) and
 /// [`canberra_distance`]. Identical series score 0.
-pub fn kulczynski_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn kulczynski_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("kulczynski_distance.a") {
         ctx.push(issue);
@@ -2692,7 +2692,7 @@ pub fn kulczynski_distance(a: &Vector, b: &Vector, session: &Session) -> Result<
 }
 
 /// Pairwise Kulczynski distance.
-pub fn cdist_kulczynski(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_kulczynski(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -2708,7 +2708,7 @@ pub fn cdist_kulczynski(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qua
 ///
 /// Distinct from [`tanimoto_distance`] (inner-product form) and
 /// [`dice_distance`]. Identical series score 0.
-pub fn ruzicka_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn ruzicka_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("ruzicka_distance.a") {
         ctx.push(issue);
@@ -2728,7 +2728,7 @@ pub fn ruzicka_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qua
 }
 
 /// Pairwise Ruzicka distance.
-pub fn cdist_ruzicka(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_ruzicka(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -2790,7 +2790,7 @@ fn jensen_shannon_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`cosine_distance`] and [`squared_euclidean_distance`].
 /// Identical series score 0.
-pub fn hellinger_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn hellinger_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("hellinger_distance.a") {
         ctx.push(issue);
@@ -2810,7 +2810,7 @@ pub fn hellinger_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Q
 }
 
 /// Pairwise Hellinger distance.
-pub fn cdist_hellinger(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_hellinger(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -2826,7 +2826,7 @@ pub fn cdist_hellinger(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qual
 ///
 /// Distinct from [`hellinger_distance`] and [`cosine_distance`]. Identical
 /// series score 0.
-pub fn jensen_shannon_distance(
+pub(crate) fn jensen_shannon_distance(
     a: &Vector,
     b: &Vector,
     session: &Session,
@@ -2850,7 +2850,7 @@ pub fn jensen_shannon_distance(
 }
 
 /// Pairwise Jensen–Shannon distance.
-pub fn cdist_jensen_shannon(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_jensen_shannon(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -2912,7 +2912,7 @@ fn hassanat_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`hellinger_distance`] (\(\sqrt{1-\mathrm{BC}}\)) and
 /// [`jensen_shannon_distance`]. Identical series score 0.
-pub fn bhattacharyya_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn bhattacharyya_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("bhattacharyya_distance.a") {
         ctx.push(issue);
@@ -2932,7 +2932,7 @@ pub fn bhattacharyya_distance(a: &Vector, b: &Vector, session: &Session) -> Resu
 }
 
 /// Pairwise Bhattacharyya distance.
-pub fn cdist_bhattacharyya(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_bhattacharyya(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -2948,7 +2948,7 @@ pub fn cdist_bhattacharyya(a: &Matrix, b: &Matrix, session: &Session) -> Result<
 ///
 /// Distinct from [`ruzicka_distance`] and [`wave_hedges_distance`]. Identical
 /// series score 0.
-pub fn hassanat_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn hassanat_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("hassanat_distance.a") {
         ctx.push(issue);
@@ -2968,7 +2968,7 @@ pub fn hassanat_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qu
 }
 
 /// Pairwise Hassanat distance.
-pub fn cdist_hassanat(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_hassanat(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -3030,7 +3030,7 @@ fn whittaker_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`bhattacharyya_distance`] (\(-\log\) BC). Identical series
 /// score 0.
-pub fn fidelity_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn fidelity_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("fidelity_distance.a") {
         ctx.push(issue);
@@ -3050,7 +3050,7 @@ pub fn fidelity_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qu
 }
 
 /// Pairwise fidelity distance.
-pub fn cdist_fidelity(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_fidelity(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -3066,7 +3066,7 @@ pub fn cdist_fidelity(a: &Matrix, b: &Matrix, session: &Session) -> Result<Quali
 ///
 /// Distinct from [`manhattan_distance`] (unnormalized) and the tsa Whittaker
 /// smoother. Identical series score 0.
-pub fn whittaker_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn whittaker_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("whittaker_distance.a") {
         ctx.push(issue);
@@ -3086,7 +3086,7 @@ pub fn whittaker_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Q
 }
 
 /// Pairwise Whittaker distance.
-pub fn cdist_whittaker(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_whittaker(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -3152,7 +3152,7 @@ fn neyman_chi_squared_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`clark_distance`] and [`neyman_chi_squared_distance`].
 /// Identical series score 0.
-pub fn pearson_chi_squared_distance(
+pub(crate) fn pearson_chi_squared_distance(
     a: &Vector,
     b: &Vector,
     session: &Session,
@@ -3178,7 +3178,7 @@ pub fn pearson_chi_squared_distance(
 }
 
 /// Pairwise Pearson \(\chi^2\) distance.
-pub fn cdist_pearson_chi_squared(
+pub(crate) fn cdist_pearson_chi_squared(
     a: &Matrix,
     b: &Matrix,
     session: &Session,
@@ -3198,7 +3198,7 @@ pub fn cdist_pearson_chi_squared(
 ///
 /// Distinct from [`pearson_chi_squared_distance`] (denominator \(p\)) and
 /// [`clark_distance`]. Identical series score 0.
-pub fn neyman_chi_squared_distance(
+pub(crate) fn neyman_chi_squared_distance(
     a: &Vector,
     b: &Vector,
     session: &Session,
@@ -3224,7 +3224,7 @@ pub fn neyman_chi_squared_distance(
 }
 
 /// Pairwise Neyman \(\chi^2\) distance.
-pub fn cdist_neyman_chi_squared(
+pub(crate) fn cdist_neyman_chi_squared(
     a: &Matrix,
     b: &Matrix,
     session: &Session,
@@ -3295,7 +3295,7 @@ fn k_divergence_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`clark_distance`] (square-root form) and
 /// [`pearson_chi_squared_distance`]. Identical series score 0.
-pub fn additive_symmetric_distance(
+pub(crate) fn additive_symmetric_distance(
     a: &Vector,
     b: &Vector,
     session: &Session,
@@ -3321,7 +3321,7 @@ pub fn additive_symmetric_distance(
 }
 
 /// Pairwise additive-symmetric \(\chi^2\) distance.
-pub fn cdist_additive_symmetric(
+pub(crate) fn cdist_additive_symmetric(
     a: &Matrix,
     b: &Matrix,
     session: &Session,
@@ -3341,7 +3341,7 @@ pub fn cdist_additive_symmetric(
 ///
 /// Distinct from [`jensen_shannon_distance`] (symmetrised). Identical series
 /// score 0.
-pub fn k_divergence_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn k_divergence_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("k_divergence_distance.a") {
         ctx.push(issue);
@@ -3361,7 +3361,7 @@ pub fn k_divergence_distance(a: &Vector, b: &Vector, session: &Session) -> Resul
 }
 
 /// Pairwise Kullback \(K\)-divergence.
-pub fn cdist_k_divergence(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_k_divergence(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -3430,7 +3430,7 @@ fn taneja_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`jensen_shannon_distance`] (square-root JS) and
 /// [`k_divergence_distance`] (one-sided). Identical series score 0.
-pub fn topsoe_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn topsoe_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("topsoe_distance.a") {
         ctx.push(issue);
@@ -3450,7 +3450,7 @@ pub fn topsoe_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qual
 }
 
 /// Pairwise Topsøe distance.
-pub fn cdist_topsoe(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_topsoe(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -3466,7 +3466,7 @@ pub fn cdist_topsoe(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualifi
 ///
 /// Distinct from [`jensen_shannon_distance`] and [`topsoe_distance`].
 /// Identical series score 0.
-pub fn taneja_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn taneja_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("taneja_distance.a") {
         ctx.push(issue);
@@ -3486,7 +3486,7 @@ pub fn taneja_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qual
 }
 
 /// Pairwise Taneja distance.
-pub fn cdist_taneja(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_taneja(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -3553,7 +3553,7 @@ fn harmonic_mean_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`pearson_chi_squared_distance`] and [`taneja_distance`].
 /// Identical series score 0.
-pub fn kumar_johnson_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn kumar_johnson_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("kumar_johnson_distance.a") {
         ctx.push(issue);
@@ -3573,7 +3573,7 @@ pub fn kumar_johnson_distance(a: &Vector, b: &Vector, session: &Session) -> Resu
 }
 
 /// Pairwise Kumar–Johnson distance.
-pub fn cdist_kumar_johnson(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_kumar_johnson(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -3589,7 +3589,7 @@ pub fn cdist_kumar_johnson(a: &Matrix, b: &Matrix, session: &Session) -> Result<
 ///
 /// Distinct from [`dice_distance`] (\(2\sum\min\)) and [`tanimoto_distance`].
 /// Identical series score 0.
-pub fn harmonic_mean_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn harmonic_mean_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("harmonic_mean_distance.a") {
         ctx.push(issue);
@@ -3609,7 +3609,7 @@ pub fn harmonic_mean_distance(a: &Vector, b: &Vector, session: &Session) -> Resu
 }
 
 /// Pairwise harmonic-mean distance.
-pub fn cdist_harmonic_mean(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_harmonic_mean(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -3677,7 +3677,7 @@ fn intersection_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from [`pearson_chi_squared_distance`] (divide by \(p\)),
 /// [`neyman_chi_squared_distance`] (divide by \(q\)), and
 /// [`additive_symmetric_distance`] (divide by \(p+q\)). Identical series score 0.
-pub fn max_symmetric_chi_squared_distance(
+pub(crate) fn max_symmetric_chi_squared_distance(
     a: &Vector,
     b: &Vector,
     session: &Session,
@@ -3705,7 +3705,7 @@ pub fn max_symmetric_chi_squared_distance(
 }
 
 /// Pairwise max-symmetric χ² distance.
-pub fn cdist_max_symmetric_chi_squared(
+pub(crate) fn cdist_max_symmetric_chi_squared(
     a: &Matrix,
     b: &Matrix,
     session: &Session,
@@ -3725,7 +3725,7 @@ pub fn cdist_max_symmetric_chi_squared(
 ///
 /// Distinct from [`dice_distance`] (vector \(2\langle a,b\rangle\) form) and
 /// [`braycurtis_distance`]. Identical series score 0.
-pub fn intersection_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn intersection_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("intersection_distance.a") {
         ctx.push(issue);
@@ -3745,7 +3745,7 @@ pub fn intersection_distance(a: &Vector, b: &Vector, session: &Session) -> Resul
 }
 
 /// Pairwise intersection distance.
-pub fn cdist_intersection(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_intersection(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -3814,7 +3814,7 @@ fn l1_squared_euclidean_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 /// Distinct from [`max_symmetric_chi_squared_distance`] (divide by \(\max\))
 /// and [`additive_symmetric_distance`] (divide by \(p+q\)). Identical series
 /// score 0.
-pub fn min_symmetric_chi_squared_distance(
+pub(crate) fn min_symmetric_chi_squared_distance(
     a: &Vector,
     b: &Vector,
     session: &Session,
@@ -3842,7 +3842,7 @@ pub fn min_symmetric_chi_squared_distance(
 }
 
 /// Pairwise min-symmetric χ² distance.
-pub fn cdist_min_symmetric_chi_squared(
+pub(crate) fn cdist_min_symmetric_chi_squared(
     a: &Matrix,
     b: &Matrix,
     session: &Session,
@@ -3862,7 +3862,7 @@ pub fn cdist_min_symmetric_chi_squared(
 ///
 /// Distinct from [`squared_euclidean_distance`] (raw coordinates).
 /// Identical series score 0.
-pub fn l1_squared_euclidean_distance(
+pub(crate) fn l1_squared_euclidean_distance(
     a: &Vector,
     b: &Vector,
     session: &Session,
@@ -3890,7 +3890,7 @@ pub fn l1_squared_euclidean_distance(
 }
 
 /// Pairwise \(\ell_1\)-normalised squared Euclidean distance.
-pub fn cdist_l1_squared_euclidean(
+pub(crate) fn cdist_l1_squared_euclidean(
     a: &Matrix,
     b: &Matrix,
     session: &Session,
@@ -3966,7 +3966,7 @@ fn jeffreys_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`crate::metrics::jaccard_distances`] (binary support) and
 /// [`intersection_distance`] (\(1-\sum\min\)). Identical series score 0.
-pub fn jaccard_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn jaccard_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("jaccard_distance.a") {
         ctx.push(issue);
@@ -3986,7 +3986,7 @@ pub fn jaccard_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qua
 }
 
 /// Pairwise probability Jaccard distance.
-pub fn cdist_jaccard(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_jaccard(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -4002,7 +4002,7 @@ pub fn cdist_jaccard(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualif
 ///
 /// Distinct from [`k_divergence_distance`] (one-sided) and [`topsoe_distance`]
 /// (two-sided \(K\) to the mean). Identical series score 0.
-pub fn jeffreys_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn jeffreys_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("jeffreys_distance.a") {
         ctx.push(issue);
@@ -4022,7 +4022,7 @@ pub fn jeffreys_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qu
 }
 
 /// Pairwise Jeffreys divergence.
-pub fn cdist_jeffreys(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_jeffreys(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -4089,7 +4089,7 @@ fn kullback_leibler_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`hellinger_distance`] (no \(\ell_1\), and a \(\sqrt{1/2}\)
 /// factor). Identical series score 0.
-pub fn squared_chord_distance(
+pub(crate) fn squared_chord_distance(
     a: &Vector,
     b: &Vector,
     session: &Session,
@@ -4113,7 +4113,7 @@ pub fn squared_chord_distance(
 }
 
 /// Pairwise squared-chord distance.
-pub fn cdist_squared_chord(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_squared_chord(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -4129,7 +4129,7 @@ pub fn cdist_squared_chord(a: &Matrix, b: &Matrix, session: &Session) -> Result<
 ///
 /// Distinct from [`k_divergence_distance`] (\(p\ln(2p/(p+q))\)) and
 /// [`jeffreys_distance`] (symmetric). Identical series score 0.
-pub fn kullback_leibler_distance(
+pub(crate) fn kullback_leibler_distance(
     a: &Vector,
     b: &Vector,
     session: &Session,
@@ -4157,7 +4157,7 @@ pub fn kullback_leibler_distance(
 }
 
 /// Pairwise Kullback–Leibler divergence.
-pub fn cdist_kullback_leibler(
+pub(crate) fn cdist_kullback_leibler(
     a: &Matrix,
     b: &Matrix,
     session: &Session,
@@ -4243,7 +4243,7 @@ fn tanimoto_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`cosine_distance`] (raw coordinates). Identical series
 /// score 0.
-pub fn cosine_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn cosine_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("cosine_l1_distance.a") {
         ctx.push(issue);
@@ -4263,7 +4263,7 @@ pub fn cosine_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Q
 }
 
 /// Pairwise \(\ell_1\)-normalised cosine distance.
-pub fn cdist_cosine_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_cosine_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -4279,7 +4279,7 @@ pub fn cdist_cosine_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qual
 ///
 /// Distinct from [`tanimoto_distance`] (raw coordinates). Identical series
 /// score 0.
-pub fn tanimoto_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn tanimoto_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("tanimoto_l1_distance.a") {
         ctx.push(issue);
@@ -4299,7 +4299,7 @@ pub fn tanimoto_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result
 }
 
 /// Pairwise \(\ell_1\)-normalised Tanimoto distance.
-pub fn cdist_tanimoto_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_tanimoto_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -4374,7 +4374,7 @@ fn vicis_symmetric_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 /// Dice / Sørensen distance after \(\ell_1\) normalisation.
 ///
 /// Distinct from [`dice_distance`] (raw coordinates). Identical series score 0.
-pub fn dice_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn dice_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("dice_l1_distance.a") {
         ctx.push(issue);
@@ -4394,7 +4394,7 @@ pub fn dice_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qua
 }
 
 /// Pairwise \(\ell_1\)-normalised Dice distance.
-pub fn cdist_dice_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_dice_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -4410,7 +4410,7 @@ pub fn cdist_dice_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualif
 ///
 /// Distinct from [`min_symmetric_chi_squared_distance`] (divide by \(\min\),
 /// not \(\min^2\)). Identical series score 0.
-pub fn vicis_symmetric_distance(
+pub(crate) fn vicis_symmetric_distance(
     a: &Vector,
     b: &Vector,
     session: &Session,
@@ -4434,7 +4434,7 @@ pub fn vicis_symmetric_distance(
 }
 
 /// Pairwise Vicis-symmetric χ² distance.
-pub fn cdist_vicis_symmetric(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_vicis_symmetric(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -4508,7 +4508,7 @@ fn correlation_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`correlation_distance`] (raw coordinates) and
 /// [`cosine_l1_distance`] (no centering). Identical series score 0.
-pub fn correlation_l1_distance(
+pub(crate) fn correlation_l1_distance(
     a: &Vector,
     b: &Vector,
     session: &Session,
@@ -4532,7 +4532,7 @@ pub fn correlation_l1_distance(
 }
 
 /// Pairwise \(\ell_1\)-normalised Pearson correlation distance.
-pub fn cdist_correlation_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_correlation_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -4575,7 +4575,7 @@ fn hellinger_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`hellinger_distance`] (raw \(\sqrt{|a_i|}\) without
 /// renormalising). Identical series score 0.
-pub fn hellinger_l1_distance(
+pub(crate) fn hellinger_l1_distance(
     a: &Vector,
     b: &Vector,
     session: &Session,
@@ -4599,7 +4599,7 @@ pub fn hellinger_l1_distance(
 }
 
 /// Pairwise \(\ell_1\)-normalised Hellinger distance.
-pub fn cdist_hellinger_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_hellinger_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -4644,7 +4644,7 @@ fn canberra_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`canberra_distance`] (raw coordinates, no renormalise).
 /// Identical series score 0.
-pub fn canberra_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn canberra_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("canberra_l1_distance.a") {
         ctx.push(issue);
@@ -4664,7 +4664,7 @@ pub fn canberra_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result
 }
 
 /// Pairwise \(\ell_1\)-normalised Canberra distance.
-pub fn cdist_canberra_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_canberra_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -4710,7 +4710,7 @@ fn clark_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`clark_distance`] (raw coordinates, no renormalise).
 /// Identical series score 0.
-pub fn clark_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn clark_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("clark_l1_distance.a") {
         ctx.push(issue);
@@ -4730,7 +4730,7 @@ pub fn clark_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qu
 }
 
 /// Pairwise \(\ell_1\)-normalised Clark distance.
-pub fn cdist_clark_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_clark_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -4776,7 +4776,7 @@ fn wave_hedges_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`wave_hedges_distance`] (raw coordinates, no renormalise).
 /// Identical series score 0.
-pub fn wave_hedges_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn wave_hedges_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("wave_hedges_l1_distance.a") {
         ctx.push(issue);
@@ -4796,7 +4796,7 @@ pub fn wave_hedges_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Wave Hedges distance.
-pub fn cdist_wave_hedges_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_wave_hedges_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -4844,7 +4844,7 @@ fn kulczynski_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`kulczynski_distance`] (raw coordinates, no renormalise).
 /// Identical series score 0.
-pub fn kulczynski_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn kulczynski_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("kulczynski_l1_distance.a") {
         ctx.push(issue);
@@ -4864,7 +4864,7 @@ pub fn kulczynski_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Resu
 }
 
 /// Pairwise \(\ell_1\)-normalised Kulczynski distance.
-pub fn cdist_kulczynski_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_kulczynski_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -4912,7 +4912,7 @@ fn ruzicka_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`ruzicka_distance`] (raw coordinates, no renormalise).
 /// Identical series score 0.
-pub fn ruzicka_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn ruzicka_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("ruzicka_l1_distance.a") {
         ctx.push(issue);
@@ -4932,7 +4932,7 @@ pub fn ruzicka_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<
 }
 
 /// Pairwise \(\ell_1\)-normalised Ružička distance.
-pub fn cdist_ruzicka_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_ruzicka_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -4975,7 +4975,7 @@ fn lorentzian_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`lorentzian_distance`] (raw coordinates, no renormalise).
 /// Identical series score 0.
-pub fn lorentzian_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn lorentzian_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("lorentzian_l1_distance.a") {
         ctx.push(issue);
@@ -4995,7 +4995,7 @@ pub fn lorentzian_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Resu
 }
 
 /// Pairwise \(\ell_1\)-normalised Lorentzian distance.
-pub fn cdist_lorentzian_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_lorentzian_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -5042,7 +5042,7 @@ fn hassanat_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`hassanat_distance`] (raw coordinates, no renormalise).
 /// Identical series score 0.
-pub fn hassanat_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn hassanat_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("hassanat_l1_distance.a") {
         ctx.push(issue);
@@ -5062,7 +5062,7 @@ pub fn hassanat_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result
 }
 
 /// Pairwise \(\ell_1\)-normalised Hassanat distance.
-pub fn cdist_hassanat_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_hassanat_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -5108,7 +5108,7 @@ fn chebyshev_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`chebyshev_distance`] (raw coordinates) and
 /// [`clark_l1_distance`]. Identical series score 0.
-pub fn chebyshev_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn chebyshev_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("chebyshev_l1_distance.a") {
         ctx.push(issue);
@@ -5128,7 +5128,7 @@ pub fn chebyshev_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Resul
 }
 
 /// Pairwise \(\ell_1\)-normalised Chebyshev distance.
-pub fn cdist_chebyshev_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_chebyshev_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -5172,7 +5172,7 @@ fn minkowski3_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski3_distance`] (raw coordinates) and
 /// [`chebyshev_l1_distance`]. Identical series score 0.
-pub fn minkowski3_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski3_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski3_l1_distance.a") {
         ctx.push(issue);
@@ -5192,7 +5192,7 @@ pub fn minkowski3_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Resu
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=3\) distance.
-pub fn cdist_minkowski3_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski3_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -5237,7 +5237,7 @@ fn minkowski4_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski3_l1_distance`] and [`chebyshev_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski4_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski4_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski4_l1_distance.a") {
         ctx.push(issue);
@@ -5257,7 +5257,7 @@ pub fn minkowski4_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Resu
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=4\) distance.
-pub fn cdist_minkowski4_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski4_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -5300,7 +5300,7 @@ fn minkowski15_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski3_l1_distance`] and [`minkowski4_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski15_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski15_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski15_l1_distance.a") {
         ctx.push(issue);
@@ -5320,7 +5320,7 @@ pub fn minkowski15_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=3/2\) distance.
-pub fn cdist_minkowski15_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski15_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -5363,7 +5363,7 @@ fn minkowski5_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski4_l1_distance`] and [`minkowski15_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski5_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski5_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski5_l1_distance.a") {
         ctx.push(issue);
@@ -5383,7 +5383,7 @@ pub fn minkowski5_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Resu
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=5\) distance.
-pub fn cdist_minkowski5_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski5_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -5426,7 +5426,7 @@ fn minkowski6_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski5_l1_distance`] and [`minkowski4_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski6_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski6_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski6_l1_distance.a") {
         ctx.push(issue);
@@ -5446,7 +5446,7 @@ pub fn minkowski6_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Resu
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=6\) distance.
-pub fn cdist_minkowski6_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski6_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -5489,7 +5489,7 @@ fn minkowski25_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski15_l1_distance`] and [`minkowski3_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski25_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski25_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski25_l1_distance.a") {
         ctx.push(issue);
@@ -5509,7 +5509,7 @@ pub fn minkowski25_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=5/2\) distance.
-pub fn cdist_minkowski25_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski25_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -5552,7 +5552,7 @@ fn minkowski8_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski6_l1_distance`] and [`minkowski5_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski8_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski8_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski8_l1_distance.a") {
         ctx.push(issue);
@@ -5572,7 +5572,7 @@ pub fn minkowski8_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Resu
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=8\) distance.
-pub fn cdist_minkowski8_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski8_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -5615,7 +5615,7 @@ fn minkowski7_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski6_l1_distance`] and [`minkowski8_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski7_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski7_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski7_l1_distance.a") {
         ctx.push(issue);
@@ -5635,7 +5635,7 @@ pub fn minkowski7_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Resu
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=7\) distance.
-pub fn cdist_minkowski7_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski7_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -5678,7 +5678,7 @@ fn minkowski9_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski7_l1_distance`] and [`minkowski8_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski9_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski9_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski9_l1_distance.a") {
         ctx.push(issue);
@@ -5698,7 +5698,7 @@ pub fn minkowski9_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Resu
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=9\) distance.
-pub fn cdist_minkowski9_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski9_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -5741,7 +5741,7 @@ fn minkowski10_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski9_l1_distance`] and [`minkowski8_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski10_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski10_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski10_l1_distance.a") {
         ctx.push(issue);
@@ -5761,7 +5761,7 @@ pub fn minkowski10_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=10\) distance.
-pub fn cdist_minkowski10_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski10_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -5804,7 +5804,7 @@ fn minkowski11_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski10_l1_distance`] and [`minkowski9_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski11_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski11_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski11_l1_distance.a") {
         ctx.push(issue);
@@ -5824,7 +5824,7 @@ pub fn minkowski11_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=11\) distance.
-pub fn cdist_minkowski11_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski11_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -5867,7 +5867,7 @@ fn minkowski12_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski11_l1_distance`] and [`minkowski10_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski12_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski12_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski12_l1_distance.a") {
         ctx.push(issue);
@@ -5887,7 +5887,7 @@ pub fn minkowski12_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=12\) distance.
-pub fn cdist_minkowski12_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski12_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -5930,7 +5930,7 @@ fn minkowski13_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski12_l1_distance`] and [`minkowski11_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski13_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski13_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski13_l1_distance.a") {
         ctx.push(issue);
@@ -5950,7 +5950,7 @@ pub fn minkowski13_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=13\) distance.
-pub fn cdist_minkowski13_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski13_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -5993,7 +5993,7 @@ fn minkowski14_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski13_l1_distance`] and [`minkowski12_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski14_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski14_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski14_l1_distance.a") {
         ctx.push(issue);
@@ -6013,7 +6013,7 @@ pub fn minkowski14_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=14\) distance.
-pub fn cdist_minkowski14_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski14_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -6056,7 +6056,7 @@ fn minkowski16_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski14_l1_distance`] and [`minkowski13_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski16_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski16_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski16_l1_distance.a") {
         ctx.push(issue);
@@ -6076,7 +6076,7 @@ pub fn minkowski16_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=16\) distance.
-pub fn cdist_minkowski16_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski16_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -6119,7 +6119,7 @@ fn minkowski18_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski16_l1_distance`] and [`minkowski14_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski18_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski18_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski18_l1_distance.a") {
         ctx.push(issue);
@@ -6139,7 +6139,7 @@ pub fn minkowski18_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=18\) distance.
-pub fn cdist_minkowski18_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski18_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -6182,7 +6182,7 @@ fn minkowski20_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski18_l1_distance`] and [`minkowski16_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski20_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski20_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski20_l1_distance.a") {
         ctx.push(issue);
@@ -6202,7 +6202,7 @@ pub fn minkowski20_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=20\) distance.
-pub fn cdist_minkowski20_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski20_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -6245,7 +6245,7 @@ fn minkowski24_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski20_l1_distance`] and [`minkowski18_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski24_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski24_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski24_l1_distance.a") {
         ctx.push(issue);
@@ -6265,7 +6265,7 @@ pub fn minkowski24_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=24\) distance.
-pub fn cdist_minkowski24_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski24_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -6308,7 +6308,7 @@ fn minkowski17_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski16_l1_distance`] and [`minkowski18_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski17_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski17_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski17_l1_distance.a") {
         ctx.push(issue);
@@ -6328,7 +6328,7 @@ pub fn minkowski17_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=17\) distance.
-pub fn cdist_minkowski17_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski17_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -6370,7 +6370,7 @@ fn minkowski19_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski17_l1_distance`] and [`minkowski18_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski19_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski19_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski19_l1_distance.a") {
         ctx.push(issue);
@@ -6390,7 +6390,7 @@ pub fn minkowski19_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=19\) distance.
-pub fn cdist_minkowski19_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski19_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -6431,7 +6431,7 @@ fn minkowski21_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski19_l1_distance`] and [`minkowski20_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski21_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski21_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski21_l1_distance.a") {
         ctx.push(issue);
@@ -6451,7 +6451,7 @@ pub fn minkowski21_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=21\) distance.
-pub fn cdist_minkowski21_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski21_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -6492,7 +6492,7 @@ fn minkowski22_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski21_l1_distance`] and [`minkowski20_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski22_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski22_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski22_l1_distance.a") {
         ctx.push(issue);
@@ -6512,7 +6512,7 @@ pub fn minkowski22_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=22\) distance.
-pub fn cdist_minkowski22_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski22_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -6553,7 +6553,7 @@ fn minkowski28_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski24_l1_distance`] and [`minkowski22_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski28_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski28_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski28_l1_distance.a") {
         ctx.push(issue);
@@ -6573,7 +6573,7 @@ pub fn minkowski28_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=28\) distance.
-pub fn cdist_minkowski28_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski28_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -6613,7 +6613,7 @@ fn minkowski23_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski22_l1_distance`] and [`minkowski24_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski23_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski23_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski23_l1_distance.a") {
         ctx.push(issue);
@@ -6633,7 +6633,7 @@ pub fn minkowski23_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=23\) distance.
-pub fn cdist_minkowski23_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski23_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -6673,7 +6673,7 @@ fn minkowski26_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski24_l1_distance`] and [`minkowski28_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski26_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski26_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski26_l1_distance.a") {
         ctx.push(issue);
@@ -6693,7 +6693,7 @@ pub fn minkowski26_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=26\) distance.
-pub fn cdist_minkowski26_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski26_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -6733,7 +6733,7 @@ fn minkowski27_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski26_l1_distance`] and [`minkowski28_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski27_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski27_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski27_l1_distance.a") {
         ctx.push(issue);
@@ -6753,7 +6753,7 @@ pub fn minkowski27_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=27\) distance.
-pub fn cdist_minkowski27_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski27_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -6793,7 +6793,7 @@ fn minkowski29_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski27_l1_distance`] and [`minkowski28_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski29_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski29_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski29_l1_distance.a") {
         ctx.push(issue);
@@ -6813,7 +6813,7 @@ pub fn minkowski29_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=29\) distance.
-pub fn cdist_minkowski29_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski29_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -6853,7 +6853,7 @@ fn minkowski30_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski28_l1_distance`] and [`minkowski29_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski30_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski30_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski30_l1_distance.a") {
         ctx.push(issue);
@@ -6873,7 +6873,7 @@ pub fn minkowski30_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=30\) distance.
-pub fn cdist_minkowski30_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski30_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -6913,7 +6913,7 @@ fn minkowski31_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski29_l1_distance`] and [`minkowski30_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski31_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski31_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski31_l1_distance.a") {
         ctx.push(issue);
@@ -6933,7 +6933,7 @@ pub fn minkowski31_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=31\) distance.
-pub fn cdist_minkowski31_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski31_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -6973,7 +6973,7 @@ fn minkowski32_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski30_l1_distance`] and [`minkowski31_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski32_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski32_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski32_l1_distance.a") {
         ctx.push(issue);
@@ -6993,7 +6993,7 @@ pub fn minkowski32_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=32\) distance.
-pub fn cdist_minkowski32_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski32_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -7033,7 +7033,7 @@ fn minkowski33_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski31_l1_distance`] and [`minkowski32_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski33_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski33_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski33_l1_distance.a") {
         ctx.push(issue);
@@ -7053,7 +7053,7 @@ pub fn minkowski33_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=33\) distance.
-pub fn cdist_minkowski33_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski33_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -7093,7 +7093,7 @@ fn minkowski34_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski32_l1_distance`] and [`minkowski33_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski34_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski34_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski34_l1_distance.a") {
         ctx.push(issue);
@@ -7113,7 +7113,7 @@ pub fn minkowski34_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=34\) distance.
-pub fn cdist_minkowski34_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski34_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -7153,7 +7153,7 @@ fn minkowski35_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski33_l1_distance`] and [`minkowski34_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski35_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski35_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski35_l1_distance.a") {
         ctx.push(issue);
@@ -7173,7 +7173,7 @@ pub fn minkowski35_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=35\) distance.
-pub fn cdist_minkowski35_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski35_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -7214,7 +7214,7 @@ fn minkowski36_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski34_l1_distance`] and [`minkowski35_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski36_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski36_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski36_l1_distance.a") {
         ctx.push(issue);
@@ -7234,7 +7234,7 @@ pub fn minkowski36_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=36\) distance.
-pub fn cdist_minkowski36_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski36_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -7275,7 +7275,7 @@ fn minkowski37_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski35_l1_distance`] and [`minkowski36_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski37_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski37_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski37_l1_distance.a") {
         ctx.push(issue);
@@ -7295,7 +7295,7 @@ pub fn minkowski37_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=37\) distance.
-pub fn cdist_minkowski37_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski37_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -7336,7 +7336,7 @@ fn minkowski38_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski36_l1_distance`] and [`minkowski37_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski38_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski38_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski38_l1_distance.a") {
         ctx.push(issue);
@@ -7356,7 +7356,7 @@ pub fn minkowski38_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=38\) distance.
-pub fn cdist_minkowski38_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski38_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -7397,7 +7397,7 @@ fn minkowski39_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski37_l1_distance`] and [`minkowski38_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski39_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski39_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski39_l1_distance.a") {
         ctx.push(issue);
@@ -7417,7 +7417,7 @@ pub fn minkowski39_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=39\) distance.
-pub fn cdist_minkowski39_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski39_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -7458,7 +7458,7 @@ fn minkowski40_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski38_l1_distance`] and [`minkowski39_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski40_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski40_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski40_l1_distance.a") {
         ctx.push(issue);
@@ -7478,7 +7478,7 @@ pub fn minkowski40_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=40\) distance.
-pub fn cdist_minkowski40_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski40_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -7519,7 +7519,7 @@ fn minkowski41_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski39_l1_distance`] and [`minkowski40_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski41_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski41_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski41_l1_distance.a") {
         ctx.push(issue);
@@ -7539,7 +7539,7 @@ pub fn minkowski41_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=41\) distance.
-pub fn cdist_minkowski41_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski41_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -7580,7 +7580,7 @@ fn minkowski42_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski40_l1_distance`] and [`minkowski41_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski42_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski42_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski42_l1_distance.a") {
         ctx.push(issue);
@@ -7600,7 +7600,7 @@ pub fn minkowski42_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=42\) distance.
-pub fn cdist_minkowski42_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski42_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -7641,7 +7641,7 @@ fn minkowski43_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski41_l1_distance`] and [`minkowski42_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski43_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski43_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski43_l1_distance.a") {
         ctx.push(issue);
@@ -7661,7 +7661,7 @@ pub fn minkowski43_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=43\) distance.
-pub fn cdist_minkowski43_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski43_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -7702,7 +7702,7 @@ fn minkowski44_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski42_l1_distance`] and [`minkowski43_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski44_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski44_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski44_l1_distance.a") {
         ctx.push(issue);
@@ -7722,7 +7722,7 @@ pub fn minkowski44_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=44\) distance.
-pub fn cdist_minkowski44_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski44_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -7763,7 +7763,7 @@ fn minkowski45_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski43_l1_distance`] and [`minkowski44_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski45_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski45_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski45_l1_distance.a") {
         ctx.push(issue);
@@ -7783,7 +7783,7 @@ pub fn minkowski45_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=45\) distance.
-pub fn cdist_minkowski45_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski45_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -7824,7 +7824,7 @@ fn minkowski46_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski44_l1_distance`] and [`minkowski45_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski46_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski46_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski46_l1_distance.a") {
         ctx.push(issue);
@@ -7844,7 +7844,7 @@ pub fn minkowski46_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=46\) distance.
-pub fn cdist_minkowski46_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski46_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -7885,7 +7885,7 @@ fn minkowski47_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski45_l1_distance`] and [`minkowski46_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski47_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski47_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski47_l1_distance.a") {
         ctx.push(issue);
@@ -7905,7 +7905,7 @@ pub fn minkowski47_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=47\) distance.
-pub fn cdist_minkowski47_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski47_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -7946,7 +7946,7 @@ fn minkowski48_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski46_l1_distance`] and [`minkowski47_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski48_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski48_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski48_l1_distance.a") {
         ctx.push(issue);
@@ -7966,7 +7966,7 @@ pub fn minkowski48_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=48\) distance.
-pub fn cdist_minkowski48_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski48_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -8008,7 +8008,7 @@ fn minkowski49_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski47_l1_distance`] and [`minkowski48_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski49_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski49_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski49_l1_distance.a") {
         ctx.push(issue);
@@ -8028,7 +8028,7 @@ pub fn minkowski49_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=49\) distance.
-pub fn cdist_minkowski49_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski49_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -8071,7 +8071,7 @@ fn minkowski50_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski48_l1_distance`] and [`minkowski49_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski50_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski50_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski50_l1_distance.a") {
         ctx.push(issue);
@@ -8091,7 +8091,7 @@ pub fn minkowski50_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=50\) distance.
-pub fn cdist_minkowski50_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski50_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -8134,7 +8134,7 @@ fn minkowski51_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski49_l1_distance`] and [`minkowski50_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski51_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski51_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski51_l1_distance.a") {
         ctx.push(issue);
@@ -8154,7 +8154,7 @@ pub fn minkowski51_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=51\) distance.
-pub fn cdist_minkowski51_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski51_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -8197,7 +8197,7 @@ fn minkowski52_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski50_l1_distance`] and [`minkowski51_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski52_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski52_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski52_l1_distance.a") {
         ctx.push(issue);
@@ -8217,7 +8217,7 @@ pub fn minkowski52_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=52\) distance.
-pub fn cdist_minkowski52_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski52_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -8260,7 +8260,7 @@ fn minkowski53_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski51_l1_distance`] and [`minkowski52_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski53_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski53_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski53_l1_distance.a") {
         ctx.push(issue);
@@ -8280,7 +8280,7 @@ pub fn minkowski53_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=53\) distance.
-pub fn cdist_minkowski53_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski53_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -8323,7 +8323,7 @@ fn minkowski54_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski52_l1_distance`] and [`minkowski53_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski54_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski54_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski54_l1_distance.a") {
         ctx.push(issue);
@@ -8343,7 +8343,7 @@ pub fn minkowski54_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=54\) distance.
-pub fn cdist_minkowski54_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski54_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -8385,7 +8385,7 @@ fn minkowski55_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski53_l1_distance`] and [`minkowski54_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski55_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski55_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski55_l1_distance.a") {
         ctx.push(issue);
@@ -8405,7 +8405,7 @@ pub fn minkowski55_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=55\) distance.
-pub fn cdist_minkowski55_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski55_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -8447,7 +8447,7 @@ fn minkowski56_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski54_l1_distance`] and [`minkowski55_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski56_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski56_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski56_l1_distance.a") {
         ctx.push(issue);
@@ -8467,7 +8467,7 @@ pub fn minkowski56_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=56\) distance.
-pub fn cdist_minkowski56_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski56_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -8509,7 +8509,7 @@ fn minkowski57_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski55_l1_distance`] and [`minkowski56_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski57_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski57_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski57_l1_distance.a") {
         ctx.push(issue);
@@ -8529,7 +8529,7 @@ pub fn minkowski57_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=57\) distance.
-pub fn cdist_minkowski57_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski57_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -8571,7 +8571,7 @@ fn minkowski58_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski56_l1_distance`] and [`minkowski57_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski58_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski58_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski58_l1_distance.a") {
         ctx.push(issue);
@@ -8591,7 +8591,7 @@ pub fn minkowski58_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=58\) distance.
-pub fn cdist_minkowski58_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski58_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -8633,7 +8633,7 @@ fn minkowski59_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski57_l1_distance`] and [`minkowski58_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski59_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski59_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski59_l1_distance.a") {
         ctx.push(issue);
@@ -8653,7 +8653,7 @@ pub fn minkowski59_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=59\) distance.
-pub fn cdist_minkowski59_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski59_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -8695,7 +8695,7 @@ fn minkowski60_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski58_l1_distance`] and [`minkowski59_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski60_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski60_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski60_l1_distance.a") {
         ctx.push(issue);
@@ -8715,7 +8715,7 @@ pub fn minkowski60_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=60\) distance.
-pub fn cdist_minkowski60_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski60_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -8757,7 +8757,7 @@ fn minkowski61_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski59_l1_distance`] and [`minkowski60_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski61_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski61_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski61_l1_distance.a") {
         ctx.push(issue);
@@ -8777,7 +8777,7 @@ pub fn minkowski61_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=61\) distance.
-pub fn cdist_minkowski61_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski61_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -8819,7 +8819,7 @@ fn minkowski62_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski60_l1_distance`] and [`minkowski61_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski62_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski62_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski62_l1_distance.a") {
         ctx.push(issue);
@@ -8839,7 +8839,7 @@ pub fn minkowski62_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=62\) distance.
-pub fn cdist_minkowski62_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski62_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -8881,7 +8881,7 @@ fn minkowski63_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski61_l1_distance`] and [`minkowski62_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski63_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski63_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski63_l1_distance.a") {
         ctx.push(issue);
@@ -8901,7 +8901,7 @@ pub fn minkowski63_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=63\) distance.
-pub fn cdist_minkowski63_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski63_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -8943,7 +8943,7 @@ fn minkowski64_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski62_l1_distance`] and [`minkowski63_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski64_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski64_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski64_l1_distance.a") {
         ctx.push(issue);
@@ -8963,7 +8963,7 @@ pub fn minkowski64_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=64\) distance.
-pub fn cdist_minkowski64_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski64_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -9005,7 +9005,7 @@ fn minkowski65_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski63_l1_distance`] and [`minkowski64_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski65_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski65_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski65_l1_distance.a") {
         ctx.push(issue);
@@ -9025,7 +9025,7 @@ pub fn minkowski65_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=65\) distance.
-pub fn cdist_minkowski65_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski65_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -9067,7 +9067,7 @@ fn minkowski66_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski64_l1_distance`] and [`minkowski65_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski66_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski66_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski66_l1_distance.a") {
         ctx.push(issue);
@@ -9087,7 +9087,7 @@ pub fn minkowski66_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=66\) distance.
-pub fn cdist_minkowski66_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski66_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -9129,7 +9129,7 @@ fn minkowski67_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski65_l1_distance`] and [`minkowski66_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski67_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski67_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski67_l1_distance.a") {
         ctx.push(issue);
@@ -9149,7 +9149,7 @@ pub fn minkowski67_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=67\) distance.
-pub fn cdist_minkowski67_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski67_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -9191,7 +9191,7 @@ fn minkowski68_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski66_l1_distance`] and [`minkowski67_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski68_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski68_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski68_l1_distance.a") {
         ctx.push(issue);
@@ -9211,7 +9211,7 @@ pub fn minkowski68_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=68\) distance.
-pub fn cdist_minkowski68_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski68_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -9253,7 +9253,7 @@ fn minkowski69_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski67_l1_distance`] and [`minkowski68_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski69_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski69_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski69_l1_distance.a") {
         ctx.push(issue);
@@ -9273,7 +9273,7 @@ pub fn minkowski69_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=69\) distance.
-pub fn cdist_minkowski69_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski69_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -9315,7 +9315,7 @@ fn minkowski70_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski68_l1_distance`] and [`minkowski69_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski70_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski70_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski70_l1_distance.a") {
         ctx.push(issue);
@@ -9335,7 +9335,7 @@ pub fn minkowski70_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=70\) distance.
-pub fn cdist_minkowski70_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski70_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -9377,7 +9377,7 @@ fn minkowski71_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski69_l1_distance`] and [`minkowski70_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski71_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski71_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski71_l1_distance.a") {
         ctx.push(issue);
@@ -9397,7 +9397,7 @@ pub fn minkowski71_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=71\) distance.
-pub fn cdist_minkowski71_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski71_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -9439,7 +9439,7 @@ fn minkowski72_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski70_l1_distance`] and [`minkowski71_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski72_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski72_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski72_l1_distance.a") {
         ctx.push(issue);
@@ -9459,7 +9459,7 @@ pub fn minkowski72_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=72\) distance.
-pub fn cdist_minkowski72_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski72_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -9501,7 +9501,7 @@ fn minkowski73_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski71_l1_distance`] and [`minkowski72_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski73_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski73_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski73_l1_distance.a") {
         ctx.push(issue);
@@ -9521,7 +9521,7 @@ pub fn minkowski73_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=73\) distance.
-pub fn cdist_minkowski73_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski73_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -9563,7 +9563,7 @@ fn minkowski74_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski73_l1_distance`] and [`minkowski72_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski74_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski74_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski74_l1_distance.a") {
         ctx.push(issue);
@@ -9583,7 +9583,7 @@ pub fn minkowski74_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=74\) distance.
-pub fn cdist_minkowski74_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski74_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -9625,7 +9625,7 @@ fn minkowski75_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski74_l1_distance`] and [`minkowski73_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski75_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski75_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski75_l1_distance.a") {
         ctx.push(issue);
@@ -9645,7 +9645,7 @@ pub fn minkowski75_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=75\) distance.
-pub fn cdist_minkowski75_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski75_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -9687,7 +9687,7 @@ fn minkowski76_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski75_l1_distance`] and [`minkowski74_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski76_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski76_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski76_l1_distance.a") {
         ctx.push(issue);
@@ -9707,7 +9707,7 @@ pub fn minkowski76_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=76\) distance.
-pub fn cdist_minkowski76_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski76_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -9749,7 +9749,7 @@ fn minkowski77_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski76_l1_distance`] and [`minkowski75_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski77_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski77_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski77_l1_distance.a") {
         ctx.push(issue);
@@ -9769,7 +9769,7 @@ pub fn minkowski77_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=77\) distance.
-pub fn cdist_minkowski77_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski77_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -9811,7 +9811,7 @@ fn minkowski78_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski77_l1_distance`] and [`minkowski76_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski78_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski78_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski78_l1_distance.a") {
         ctx.push(issue);
@@ -9831,7 +9831,7 @@ pub fn minkowski78_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=78\) distance.
-pub fn cdist_minkowski78_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski78_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -9873,7 +9873,7 @@ fn minkowski79_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski78_l1_distance`] and [`minkowski77_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski79_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski79_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski79_l1_distance.a") {
         ctx.push(issue);
@@ -9893,7 +9893,7 @@ pub fn minkowski79_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=79\) distance.
-pub fn cdist_minkowski79_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski79_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -9935,7 +9935,7 @@ fn minkowski80_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski79_l1_distance`] and [`minkowski78_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski80_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski80_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski80_l1_distance.a") {
         ctx.push(issue);
@@ -9955,7 +9955,7 @@ pub fn minkowski80_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=80\) distance.
-pub fn cdist_minkowski80_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski80_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -9997,7 +9997,7 @@ fn minkowski81_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski80_l1_distance`] and [`minkowski79_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski81_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski81_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski81_l1_distance.a") {
         ctx.push(issue);
@@ -10017,7 +10017,7 @@ pub fn minkowski81_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=81\) distance.
-pub fn cdist_minkowski81_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski81_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -10059,7 +10059,7 @@ fn minkowski82_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski81_l1_distance`] and [`minkowski80_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski82_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski82_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski82_l1_distance.a") {
         ctx.push(issue);
@@ -10079,7 +10079,7 @@ pub fn minkowski82_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=82\) distance.
-pub fn cdist_minkowski82_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski82_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -10121,7 +10121,7 @@ fn minkowski83_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski82_l1_distance`] and [`minkowski81_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski83_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski83_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski83_l1_distance.a") {
         ctx.push(issue);
@@ -10141,7 +10141,7 @@ pub fn minkowski83_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=83\) distance.
-pub fn cdist_minkowski83_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski83_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -10183,7 +10183,7 @@ fn minkowski84_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski83_l1_distance`] and [`minkowski82_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski84_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski84_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski84_l1_distance.a") {
         ctx.push(issue);
@@ -10203,7 +10203,7 @@ pub fn minkowski84_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=84\) distance.
-pub fn cdist_minkowski84_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski84_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -10245,7 +10245,7 @@ fn minkowski85_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski84_l1_distance`] and [`minkowski83_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski85_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski85_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski85_l1_distance.a") {
         ctx.push(issue);
@@ -10265,7 +10265,7 @@ pub fn minkowski85_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=85\) distance.
-pub fn cdist_minkowski85_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski85_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -10307,7 +10307,7 @@ fn minkowski86_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski85_l1_distance`] and [`minkowski84_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski86_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski86_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski86_l1_distance.a") {
         ctx.push(issue);
@@ -10327,7 +10327,7 @@ pub fn minkowski86_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=86\) distance.
-pub fn cdist_minkowski86_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski86_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -10369,7 +10369,7 @@ fn minkowski87_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski86_l1_distance`] and [`minkowski85_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski87_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski87_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski87_l1_distance.a") {
         ctx.push(issue);
@@ -10389,7 +10389,7 @@ pub fn minkowski87_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=87\) distance.
-pub fn cdist_minkowski87_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski87_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -10431,7 +10431,7 @@ fn minkowski88_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski87_l1_distance`] and [`minkowski86_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski88_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski88_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski88_l1_distance.a") {
         ctx.push(issue);
@@ -10451,7 +10451,7 @@ pub fn minkowski88_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=88\) distance.
-pub fn cdist_minkowski88_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski88_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -10493,7 +10493,7 @@ fn minkowski89_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski88_l1_distance`] and [`minkowski87_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski89_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski89_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski89_l1_distance.a") {
         ctx.push(issue);
@@ -10513,7 +10513,7 @@ pub fn minkowski89_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=89\) distance.
-pub fn cdist_minkowski89_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski89_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -10555,7 +10555,7 @@ fn minkowski90_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski89_l1_distance`] and [`minkowski88_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski90_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski90_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski90_l1_distance.a") {
         ctx.push(issue);
@@ -10575,7 +10575,7 @@ pub fn minkowski90_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=90\) distance.
-pub fn cdist_minkowski90_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski90_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -10617,7 +10617,7 @@ fn minkowski91_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski90_l1_distance`] and [`minkowski89_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski91_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski91_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski91_l1_distance.a") {
         ctx.push(issue);
@@ -10637,7 +10637,7 @@ pub fn minkowski91_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=91\) distance.
-pub fn cdist_minkowski91_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski91_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -10679,7 +10679,7 @@ fn minkowski92_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski91_l1_distance`] and [`minkowski90_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski92_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski92_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski92_l1_distance.a") {
         ctx.push(issue);
@@ -10699,7 +10699,7 @@ pub fn minkowski92_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=92\) distance.
-pub fn cdist_minkowski92_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski92_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -10741,7 +10741,7 @@ fn minkowski93_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski92_l1_distance`] and [`minkowski91_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski93_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski93_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski93_l1_distance.a") {
         ctx.push(issue);
@@ -10761,7 +10761,7 @@ pub fn minkowski93_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=93\) distance.
-pub fn cdist_minkowski93_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski93_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -10803,7 +10803,7 @@ fn minkowski94_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski93_l1_distance`] and [`minkowski92_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski94_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski94_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski94_l1_distance.a") {
         ctx.push(issue);
@@ -10823,7 +10823,7 @@ pub fn minkowski94_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=94\) distance.
-pub fn cdist_minkowski94_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski94_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -10865,7 +10865,7 @@ fn minkowski95_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski94_l1_distance`] and [`minkowski93_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski95_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski95_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski95_l1_distance.a") {
         ctx.push(issue);
@@ -10885,7 +10885,7 @@ pub fn minkowski95_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=95\) distance.
-pub fn cdist_minkowski95_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski95_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -10927,7 +10927,7 @@ fn minkowski96_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski95_l1_distance`] and [`minkowski93_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski96_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski96_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski96_l1_distance.a") {
         ctx.push(issue);
@@ -10947,7 +10947,7 @@ pub fn minkowski96_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=96\) distance.
-pub fn cdist_minkowski96_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski96_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -10989,7 +10989,7 @@ fn minkowski97_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski96_l1_distance`] and [`minkowski93_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski97_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski97_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski97_l1_distance.a") {
         ctx.push(issue);
@@ -11009,7 +11009,7 @@ pub fn minkowski97_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=97\) distance.
-pub fn cdist_minkowski97_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski97_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -11051,7 +11051,7 @@ fn minkowski98_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski97_l1_distance`] and [`minkowski96_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski98_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski98_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski98_l1_distance.a") {
         ctx.push(issue);
@@ -11071,7 +11071,7 @@ pub fn minkowski98_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=98\) distance.
-pub fn cdist_minkowski98_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski98_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -11113,7 +11113,7 @@ fn minkowski99_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski98_l1_distance`] and [`minkowski97_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski99_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski99_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski99_l1_distance.a") {
         ctx.push(issue);
@@ -11133,7 +11133,7 @@ pub fn minkowski99_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Res
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=99\) distance.
-pub fn cdist_minkowski99_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski99_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -11175,7 +11175,7 @@ fn minkowski100_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski99_l1_distance`] and [`minkowski98_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski100_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski100_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski100_l1_distance.a") {
         ctx.push(issue);
@@ -11195,7 +11195,7 @@ pub fn minkowski100_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=100\) distance.
-pub fn cdist_minkowski100_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski100_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -11237,7 +11237,7 @@ fn minkowski101_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski100_l1_distance`] and [`minkowski99_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski101_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski101_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski101_l1_distance.a") {
         ctx.push(issue);
@@ -11257,7 +11257,7 @@ pub fn minkowski101_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=101\) distance.
-pub fn cdist_minkowski101_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski101_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -11299,7 +11299,7 @@ fn minkowski102_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski101_l1_distance`] and [`minkowski100_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski102_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski102_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski102_l1_distance.a") {
         ctx.push(issue);
@@ -11319,7 +11319,7 @@ pub fn minkowski102_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=102\) distance.
-pub fn cdist_minkowski102_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski102_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -11361,7 +11361,7 @@ fn minkowski103_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski102_l1_distance`] and [`minkowski101_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski103_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski103_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski103_l1_distance.a") {
         ctx.push(issue);
@@ -11381,7 +11381,7 @@ pub fn minkowski103_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=103\) distance.
-pub fn cdist_minkowski103_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski103_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -11423,7 +11423,7 @@ fn minkowski104_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski103_l1_distance`] and [`minkowski102_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski104_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski104_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski104_l1_distance.a") {
         ctx.push(issue);
@@ -11443,7 +11443,7 @@ pub fn minkowski104_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=104\) distance.
-pub fn cdist_minkowski104_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski104_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -11485,7 +11485,7 @@ fn minkowski105_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski104_l1_distance`] and [`minkowski103_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski105_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski105_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski105_l1_distance.a") {
         ctx.push(issue);
@@ -11505,7 +11505,7 @@ pub fn minkowski105_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=105\) distance.
-pub fn cdist_minkowski105_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski105_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -11547,7 +11547,7 @@ fn minkowski106_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski105_l1_distance`] and [`minkowski104_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski106_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski106_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski106_l1_distance.a") {
         ctx.push(issue);
@@ -11567,7 +11567,7 @@ pub fn minkowski106_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=106\) distance.
-pub fn cdist_minkowski106_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski106_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -11609,7 +11609,7 @@ fn minkowski107_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski106_l1_distance`] and [`minkowski105_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski107_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski107_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski107_l1_distance.a") {
         ctx.push(issue);
@@ -11629,7 +11629,7 @@ pub fn minkowski107_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=107\) distance.
-pub fn cdist_minkowski107_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski107_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -11671,7 +11671,7 @@ fn minkowski108_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski107_l1_distance`] and [`minkowski106_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski108_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski108_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski108_l1_distance.a") {
         ctx.push(issue);
@@ -11691,7 +11691,7 @@ pub fn minkowski108_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=108\) distance.
-pub fn cdist_minkowski108_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski108_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -11733,7 +11733,7 @@ fn minkowski109_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski108_l1_distance`] and [`minkowski107_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski109_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski109_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski109_l1_distance.a") {
         ctx.push(issue);
@@ -11753,7 +11753,7 @@ pub fn minkowski109_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=109\) distance.
-pub fn cdist_minkowski109_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski109_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -11795,7 +11795,7 @@ fn minkowski110_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski109_l1_distance`] and [`minkowski108_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski110_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski110_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski110_l1_distance.a") {
         ctx.push(issue);
@@ -11815,7 +11815,7 @@ pub fn minkowski110_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=110\) distance.
-pub fn cdist_minkowski110_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski110_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -11857,7 +11857,7 @@ fn minkowski111_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski110_l1_distance`] and [`minkowski109_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski111_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski111_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski111_l1_distance.a") {
         ctx.push(issue);
@@ -11877,7 +11877,7 @@ pub fn minkowski111_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=111\) distance.
-pub fn cdist_minkowski111_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski111_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -11919,7 +11919,7 @@ fn minkowski112_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski111_l1_distance`] and [`minkowski110_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski112_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski112_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski112_l1_distance.a") {
         ctx.push(issue);
@@ -11939,7 +11939,7 @@ pub fn minkowski112_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=112\) distance.
-pub fn cdist_minkowski112_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski112_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -11981,7 +11981,7 @@ fn minkowski113_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski112_l1_distance`] and [`minkowski111_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski113_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski113_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski113_l1_distance.a") {
         ctx.push(issue);
@@ -12001,7 +12001,7 @@ pub fn minkowski113_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=113\) distance.
-pub fn cdist_minkowski113_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski113_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -12043,7 +12043,7 @@ fn minkowski114_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski113_l1_distance`] and [`minkowski112_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski114_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski114_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski114_l1_distance.a") {
         ctx.push(issue);
@@ -12063,7 +12063,7 @@ pub fn minkowski114_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=114\) distance.
-pub fn cdist_minkowski114_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski114_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -12105,7 +12105,7 @@ fn minkowski115_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski114_l1_distance`] and [`minkowski113_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski115_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski115_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski115_l1_distance.a") {
         ctx.push(issue);
@@ -12125,7 +12125,7 @@ pub fn minkowski115_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=115\) distance.
-pub fn cdist_minkowski115_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski115_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -12167,7 +12167,7 @@ fn minkowski116_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski115_l1_distance`] and [`minkowski114_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski116_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski116_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski116_l1_distance.a") {
         ctx.push(issue);
@@ -12187,7 +12187,7 @@ pub fn minkowski116_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=116\) distance.
-pub fn cdist_minkowski116_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski116_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -12229,7 +12229,7 @@ fn minkowski117_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski116_l1_distance`] and [`minkowski115_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski117_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski117_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski117_l1_distance.a") {
         ctx.push(issue);
@@ -12249,7 +12249,7 @@ pub fn minkowski117_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=117\) distance.
-pub fn cdist_minkowski117_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski117_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -12291,7 +12291,7 @@ fn minkowski118_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski117_l1_distance`] and [`minkowski116_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski118_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski118_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski118_l1_distance.a") {
         ctx.push(issue);
@@ -12311,7 +12311,7 @@ pub fn minkowski118_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=118\) distance.
-pub fn cdist_minkowski118_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski118_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -12352,7 +12352,7 @@ fn minkowski119_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski118_l1_distance`] and [`minkowski117_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski119_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski119_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski119_l1_distance.a") {
         ctx.push(issue);
@@ -12372,7 +12372,7 @@ pub fn minkowski119_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=119\) distance.
-pub fn cdist_minkowski119_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski119_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -12414,7 +12414,7 @@ fn minkowski120_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski119_l1_distance`] and [`minkowski118_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski120_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski120_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski120_l1_distance.a") {
         ctx.push(issue);
@@ -12434,7 +12434,7 @@ pub fn minkowski120_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=120\) distance.
-pub fn cdist_minkowski120_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski120_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -12476,7 +12476,7 @@ fn minkowski121_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski120_l1_distance`] and [`minkowski119_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski121_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski121_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski121_l1_distance.a") {
         ctx.push(issue);
@@ -12496,7 +12496,7 @@ pub fn minkowski121_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=121\) distance.
-pub fn cdist_minkowski121_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski121_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -12538,7 +12538,7 @@ fn minkowski122_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski121_l1_distance`] and [`minkowski120_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski122_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski122_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski122_l1_distance.a") {
         ctx.push(issue);
@@ -12558,7 +12558,7 @@ pub fn minkowski122_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=122\) distance.
-pub fn cdist_minkowski122_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski122_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -12600,7 +12600,7 @@ fn minkowski123_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski122_l1_distance`] and [`minkowski121_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski123_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski123_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski123_l1_distance.a") {
         ctx.push(issue);
@@ -12620,7 +12620,7 @@ pub fn minkowski123_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=123\) distance.
-pub fn cdist_minkowski123_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski123_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -12662,7 +12662,7 @@ fn minkowski124_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski123_l1_distance`] and [`minkowski122_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski124_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski124_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski124_l1_distance.a") {
         ctx.push(issue);
@@ -12682,7 +12682,7 @@ pub fn minkowski124_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=124\) distance.
-pub fn cdist_minkowski124_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski124_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -12724,7 +12724,7 @@ fn minkowski125_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski124_l1_distance`] and [`minkowski123_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski125_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski125_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski125_l1_distance.a") {
         ctx.push(issue);
@@ -12744,7 +12744,7 @@ pub fn minkowski125_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=125\) distance.
-pub fn cdist_minkowski125_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski125_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -12786,7 +12786,7 @@ fn minkowski126_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski125_l1_distance`] and [`minkowski124_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski126_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski126_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski126_l1_distance.a") {
         ctx.push(issue);
@@ -12806,7 +12806,7 @@ pub fn minkowski126_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=126\) distance.
-pub fn cdist_minkowski126_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski126_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -12848,7 +12848,7 @@ fn minkowski127_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski126_l1_distance`] and [`minkowski125_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski127_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski127_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski127_l1_distance.a") {
         ctx.push(issue);
@@ -12868,7 +12868,7 @@ pub fn minkowski127_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=127\) distance.
-pub fn cdist_minkowski127_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski127_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -12910,7 +12910,7 @@ fn minkowski128_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski127_l1_distance`] and [`minkowski126_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski128_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski128_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski128_l1_distance.a") {
         ctx.push(issue);
@@ -12930,7 +12930,7 @@ pub fn minkowski128_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=128\) distance.
-pub fn cdist_minkowski128_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski128_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -12972,7 +12972,7 @@ fn minkowski129_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski128_l1_distance`] and [`minkowski127_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski129_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski129_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski129_l1_distance.a") {
         ctx.push(issue);
@@ -12992,7 +12992,7 @@ pub fn minkowski129_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=129\) distance.
-pub fn cdist_minkowski129_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski129_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -13034,7 +13034,7 @@ fn minkowski130_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski129_l1_distance`] and [`minkowski128_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski130_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski130_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski130_l1_distance.a") {
         ctx.push(issue);
@@ -13054,7 +13054,7 @@ pub fn minkowski130_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=130\) distance.
-pub fn cdist_minkowski130_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski130_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -13096,7 +13096,7 @@ fn minkowski131_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski130_l1_distance`] and [`minkowski129_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski131_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski131_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski131_l1_distance.a") {
         ctx.push(issue);
@@ -13116,7 +13116,7 @@ pub fn minkowski131_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=131\) distance.
-pub fn cdist_minkowski131_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski131_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -13158,7 +13158,7 @@ fn minkowski132_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski131_l1_distance`] and [`minkowski130_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski132_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski132_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski132_l1_distance.a") {
         ctx.push(issue);
@@ -13178,7 +13178,7 @@ pub fn minkowski132_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=132\) distance.
-pub fn cdist_minkowski132_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski132_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -13219,7 +13219,7 @@ fn minkowski133_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski132_l1_distance`] and [`minkowski131_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski133_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski133_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski133_l1_distance.a") {
         ctx.push(issue);
@@ -13239,7 +13239,7 @@ pub fn minkowski133_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=133\) distance.
-pub fn cdist_minkowski133_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski133_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -13281,7 +13281,7 @@ fn minkowski134_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski133_l1_distance`] and [`minkowski132_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski134_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski134_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski134_l1_distance.a") {
         ctx.push(issue);
@@ -13301,7 +13301,7 @@ pub fn minkowski134_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=134\) distance.
-pub fn cdist_minkowski134_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski134_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -13342,7 +13342,7 @@ fn minkowski135_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski134_l1_distance`] and [`minkowski133_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski135_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski135_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski135_l1_distance.a") {
         ctx.push(issue);
@@ -13362,7 +13362,7 @@ pub fn minkowski135_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=135\) distance.
-pub fn cdist_minkowski135_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski135_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -13404,7 +13404,7 @@ fn minkowski136_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski135_l1_distance`] and [`minkowski134_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski136_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski136_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski136_l1_distance.a") {
         ctx.push(issue);
@@ -13424,7 +13424,7 @@ pub fn minkowski136_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=136\) distance.
-pub fn cdist_minkowski136_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski136_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -13465,7 +13465,7 @@ fn minkowski137_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski136_l1_distance`] and [`minkowski135_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski137_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski137_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski137_l1_distance.a") {
         ctx.push(issue);
@@ -13485,7 +13485,7 @@ pub fn minkowski137_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=137\) distance.
-pub fn cdist_minkowski137_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski137_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -13527,7 +13527,7 @@ fn minkowski138_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski137_l1_distance`] and [`minkowski136_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski138_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski138_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski138_l1_distance.a") {
         ctx.push(issue);
@@ -13547,7 +13547,7 @@ pub fn minkowski138_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=138\) distance.
-pub fn cdist_minkowski138_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski138_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -13588,7 +13588,7 @@ fn minkowski139_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski138_l1_distance`] and [`minkowski137_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski139_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski139_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski139_l1_distance.a") {
         ctx.push(issue);
@@ -13608,7 +13608,7 @@ pub fn minkowski139_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=139\) distance.
-pub fn cdist_minkowski139_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski139_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -13650,7 +13650,7 @@ fn minkowski140_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski139_l1_distance`] and [`minkowski138_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski140_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski140_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski140_l1_distance.a") {
         ctx.push(issue);
@@ -13670,7 +13670,7 @@ pub fn minkowski140_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=140\) distance.
-pub fn cdist_minkowski140_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski140_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -13711,7 +13711,7 @@ fn minkowski141_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski140_l1_distance`] and [`minkowski139_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski141_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski141_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski141_l1_distance.a") {
         ctx.push(issue);
@@ -13731,7 +13731,7 @@ pub fn minkowski141_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=141\) distance.
-pub fn cdist_minkowski141_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski141_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -13773,7 +13773,7 @@ fn minkowski142_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski141_l1_distance`] and [`minkowski140_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski142_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski142_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski142_l1_distance.a") {
         ctx.push(issue);
@@ -13793,7 +13793,7 @@ pub fn minkowski142_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=142\) distance.
-pub fn cdist_minkowski142_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski142_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -13834,7 +13834,7 @@ fn minkowski143_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski142_l1_distance`] and [`minkowski141_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski143_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski143_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski143_l1_distance.a") {
         ctx.push(issue);
@@ -13854,7 +13854,7 @@ pub fn minkowski143_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=143\) distance.
-pub fn cdist_minkowski143_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski143_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -13896,7 +13896,7 @@ fn minkowski144_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski143_l1_distance`] and [`minkowski142_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski144_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski144_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski144_l1_distance.a") {
         ctx.push(issue);
@@ -13916,7 +13916,7 @@ pub fn minkowski144_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=144\) distance.
-pub fn cdist_minkowski144_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski144_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -13957,7 +13957,7 @@ fn minkowski145_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski144_l1_distance`] and [`minkowski143_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski145_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski145_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski145_l1_distance.a") {
         ctx.push(issue);
@@ -13977,7 +13977,7 @@ pub fn minkowski145_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=145\) distance.
-pub fn cdist_minkowski145_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski145_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -14019,7 +14019,7 @@ fn minkowski146_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski145_l1_distance`] and [`minkowski144_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski146_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski146_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski146_l1_distance.a") {
         ctx.push(issue);
@@ -14039,7 +14039,7 @@ pub fn minkowski146_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=146\) distance.
-pub fn cdist_minkowski146_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski146_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -14080,7 +14080,7 @@ fn minkowski147_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski146_l1_distance`] and [`minkowski145_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski147_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski147_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski147_l1_distance.a") {
         ctx.push(issue);
@@ -14100,7 +14100,7 @@ pub fn minkowski147_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=147\) distance.
-pub fn cdist_minkowski147_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski147_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -14142,7 +14142,7 @@ fn minkowski148_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski147_l1_distance`] and [`minkowski146_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski148_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski148_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski148_l1_distance.a") {
         ctx.push(issue);
@@ -14162,7 +14162,7 @@ pub fn minkowski148_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=148\) distance.
-pub fn cdist_minkowski148_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski148_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -14203,7 +14203,7 @@ fn minkowski149_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski148_l1_distance`] and [`minkowski147_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski149_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski149_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski149_l1_distance.a") {
         ctx.push(issue);
@@ -14223,7 +14223,7 @@ pub fn minkowski149_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=149\) distance.
-pub fn cdist_minkowski149_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski149_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -14265,7 +14265,7 @@ fn minkowski150_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski149_l1_distance`] and [`minkowski148_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski150_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski150_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski150_l1_distance.a") {
         ctx.push(issue);
@@ -14285,7 +14285,7 @@ pub fn minkowski150_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=150\) distance.
-pub fn cdist_minkowski150_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski150_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -14326,7 +14326,7 @@ fn minkowski151_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski150_l1_distance`] and [`minkowski149_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski151_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski151_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski151_l1_distance.a") {
         ctx.push(issue);
@@ -14346,7 +14346,7 @@ pub fn minkowski151_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=151\) distance.
-pub fn cdist_minkowski151_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski151_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -14388,7 +14388,7 @@ fn minkowski152_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski151_l1_distance`] and [`minkowski150_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski152_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski152_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski152_l1_distance.a") {
         ctx.push(issue);
@@ -14408,7 +14408,7 @@ pub fn minkowski152_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=152\) distance.
-pub fn cdist_minkowski152_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski152_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -14449,7 +14449,7 @@ fn minkowski153_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski152_l1_distance`] and [`minkowski151_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski153_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski153_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski153_l1_distance.a") {
         ctx.push(issue);
@@ -14469,7 +14469,7 @@ pub fn minkowski153_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=153\) distance.
-pub fn cdist_minkowski153_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski153_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -14511,7 +14511,7 @@ fn minkowski154_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski153_l1_distance`] and [`minkowski152_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski154_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski154_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski154_l1_distance.a") {
         ctx.push(issue);
@@ -14531,7 +14531,7 @@ pub fn minkowski154_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=154\) distance.
-pub fn cdist_minkowski154_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski154_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -14572,7 +14572,7 @@ fn minkowski155_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski154_l1_distance`] and [`minkowski153_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski155_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski155_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski155_l1_distance.a") {
         ctx.push(issue);
@@ -14592,7 +14592,7 @@ pub fn minkowski155_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=155\) distance.
-pub fn cdist_minkowski155_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski155_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -14634,7 +14634,7 @@ fn minkowski156_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski155_l1_distance`] and [`minkowski154_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski156_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski156_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski156_l1_distance.a") {
         ctx.push(issue);
@@ -14654,7 +14654,7 @@ pub fn minkowski156_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=156\) distance.
-pub fn cdist_minkowski156_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski156_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -14696,7 +14696,7 @@ fn minkowski157_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski156_l1_distance`] and [`minkowski155_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski157_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski157_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski157_l1_distance.a") {
         ctx.push(issue);
@@ -14716,7 +14716,7 @@ pub fn minkowski157_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=157\) distance.
-pub fn cdist_minkowski157_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski157_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -14758,7 +14758,7 @@ fn minkowski158_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski157_l1_distance`] and [`minkowski156_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski158_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski158_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski158_l1_distance.a") {
         ctx.push(issue);
@@ -14778,7 +14778,7 @@ pub fn minkowski158_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=158\) distance.
-pub fn cdist_minkowski158_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski158_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -14820,7 +14820,7 @@ fn minkowski159_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski158_l1_distance`] and [`minkowski157_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski159_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski159_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski159_l1_distance.a") {
         ctx.push(issue);
@@ -14840,7 +14840,7 @@ pub fn minkowski159_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=159\) distance.
-pub fn cdist_minkowski159_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski159_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -14882,7 +14882,7 @@ fn minkowski160_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski159_l1_distance`] and [`minkowski158_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski160_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski160_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski160_l1_distance.a") {
         ctx.push(issue);
@@ -14902,7 +14902,7 @@ pub fn minkowski160_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=160\) distance.
-pub fn cdist_minkowski160_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski160_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -14944,7 +14944,7 @@ fn minkowski161_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski160_l1_distance`] and [`minkowski159_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski161_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski161_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski161_l1_distance.a") {
         ctx.push(issue);
@@ -14964,7 +14964,7 @@ pub fn minkowski161_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=161\) distance.
-pub fn cdist_minkowski161_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski161_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -15006,7 +15006,7 @@ fn minkowski162_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski161_l1_distance`] and [`minkowski160_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski162_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski162_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski162_l1_distance.a") {
         ctx.push(issue);
@@ -15026,7 +15026,7 @@ pub fn minkowski162_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=162\) distance.
-pub fn cdist_minkowski162_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski162_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -15068,7 +15068,7 @@ fn minkowski163_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski162_l1_distance`] and [`minkowski161_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski163_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski163_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski163_l1_distance.a") {
         ctx.push(issue);
@@ -15088,7 +15088,7 @@ pub fn minkowski163_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=163\) distance.
-pub fn cdist_minkowski163_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski163_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -15130,7 +15130,7 @@ fn minkowski164_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski163_l1_distance`] and [`minkowski162_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski164_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski164_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski164_l1_distance.a") {
         ctx.push(issue);
@@ -15150,7 +15150,7 @@ pub fn minkowski164_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=164\) distance.
-pub fn cdist_minkowski164_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski164_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -15192,7 +15192,7 @@ fn minkowski165_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski164_l1_distance`] and [`minkowski163_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski165_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski165_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski165_l1_distance.a") {
         ctx.push(issue);
@@ -15212,7 +15212,7 @@ pub fn minkowski165_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=165\) distance.
-pub fn cdist_minkowski165_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski165_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -15254,7 +15254,7 @@ fn minkowski166_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski165_l1_distance`] and [`minkowski164_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski166_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski166_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski166_l1_distance.a") {
         ctx.push(issue);
@@ -15274,7 +15274,7 @@ pub fn minkowski166_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=166\) distance.
-pub fn cdist_minkowski166_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski166_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -15316,7 +15316,7 @@ fn minkowski167_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski166_l1_distance`] and [`minkowski165_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski167_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski167_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski167_l1_distance.a") {
         ctx.push(issue);
@@ -15336,7 +15336,7 @@ pub fn minkowski167_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=167\) distance.
-pub fn cdist_minkowski167_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski167_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -15378,7 +15378,7 @@ fn minkowski168_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski167_l1_distance`] and [`minkowski166_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski168_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski168_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski168_l1_distance.a") {
         ctx.push(issue);
@@ -15398,7 +15398,7 @@ pub fn minkowski168_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=168\) distance.
-pub fn cdist_minkowski168_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski168_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -15440,7 +15440,7 @@ fn minkowski169_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski168_l1_distance`] and [`minkowski167_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski169_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski169_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski169_l1_distance.a") {
         ctx.push(issue);
@@ -15460,7 +15460,7 @@ pub fn minkowski169_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=169\) distance.
-pub fn cdist_minkowski169_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski169_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -15502,7 +15502,7 @@ fn minkowski170_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski169_l1_distance`] and [`minkowski168_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski170_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski170_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski170_l1_distance.a") {
         ctx.push(issue);
@@ -15522,7 +15522,7 @@ pub fn minkowski170_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=170\) distance.
-pub fn cdist_minkowski170_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski170_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -15564,7 +15564,7 @@ fn minkowski171_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski170_l1_distance`] and [`minkowski169_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski171_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski171_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski171_l1_distance.a") {
         ctx.push(issue);
@@ -15584,7 +15584,7 @@ pub fn minkowski171_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=171\) distance.
-pub fn cdist_minkowski171_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski171_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -15626,7 +15626,7 @@ fn minkowski172_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski171_l1_distance`] and [`minkowski170_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski172_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski172_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski172_l1_distance.a") {
         ctx.push(issue);
@@ -15646,7 +15646,7 @@ pub fn minkowski172_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=172\) distance.
-pub fn cdist_minkowski172_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski172_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -15688,7 +15688,7 @@ fn minkowski173_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski172_l1_distance`] and [`minkowski171_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski173_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski173_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski173_l1_distance.a") {
         ctx.push(issue);
@@ -15708,7 +15708,7 @@ pub fn minkowski173_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=173\) distance.
-pub fn cdist_minkowski173_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski173_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -15750,7 +15750,7 @@ fn minkowski174_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski173_l1_distance`] and [`minkowski172_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski174_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski174_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski174_l1_distance.a") {
         ctx.push(issue);
@@ -15770,7 +15770,7 @@ pub fn minkowski174_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=174\) distance.
-pub fn cdist_minkowski174_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski174_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -15812,7 +15812,7 @@ fn minkowski175_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski174_l1_distance`] and [`minkowski173_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski175_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski175_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski175_l1_distance.a") {
         ctx.push(issue);
@@ -15832,7 +15832,7 @@ pub fn minkowski175_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=175\) distance.
-pub fn cdist_minkowski175_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski175_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -15874,7 +15874,7 @@ fn minkowski176_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski175_l1_distance`] and [`minkowski174_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski176_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski176_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski176_l1_distance.a") {
         ctx.push(issue);
@@ -15894,7 +15894,7 @@ pub fn minkowski176_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=176\) distance.
-pub fn cdist_minkowski176_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski176_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -15936,7 +15936,7 @@ fn minkowski177_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski176_l1_distance`] and [`minkowski175_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski177_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski177_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski177_l1_distance.a") {
         ctx.push(issue);
@@ -15956,7 +15956,7 @@ pub fn minkowski177_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=177\) distance.
-pub fn cdist_minkowski177_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski177_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -15998,7 +15998,7 @@ fn minkowski178_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski177_l1_distance`] and [`minkowski176_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski178_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski178_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski178_l1_distance.a") {
         ctx.push(issue);
@@ -16018,7 +16018,7 @@ pub fn minkowski178_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=178\) distance.
-pub fn cdist_minkowski178_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski178_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -16060,7 +16060,7 @@ fn minkowski179_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski178_l1_distance`] and [`minkowski177_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski179_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski179_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski179_l1_distance.a") {
         ctx.push(issue);
@@ -16080,7 +16080,7 @@ pub fn minkowski179_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=179\) distance.
-pub fn cdist_minkowski179_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski179_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -16122,7 +16122,7 @@ fn minkowski180_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski179_l1_distance`] and [`minkowski178_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski180_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski180_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski180_l1_distance.a") {
         ctx.push(issue);
@@ -16142,7 +16142,7 @@ pub fn minkowski180_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=180\) distance.
-pub fn cdist_minkowski180_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski180_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -16184,7 +16184,7 @@ fn minkowski181_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski180_l1_distance`] and [`minkowski179_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski181_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski181_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski181_l1_distance.a") {
         ctx.push(issue);
@@ -16204,7 +16204,7 @@ pub fn minkowski181_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=181\) distance.
-pub fn cdist_minkowski181_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski181_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -16246,7 +16246,7 @@ fn minkowski182_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski181_l1_distance`] and [`minkowski180_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski182_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski182_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski182_l1_distance.a") {
         ctx.push(issue);
@@ -16266,7 +16266,7 @@ pub fn minkowski182_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=182\) distance.
-pub fn cdist_minkowski182_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski182_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -16308,7 +16308,7 @@ fn minkowski183_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski182_l1_distance`] and [`minkowski181_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski183_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski183_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski183_l1_distance.a") {
         ctx.push(issue);
@@ -16328,7 +16328,7 @@ pub fn minkowski183_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=183\) distance.
-pub fn cdist_minkowski183_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski183_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -16370,7 +16370,7 @@ fn minkowski184_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski183_l1_distance`] and [`minkowski182_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski184_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski184_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski184_l1_distance.a") {
         ctx.push(issue);
@@ -16390,7 +16390,7 @@ pub fn minkowski184_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=184\) distance.
-pub fn cdist_minkowski184_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski184_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -16432,7 +16432,7 @@ fn minkowski185_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski184_l1_distance`] and [`minkowski183_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski185_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski185_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski185_l1_distance.a") {
         ctx.push(issue);
@@ -16452,7 +16452,7 @@ pub fn minkowski185_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=185\) distance.
-pub fn cdist_minkowski185_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski185_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -16494,7 +16494,7 @@ fn minkowski186_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski185_l1_distance`] and [`minkowski184_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski186_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski186_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski186_l1_distance.a") {
         ctx.push(issue);
@@ -16514,7 +16514,7 @@ pub fn minkowski186_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=186\) distance.
-pub fn cdist_minkowski186_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski186_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -16556,7 +16556,7 @@ fn minkowski187_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski186_l1_distance`] and [`minkowski185_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski187_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski187_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski187_l1_distance.a") {
         ctx.push(issue);
@@ -16576,7 +16576,7 @@ pub fn minkowski187_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=187\) distance.
-pub fn cdist_minkowski187_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski187_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -16618,7 +16618,7 @@ fn minkowski188_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski187_l1_distance`] and [`minkowski186_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski188_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski188_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski188_l1_distance.a") {
         ctx.push(issue);
@@ -16638,7 +16638,7 @@ pub fn minkowski188_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=188\) distance.
-pub fn cdist_minkowski188_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski188_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -16680,7 +16680,7 @@ fn minkowski189_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski188_l1_distance`] and [`minkowski187_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski189_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski189_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski189_l1_distance.a") {
         ctx.push(issue);
@@ -16700,7 +16700,7 @@ pub fn minkowski189_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=189\) distance.
-pub fn cdist_minkowski189_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski189_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -16742,7 +16742,7 @@ fn minkowski190_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski189_l1_distance`] and [`minkowski188_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski190_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski190_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski190_l1_distance.a") {
         ctx.push(issue);
@@ -16762,7 +16762,7 @@ pub fn minkowski190_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=190\) distance.
-pub fn cdist_minkowski190_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski190_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -16804,7 +16804,7 @@ fn minkowski191_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski190_l1_distance`] and [`minkowski189_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski191_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski191_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski191_l1_distance.a") {
         ctx.push(issue);
@@ -16824,7 +16824,7 @@ pub fn minkowski191_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=191\) distance.
-pub fn cdist_minkowski191_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski191_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -16866,7 +16866,7 @@ fn minkowski192_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski191_l1_distance`] and [`minkowski190_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski192_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski192_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski192_l1_distance.a") {
         ctx.push(issue);
@@ -16886,7 +16886,7 @@ pub fn minkowski192_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=192\) distance.
-pub fn cdist_minkowski192_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski192_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -16928,7 +16928,7 @@ fn minkowski193_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski192_l1_distance`] and [`minkowski191_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski193_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski193_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski193_l1_distance.a") {
         ctx.push(issue);
@@ -16948,7 +16948,7 @@ pub fn minkowski193_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=193\) distance.
-pub fn cdist_minkowski193_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski193_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -16990,7 +16990,7 @@ fn minkowski194_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski193_l1_distance`] and [`minkowski192_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski194_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski194_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski194_l1_distance.a") {
         ctx.push(issue);
@@ -17010,7 +17010,7 @@ pub fn minkowski194_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=194\) distance.
-pub fn cdist_minkowski194_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski194_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -17051,7 +17051,7 @@ fn minkowski195_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski194_l1_distance`] and [`minkowski193_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski195_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski195_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski195_l1_distance.a") {
         ctx.push(issue);
@@ -17071,7 +17071,7 @@ pub fn minkowski195_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=195\) distance.
-pub fn cdist_minkowski195_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski195_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -17113,7 +17113,7 @@ fn minkowski196_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski195_l1_distance`] and [`minkowski194_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski196_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski196_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski196_l1_distance.a") {
         ctx.push(issue);
@@ -17133,7 +17133,7 @@ pub fn minkowski196_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=196\) distance.
-pub fn cdist_minkowski196_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski196_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -17174,7 +17174,7 @@ fn minkowski197_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski196_l1_distance`] and [`minkowski195_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski197_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski197_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski197_l1_distance.a") {
         ctx.push(issue);
@@ -17194,7 +17194,7 @@ pub fn minkowski197_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=197\) distance.
-pub fn cdist_minkowski197_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski197_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -17236,7 +17236,7 @@ fn minkowski198_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski197_l1_distance`] and [`minkowski196_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski198_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski198_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski198_l1_distance.a") {
         ctx.push(issue);
@@ -17256,7 +17256,7 @@ pub fn minkowski198_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=198\) distance.
-pub fn cdist_minkowski198_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski198_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -17297,7 +17297,7 @@ fn minkowski199_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski198_l1_distance`] and [`minkowski197_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski199_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski199_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski199_l1_distance.a") {
         ctx.push(issue);
@@ -17317,7 +17317,7 @@ pub fn minkowski199_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=199\) distance.
-pub fn cdist_minkowski199_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski199_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -17359,7 +17359,7 @@ fn minkowski200_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski199_l1_distance`] and [`minkowski198_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski200_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski200_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski200_l1_distance.a") {
         ctx.push(issue);
@@ -17379,7 +17379,7 @@ pub fn minkowski200_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=200\) distance.
-pub fn cdist_minkowski200_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski200_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -17420,7 +17420,7 @@ fn minkowski201_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski200_l1_distance`] and [`minkowski199_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski201_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski201_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski201_l1_distance.a") {
         ctx.push(issue);
@@ -17440,7 +17440,7 @@ pub fn minkowski201_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=201\) distance.
-pub fn cdist_minkowski201_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski201_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -17482,7 +17482,7 @@ fn minkowski202_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski201_l1_distance`] and [`minkowski200_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski202_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski202_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski202_l1_distance.a") {
         ctx.push(issue);
@@ -17502,7 +17502,7 @@ pub fn minkowski202_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=202\) distance.
-pub fn cdist_minkowski202_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski202_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -17543,7 +17543,7 @@ fn minkowski203_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski202_l1_distance`] and [`minkowski201_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski203_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski203_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski203_l1_distance.a") {
         ctx.push(issue);
@@ -17563,7 +17563,7 @@ pub fn minkowski203_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=203\) distance.
-pub fn cdist_minkowski203_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski203_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -17605,7 +17605,7 @@ fn minkowski204_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski203_l1_distance`] and [`minkowski202_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski204_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski204_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski204_l1_distance.a") {
         ctx.push(issue);
@@ -17625,7 +17625,7 @@ pub fn minkowski204_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=204\) distance.
-pub fn cdist_minkowski204_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski204_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -17666,7 +17666,7 @@ fn minkowski205_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski204_l1_distance`] and [`minkowski203_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski205_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski205_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski205_l1_distance.a") {
         ctx.push(issue);
@@ -17686,7 +17686,7 @@ pub fn minkowski205_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=205\) distance.
-pub fn cdist_minkowski205_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski205_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -17728,7 +17728,7 @@ fn minkowski206_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski205_l1_distance`] and [`minkowski204_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski206_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski206_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski206_l1_distance.a") {
         ctx.push(issue);
@@ -17748,7 +17748,7 @@ pub fn minkowski206_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=206\) distance.
-pub fn cdist_minkowski206_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski206_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -17789,7 +17789,7 @@ fn minkowski207_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski206_l1_distance`] and [`minkowski205_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski207_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski207_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski207_l1_distance.a") {
         ctx.push(issue);
@@ -17809,7 +17809,7 @@ pub fn minkowski207_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=207\) distance.
-pub fn cdist_minkowski207_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski207_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -17851,7 +17851,7 @@ fn minkowski208_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski207_l1_distance`] and [`minkowski206_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski208_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski208_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski208_l1_distance.a") {
         ctx.push(issue);
@@ -17871,7 +17871,7 @@ pub fn minkowski208_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=208\) distance.
-pub fn cdist_minkowski208_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski208_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -17912,7 +17912,7 @@ fn minkowski209_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski208_l1_distance`] and [`minkowski207_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski209_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski209_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski209_l1_distance.a") {
         ctx.push(issue);
@@ -17932,7 +17932,7 @@ pub fn minkowski209_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=209\) distance.
-pub fn cdist_minkowski209_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski209_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -17974,7 +17974,7 @@ fn minkowski210_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski209_l1_distance`] and [`minkowski208_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski210_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski210_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski210_l1_distance.a") {
         ctx.push(issue);
@@ -17994,7 +17994,7 @@ pub fn minkowski210_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=210\) distance.
-pub fn cdist_minkowski210_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski210_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -18035,7 +18035,7 @@ fn minkowski211_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski210_l1_distance`] and [`minkowski209_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski211_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski211_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski211_l1_distance.a") {
         ctx.push(issue);
@@ -18055,7 +18055,7 @@ pub fn minkowski211_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=211\) distance.
-pub fn cdist_minkowski211_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski211_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -18097,7 +18097,7 @@ fn minkowski212_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski211_l1_distance`] and [`minkowski210_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski212_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski212_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski212_l1_distance.a") {
         ctx.push(issue);
@@ -18117,7 +18117,7 @@ pub fn minkowski212_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=212\) distance.
-pub fn cdist_minkowski212_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski212_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -18158,7 +18158,7 @@ fn minkowski213_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski212_l1_distance`] and [`minkowski211_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski213_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski213_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski213_l1_distance.a") {
         ctx.push(issue);
@@ -18178,7 +18178,7 @@ pub fn minkowski213_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=213\) distance.
-pub fn cdist_minkowski213_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski213_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -18220,7 +18220,7 @@ fn minkowski214_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski213_l1_distance`] and [`minkowski212_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski214_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski214_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski214_l1_distance.a") {
         ctx.push(issue);
@@ -18240,7 +18240,7 @@ pub fn minkowski214_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=214\) distance.
-pub fn cdist_minkowski214_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski214_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -18281,7 +18281,7 @@ fn minkowski215_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski214_l1_distance`] and [`minkowski213_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski215_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski215_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski215_l1_distance.a") {
         ctx.push(issue);
@@ -18301,7 +18301,7 @@ pub fn minkowski215_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=215\) distance.
-pub fn cdist_minkowski215_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski215_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -18343,7 +18343,7 @@ fn minkowski216_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski215_l1_distance`] and [`minkowski214_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski216_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski216_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski216_l1_distance.a") {
         ctx.push(issue);
@@ -18363,7 +18363,7 @@ pub fn minkowski216_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=216\) distance.
-pub fn cdist_minkowski216_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski216_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -18404,7 +18404,7 @@ fn minkowski217_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski216_l1_distance`] and [`minkowski215_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski217_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski217_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski217_l1_distance.a") {
         ctx.push(issue);
@@ -18424,7 +18424,7 @@ pub fn minkowski217_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=217\) distance.
-pub fn cdist_minkowski217_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski217_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -18466,7 +18466,7 @@ fn minkowski218_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski217_l1_distance`] and [`minkowski216_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski218_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski218_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski218_l1_distance.a") {
         ctx.push(issue);
@@ -18486,7 +18486,7 @@ pub fn minkowski218_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=218\) distance.
-pub fn cdist_minkowski218_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski218_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -18527,7 +18527,7 @@ fn minkowski219_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski218_l1_distance`] and [`minkowski217_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski219_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski219_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski219_l1_distance.a") {
         ctx.push(issue);
@@ -18547,7 +18547,7 @@ pub fn minkowski219_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=219\) distance.
-pub fn cdist_minkowski219_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski219_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -18589,7 +18589,7 @@ fn minkowski220_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski219_l1_distance`] and [`minkowski218_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski220_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski220_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski220_l1_distance.a") {
         ctx.push(issue);
@@ -18609,7 +18609,7 @@ pub fn minkowski220_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=220\) distance.
-pub fn cdist_minkowski220_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski220_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -18650,7 +18650,7 @@ fn minkowski221_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski220_l1_distance`] and [`minkowski219_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski221_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski221_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski221_l1_distance.a") {
         ctx.push(issue);
@@ -18670,7 +18670,7 @@ pub fn minkowski221_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=221\) distance.
-pub fn cdist_minkowski221_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski221_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -18712,7 +18712,7 @@ fn minkowski222_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski221_l1_distance`] and [`minkowski220_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski222_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski222_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski222_l1_distance.a") {
         ctx.push(issue);
@@ -18732,7 +18732,7 @@ pub fn minkowski222_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=222\) distance.
-pub fn cdist_minkowski222_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski222_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -18773,7 +18773,7 @@ fn minkowski223_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski222_l1_distance`] and [`minkowski221_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski223_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski223_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski223_l1_distance.a") {
         ctx.push(issue);
@@ -18793,7 +18793,7 @@ pub fn minkowski223_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=223\) distance.
-pub fn cdist_minkowski223_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski223_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -18835,7 +18835,7 @@ fn minkowski224_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski223_l1_distance`] and [`minkowski222_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski224_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski224_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski224_l1_distance.a") {
         ctx.push(issue);
@@ -18855,7 +18855,7 @@ pub fn minkowski224_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=224\) distance.
-pub fn cdist_minkowski224_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski224_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -18896,7 +18896,7 @@ fn minkowski225_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski224_l1_distance`] and [`minkowski223_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski225_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski225_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski225_l1_distance.a") {
         ctx.push(issue);
@@ -18916,7 +18916,7 @@ pub fn minkowski225_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=225\) distance.
-pub fn cdist_minkowski225_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski225_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -18958,7 +18958,7 @@ fn minkowski226_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski225_l1_distance`] and [`minkowski224_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski226_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski226_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski226_l1_distance.a") {
         ctx.push(issue);
@@ -18978,7 +18978,7 @@ pub fn minkowski226_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=226\) distance.
-pub fn cdist_minkowski226_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski226_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -19019,7 +19019,7 @@ fn minkowski227_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski226_l1_distance`] and [`minkowski225_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski227_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski227_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski227_l1_distance.a") {
         ctx.push(issue);
@@ -19039,7 +19039,7 @@ pub fn minkowski227_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=227\) distance.
-pub fn cdist_minkowski227_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski227_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -19081,7 +19081,7 @@ fn minkowski228_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski227_l1_distance`] and [`minkowski226_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski228_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski228_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski228_l1_distance.a") {
         ctx.push(issue);
@@ -19101,7 +19101,7 @@ pub fn minkowski228_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=228\) distance.
-pub fn cdist_minkowski228_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski228_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -19142,7 +19142,7 @@ fn minkowski229_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski228_l1_distance`] and [`minkowski227_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski229_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski229_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski229_l1_distance.a") {
         ctx.push(issue);
@@ -19162,7 +19162,7 @@ pub fn minkowski229_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=229\) distance.
-pub fn cdist_minkowski229_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski229_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -19204,7 +19204,7 @@ fn minkowski230_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski229_l1_distance`] and [`minkowski228_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski230_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski230_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski230_l1_distance.a") {
         ctx.push(issue);
@@ -19224,7 +19224,7 @@ pub fn minkowski230_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=230\) distance.
-pub fn cdist_minkowski230_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski230_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -19265,7 +19265,7 @@ fn minkowski231_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski230_l1_distance`] and [`minkowski229_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski231_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski231_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski231_l1_distance.a") {
         ctx.push(issue);
@@ -19285,7 +19285,7 @@ pub fn minkowski231_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=231\) distance.
-pub fn cdist_minkowski231_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski231_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -19327,7 +19327,7 @@ fn minkowski232_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski231_l1_distance`] and [`minkowski230_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski232_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski232_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski232_l1_distance.a") {
         ctx.push(issue);
@@ -19347,7 +19347,7 @@ pub fn minkowski232_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=232\) distance.
-pub fn cdist_minkowski232_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski232_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -19388,7 +19388,7 @@ fn minkowski233_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski232_l1_distance`] and [`minkowski231_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski233_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski233_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski233_l1_distance.a") {
         ctx.push(issue);
@@ -19408,7 +19408,7 @@ pub fn minkowski233_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=233\) distance.
-pub fn cdist_minkowski233_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski233_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -19450,7 +19450,7 @@ fn minkowski234_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski233_l1_distance`] and [`minkowski232_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski234_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski234_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski234_l1_distance.a") {
         ctx.push(issue);
@@ -19470,7 +19470,7 @@ pub fn minkowski234_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=234\) distance.
-pub fn cdist_minkowski234_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski234_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -19511,7 +19511,7 @@ fn minkowski235_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski234_l1_distance`] and [`minkowski233_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski235_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski235_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski235_l1_distance.a") {
         ctx.push(issue);
@@ -19531,7 +19531,7 @@ pub fn minkowski235_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=235\) distance.
-pub fn cdist_minkowski235_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski235_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -19573,7 +19573,7 @@ fn minkowski236_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski235_l1_distance`] and [`minkowski234_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski236_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski236_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski236_l1_distance.a") {
         ctx.push(issue);
@@ -19593,7 +19593,7 @@ pub fn minkowski236_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=236\) distance.
-pub fn cdist_minkowski236_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski236_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -19634,7 +19634,7 @@ fn minkowski237_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski236_l1_distance`] and [`minkowski235_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski237_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski237_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski237_l1_distance.a") {
         ctx.push(issue);
@@ -19654,7 +19654,7 @@ pub fn minkowski237_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=237\) distance.
-pub fn cdist_minkowski237_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski237_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -19696,7 +19696,7 @@ fn minkowski238_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski237_l1_distance`] and [`minkowski236_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski238_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski238_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski238_l1_distance.a") {
         ctx.push(issue);
@@ -19716,7 +19716,7 @@ pub fn minkowski238_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=238\) distance.
-pub fn cdist_minkowski238_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski238_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -19757,7 +19757,7 @@ fn minkowski239_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski238_l1_distance`] and [`minkowski237_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski239_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski239_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski239_l1_distance.a") {
         ctx.push(issue);
@@ -19777,7 +19777,7 @@ pub fn minkowski239_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=239\) distance.
-pub fn cdist_minkowski239_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski239_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -19819,7 +19819,7 @@ fn minkowski240_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski239_l1_distance`] and [`minkowski238_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski240_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski240_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski240_l1_distance.a") {
         ctx.push(issue);
@@ -19839,7 +19839,7 @@ pub fn minkowski240_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=240\) distance.
-pub fn cdist_minkowski240_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski240_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -19880,7 +19880,7 @@ fn minkowski241_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski240_l1_distance`] and [`minkowski239_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski241_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski241_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski241_l1_distance.a") {
         ctx.push(issue);
@@ -19900,7 +19900,7 @@ pub fn minkowski241_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=241\) distance.
-pub fn cdist_minkowski241_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski241_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -19942,7 +19942,7 @@ fn minkowski242_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski241_l1_distance`] and [`minkowski240_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski242_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski242_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski242_l1_distance.a") {
         ctx.push(issue);
@@ -19962,7 +19962,7 @@ pub fn minkowski242_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=242\) distance.
-pub fn cdist_minkowski242_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski242_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -20003,7 +20003,7 @@ fn minkowski243_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski242_l1_distance`] and [`minkowski241_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski243_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski243_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski243_l1_distance.a") {
         ctx.push(issue);
@@ -20023,7 +20023,7 @@ pub fn minkowski243_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=243\) distance.
-pub fn cdist_minkowski243_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski243_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -20065,7 +20065,7 @@ fn minkowski244_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski243_l1_distance`] and [`minkowski242_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski244_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski244_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski244_l1_distance.a") {
         ctx.push(issue);
@@ -20085,7 +20085,7 @@ pub fn minkowski244_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=244\) distance.
-pub fn cdist_minkowski244_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski244_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -20126,7 +20126,7 @@ fn minkowski245_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski244_l1_distance`] and [`minkowski243_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski245_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski245_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski245_l1_distance.a") {
         ctx.push(issue);
@@ -20146,7 +20146,7 @@ pub fn minkowski245_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=245\) distance.
-pub fn cdist_minkowski245_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski245_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -20188,7 +20188,7 @@ fn minkowski246_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski245_l1_distance`] and [`minkowski244_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski246_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski246_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski246_l1_distance.a") {
         ctx.push(issue);
@@ -20208,7 +20208,7 @@ pub fn minkowski246_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=246\) distance.
-pub fn cdist_minkowski246_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski246_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -20249,7 +20249,7 @@ fn minkowski247_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski246_l1_distance`] and [`minkowski245_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski247_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski247_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski247_l1_distance.a") {
         ctx.push(issue);
@@ -20269,7 +20269,7 @@ pub fn minkowski247_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=247\) distance.
-pub fn cdist_minkowski247_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski247_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -20311,7 +20311,7 @@ fn minkowski248_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski247_l1_distance`] and [`minkowski246_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski248_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski248_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski248_l1_distance.a") {
         ctx.push(issue);
@@ -20331,7 +20331,7 @@ pub fn minkowski248_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=248\) distance.
-pub fn cdist_minkowski248_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski248_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -20372,7 +20372,7 @@ fn minkowski249_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski248_l1_distance`] and [`minkowski247_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski249_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski249_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski249_l1_distance.a") {
         ctx.push(issue);
@@ -20392,7 +20392,7 @@ pub fn minkowski249_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=249\) distance.
-pub fn cdist_minkowski249_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski249_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -20434,7 +20434,7 @@ fn minkowski250_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski249_l1_distance`] and [`minkowski248_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski250_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski250_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski250_l1_distance.a") {
         ctx.push(issue);
@@ -20454,7 +20454,7 @@ pub fn minkowski250_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=250\) distance.
-pub fn cdist_minkowski250_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski250_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -20495,7 +20495,7 @@ fn minkowski251_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski250_l1_distance`] and [`minkowski249_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski251_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski251_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski251_l1_distance.a") {
         ctx.push(issue);
@@ -20515,7 +20515,7 @@ pub fn minkowski251_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=251\) distance.
-pub fn cdist_minkowski251_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski251_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -20557,7 +20557,7 @@ fn minkowski252_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski251_l1_distance`] and [`minkowski250_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski252_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski252_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski252_l1_distance.a") {
         ctx.push(issue);
@@ -20577,7 +20577,7 @@ pub fn minkowski252_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=252\) distance.
-pub fn cdist_minkowski252_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski252_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -20618,7 +20618,7 @@ fn minkowski253_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski252_l1_distance`] and [`minkowski251_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski253_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski253_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski253_l1_distance.a") {
         ctx.push(issue);
@@ -20638,7 +20638,7 @@ pub fn minkowski253_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=253\) distance.
-pub fn cdist_minkowski253_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski253_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -20680,7 +20680,7 @@ fn minkowski254_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski253_l1_distance`] and [`minkowski252_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski254_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski254_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski254_l1_distance.a") {
         ctx.push(issue);
@@ -20700,7 +20700,7 @@ pub fn minkowski254_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=254\) distance.
-pub fn cdist_minkowski254_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski254_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -20741,7 +20741,7 @@ fn minkowski255_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski254_l1_distance`] and [`minkowski253_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski255_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski255_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski255_l1_distance.a") {
         ctx.push(issue);
@@ -20761,7 +20761,7 @@ pub fn minkowski255_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=255\) distance.
-pub fn cdist_minkowski255_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski255_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -20803,7 +20803,7 @@ fn minkowski256_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski255_l1_distance`] and [`minkowski254_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski256_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski256_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski256_l1_distance.a") {
         ctx.push(issue);
@@ -20823,7 +20823,7 @@ pub fn minkowski256_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=256\) distance.
-pub fn cdist_minkowski256_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski256_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -20864,7 +20864,7 @@ fn minkowski257_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski256_l1_distance`] and [`minkowski255_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski257_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski257_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski257_l1_distance.a") {
         ctx.push(issue);
@@ -20884,7 +20884,7 @@ pub fn minkowski257_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=257\) distance.
-pub fn cdist_minkowski257_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski257_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -20926,7 +20926,7 @@ fn minkowski258_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski257_l1_distance`] and [`minkowski256_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski258_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski258_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski258_l1_distance.a") {
         ctx.push(issue);
@@ -20946,7 +20946,7 @@ pub fn minkowski258_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=258\) distance.
-pub fn cdist_minkowski258_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski258_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -20987,7 +20987,7 @@ fn minkowski259_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski258_l1_distance`] and [`minkowski257_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski259_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski259_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski259_l1_distance.a") {
         ctx.push(issue);
@@ -21007,7 +21007,7 @@ pub fn minkowski259_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=259\) distance.
-pub fn cdist_minkowski259_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski259_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -21049,7 +21049,7 @@ fn minkowski260_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski259_l1_distance`] and [`minkowski258_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski260_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski260_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski260_l1_distance.a") {
         ctx.push(issue);
@@ -21069,7 +21069,7 @@ pub fn minkowski260_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=260\) distance.
-pub fn cdist_minkowski260_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski260_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -21110,7 +21110,7 @@ fn minkowski261_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski260_l1_distance`] and [`minkowski259_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski261_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski261_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski261_l1_distance.a") {
         ctx.push(issue);
@@ -21130,7 +21130,7 @@ pub fn minkowski261_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=261\) distance.
-pub fn cdist_minkowski261_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski261_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -21172,7 +21172,7 @@ fn minkowski262_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski261_l1_distance`] and [`minkowski260_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski262_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski262_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski262_l1_distance.a") {
         ctx.push(issue);
@@ -21192,7 +21192,7 @@ pub fn minkowski262_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=262\) distance.
-pub fn cdist_minkowski262_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski262_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -21233,7 +21233,7 @@ fn minkowski263_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski262_l1_distance`] and [`minkowski261_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski263_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski263_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski263_l1_distance.a") {
         ctx.push(issue);
@@ -21253,7 +21253,7 @@ pub fn minkowski263_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=263\) distance.
-pub fn cdist_minkowski263_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski263_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -21295,7 +21295,7 @@ fn minkowski264_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski263_l1_distance`] and [`minkowski262_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski264_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski264_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski264_l1_distance.a") {
         ctx.push(issue);
@@ -21315,7 +21315,7 @@ pub fn minkowski264_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=264\) distance.
-pub fn cdist_minkowski264_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski264_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -21356,7 +21356,7 @@ fn minkowski265_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski264_l1_distance`] and [`minkowski263_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski265_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski265_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski265_l1_distance.a") {
         ctx.push(issue);
@@ -21376,7 +21376,7 @@ pub fn minkowski265_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=265\) distance.
-pub fn cdist_minkowski265_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski265_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -21418,7 +21418,7 @@ fn minkowski266_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski265_l1_distance`] and [`minkowski264_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski266_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski266_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski266_l1_distance.a") {
         ctx.push(issue);
@@ -21438,7 +21438,7 @@ pub fn minkowski266_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=266\) distance.
-pub fn cdist_minkowski266_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski266_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -21479,7 +21479,7 @@ fn minkowski267_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski266_l1_distance`] and [`minkowski265_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski267_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski267_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski267_l1_distance.a") {
         ctx.push(issue);
@@ -21499,7 +21499,7 @@ pub fn minkowski267_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=267\) distance.
-pub fn cdist_minkowski267_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski267_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -21541,7 +21541,7 @@ fn minkowski268_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski267_l1_distance`] and [`minkowski266_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski268_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski268_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski268_l1_distance.a") {
         ctx.push(issue);
@@ -21561,7 +21561,7 @@ pub fn minkowski268_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=268\) distance.
-pub fn cdist_minkowski268_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski268_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -21602,7 +21602,7 @@ fn minkowski269_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski268_l1_distance`] and [`minkowski267_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski269_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski269_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski269_l1_distance.a") {
         ctx.push(issue);
@@ -21622,7 +21622,7 @@ pub fn minkowski269_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=269\) distance.
-pub fn cdist_minkowski269_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski269_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -21664,7 +21664,7 @@ fn minkowski270_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski269_l1_distance`] and [`minkowski268_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski270_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski270_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski270_l1_distance.a") {
         ctx.push(issue);
@@ -21684,7 +21684,7 @@ pub fn minkowski270_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=270\) distance.
-pub fn cdist_minkowski270_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski270_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -21725,7 +21725,7 @@ fn minkowski271_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski270_l1_distance`] and [`minkowski269_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski271_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski271_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski271_l1_distance.a") {
         ctx.push(issue);
@@ -21745,7 +21745,7 @@ pub fn minkowski271_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=271\) distance.
-pub fn cdist_minkowski271_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski271_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -21787,7 +21787,7 @@ fn minkowski272_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski271_l1_distance`] and [`minkowski270_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski272_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski272_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski272_l1_distance.a") {
         ctx.push(issue);
@@ -21807,7 +21807,7 @@ pub fn minkowski272_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=272\) distance.
-pub fn cdist_minkowski272_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski272_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -21848,7 +21848,7 @@ fn minkowski273_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski272_l1_distance`] and [`minkowski271_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski273_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski273_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski273_l1_distance.a") {
         ctx.push(issue);
@@ -21868,7 +21868,7 @@ pub fn minkowski273_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=273\) distance.
-pub fn cdist_minkowski273_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski273_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -21910,7 +21910,7 @@ fn minkowski274_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski273_l1_distance`] and [`minkowski272_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski274_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski274_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski274_l1_distance.a") {
         ctx.push(issue);
@@ -21930,7 +21930,7 @@ pub fn minkowski274_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=274\) distance.
-pub fn cdist_minkowski274_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski274_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -21971,7 +21971,7 @@ fn minkowski275_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski274_l1_distance`] and [`minkowski273_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski275_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski275_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski275_l1_distance.a") {
         ctx.push(issue);
@@ -21991,7 +21991,7 @@ pub fn minkowski275_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=275\) distance.
-pub fn cdist_minkowski275_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski275_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -22033,7 +22033,7 @@ fn minkowski276_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski275_l1_distance`] and [`minkowski274_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski276_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski276_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski276_l1_distance.a") {
         ctx.push(issue);
@@ -22053,7 +22053,7 @@ pub fn minkowski276_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=276\) distance.
-pub fn cdist_minkowski276_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski276_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -22094,7 +22094,7 @@ fn minkowski277_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski276_l1_distance`] and [`minkowski275_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski277_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski277_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski277_l1_distance.a") {
         ctx.push(issue);
@@ -22114,7 +22114,7 @@ pub fn minkowski277_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=277\) distance.
-pub fn cdist_minkowski277_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski277_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -22156,7 +22156,7 @@ fn minkowski278_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski277_l1_distance`] and [`minkowski276_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski278_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski278_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski278_l1_distance.a") {
         ctx.push(issue);
@@ -22176,7 +22176,7 @@ pub fn minkowski278_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=278\) distance.
-pub fn cdist_minkowski278_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski278_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -22217,7 +22217,7 @@ fn minkowski279_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski278_l1_distance`] and [`minkowski277_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski279_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski279_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski279_l1_distance.a") {
         ctx.push(issue);
@@ -22237,7 +22237,7 @@ pub fn minkowski279_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=279\) distance.
-pub fn cdist_minkowski279_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski279_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -22279,7 +22279,7 @@ fn minkowski280_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski279_l1_distance`] and [`minkowski278_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski280_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski280_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski280_l1_distance.a") {
         ctx.push(issue);
@@ -22299,7 +22299,7 @@ pub fn minkowski280_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=280\) distance.
-pub fn cdist_minkowski280_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski280_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -22340,7 +22340,7 @@ fn minkowski281_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski280_l1_distance`] and [`minkowski279_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski281_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski281_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski281_l1_distance.a") {
         ctx.push(issue);
@@ -22360,7 +22360,7 @@ pub fn minkowski281_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=281\) distance.
-pub fn cdist_minkowski281_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski281_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -22402,7 +22402,7 @@ fn minkowski282_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski281_l1_distance`] and [`minkowski280_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski282_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski282_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski282_l1_distance.a") {
         ctx.push(issue);
@@ -22422,7 +22422,7 @@ pub fn minkowski282_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=282\) distance.
-pub fn cdist_minkowski282_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski282_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -22463,7 +22463,7 @@ fn minkowski283_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski282_l1_distance`] and [`minkowski281_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski283_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski283_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski283_l1_distance.a") {
         ctx.push(issue);
@@ -22483,7 +22483,7 @@ pub fn minkowski283_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=283\) distance.
-pub fn cdist_minkowski283_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski283_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -22525,7 +22525,7 @@ fn minkowski284_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski283_l1_distance`] and [`minkowski282_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski284_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski284_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski284_l1_distance.a") {
         ctx.push(issue);
@@ -22545,7 +22545,7 @@ pub fn minkowski284_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=284\) distance.
-pub fn cdist_minkowski284_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski284_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -22586,7 +22586,7 @@ fn minkowski285_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski284_l1_distance`] and [`minkowski283_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski285_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski285_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski285_l1_distance.a") {
         ctx.push(issue);
@@ -22606,7 +22606,7 @@ pub fn minkowski285_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=285\) distance.
-pub fn cdist_minkowski285_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski285_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -22648,7 +22648,7 @@ fn minkowski286_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski285_l1_distance`] and [`minkowski284_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski286_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski286_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski286_l1_distance.a") {
         ctx.push(issue);
@@ -22668,7 +22668,7 @@ pub fn minkowski286_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=286\) distance.
-pub fn cdist_minkowski286_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski286_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -22709,7 +22709,7 @@ fn minkowski287_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski286_l1_distance`] and [`minkowski285_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski287_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski287_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski287_l1_distance.a") {
         ctx.push(issue);
@@ -22729,7 +22729,7 @@ pub fn minkowski287_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=287\) distance.
-pub fn cdist_minkowski287_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski287_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -22771,7 +22771,7 @@ fn minkowski288_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski287_l1_distance`] and [`minkowski286_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski288_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski288_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski288_l1_distance.a") {
         ctx.push(issue);
@@ -22791,7 +22791,7 @@ pub fn minkowski288_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=288\) distance.
-pub fn cdist_minkowski288_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski288_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -22832,7 +22832,7 @@ fn minkowski289_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski288_l1_distance`] and [`minkowski287_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski289_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski289_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski289_l1_distance.a") {
         ctx.push(issue);
@@ -22852,7 +22852,7 @@ pub fn minkowski289_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=289\) distance.
-pub fn cdist_minkowski289_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski289_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -22894,7 +22894,7 @@ fn minkowski290_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski289_l1_distance`] and [`minkowski288_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski290_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski290_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski290_l1_distance.a") {
         ctx.push(issue);
@@ -22914,7 +22914,7 @@ pub fn minkowski290_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=290\) distance.
-pub fn cdist_minkowski290_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski290_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -22955,7 +22955,7 @@ fn minkowski291_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski290_l1_distance`] and [`minkowski289_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski291_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski291_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski291_l1_distance.a") {
         ctx.push(issue);
@@ -22975,7 +22975,7 @@ pub fn minkowski291_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=291\) distance.
-pub fn cdist_minkowski291_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski291_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -23017,7 +23017,7 @@ fn minkowski292_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski291_l1_distance`] and [`minkowski290_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski292_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski292_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski292_l1_distance.a") {
         ctx.push(issue);
@@ -23037,7 +23037,7 @@ pub fn minkowski292_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=292\) distance.
-pub fn cdist_minkowski292_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski292_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -23078,7 +23078,7 @@ fn minkowski293_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski292_l1_distance`] and [`minkowski291_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski293_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski293_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski293_l1_distance.a") {
         ctx.push(issue);
@@ -23098,7 +23098,7 @@ pub fn minkowski293_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=293\) distance.
-pub fn cdist_minkowski293_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski293_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -23140,7 +23140,7 @@ fn minkowski294_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski293_l1_distance`] and [`minkowski292_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski294_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski294_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski294_l1_distance.a") {
         ctx.push(issue);
@@ -23160,7 +23160,7 @@ pub fn minkowski294_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=294\) distance.
-pub fn cdist_minkowski294_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski294_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -23201,7 +23201,7 @@ fn minkowski295_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski294_l1_distance`] and [`minkowski293_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski295_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski295_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski295_l1_distance.a") {
         ctx.push(issue);
@@ -23221,7 +23221,7 @@ pub fn minkowski295_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=295\) distance.
-pub fn cdist_minkowski295_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski295_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -23263,7 +23263,7 @@ fn minkowski296_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski295_l1_distance`] and [`minkowski294_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski296_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski296_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski296_l1_distance.a") {
         ctx.push(issue);
@@ -23283,7 +23283,7 @@ pub fn minkowski296_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=296\) distance.
-pub fn cdist_minkowski296_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski296_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -23324,7 +23324,7 @@ fn minkowski297_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski296_l1_distance`] and [`minkowski295_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski297_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski297_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski297_l1_distance.a") {
         ctx.push(issue);
@@ -23344,7 +23344,7 @@ pub fn minkowski297_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=297\) distance.
-pub fn cdist_minkowski297_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski297_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -23386,7 +23386,7 @@ fn minkowski298_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski297_l1_distance`] and [`minkowski296_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski298_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski298_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski298_l1_distance.a") {
         ctx.push(issue);
@@ -23406,7 +23406,7 @@ pub fn minkowski298_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=298\) distance.
-pub fn cdist_minkowski298_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski298_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -23447,7 +23447,7 @@ fn minkowski299_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski298_l1_distance`] and [`minkowski297_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski299_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski299_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski299_l1_distance.a") {
         ctx.push(issue);
@@ -23467,7 +23467,7 @@ pub fn minkowski299_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=299\) distance.
-pub fn cdist_minkowski299_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski299_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -23509,7 +23509,7 @@ fn minkowski300_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski299_l1_distance`] and [`minkowski298_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski300_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski300_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski300_l1_distance.a") {
         ctx.push(issue);
@@ -23529,7 +23529,7 @@ pub fn minkowski300_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=300\) distance.
-pub fn cdist_minkowski300_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski300_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -23570,7 +23570,7 @@ fn minkowski301_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski300_l1_distance`] and [`minkowski299_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski301_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski301_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski301_l1_distance.a") {
         ctx.push(issue);
@@ -23590,7 +23590,7 @@ pub fn minkowski301_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=301\) distance.
-pub fn cdist_minkowski301_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski301_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -23632,7 +23632,7 @@ fn minkowski302_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski301_l1_distance`] and [`minkowski300_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski302_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski302_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski302_l1_distance.a") {
         ctx.push(issue);
@@ -23652,7 +23652,7 @@ pub fn minkowski302_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=302\) distance.
-pub fn cdist_minkowski302_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski302_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -23693,7 +23693,7 @@ fn minkowski303_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski302_l1_distance`] and [`minkowski301_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski303_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski303_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski303_l1_distance.a") {
         ctx.push(issue);
@@ -23713,7 +23713,7 @@ pub fn minkowski303_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=303\) distance.
-pub fn cdist_minkowski303_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski303_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -23755,7 +23755,7 @@ fn minkowski304_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski303_l1_distance`] and [`minkowski302_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski304_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski304_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski304_l1_distance.a") {
         ctx.push(issue);
@@ -23775,7 +23775,7 @@ pub fn minkowski304_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=304\) distance.
-pub fn cdist_minkowski304_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski304_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -23816,7 +23816,7 @@ fn minkowski305_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski304_l1_distance`] and [`minkowski303_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski305_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski305_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski305_l1_distance.a") {
         ctx.push(issue);
@@ -23836,7 +23836,7 @@ pub fn minkowski305_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=305\) distance.
-pub fn cdist_minkowski305_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski305_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -23878,7 +23878,7 @@ fn minkowski306_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski305_l1_distance`] and [`minkowski304_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski306_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski306_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski306_l1_distance.a") {
         ctx.push(issue);
@@ -23898,7 +23898,7 @@ pub fn minkowski306_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=306\) distance.
-pub fn cdist_minkowski306_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski306_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -23939,7 +23939,7 @@ fn minkowski307_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski306_l1_distance`] and [`minkowski305_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski307_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski307_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski307_l1_distance.a") {
         ctx.push(issue);
@@ -23959,7 +23959,7 @@ pub fn minkowski307_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=307\) distance.
-pub fn cdist_minkowski307_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski307_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -24001,7 +24001,7 @@ fn minkowski308_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski307_l1_distance`] and [`minkowski306_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski308_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski308_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski308_l1_distance.a") {
         ctx.push(issue);
@@ -24021,7 +24021,7 @@ pub fn minkowski308_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=308\) distance.
-pub fn cdist_minkowski308_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski308_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -24062,7 +24062,7 @@ fn minkowski309_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski308_l1_distance`] and [`minkowski307_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski309_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski309_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski309_l1_distance.a") {
         ctx.push(issue);
@@ -24082,7 +24082,7 @@ pub fn minkowski309_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=309\) distance.
-pub fn cdist_minkowski309_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski309_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -24124,7 +24124,7 @@ fn minkowski310_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski309_l1_distance`] and [`minkowski308_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski310_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski310_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski310_l1_distance.a") {
         ctx.push(issue);
@@ -24144,7 +24144,7 @@ pub fn minkowski310_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=310\) distance.
-pub fn cdist_minkowski310_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski310_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -24185,7 +24185,7 @@ fn minkowski311_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski310_l1_distance`] and [`minkowski309_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski311_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski311_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski311_l1_distance.a") {
         ctx.push(issue);
@@ -24205,7 +24205,7 @@ pub fn minkowski311_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=311\) distance.
-pub fn cdist_minkowski311_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski311_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -24247,7 +24247,7 @@ fn minkowski312_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski311_l1_distance`] and [`minkowski310_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski312_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski312_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski312_l1_distance.a") {
         ctx.push(issue);
@@ -24267,7 +24267,7 @@ pub fn minkowski312_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=312\) distance.
-pub fn cdist_minkowski312_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski312_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -24308,7 +24308,7 @@ fn minkowski313_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski312_l1_distance`] and [`minkowski311_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski313_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski313_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski313_l1_distance.a") {
         ctx.push(issue);
@@ -24328,7 +24328,7 @@ pub fn minkowski313_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=313\) distance.
-pub fn cdist_minkowski313_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski313_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -24370,7 +24370,7 @@ fn minkowski314_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski313_l1_distance`] and [`minkowski312_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski314_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski314_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski314_l1_distance.a") {
         ctx.push(issue);
@@ -24390,7 +24390,7 @@ pub fn minkowski314_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=314\) distance.
-pub fn cdist_minkowski314_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski314_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -24431,7 +24431,7 @@ fn minkowski315_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski314_l1_distance`] and [`minkowski313_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski315_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski315_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski315_l1_distance.a") {
         ctx.push(issue);
@@ -24451,7 +24451,7 @@ pub fn minkowski315_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=315\) distance.
-pub fn cdist_minkowski315_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski315_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -24493,7 +24493,7 @@ fn minkowski316_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski315_l1_distance`] and [`minkowski314_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski316_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski316_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski316_l1_distance.a") {
         ctx.push(issue);
@@ -24513,7 +24513,7 @@ pub fn minkowski316_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=316\) distance.
-pub fn cdist_minkowski316_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski316_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -24554,7 +24554,7 @@ fn minkowski317_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski316_l1_distance`] and [`minkowski315_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski317_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski317_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski317_l1_distance.a") {
         ctx.push(issue);
@@ -24574,7 +24574,7 @@ pub fn minkowski317_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=317\) distance.
-pub fn cdist_minkowski317_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski317_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -24616,7 +24616,7 @@ fn minkowski318_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski317_l1_distance`] and [`minkowski316_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski318_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski318_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski318_l1_distance.a") {
         ctx.push(issue);
@@ -24636,7 +24636,7 @@ pub fn minkowski318_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=318\) distance.
-pub fn cdist_minkowski318_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski318_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -24677,7 +24677,7 @@ fn minkowski319_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski318_l1_distance`] and [`minkowski317_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski319_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski319_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski319_l1_distance.a") {
         ctx.push(issue);
@@ -24697,7 +24697,7 @@ pub fn minkowski319_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=319\) distance.
-pub fn cdist_minkowski319_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski319_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -24739,7 +24739,7 @@ fn minkowski320_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski319_l1_distance`] and [`minkowski318_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski320_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski320_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski320_l1_distance.a") {
         ctx.push(issue);
@@ -24759,7 +24759,7 @@ pub fn minkowski320_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=320\) distance.
-pub fn cdist_minkowski320_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski320_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -24800,7 +24800,7 @@ fn minkowski321_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski320_l1_distance`] and [`minkowski319_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski321_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski321_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski321_l1_distance.a") {
         ctx.push(issue);
@@ -24820,7 +24820,7 @@ pub fn minkowski321_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=321\) distance.
-pub fn cdist_minkowski321_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski321_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -24862,7 +24862,7 @@ fn minkowski322_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski321_l1_distance`] and [`minkowski320_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski322_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski322_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski322_l1_distance.a") {
         ctx.push(issue);
@@ -24882,7 +24882,7 @@ pub fn minkowski322_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=322\) distance.
-pub fn cdist_minkowski322_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski322_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -24923,7 +24923,7 @@ fn minkowski323_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski322_l1_distance`] and [`minkowski321_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski323_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski323_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski323_l1_distance.a") {
         ctx.push(issue);
@@ -24943,7 +24943,7 @@ pub fn minkowski323_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=323\) distance.
-pub fn cdist_minkowski323_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski323_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -24985,7 +24985,7 @@ fn minkowski324_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski323_l1_distance`] and [`minkowski322_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski324_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski324_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski324_l1_distance.a") {
         ctx.push(issue);
@@ -25005,7 +25005,7 @@ pub fn minkowski324_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=324\) distance.
-pub fn cdist_minkowski324_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski324_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -25046,7 +25046,7 @@ fn minkowski325_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski324_l1_distance`] and [`minkowski323_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski325_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski325_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski325_l1_distance.a") {
         ctx.push(issue);
@@ -25066,7 +25066,7 @@ pub fn minkowski325_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=325\) distance.
-pub fn cdist_minkowski325_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski325_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -25108,7 +25108,7 @@ fn minkowski326_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski325_l1_distance`] and [`minkowski324_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski326_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski326_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski326_l1_distance.a") {
         ctx.push(issue);
@@ -25128,7 +25128,7 @@ pub fn minkowski326_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=326\) distance.
-pub fn cdist_minkowski326_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski326_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -25169,7 +25169,7 @@ fn minkowski327_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski326_l1_distance`] and [`minkowski325_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski327_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski327_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski327_l1_distance.a") {
         ctx.push(issue);
@@ -25189,7 +25189,7 @@ pub fn minkowski327_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=327\) distance.
-pub fn cdist_minkowski327_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski327_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -25231,7 +25231,7 @@ fn minkowski328_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski327_l1_distance`] and [`minkowski326_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski328_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski328_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski328_l1_distance.a") {
         ctx.push(issue);
@@ -25251,7 +25251,7 @@ pub fn minkowski328_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=328\) distance.
-pub fn cdist_minkowski328_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski328_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -25292,7 +25292,7 @@ fn minkowski329_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski328_l1_distance`] and [`minkowski327_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski329_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski329_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski329_l1_distance.a") {
         ctx.push(issue);
@@ -25312,7 +25312,7 @@ pub fn minkowski329_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=329\) distance.
-pub fn cdist_minkowski329_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski329_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -25354,7 +25354,7 @@ fn minkowski330_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski329_l1_distance`] and [`minkowski328_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski330_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski330_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski330_l1_distance.a") {
         ctx.push(issue);
@@ -25374,7 +25374,7 @@ pub fn minkowski330_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=330\) distance.
-pub fn cdist_minkowski330_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski330_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -25415,7 +25415,7 @@ fn minkowski331_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski330_l1_distance`] and [`minkowski329_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski331_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski331_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski331_l1_distance.a") {
         ctx.push(issue);
@@ -25435,7 +25435,7 @@ pub fn minkowski331_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=331\) distance.
-pub fn cdist_minkowski331_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski331_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -25477,7 +25477,7 @@ fn minkowski332_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski331_l1_distance`] and [`minkowski330_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski332_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski332_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski332_l1_distance.a") {
         ctx.push(issue);
@@ -25497,7 +25497,7 @@ pub fn minkowski332_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=332\) distance.
-pub fn cdist_minkowski332_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski332_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -25538,7 +25538,7 @@ fn minkowski333_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski332_l1_distance`] and [`minkowski331_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski333_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski333_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski333_l1_distance.a") {
         ctx.push(issue);
@@ -25558,7 +25558,7 @@ pub fn minkowski333_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=333\) distance.
-pub fn cdist_minkowski333_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski333_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -25600,7 +25600,7 @@ fn minkowski334_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski333_l1_distance`] and [`minkowski332_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski334_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski334_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski334_l1_distance.a") {
         ctx.push(issue);
@@ -25620,7 +25620,7 @@ pub fn minkowski334_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=334\) distance.
-pub fn cdist_minkowski334_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski334_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -25661,7 +25661,7 @@ fn minkowski335_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski334_l1_distance`] and [`minkowski333_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski335_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski335_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski335_l1_distance.a") {
         ctx.push(issue);
@@ -25681,7 +25681,7 @@ pub fn minkowski335_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=335\) distance.
-pub fn cdist_minkowski335_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski335_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -25723,7 +25723,7 @@ fn minkowski336_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski335_l1_distance`] and [`minkowski334_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski336_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski336_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski336_l1_distance.a") {
         ctx.push(issue);
@@ -25743,7 +25743,7 @@ pub fn minkowski336_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=336\) distance.
-pub fn cdist_minkowski336_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski336_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -25784,7 +25784,7 @@ fn minkowski337_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski336_l1_distance`] and [`minkowski335_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski337_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski337_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski337_l1_distance.a") {
         ctx.push(issue);
@@ -25804,7 +25804,7 @@ pub fn minkowski337_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=337\) distance.
-pub fn cdist_minkowski337_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski337_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -25846,7 +25846,7 @@ fn minkowski338_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski337_l1_distance`] and [`minkowski336_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski338_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski338_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski338_l1_distance.a") {
         ctx.push(issue);
@@ -25866,7 +25866,7 @@ pub fn minkowski338_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=338\) distance.
-pub fn cdist_minkowski338_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski338_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -25907,7 +25907,7 @@ fn minkowski339_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski338_l1_distance`] and [`minkowski337_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski339_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski339_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski339_l1_distance.a") {
         ctx.push(issue);
@@ -25927,7 +25927,7 @@ pub fn minkowski339_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=339\) distance.
-pub fn cdist_minkowski339_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski339_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -25969,7 +25969,7 @@ fn minkowski340_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski339_l1_distance`] and [`minkowski338_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski340_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski340_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski340_l1_distance.a") {
         ctx.push(issue);
@@ -25989,7 +25989,7 @@ pub fn minkowski340_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=340\) distance.
-pub fn cdist_minkowski340_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski340_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -26030,7 +26030,7 @@ fn minkowski341_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski340_l1_distance`] and [`minkowski339_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski341_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski341_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski341_l1_distance.a") {
         ctx.push(issue);
@@ -26050,7 +26050,7 @@ pub fn minkowski341_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=341\) distance.
-pub fn cdist_minkowski341_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski341_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -26092,7 +26092,7 @@ fn minkowski342_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski341_l1_distance`] and [`minkowski340_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski342_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski342_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski342_l1_distance.a") {
         ctx.push(issue);
@@ -26112,7 +26112,7 @@ pub fn minkowski342_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=342\) distance.
-pub fn cdist_minkowski342_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski342_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -26153,7 +26153,7 @@ fn minkowski343_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski342_l1_distance`] and [`minkowski341_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski343_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski343_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski343_l1_distance.a") {
         ctx.push(issue);
@@ -26173,7 +26173,7 @@ pub fn minkowski343_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=343\) distance.
-pub fn cdist_minkowski343_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski343_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -26215,7 +26215,7 @@ fn minkowski344_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski343_l1_distance`] and [`minkowski342_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski344_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski344_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski344_l1_distance.a") {
         ctx.push(issue);
@@ -26235,7 +26235,7 @@ pub fn minkowski344_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=344\) distance.
-pub fn cdist_minkowski344_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski344_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -26276,7 +26276,7 @@ fn minkowski345_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski344_l1_distance`] and [`minkowski343_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski345_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski345_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski345_l1_distance.a") {
         ctx.push(issue);
@@ -26296,7 +26296,7 @@ pub fn minkowski345_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=345\) distance.
-pub fn cdist_minkowski345_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski345_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -26338,7 +26338,7 @@ fn minkowski346_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski345_l1_distance`] and [`minkowski344_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski346_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski346_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski346_l1_distance.a") {
         ctx.push(issue);
@@ -26358,7 +26358,7 @@ pub fn minkowski346_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=346\) distance.
-pub fn cdist_minkowski346_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski346_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -26399,7 +26399,7 @@ fn minkowski347_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski346_l1_distance`] and [`minkowski345_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski347_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski347_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski347_l1_distance.a") {
         ctx.push(issue);
@@ -26419,7 +26419,7 @@ pub fn minkowski347_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=347\) distance.
-pub fn cdist_minkowski347_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski347_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -26461,7 +26461,7 @@ fn minkowski348_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski347_l1_distance`] and [`minkowski346_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski348_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski348_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski348_l1_distance.a") {
         ctx.push(issue);
@@ -26481,7 +26481,7 @@ pub fn minkowski348_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=348\) distance.
-pub fn cdist_minkowski348_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski348_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -26522,7 +26522,7 @@ fn minkowski349_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski348_l1_distance`] and [`minkowski347_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski349_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski349_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski349_l1_distance.a") {
         ctx.push(issue);
@@ -26542,7 +26542,7 @@ pub fn minkowski349_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=349\) distance.
-pub fn cdist_minkowski349_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski349_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -26584,7 +26584,7 @@ fn minkowski350_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski349_l1_distance`] and [`minkowski348_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski350_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski350_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski350_l1_distance.a") {
         ctx.push(issue);
@@ -26604,7 +26604,7 @@ pub fn minkowski350_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=350\) distance.
-pub fn cdist_minkowski350_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski350_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -26645,7 +26645,7 @@ fn minkowski351_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski350_l1_distance`] and [`minkowski349_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski351_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski351_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski351_l1_distance.a") {
         ctx.push(issue);
@@ -26665,7 +26665,7 @@ pub fn minkowski351_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=351\) distance.
-pub fn cdist_minkowski351_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski351_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -26707,7 +26707,7 @@ fn minkowski352_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski351_l1_distance`] and [`minkowski350_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski352_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski352_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski352_l1_distance.a") {
         ctx.push(issue);
@@ -26727,7 +26727,7 @@ pub fn minkowski352_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=352\) distance.
-pub fn cdist_minkowski352_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski352_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -26768,7 +26768,7 @@ fn minkowski353_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski352_l1_distance`] and [`minkowski351_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski353_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski353_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski353_l1_distance.a") {
         ctx.push(issue);
@@ -26788,7 +26788,7 @@ pub fn minkowski353_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=353\) distance.
-pub fn cdist_minkowski353_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski353_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -26830,7 +26830,7 @@ fn minkowski354_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski353_l1_distance`] and [`minkowski352_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski354_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski354_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski354_l1_distance.a") {
         ctx.push(issue);
@@ -26850,7 +26850,7 @@ pub fn minkowski354_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=354\) distance.
-pub fn cdist_minkowski354_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski354_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -26891,7 +26891,7 @@ fn minkowski355_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski354_l1_distance`] and [`minkowski353_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski355_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski355_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski355_l1_distance.a") {
         ctx.push(issue);
@@ -26911,7 +26911,7 @@ pub fn minkowski355_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=355\) distance.
-pub fn cdist_minkowski355_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski355_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -26953,7 +26953,7 @@ fn minkowski356_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski355_l1_distance`] and [`minkowski354_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski356_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski356_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski356_l1_distance.a") {
         ctx.push(issue);
@@ -26973,7 +26973,7 @@ pub fn minkowski356_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=356\) distance.
-pub fn cdist_minkowski356_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski356_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -27014,7 +27014,7 @@ fn minkowski357_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski356_l1_distance`] and [`minkowski355_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski357_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski357_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski357_l1_distance.a") {
         ctx.push(issue);
@@ -27034,7 +27034,7 @@ pub fn minkowski357_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=357\) distance.
-pub fn cdist_minkowski357_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski357_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -27076,7 +27076,7 @@ fn minkowski358_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski357_l1_distance`] and [`minkowski356_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski358_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski358_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski358_l1_distance.a") {
         ctx.push(issue);
@@ -27096,7 +27096,7 @@ pub fn minkowski358_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=358\) distance.
-pub fn cdist_minkowski358_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski358_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -27137,7 +27137,7 @@ fn minkowski359_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski358_l1_distance`] and [`minkowski357_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski359_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski359_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski359_l1_distance.a") {
         ctx.push(issue);
@@ -27157,7 +27157,7 @@ pub fn minkowski359_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=359\) distance.
-pub fn cdist_minkowski359_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski359_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -27199,7 +27199,7 @@ fn minkowski360_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski359_l1_distance`] and [`minkowski358_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski360_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski360_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski360_l1_distance.a") {
         ctx.push(issue);
@@ -27219,7 +27219,7 @@ pub fn minkowski360_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=360\) distance.
-pub fn cdist_minkowski360_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski360_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -27260,7 +27260,7 @@ fn minkowski361_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski360_l1_distance`] and [`minkowski359_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski361_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski361_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski361_l1_distance.a") {
         ctx.push(issue);
@@ -27280,7 +27280,7 @@ pub fn minkowski361_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=361\) distance.
-pub fn cdist_minkowski361_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski361_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -27322,7 +27322,7 @@ fn minkowski362_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski361_l1_distance`] and [`minkowski360_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski362_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski362_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski362_l1_distance.a") {
         ctx.push(issue);
@@ -27342,7 +27342,7 @@ pub fn minkowski362_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=362\) distance.
-pub fn cdist_minkowski362_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski362_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -27383,7 +27383,7 @@ fn minkowski363_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski362_l1_distance`] and [`minkowski361_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski363_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski363_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski363_l1_distance.a") {
         ctx.push(issue);
@@ -27403,7 +27403,7 @@ pub fn minkowski363_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=363\) distance.
-pub fn cdist_minkowski363_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski363_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -27445,7 +27445,7 @@ fn minkowski364_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski363_l1_distance`] and [`minkowski362_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski364_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski364_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski364_l1_distance.a") {
         ctx.push(issue);
@@ -27465,7 +27465,7 @@ pub fn minkowski364_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=364\) distance.
-pub fn cdist_minkowski364_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski364_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -27506,7 +27506,7 @@ fn minkowski365_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski364_l1_distance`] and [`minkowski363_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski365_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski365_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski365_l1_distance.a") {
         ctx.push(issue);
@@ -27526,7 +27526,7 @@ pub fn minkowski365_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=365\) distance.
-pub fn cdist_minkowski365_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski365_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -27568,7 +27568,7 @@ fn minkowski366_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski365_l1_distance`] and [`minkowski364_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski366_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski366_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski366_l1_distance.a") {
         ctx.push(issue);
@@ -27588,7 +27588,7 @@ pub fn minkowski366_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=366\) distance.
-pub fn cdist_minkowski366_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski366_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -27629,7 +27629,7 @@ fn minkowski367_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski366_l1_distance`] and [`minkowski365_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski367_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski367_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski367_l1_distance.a") {
         ctx.push(issue);
@@ -27649,7 +27649,7 @@ pub fn minkowski367_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=367\) distance.
-pub fn cdist_minkowski367_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski367_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -27691,7 +27691,7 @@ fn minkowski368_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski367_l1_distance`] and [`minkowski366_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski368_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski368_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski368_l1_distance.a") {
         ctx.push(issue);
@@ -27711,7 +27711,7 @@ pub fn minkowski368_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=368\) distance.
-pub fn cdist_minkowski368_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski368_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -27752,7 +27752,7 @@ fn minkowski369_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski368_l1_distance`] and [`minkowski367_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski369_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski369_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski369_l1_distance.a") {
         ctx.push(issue);
@@ -27772,7 +27772,7 @@ pub fn minkowski369_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=369\) distance.
-pub fn cdist_minkowski369_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski369_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -27814,7 +27814,7 @@ fn minkowski370_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski369_l1_distance`] and [`minkowski368_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski370_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski370_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski370_l1_distance.a") {
         ctx.push(issue);
@@ -27834,7 +27834,7 @@ pub fn minkowski370_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=370\) distance.
-pub fn cdist_minkowski370_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski370_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -27875,7 +27875,7 @@ fn minkowski371_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski370_l1_distance`] and [`minkowski369_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski371_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski371_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski371_l1_distance.a") {
         ctx.push(issue);
@@ -27895,7 +27895,7 @@ pub fn minkowski371_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=371\) distance.
-pub fn cdist_minkowski371_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski371_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -27937,7 +27937,7 @@ fn minkowski372_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski371_l1_distance`] and [`minkowski370_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski372_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski372_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski372_l1_distance.a") {
         ctx.push(issue);
@@ -27957,7 +27957,7 @@ pub fn minkowski372_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=372\) distance.
-pub fn cdist_minkowski372_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski372_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -27998,7 +27998,7 @@ fn minkowski373_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski372_l1_distance`] and [`minkowski371_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski373_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski373_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski373_l1_distance.a") {
         ctx.push(issue);
@@ -28018,7 +28018,7 @@ pub fn minkowski373_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=373\) distance.
-pub fn cdist_minkowski373_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski373_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -28060,7 +28060,7 @@ fn minkowski374_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski373_l1_distance`] and [`minkowski372_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski374_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski374_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski374_l1_distance.a") {
         ctx.push(issue);
@@ -28080,7 +28080,7 @@ pub fn minkowski374_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=374\) distance.
-pub fn cdist_minkowski374_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski374_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -28121,7 +28121,7 @@ fn minkowski375_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski374_l1_distance`] and [`minkowski373_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski375_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski375_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski375_l1_distance.a") {
         ctx.push(issue);
@@ -28141,7 +28141,7 @@ pub fn minkowski375_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=375\) distance.
-pub fn cdist_minkowski375_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski375_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -28183,7 +28183,7 @@ fn minkowski376_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski375_l1_distance`] and [`minkowski374_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski376_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski376_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski376_l1_distance.a") {
         ctx.push(issue);
@@ -28203,7 +28203,7 @@ pub fn minkowski376_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=376\) distance.
-pub fn cdist_minkowski376_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski376_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -28244,7 +28244,7 @@ fn minkowski377_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski376_l1_distance`] and [`minkowski375_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski377_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski377_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski377_l1_distance.a") {
         ctx.push(issue);
@@ -28264,7 +28264,7 @@ pub fn minkowski377_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=377\) distance.
-pub fn cdist_minkowski377_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski377_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -28306,7 +28306,7 @@ fn minkowski378_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski377_l1_distance`] and [`minkowski376_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski378_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski378_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski378_l1_distance.a") {
         ctx.push(issue);
@@ -28326,7 +28326,7 @@ pub fn minkowski378_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=378\) distance.
-pub fn cdist_minkowski378_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski378_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -28367,7 +28367,7 @@ fn minkowski379_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski378_l1_distance`] and [`minkowski377_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski379_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski379_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski379_l1_distance.a") {
         ctx.push(issue);
@@ -28387,7 +28387,7 @@ pub fn minkowski379_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=379\) distance.
-pub fn cdist_minkowski379_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski379_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -28429,7 +28429,7 @@ fn minkowski380_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski379_l1_distance`] and [`minkowski378_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski380_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski380_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski380_l1_distance.a") {
         ctx.push(issue);
@@ -28449,7 +28449,7 @@ pub fn minkowski380_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=380\) distance.
-pub fn cdist_minkowski380_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski380_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -28490,7 +28490,7 @@ fn minkowski381_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski380_l1_distance`] and [`minkowski379_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski381_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski381_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski381_l1_distance.a") {
         ctx.push(issue);
@@ -28510,7 +28510,7 @@ pub fn minkowski381_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=381\) distance.
-pub fn cdist_minkowski381_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski381_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -28552,7 +28552,7 @@ fn minkowski382_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski381_l1_distance`] and [`minkowski380_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski382_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski382_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski382_l1_distance.a") {
         ctx.push(issue);
@@ -28572,7 +28572,7 @@ pub fn minkowski382_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=382\) distance.
-pub fn cdist_minkowski382_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski382_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -28613,7 +28613,7 @@ fn minkowski383_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski382_l1_distance`] and [`minkowski381_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski383_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski383_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski383_l1_distance.a") {
         ctx.push(issue);
@@ -28633,7 +28633,7 @@ pub fn minkowski383_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=383\) distance.
-pub fn cdist_minkowski383_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski383_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -28675,7 +28675,7 @@ fn minkowski384_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski383_l1_distance`] and [`minkowski382_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski384_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski384_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski384_l1_distance.a") {
         ctx.push(issue);
@@ -28695,7 +28695,7 @@ pub fn minkowski384_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=384\) distance.
-pub fn cdist_minkowski384_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski384_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -28736,7 +28736,7 @@ fn minkowski385_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski384_l1_distance`] and [`minkowski383_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski385_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski385_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski385_l1_distance.a") {
         ctx.push(issue);
@@ -28756,7 +28756,7 @@ pub fn minkowski385_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=385\) distance.
-pub fn cdist_minkowski385_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski385_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -28798,7 +28798,7 @@ fn minkowski386_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski385_l1_distance`] and [`minkowski384_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski386_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski386_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski386_l1_distance.a") {
         ctx.push(issue);
@@ -28818,7 +28818,7 @@ pub fn minkowski386_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=386\) distance.
-pub fn cdist_minkowski386_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski386_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -28859,7 +28859,7 @@ fn minkowski387_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski386_l1_distance`] and [`minkowski385_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski387_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski387_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski387_l1_distance.a") {
         ctx.push(issue);
@@ -28879,7 +28879,7 @@ pub fn minkowski387_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=387\) distance.
-pub fn cdist_minkowski387_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski387_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -28921,7 +28921,7 @@ fn minkowski388_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski387_l1_distance`] and [`minkowski386_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski388_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski388_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski388_l1_distance.a") {
         ctx.push(issue);
@@ -28941,7 +28941,7 @@ pub fn minkowski388_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=388\) distance.
-pub fn cdist_minkowski388_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski388_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -28982,7 +28982,7 @@ fn minkowski389_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski388_l1_distance`] and [`minkowski387_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski389_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski389_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski389_l1_distance.a") {
         ctx.push(issue);
@@ -29002,7 +29002,7 @@ pub fn minkowski389_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=389\) distance.
-pub fn cdist_minkowski389_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski389_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -29044,7 +29044,7 @@ fn minkowski390_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski389_l1_distance`] and [`minkowski388_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski390_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski390_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski390_l1_distance.a") {
         ctx.push(issue);
@@ -29064,7 +29064,7 @@ pub fn minkowski390_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=390\) distance.
-pub fn cdist_minkowski390_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski390_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -29105,7 +29105,7 @@ fn minkowski391_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski390_l1_distance`] and [`minkowski389_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski391_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski391_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski391_l1_distance.a") {
         ctx.push(issue);
@@ -29125,7 +29125,7 @@ pub fn minkowski391_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=391\) distance.
-pub fn cdist_minkowski391_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski391_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -29167,7 +29167,7 @@ fn minkowski392_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski391_l1_distance`] and [`minkowski390_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski392_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski392_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski392_l1_distance.a") {
         ctx.push(issue);
@@ -29187,7 +29187,7 @@ pub fn minkowski392_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=392\) distance.
-pub fn cdist_minkowski392_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski392_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -29228,7 +29228,7 @@ fn minkowski393_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski392_l1_distance`] and [`minkowski391_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski393_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski393_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski393_l1_distance.a") {
         ctx.push(issue);
@@ -29248,7 +29248,7 @@ pub fn minkowski393_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=393\) distance.
-pub fn cdist_minkowski393_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski393_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -29290,7 +29290,7 @@ fn minkowski394_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski393_l1_distance`] and [`minkowski392_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski394_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski394_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski394_l1_distance.a") {
         ctx.push(issue);
@@ -29310,7 +29310,7 @@ pub fn minkowski394_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=394\) distance.
-pub fn cdist_minkowski394_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski394_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -29351,7 +29351,7 @@ fn minkowski395_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski394_l1_distance`] and [`minkowski393_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski395_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski395_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski395_l1_distance.a") {
         ctx.push(issue);
@@ -29371,7 +29371,7 @@ pub fn minkowski395_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=395\) distance.
-pub fn cdist_minkowski395_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski395_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -29413,7 +29413,7 @@ fn minkowski396_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski395_l1_distance`] and [`minkowski394_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski396_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski396_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski396_l1_distance.a") {
         ctx.push(issue);
@@ -29433,7 +29433,7 @@ pub fn minkowski396_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=396\) distance.
-pub fn cdist_minkowski396_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski396_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -29474,7 +29474,7 @@ fn minkowski397_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski396_l1_distance`] and [`minkowski395_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski397_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski397_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski397_l1_distance.a") {
         ctx.push(issue);
@@ -29494,7 +29494,7 @@ pub fn minkowski397_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=397\) distance.
-pub fn cdist_minkowski397_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski397_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -29536,7 +29536,7 @@ fn minkowski398_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski397_l1_distance`] and [`minkowski396_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski398_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski398_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski398_l1_distance.a") {
         ctx.push(issue);
@@ -29556,7 +29556,7 @@ pub fn minkowski398_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=398\) distance.
-pub fn cdist_minkowski398_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski398_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -29597,7 +29597,7 @@ fn minkowski399_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski398_l1_distance`] and [`minkowski397_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski399_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski399_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski399_l1_distance.a") {
         ctx.push(issue);
@@ -29617,7 +29617,7 @@ pub fn minkowski399_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=399\) distance.
-pub fn cdist_minkowski399_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski399_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -29659,7 +29659,7 @@ fn minkowski400_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski399_l1_distance`] and [`minkowski398_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski400_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski400_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski400_l1_distance.a") {
         ctx.push(issue);
@@ -29679,7 +29679,7 @@ pub fn minkowski400_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=400\) distance.
-pub fn cdist_minkowski400_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski400_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -29720,7 +29720,7 @@ fn minkowski401_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski400_l1_distance`] and [`minkowski399_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski401_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski401_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski401_l1_distance.a") {
         ctx.push(issue);
@@ -29740,7 +29740,7 @@ pub fn minkowski401_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=401\) distance.
-pub fn cdist_minkowski401_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski401_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -29782,7 +29782,7 @@ fn minkowski402_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski401_l1_distance`] and [`minkowski400_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski402_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski402_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski402_l1_distance.a") {
         ctx.push(issue);
@@ -29802,7 +29802,7 @@ pub fn minkowski402_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=402\) distance.
-pub fn cdist_minkowski402_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski402_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -29843,7 +29843,7 @@ fn minkowski403_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski402_l1_distance`] and [`minkowski401_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski403_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski403_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski403_l1_distance.a") {
         ctx.push(issue);
@@ -29863,7 +29863,7 @@ pub fn minkowski403_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=403\) distance.
-pub fn cdist_minkowski403_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski403_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -29905,7 +29905,7 @@ fn minkowski404_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski403_l1_distance`] and [`minkowski402_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski404_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski404_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski404_l1_distance.a") {
         ctx.push(issue);
@@ -29925,7 +29925,7 @@ pub fn minkowski404_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=404\) distance.
-pub fn cdist_minkowski404_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski404_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -29966,7 +29966,7 @@ fn minkowski405_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski404_l1_distance`] and [`minkowski403_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski405_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski405_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski405_l1_distance.a") {
         ctx.push(issue);
@@ -29986,7 +29986,7 @@ pub fn minkowski405_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=405\) distance.
-pub fn cdist_minkowski405_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski405_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -30028,7 +30028,7 @@ fn minkowski406_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski405_l1_distance`] and [`minkowski404_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski406_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski406_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski406_l1_distance.a") {
         ctx.push(issue);
@@ -30048,7 +30048,7 @@ pub fn minkowski406_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=406\) distance.
-pub fn cdist_minkowski406_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski406_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -30089,7 +30089,7 @@ fn minkowski407_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski406_l1_distance`] and [`minkowski405_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski407_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski407_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski407_l1_distance.a") {
         ctx.push(issue);
@@ -30109,7 +30109,7 @@ pub fn minkowski407_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=407\) distance.
-pub fn cdist_minkowski407_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski407_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -30151,7 +30151,7 @@ fn minkowski408_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski407_l1_distance`] and [`minkowski406_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski408_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski408_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski408_l1_distance.a") {
         ctx.push(issue);
@@ -30171,7 +30171,7 @@ pub fn minkowski408_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=408\) distance.
-pub fn cdist_minkowski408_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski408_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -30212,7 +30212,7 @@ fn minkowski409_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski408_l1_distance`] and [`minkowski407_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski409_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski409_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski409_l1_distance.a") {
         ctx.push(issue);
@@ -30232,7 +30232,7 @@ pub fn minkowski409_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=409\) distance.
-pub fn cdist_minkowski409_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski409_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -30274,7 +30274,7 @@ fn minkowski410_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski409_l1_distance`] and [`minkowski408_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski410_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski410_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski410_l1_distance.a") {
         ctx.push(issue);
@@ -30294,7 +30294,7 @@ pub fn minkowski410_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=410\) distance.
-pub fn cdist_minkowski410_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski410_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -30335,7 +30335,7 @@ fn minkowski411_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski410_l1_distance`] and [`minkowski409_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski411_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski411_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski411_l1_distance.a") {
         ctx.push(issue);
@@ -30355,7 +30355,7 @@ pub fn minkowski411_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=411\) distance.
-pub fn cdist_minkowski411_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski411_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -30397,7 +30397,7 @@ fn minkowski412_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski411_l1_distance`] and [`minkowski410_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski412_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski412_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski412_l1_distance.a") {
         ctx.push(issue);
@@ -30417,7 +30417,7 @@ pub fn minkowski412_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=412\) distance.
-pub fn cdist_minkowski412_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski412_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -30458,7 +30458,7 @@ fn minkowski413_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski412_l1_distance`] and [`minkowski411_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski413_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski413_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski413_l1_distance.a") {
         ctx.push(issue);
@@ -30478,7 +30478,7 @@ pub fn minkowski413_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=413\) distance.
-pub fn cdist_minkowski413_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski413_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -30520,7 +30520,7 @@ fn minkowski414_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski413_l1_distance`] and [`minkowski412_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski414_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski414_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski414_l1_distance.a") {
         ctx.push(issue);
@@ -30540,7 +30540,7 @@ pub fn minkowski414_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=414\) distance.
-pub fn cdist_minkowski414_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski414_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -30581,7 +30581,7 @@ fn minkowski415_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski414_l1_distance`] and [`minkowski413_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski415_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski415_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski415_l1_distance.a") {
         ctx.push(issue);
@@ -30601,7 +30601,7 @@ pub fn minkowski415_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=415\) distance.
-pub fn cdist_minkowski415_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski415_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -30643,7 +30643,7 @@ fn minkowski416_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski415_l1_distance`] and [`minkowski414_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski416_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski416_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski416_l1_distance.a") {
         ctx.push(issue);
@@ -30663,7 +30663,7 @@ pub fn minkowski416_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=416\) distance.
-pub fn cdist_minkowski416_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski416_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -30704,7 +30704,7 @@ fn minkowski417_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski416_l1_distance`] and [`minkowski415_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski417_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski417_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski417_l1_distance.a") {
         ctx.push(issue);
@@ -30724,7 +30724,7 @@ pub fn minkowski417_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=417\) distance.
-pub fn cdist_minkowski417_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski417_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -30766,7 +30766,7 @@ fn minkowski418_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski417_l1_distance`] and [`minkowski416_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski418_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski418_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski418_l1_distance.a") {
         ctx.push(issue);
@@ -30786,7 +30786,7 @@ pub fn minkowski418_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=418\) distance.
-pub fn cdist_minkowski418_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski418_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -30827,7 +30827,7 @@ fn minkowski419_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski418_l1_distance`] and [`minkowski417_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski419_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski419_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski419_l1_distance.a") {
         ctx.push(issue);
@@ -30847,7 +30847,7 @@ pub fn minkowski419_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=419\) distance.
-pub fn cdist_minkowski419_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski419_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -30889,7 +30889,7 @@ fn minkowski420_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski419_l1_distance`] and [`minkowski418_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski420_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski420_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski420_l1_distance.a") {
         ctx.push(issue);
@@ -30909,7 +30909,7 @@ pub fn minkowski420_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=420\) distance.
-pub fn cdist_minkowski420_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski420_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -30950,7 +30950,7 @@ fn minkowski421_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski420_l1_distance`] and [`minkowski419_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski421_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski421_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski421_l1_distance.a") {
         ctx.push(issue);
@@ -30970,7 +30970,7 @@ pub fn minkowski421_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=421\) distance.
-pub fn cdist_minkowski421_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski421_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -31012,7 +31012,7 @@ fn minkowski422_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski421_l1_distance`] and [`minkowski420_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski422_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski422_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski422_l1_distance.a") {
         ctx.push(issue);
@@ -31032,7 +31032,7 @@ pub fn minkowski422_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=422\) distance.
-pub fn cdist_minkowski422_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski422_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -31073,7 +31073,7 @@ fn minkowski423_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski422_l1_distance`] and [`minkowski421_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski423_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski423_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski423_l1_distance.a") {
         ctx.push(issue);
@@ -31093,7 +31093,7 @@ pub fn minkowski423_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=423\) distance.
-pub fn cdist_minkowski423_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski423_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -31135,7 +31135,7 @@ fn minkowski424_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski423_l1_distance`] and [`minkowski422_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski424_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski424_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski424_l1_distance.a") {
         ctx.push(issue);
@@ -31155,7 +31155,7 @@ pub fn minkowski424_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=424\) distance.
-pub fn cdist_minkowski424_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski424_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -31196,7 +31196,7 @@ fn minkowski425_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski424_l1_distance`] and [`minkowski423_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski425_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski425_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski425_l1_distance.a") {
         ctx.push(issue);
@@ -31216,7 +31216,7 @@ pub fn minkowski425_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=425\) distance.
-pub fn cdist_minkowski425_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski425_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -31258,7 +31258,7 @@ fn minkowski426_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski425_l1_distance`] and [`minkowski424_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski426_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski426_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski426_l1_distance.a") {
         ctx.push(issue);
@@ -31278,7 +31278,7 @@ pub fn minkowski426_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=426\) distance.
-pub fn cdist_minkowski426_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski426_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -31319,7 +31319,7 @@ fn minkowski427_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski426_l1_distance`] and [`minkowski425_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski427_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski427_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski427_l1_distance.a") {
         ctx.push(issue);
@@ -31339,7 +31339,7 @@ pub fn minkowski427_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=427\) distance.
-pub fn cdist_minkowski427_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski427_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -31381,7 +31381,7 @@ fn minkowski428_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski427_l1_distance`] and [`minkowski426_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski428_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski428_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski428_l1_distance.a") {
         ctx.push(issue);
@@ -31401,7 +31401,7 @@ pub fn minkowski428_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=428\) distance.
-pub fn cdist_minkowski428_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski428_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -31442,7 +31442,7 @@ fn minkowski429_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski428_l1_distance`] and [`minkowski427_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski429_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski429_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski429_l1_distance.a") {
         ctx.push(issue);
@@ -31462,7 +31462,7 @@ pub fn minkowski429_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=429\) distance.
-pub fn cdist_minkowski429_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski429_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -31504,7 +31504,7 @@ fn minkowski430_l1_distance_raw(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Distinct from [`minkowski429_l1_distance`] and [`minkowski428_l1_distance`].
 /// Identical series score 0.
-pub fn minkowski430_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn minkowski430_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("minkowski430_l1_distance.a") {
         ctx.push(issue);
@@ -31524,7 +31524,7 @@ pub fn minkowski430_l1_distance(a: &Vector, b: &Vector, session: &Session) -> Re
 }
 
 /// Pairwise \(\ell_1\)-normalised Minkowski \(p=430\) distance.
-pub fn cdist_minkowski430_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_minkowski430_l1(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -31541,7 +31541,7 @@ pub fn cdist_minkowski430_l1(a: &Matrix, b: &Matrix, session: &Session) -> Resul
 /// or substitute costs 1. Distinct from [`edit_distance`] (absolute-cost
 /// substitution) and [`erp`] (real-valued gap penalty). `ε` is not
 /// identification `p`.
-pub fn edr(a: &Vector, b: &Vector, eps: f64, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn edr(a: &Vector, b: &Vector, eps: f64, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("edr.a") {
         ctx.push(issue);
@@ -31576,7 +31576,7 @@ pub fn edr(a: &Vector, b: &Vector, eps: f64, session: &Session) -> Result<Qualif
 /// Off-diagonal steps pay an extra warp penalty `ω` on top of the local
 /// absolute cost. Distinct from [`dtw`] (`ω = 0`) and [`wdtw`] (logistic
 /// multiplicative weights). `ω` is not identification `p`.
-pub fn adtw(a: &Vector, b: &Vector, omega: f64, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn adtw(a: &Vector, b: &Vector, omega: f64, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("adtw.a") {
         ctx.push(issue);
@@ -31656,7 +31656,7 @@ fn edr_raw(a: &[f64], b: &[f64], eps: f64) -> f64 {
 ///
 /// Series / pair counts are not identification `p`. The logistic slope `g`
 /// is not identification `p`.
-pub fn cdist_wdtw(a: &Matrix, b: &Matrix, g: f64, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_wdtw(a: &Matrix, b: &Matrix, g: f64, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -31682,7 +31682,7 @@ pub fn cdist_wdtw(a: &Matrix, b: &Matrix, g: f64, session: &Session) -> Result<Q
 /// Pairwise derivative DTW (tslearn `cdist` with DDTW).
 ///
 /// Series / pair counts are not identification `p`.
-pub fn cdist_ddtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_ddtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -31712,7 +31712,7 @@ fn embed_series(s: &[f64], d: usize) -> Matrix {
 /// Eigenvector similarity of delay-embedded covariance (tslearn `eros`).
 ///
 /// Embedding order is not identification `p`. Identical series score near 1.
-pub fn eros(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn eros(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("eros.a") {
         ctx.push(issue);
@@ -31770,7 +31770,7 @@ pub fn eros(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>>
 /// Naive STOMP-style Euclidean matrix profile (tslearn / stumpy `matrix_profile`).
 ///
 /// Window length is not identification `p`. The exclusion zone is `window/4`.
-pub fn matrix_profile(s: &Vector, window: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn matrix_profile(s: &Vector, window: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(s.as_slice()).to_issue("matrix_profile") {
         ctx.push(issue);
@@ -31812,7 +31812,7 @@ pub fn matrix_profile(s: &Vector, window: usize, session: &Session) -> Result<Qu
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct StampResult {
+pub(crate) struct StampResult {
     /// Distance profile (length `n − window + 1`).
     pub profile: Vector,
     /// Argmin index of `profile`.
@@ -31820,7 +31820,7 @@ pub struct StampResult {
 }
 
 /// Matrix profile and its nearest-neighbor location.
-pub fn stamp(y: &Vector, window: usize, session: &Session) -> Result<Qualified<StampResult>> {
+pub(crate) fn stamp(y: &Vector, window: usize, session: &Session) -> Result<Qualified<StampResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(
         &mut ctx.report,
@@ -31872,7 +31872,7 @@ fn finite_median(xs: &[f64]) -> f64 {
 /// STRAY-style matrix-profile anomaly scores (sktime `STRAY`).
 ///
 /// \((mp − \mathrm{median}) / \mathrm{MAD}\). Window length is not identification `p`.
-pub fn stray(y: &Vector, window: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn stray(y: &Vector, window: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(
         &mut ctx.report,
@@ -31927,7 +31927,7 @@ pub fn stray(y: &Vector, window: usize, session: &Session) -> Result<Qualified<V
 }
 
 /// Real-valued edit distance (insert/delete cost 1, replace `|a-b|`).
-pub fn edit_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn edit_distance(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("edit.a") {
         ctx.push(issue);
@@ -31995,7 +31995,7 @@ fn dtw_raw(a: &[f64], b: &[f64]) -> f64 {
 }
 
 /// Pairwise DTW between rows of `a` and rows of `b` (each row is a series).
-pub fn cdist_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -32048,7 +32048,7 @@ pub fn softdtw(a: &Vector, b: &Vector, gamma: f64, session: &Session) -> Result<
 /// Path length is not identification `p`. The path is a greedy backtrack of
 /// the three predecessor cells of the Cuturi–Blondel DP (hard min of the
 /// same cells that enter the softmin).
-pub fn softdtw_alignment(
+pub(crate) fn softdtw_alignment(
     a: &Vector,
     b: &Vector,
     gamma: f64,
@@ -32134,7 +32134,7 @@ fn softdtw_path(a: &[f64], b: &[f64], gamma: f64) -> Vec<(usize, usize)> {
 }
 
 /// Pairwise soft-DTW between rows of `a` and rows of `b`.
-pub fn cdist_softdtw(
+pub(crate) fn cdist_softdtw(
     a: &Matrix,
     b: &Matrix,
     gamma: f64,
@@ -32165,7 +32165,7 @@ fn dtw_path(a: &[f64], b: &[f64]) -> Vec<(usize, usize)> {
 /// DTW alignment path as an `n_path × 2` index matrix (tslearn `dtw_path`).
 ///
 /// Path length is not identification `p`.
-pub fn dtw_alignment(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn dtw_alignment(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("dtw_path.a") {
         ctx.push(issue);
@@ -32193,7 +32193,7 @@ pub fn dtw_alignment(a: &Vector, b: &Vector, session: &Session) -> Result<Qualif
 }
 
 /// DTW barycentre averaging (DBA) of the rows of `x`.
-pub fn dtw_barycenter(x: &Matrix, max_iter: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn dtw_barycenter(x: &Matrix, max_iter: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, None, &ctx.policy);
     if x.nrows() == 0 || x.ncols() == 0 {
@@ -32215,7 +32215,7 @@ pub fn dtw_barycenter(x: &Matrix, max_iter: usize, session: &Session) -> Result<
 
 /// k-means with DTW distance and DBA centroids.
 #[derive(Clone, Debug)]
-pub struct TimeSeriesKMeans {
+pub(crate) struct TimeSeriesKMeans {
     /// Number of clusters.
     pub n_clusters: usize,
     /// Assignment / DBA iterations.
@@ -32236,7 +32236,7 @@ impl Default for TimeSeriesKMeans {
 
 impl TimeSeriesKMeans {
     /// DTW k-means with `k` clusters.
-    pub fn new(n_clusters: usize) -> Self {
+    pub(crate) fn new(n_clusters: usize) -> Self {
         Self {
             n_clusters,
             ..Self::default()
@@ -32246,7 +32246,7 @@ impl TimeSeriesKMeans {
 
 /// Fitted DTW k-means.
 #[derive(Clone, Debug)]
-pub struct FittedTsKMeans {
+pub(crate) struct FittedTsKMeans {
     /// Centroids (`k × T`).
     pub centers: Matrix,
     /// Training assignments.
@@ -32278,7 +32278,7 @@ impl Predict for FittedTsKMeans {
 impl Fit for TimeSeriesKMeans {
     type Fitted = FittedTsKMeans;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         _y: &Vector,
         session: &Session,
@@ -32375,7 +32375,7 @@ fn ncc(a: &Vector, b: &Vector) -> (f64, isize) {
 
 /// k-Shape: z-normalized series clustered by normalized cross-correlation.
 #[derive(Clone, Debug)]
-pub struct KShape {
+pub(crate) struct KShape {
     /// Number of clusters.
     pub n_clusters: usize,
     /// Iterations.
@@ -32396,7 +32396,7 @@ impl Default for KShape {
 
 impl KShape {
     /// k-Shape with `k` clusters.
-    pub fn new(n_clusters: usize) -> Self {
+    pub(crate) fn new(n_clusters: usize) -> Self {
         Self {
             n_clusters,
             ..Self::default()
@@ -32406,7 +32406,7 @@ impl KShape {
 
 /// Fitted k-Shape model.
 #[derive(Clone, Debug)]
-pub struct FittedKShape {
+pub(crate) struct FittedKShape {
     /// Z-normalized centroids.
     pub centers: Matrix,
     /// Training assignments.
@@ -32438,7 +32438,7 @@ impl Predict for FittedKShape {
 impl Fit for KShape {
     type Fitted = FittedKShape;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         _y: &Vector,
         session: &Session,
@@ -32506,7 +32506,7 @@ impl Fit for KShape {
 }
 
 /// Piecewise aggregate approximation onto `n_pieces` windows.
-pub fn paa(y: &Vector, n_pieces: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn paa(y: &Vector, n_pieces: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(y.as_slice()).to_issue("paa") {
         ctx.push(issue);
@@ -32537,7 +32537,7 @@ pub fn paa(y: &Vector, n_pieces: usize, session: &Session) -> Result<Qualified<V
 }
 
 /// Symbolic aggregate approximation: PAA then Gaussian breakpoints.
-pub fn sax(
+pub(crate) fn sax(
     y: &Vector,
     n_pieces: usize,
     alphabet: usize,
@@ -32583,7 +32583,7 @@ pub fn sax(
 }
 
 /// Minimum Euclidean distance between `shapelet` and any subsequence of `series`.
-pub fn shapelet_distance(
+pub(crate) fn shapelet_distance(
     series: &Vector,
     shapelet: &Vector,
     session: &Session,
@@ -32614,7 +32614,7 @@ pub fn shapelet_distance(
 
 /// Time-series classifier: linear model on PAA features + a DTW 1-NN baseline.
 #[derive(Clone, Debug)]
-pub struct TimeSeriesSvm {
+pub(crate) struct TimeSeriesSvm {
     /// PAA length used as the linear feature map.
     pub n_pieces: usize,
     /// Ridge penalty on the PAA features.
@@ -32632,14 +32632,14 @@ impl Default for TimeSeriesSvm {
 
 impl TimeSeriesSvm {
     /// Default PAA-linear + DTW 1-NN classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted time-series SVM-style classifier.
 #[derive(Clone, Debug)]
-pub struct FittedTimeSeriesSvm {
+pub(crate) struct FittedTimeSeriesSvm {
     /// Training series (rows).
     pub x_train: Matrix,
     /// Training labels.
@@ -32662,7 +32662,7 @@ impl FittedTimeSeriesSvm {
     }
 
     /// DTW 1-NN labels (the baseline).
-    pub fn predict_dtw_nn(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_dtw_nn(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("dtw_nn"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let y = Vector::from_iter((0..x.nrows()).map(|i| {
@@ -32709,7 +32709,7 @@ impl Predict for FittedTimeSeriesSvm {
 impl Fit for TimeSeriesSvm {
     type Fitted = FittedTimeSeriesSvm;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -32762,7 +32762,7 @@ impl Fit for TimeSeriesSvm {
 
 /// Mini-ROCKET-style random convolutional features (sktime / tslearn ROCKET).
 #[derive(Clone, Debug)]
-pub struct Rocket {
+pub(crate) struct Rocket {
     /// Number of random kernels.
     pub n_kernels: usize,
     /// Kernel length.
@@ -32783,7 +32783,7 @@ impl Default for Rocket {
 
 impl Rocket {
     /// ROCKET with `k` kernels.
-    pub fn new(n_kernels: usize) -> Self {
+    pub(crate) fn new(n_kernels: usize) -> Self {
         Self {
             n_kernels,
             ..Self::default()
@@ -32791,7 +32791,7 @@ impl Rocket {
     }
 
     /// Transform each row (series) into PPV + max features per kernel.
-    pub fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let n = x.nrows();
@@ -32874,7 +32874,7 @@ impl Rocket {
 /// features are mean, standard deviation, and OLS slope of the window. A
 /// series shorter than 3 samples cannot identify a slope.
 #[derive(Clone, Debug)]
-pub struct TimeSeriesForestClassifier {
+pub(crate) struct TimeSeriesForestClassifier {
     /// Number of trees.
     pub n_estimators: usize,
     /// Random intervals per tree.
@@ -32898,7 +32898,7 @@ impl Default for TimeSeriesForestClassifier {
 
 impl TimeSeriesForestClassifier {
     /// Default interval forest.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -32911,7 +32911,7 @@ struct Interval {
 
 /// Fitted interval forest.
 #[derive(Clone, Debug)]
-pub struct FittedTimeSeriesForest {
+pub(crate) struct FittedTimeSeriesForest {
     trees: Vec<crate::tree::FittedTreeClassifier>,
     intervals: Vec<Vec<Interval>>,
     /// Sorted class labels.
@@ -32962,7 +32962,7 @@ fn interval_feats(x: &Matrix, intervals: &[Interval]) -> Matrix {
 impl Fit for TimeSeriesForestClassifier {
     type Fitted = FittedTimeSeriesForest;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -33121,7 +33121,7 @@ fn interval_feats_cif(x: &Matrix, intervals: &[Interval]) -> Matrix {
 /// Each interval yields mean, std, slope, median, and IQR — a catch22-lite
 /// subset, recorded as a compromise.
 #[derive(Clone, Debug)]
-pub struct CanonicalIntervalForest {
+pub(crate) struct CanonicalIntervalForest {
     /// Number of trees.
     pub n_estimators: usize,
     /// Random intervals per tree.
@@ -33145,14 +33145,14 @@ impl Default for CanonicalIntervalForest {
 
 impl CanonicalIntervalForest {
     /// Default CIF.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted CIF.
 #[derive(Clone, Debug)]
-pub struct FittedCanonicalIntervalForest {
+pub(crate) struct FittedCanonicalIntervalForest {
     trees: Vec<crate::tree::FittedTreeClassifier>,
     intervals: Vec<Vec<Interval>>,
     /// Sorted class labels.
@@ -33162,7 +33162,7 @@ pub struct FittedCanonicalIntervalForest {
 impl Fit for CanonicalIntervalForest {
     type Fitted = FittedCanonicalIntervalForest;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -33273,7 +33273,7 @@ impl Predict for FittedCanonicalIntervalForest {
 /// Interval / tree counts are not identification `p`. Uses the same five
 /// summaries per interval as [`CanonicalIntervalForest`].
 #[derive(Clone, Debug)]
-pub struct CanonicalIntervalForestRegressor {
+pub(crate) struct CanonicalIntervalForestRegressor {
     /// Trees.
     pub n_estimators: usize,
     /// Random intervals per tree.
@@ -33297,14 +33297,14 @@ impl Default for CanonicalIntervalForestRegressor {
 
 impl CanonicalIntervalForestRegressor {
     /// Default CIF regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted CIF regressor.
 #[derive(Clone, Debug)]
-pub struct FittedCanonicalIntervalForestReg {
+pub(crate) struct FittedCanonicalIntervalForestReg {
     trees: Vec<crate::tree::FittedTreeRegressor>,
     intervals: Vec<Vec<Interval>>,
 }
@@ -33312,7 +33312,7 @@ pub struct FittedCanonicalIntervalForestReg {
 impl Fit for CanonicalIntervalForestRegressor {
     type Fitted = FittedCanonicalIntervalForestReg;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -33420,7 +33420,7 @@ impl Predict for FittedCanonicalIntervalForestReg {
 
 /// ROCKET features + ridge classifier (sktime `RocketClassifier`).
 #[derive(Clone, Debug)]
-pub struct RocketClassifier {
+pub(crate) struct RocketClassifier {
     /// Random kernels.
     pub n_kernels: usize,
     /// Kernel length.
@@ -33444,14 +33444,14 @@ impl Default for RocketClassifier {
 
 impl RocketClassifier {
     /// Default ROCKET classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted ROCKET + ridge classifier.
 #[derive(Clone, Debug)]
-pub struct FittedRocketClassifier {
+pub(crate) struct FittedRocketClassifier {
     rocket: Rocket,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -33459,7 +33459,7 @@ pub struct FittedRocketClassifier {
 impl Fit for RocketClassifier {
     type Fitted = FittedRocketClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -33491,7 +33491,7 @@ impl Predict for FittedRocketClassifier {
 /// Kernel count is not identification `p`. The ridge solve is scratch-reported
 /// so a large kernel map on a short panel cannot abort via identification.
 #[derive(Clone, Debug)]
-pub struct RocketRegressor {
+pub(crate) struct RocketRegressor {
     /// Random kernels.
     pub n_kernels: usize,
     /// Kernel length.
@@ -33515,14 +33515,14 @@ impl Default for RocketRegressor {
 
 impl RocketRegressor {
     /// Default ROCKET regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted ROCKET + ridge regressor.
 #[derive(Clone, Debug)]
-pub struct FittedRocketRegressor {
+pub(crate) struct FittedRocketRegressor {
     rocket: Rocket,
     inner: FittedPenalized,
 }
@@ -33530,7 +33530,7 @@ pub struct FittedRocketRegressor {
 impl Fit for RocketRegressor {
     type Fitted = FittedRocketRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -33584,7 +33584,7 @@ impl Predict for FittedRocketRegressor {
 ///
 /// Ensemble size is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct HiveCote {
+pub(crate) struct HiveCote {
     /// ROCKET kernels.
     pub n_kernels: usize,
     /// Forest trees.
@@ -33605,14 +33605,14 @@ impl Default for HiveCote {
 
 impl HiveCote {
     /// Default HIVE-COTE lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted two-member HIVE-COTE vote.
 #[derive(Clone, Debug)]
-pub struct FittedHiveCote {
+pub(crate) struct FittedHiveCote {
     rocket: FittedRocketClassifier,
     forest: FittedTimeSeriesForest,
 }
@@ -33620,7 +33620,7 @@ pub struct FittedHiveCote {
 impl Fit for HiveCote {
     type Fitted = FittedHiveCote;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -33682,7 +33682,7 @@ impl Predict for FittedHiveCote {
 
 /// DTW 1-NN classifier (sktime `KNeighborsTimeSeriesClassifier`).
 #[derive(Clone, Debug)]
-pub struct KNeighborsTimeSeries {
+pub(crate) struct KNeighborsTimeSeries {
     /// Neighbours (only \(k=1\) is identified without a weighted vote).
     pub n_neighbors: usize,
 }
@@ -33695,14 +33695,14 @@ impl Default for KNeighborsTimeSeries {
 
 impl KNeighborsTimeSeries {
     /// `k`-NN DTW classifier.
-    pub fn new(n_neighbors: usize) -> Self {
+    pub(crate) fn new(n_neighbors: usize) -> Self {
         Self { n_neighbors }
     }
 }
 
 /// Fitted DTW neighbour store.
 #[derive(Clone, Debug)]
-pub struct FittedKnnTs {
+pub(crate) struct FittedKnnTs {
     x_train: Matrix,
     y_train: Vector,
     k: usize,
@@ -33710,7 +33710,7 @@ pub struct FittedKnnTs {
 
 impl Fit for KNeighborsTimeSeries {
     type Fitted = FittedKnnTs;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedKnnTs>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedKnnTs>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -33770,7 +33770,7 @@ impl Predict for FittedKnnTs {
 /// Neighbour count is not identification `p`. A constant `y` is vacuous via
 /// [`inspect_xy`].
 #[derive(Clone, Debug)]
-pub struct SoftDtwRegressor {
+pub(crate) struct SoftDtwRegressor {
     /// Neighbourhood size.
     pub k: usize,
     /// Soft-DTW smoothness.
@@ -33785,7 +33785,7 @@ impl Default for SoftDtwRegressor {
 
 impl SoftDtwRegressor {
     /// `k`-NN soft-DTW regressor.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k: k.max(1),
             ..Self::default()
@@ -33795,7 +33795,7 @@ impl SoftDtwRegressor {
 
 /// Fitted soft-DTW regressor.
 #[derive(Clone, Debug)]
-pub struct FittedSoftDtwRegressor {
+pub(crate) struct FittedSoftDtwRegressor {
     /// Training series (rows).
     pub x_train: Matrix,
     /// Training targets.
@@ -33809,30 +33809,31 @@ pub struct FittedSoftDtwRegressor {
 impl Fit for SoftDtwRegressor {
     type Fitted = FittedSoftDtwRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedSoftDtwRegressor>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        if !self.gamma.is_finite() || self.gamma <= 0.0 {
+        if !this.gamma.is_finite() || this.gamma <= 0.0 {
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
                     .severity(Severity::Warning)
                     .message(format!(
                         "SoftDtwRegressor gamma={} is not positive; using 0.5",
-                        self.gamma
+                        this.gamma
                     ))
                     .build(),
             );
-            self.gamma = 0.5;
+            this.gamma = 0.5;
         }
         ctx.finish(FittedSoftDtwRegressor {
             x_train: x.clone(),
             y_train: y.clone(),
-            k: self.k.max(1),
-            gamma: self.gamma,
+            k: this.k.max(1),
+            gamma: this.gamma,
         })
     }
 }
@@ -33874,7 +33875,7 @@ impl Predict for FittedSoftDtwRegressor {
 ///
 /// Segment count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Paa {
+pub(crate) struct Paa {
     /// Number of segments.
     pub n_segments: usize,
 }
@@ -33887,7 +33888,7 @@ impl Default for Paa {
 
 impl Paa {
     /// PAA with `n_segments` bins.
-    pub fn new(n_segments: usize) -> Self {
+    pub(crate) fn new(n_segments: usize) -> Self {
         Self {
             n_segments: n_segments.max(1),
         }
@@ -33920,7 +33921,7 @@ impl Transform for Paa {
 
 /// Symbolic aggregate approximation (tslearn `SymbolicAggregateApproximation`).
 #[derive(Clone, Debug)]
-pub struct Sax {
+pub(crate) struct Sax {
     /// PAA segments.
     pub n_segments: usize,
     /// Alphabet size.
@@ -33938,7 +33939,7 @@ impl Default for Sax {
 
 impl Sax {
     /// SAX with the given segments and alphabet.
-    pub fn new(n_segments: usize, alphabet: usize) -> Self {
+    pub(crate) fn new(n_segments: usize, alphabet: usize) -> Self {
         Self {
             n_segments: n_segments.max(1),
             alphabet: alphabet.max(2),
@@ -33965,7 +33966,7 @@ impl Transform for Sax {
 ///
 /// Segment / alphabet counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct OneDSax {
+pub(crate) struct OneDSax {
     /// PAA segments.
     pub n_segments: usize,
     /// Alphabet size for each of mean and slope.
@@ -33983,7 +33984,7 @@ impl Default for OneDSax {
 
 impl OneDSax {
     /// 1d-SAX with the given segments and alphabet.
-    pub fn new(n_segments: usize, alphabet: usize) -> Self {
+    pub(crate) fn new(n_segments: usize, alphabet: usize) -> Self {
         Self {
             n_segments: n_segments.max(1),
             alphabet: alphabet.max(2),
@@ -34050,7 +34051,7 @@ impl Transform for OneDSax {
 
 /// Linear SVC on PAA features (tslearn `TimeSeriesSVC` lite).
 #[derive(Clone, Debug)]
-pub struct TimeSeriesSvc {
+pub(crate) struct TimeSeriesSvc {
     /// PAA segments.
     pub n_segments: usize,
     /// Ridge penalty on the PAA design.
@@ -34068,7 +34069,7 @@ impl Default for TimeSeriesSvc {
 
 impl TimeSeriesSvc {
     /// SVC on a PAA map.
-    pub fn new(n_segments: usize) -> Self {
+    pub(crate) fn new(n_segments: usize) -> Self {
         Self {
             n_segments: n_segments.max(1),
             ..Self::default()
@@ -34079,7 +34080,7 @@ impl TimeSeriesSvc {
 impl Fit for TimeSeriesSvc {
     type Fitted = crate::classification::FittedRidgeClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -34139,7 +34140,7 @@ impl Fit for TimeSeriesSvc {
 ///
 /// Segment count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct TimeSeriesSvr {
+pub(crate) struct TimeSeriesSvr {
     /// PAA segments.
     pub n_segments: usize,
     /// Ridge penalty.
@@ -34157,7 +34158,7 @@ impl Default for TimeSeriesSvr {
 
 impl TimeSeriesSvr {
     /// SVR on a PAA map.
-    pub fn new(n_segments: usize) -> Self {
+    pub(crate) fn new(n_segments: usize) -> Self {
         Self {
             n_segments: n_segments.max(1),
             ..Self::default()
@@ -34168,7 +34169,7 @@ impl TimeSeriesSvr {
 impl Fit for TimeSeriesSvr {
     type Fitted = FittedPenalized;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -34204,7 +34205,7 @@ impl Fit for TimeSeriesSvr {
 
 /// Interval-feature forest regressor (sktime `TimeSeriesForestRegressor`).
 #[derive(Clone, Debug)]
-pub struct TimeSeriesForestRegressor {
+pub(crate) struct TimeSeriesForestRegressor {
     /// Number of trees.
     pub n_estimators: usize,
     /// Random intervals per tree.
@@ -34228,14 +34229,14 @@ impl Default for TimeSeriesForestRegressor {
 
 impl TimeSeriesForestRegressor {
     /// Default interval forest regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted interval forest regressor.
 #[derive(Clone, Debug)]
-pub struct FittedTimeSeriesForestReg {
+pub(crate) struct FittedTimeSeriesForestReg {
     trees: Vec<crate::tree::FittedTreeRegressor>,
     intervals: Vec<Vec<Interval>>,
 }
@@ -34243,7 +34244,7 @@ pub struct FittedTimeSeriesForestReg {
 impl Fit for TimeSeriesForestRegressor {
     type Fitted = FittedTimeSeriesForestReg;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -34329,7 +34330,7 @@ impl Predict for FittedTimeSeriesForestReg {
 
 /// Kernel k-means with a soft-DTW RBF kernel on the rows.
 #[derive(Clone, Debug)]
-pub struct KernelKMeans {
+pub(crate) struct KernelKMeans {
     /// Number of clusters.
     pub n_clusters: usize,
     /// Soft-DTW smoothness (also the kernel scale).
@@ -34353,7 +34354,7 @@ impl Default for KernelKMeans {
 
 impl KernelKMeans {
     /// Soft-DTW kernel k-means with `k` clusters.
-    pub fn new(n_clusters: usize) -> Self {
+    pub(crate) fn new(n_clusters: usize) -> Self {
         Self {
             n_clusters,
             ..Self::default()
@@ -34363,7 +34364,7 @@ impl KernelKMeans {
 
 /// Fitted kernel k-means partition.
 #[derive(Clone, Debug)]
-pub struct FittedKernelKMeans {
+pub(crate) struct FittedKernelKMeans {
     /// Training assignments.
     pub labels: Vector,
     /// Soft-DTW RBF Gram used for assignment.
@@ -34373,7 +34374,7 @@ pub struct FittedKernelKMeans {
 impl FitUnsupervised for KernelKMeans {
     type Fitted = FittedKernelKMeans;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedKernelKMeans>> {
@@ -34471,18 +34472,18 @@ impl FitUnsupervised for KernelKMeans {
 /// Each row is z-scored independently. A constant series becomes zeros and
 /// records a near-zero-variance warning.
 #[derive(Clone, Debug, Default)]
-pub struct TimeSeriesScalerMeanVariance;
+pub(crate) struct TimeSeriesScalerMeanVariance;
 
 impl TimeSeriesScalerMeanVariance {
     /// Default per-series z-score.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
 
 impl FitUnsupervised for TimeSeriesScalerMeanVariance {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(self.clone())
@@ -34566,7 +34567,7 @@ fn softdtw_grad(a: &[f64], b: &[f64], gamma: f64) -> (f64, Vec<f64>) {
 }
 
 /// Soft-DTW barycentre of the rows of `x` (Cuturi & Blondel).
-pub fn softdtw_barycenter(
+pub(crate) fn softdtw_barycenter(
     x: &Matrix,
     gamma: f64,
     max_iter: usize,
@@ -34615,7 +34616,7 @@ pub fn softdtw_barycenter(
 }
 
 /// Global alignment kernel \(K=\exp(-\mathrm{softDTW}/\sigma)\).
-pub fn global_alignment_kernel(
+pub(crate) fn global_alignment_kernel(
     a: &Vector,
     b: &Vector,
     sigma: f64,
@@ -34638,12 +34639,12 @@ pub fn global_alignment_kernel(
 }
 
 /// Petitjean DBA alias of [`dtw_barycenter`] (tslearn `dtw_barycenter_averaging`).
-pub fn dba(x: &Matrix, max_iter: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn dba(x: &Matrix, max_iter: usize, session: &Session) -> Result<Qualified<Vector>> {
     dtw_barycenter(x, max_iter, session)
 }
 
 /// Euclidean barycentre (column means of the row-as-series matrix).
-pub fn euclidean_barycenter(x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn euclidean_barycenter(x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, None, &ctx.policy);
     if x.nrows() == 0 || x.ncols() == 0 {
@@ -34657,7 +34658,7 @@ pub fn euclidean_barycenter(x: &Matrix, session: &Session) -> Result<Qualified<V
 /// LB_Keogh lower bound on DTW (tslearn `lb_keogh`).
 ///
 /// Window width is not identification `p`.
-pub fn lb_keogh(
+pub(crate) fn lb_keogh(
     query: &Vector,
     candidate: &Vector,
     r: usize,
@@ -34703,7 +34704,7 @@ pub fn lb_keogh(
 ///
 /// Distinct from [`lb_keogh`] (sliding envelope). Feature count is not
 /// identification `p`.
-pub fn lb_kim(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn lb_kim(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if a.is_empty() || b.is_empty() {
         ctx.push(Issue::builder(IssueCode::EmptyMatrix).build());
@@ -34744,7 +34745,7 @@ fn lb_kim_raw(a: &[f64], b: &[f64]) -> f64 {
 /// Candidate points inside the query envelope get a second pass against the
 /// candidate envelope. Distinct from [`lb_keogh`] (one-sided) and [`lb_kim`].
 /// Window width is not identification `p`.
-pub fn lb_improved(
+pub(crate) fn lb_improved(
     query: &Vector,
     candidate: &Vector,
     r: usize,
@@ -34817,7 +34818,7 @@ pub fn lb_improved(
 /// Matches under an \(\varepsilon\)-tube earn \(1/(1+|i-j|)\). Distinct from
 /// [`lcss`] (unweighted matches) and [`edr`] (unit edit cost). `ε` is not
 /// identification `p`.
-pub fn swale(a: &Vector, b: &Vector, eps: f64, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn swale(a: &Vector, b: &Vector, eps: f64, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = signlred::scan_finite(a.as_slice()).to_issue("swale.a") {
         ctx.push(issue);
@@ -34912,7 +34913,7 @@ fn msm_cost(new_p: f64, x: f64, y: f64, c: f64) -> f64 {
 ///
 /// The move cost is \(|x_i-y_j|\); split/merge pay `c` plus a possible extra
 /// jump. `c` is not identification `p`.
-pub fn msm(a: &Vector, b: &Vector, c: f64, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn msm(a: &Vector, b: &Vector, c: f64, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     let c = if c.is_finite() && c >= 0.0 {
         c
@@ -34963,7 +34964,7 @@ fn msm_raw(a: &[f64], b: &[f64], c: f64) -> f64 {
 /// Time Warp Edit distance (tslearn `twe`).
 ///
 /// Stiffness `nu` and mismatch penalty `lambda` are not identification `p`.
-pub fn twe(
+pub(crate) fn twe(
     a: &Vector,
     b: &Vector,
     nu: f64,
@@ -35038,7 +35039,7 @@ fn twe_raw(a: &[f64], b: &[f64], nu: f64, lambda: f64) -> f64 {
 }
 
 /// Pairwise MSM between rows of `a` and rows of `b`.
-pub fn cdist_msm(a: &Matrix, b: &Matrix, c: f64, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_msm(a: &Matrix, b: &Matrix, c: f64, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -35050,7 +35051,7 @@ pub fn cdist_msm(a: &Matrix, b: &Matrix, c: f64, session: &Session) -> Result<Qu
 }
 
 /// Pairwise TWE between rows of `a` and rows of `b`.
-pub fn cdist_twe(
+pub(crate) fn cdist_twe(
     a: &Matrix,
     b: &Matrix,
     nu: f64,
@@ -35075,7 +35076,7 @@ pub fn cdist_twe(
 /// Pairwise global alignment kernel (tslearn `cdist_gak`).
 ///
 /// \(\sigma\) is not identification `p`.
-pub fn cdist_gak(
+pub(crate) fn cdist_gak(
     a: &Matrix,
     b: &Matrix,
     sigma: f64,
@@ -35104,7 +35105,7 @@ pub fn cdist_gak(
 
 /// Linear resampler of each row to `n_out` samples (tslearn `TimeSeriesResampler`).
 #[derive(Clone, Debug)]
-pub struct TimeSeriesResampler {
+pub(crate) struct TimeSeriesResampler {
     /// Output length.
     pub n_out: usize,
 }
@@ -35117,7 +35118,7 @@ impl Default for TimeSeriesResampler {
 
 impl TimeSeriesResampler {
     /// Resample to `n_out` columns.
-    pub fn new(n_out: usize) -> Self {
+    pub(crate) fn new(n_out: usize) -> Self {
         Self {
             n_out: n_out.max(1),
         }
@@ -35158,7 +35159,7 @@ impl Transform for TimeSeriesResampler {
 ///
 /// Feature count is not identification `p`; the ridge path is penalized.
 #[derive(Clone, Debug)]
-pub struct Catch22Classifier {
+pub(crate) struct Catch22Classifier {
     /// Ridge penalty.
     pub alpha: f64,
 }
@@ -35171,14 +35172,14 @@ impl Default for Catch22Classifier {
 
 impl Catch22Classifier {
     /// Catch22 classifier with ridge penalty `alpha`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self { alpha }
     }
 }
 
 /// Fitted Catch22 classifier.
 #[derive(Clone, Debug)]
-pub struct FittedCatch22Classifier {
+pub(crate) struct FittedCatch22Classifier {
     inner: crate::classification::FittedRidgeClassifier,
 }
 
@@ -35220,7 +35221,7 @@ fn catch22_rows(x: &Matrix, session: &Session, ctx: &mut FitCtx) -> Matrix {
 impl Fit for Catch22Classifier {
     type Fitted = FittedCatch22Classifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -35295,7 +35296,7 @@ impl Predict for FittedCatch22Classifier {
 ///
 /// Interval count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct TimeSeriesBagOfFeatures {
+pub(crate) struct TimeSeriesBagOfFeatures {
     /// Random intervals.
     pub n_intervals: usize,
     /// Ridge \(\alpha\).
@@ -35316,14 +35317,14 @@ impl Default for TimeSeriesBagOfFeatures {
 
 impl TimeSeriesBagOfFeatures {
     /// Default TSBF-lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted bag-of-features classifier.
 #[derive(Clone, Debug)]
-pub struct FittedTimeSeriesBagOfFeatures {
+pub(crate) struct FittedTimeSeriesBagOfFeatures {
     intervals: Vec<Interval>,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -35331,7 +35332,7 @@ pub struct FittedTimeSeriesBagOfFeatures {
 impl Fit for TimeSeriesBagOfFeatures {
     type Fitted = FittedTimeSeriesBagOfFeatures;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -35418,18 +35419,18 @@ impl Predict for FittedTimeSeriesBagOfFeatures {
 
 /// Per-series min–max scaler (tslearn `TimeSeriesScalerMinMax`).
 #[derive(Clone, Debug, Default)]
-pub struct TimeSeriesScalerMinMax;
+pub(crate) struct TimeSeriesScalerMinMax;
 
 impl TimeSeriesScalerMinMax {
     /// Default per-series `[0, 1]` map.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
 
 impl FitUnsupervised for TimeSeriesScalerMinMax {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(self.clone())
@@ -35472,7 +35473,7 @@ impl Transform for TimeSeriesScalerMinMax {
 
 /// MiniROCKET-style dilated PPV features (Dempster, Schmidt, Webb).
 #[derive(Clone, Debug)]
-pub struct MiniRocket {
+pub(crate) struct MiniRocket {
     /// Number of random dilated kernels.
     pub n_kernels: usize,
     /// Seed.
@@ -35490,7 +35491,7 @@ impl Default for MiniRocket {
 
 impl MiniRocket {
     /// MiniROCKET with `k` kernels.
-    pub fn new(n_kernels: usize) -> Self {
+    pub(crate) fn new(n_kernels: usize) -> Self {
         Self {
             n_kernels,
             ..Self::default()
@@ -35498,7 +35499,7 @@ impl MiniRocket {
     }
 
     /// Transform each row into one PPV feature per kernel.
-    pub fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let n = x.nrows();
@@ -35566,7 +35567,7 @@ impl MiniRocket {
 ///
 /// Kernel count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MultiRocket {
+pub(crate) struct MultiRocket {
     /// Number of random kernels.
     pub n_kernels: usize,
     /// Seed.
@@ -35584,7 +35585,7 @@ impl Default for MultiRocket {
 
 impl MultiRocket {
     /// MultiROCKET with `k` kernels (3 features each).
-    pub fn new(n_kernels: usize) -> Self {
+    pub(crate) fn new(n_kernels: usize) -> Self {
         Self {
             n_kernels,
             ..Self::default()
@@ -35765,7 +35766,7 @@ fn boss_histograms(
 
 /// BOSS word-histogram + ridge classifier (sktime `BOSSEnsemble` lite).
 #[derive(Clone, Debug)]
-pub struct BossEnsemble {
+pub(crate) struct BossEnsemble {
     /// Sliding-window length.
     pub window: usize,
     /// DFT coefficients kept per window.
@@ -35786,14 +35787,14 @@ impl Default for BossEnsemble {
 
 impl BossEnsemble {
     /// Default BOSS.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted BOSS / WEASEL histogram ridge.
 #[derive(Clone, Debug)]
-pub struct FittedBoss {
+pub(crate) struct FittedBoss {
     /// Word vocabulary (hashes).
     pub vocab: Vec<u64>,
     /// Ridge on histograms.
@@ -35828,7 +35829,7 @@ impl Predict for FittedBoss {
 
 impl Fit for BossEnsemble {
     type Fitted = FittedBoss;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedBoss>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedBoss>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -35882,7 +35883,7 @@ impl Fit for BossEnsemble {
 
 /// WEASEL: BOSS histograms with a variance filter on words, then ridge.
 #[derive(Clone, Debug)]
-pub struct Weasel {
+pub(crate) struct Weasel {
     /// Sliding-window length.
     pub window: usize,
     /// DFT coefficients kept per window.
@@ -35906,14 +35907,14 @@ impl Default for Weasel {
 
 impl Weasel {
     /// Default WEASEL.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for Weasel {
     type Fitted = FittedBoss;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedBoss>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedBoss>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -35955,7 +35956,7 @@ impl Fit for Weasel {
 /// Do not pass `n_shapelets` as `p` to identification: 10 series and 4
 /// shapelets is a feature map, not an overparameterized linear model.
 #[derive(Clone, Debug)]
-pub struct LearningShapelets {
+pub(crate) struct LearningShapelets {
     /// Number of random shapelets.
     pub n_shapelets: usize,
     /// Shapelet length.
@@ -35976,7 +35977,7 @@ impl Default for LearningShapelets {
 
 impl LearningShapelets {
     /// `k` shapelets of length `length`.
-    pub fn new(n_shapelets: usize, length: usize) -> Self {
+    pub(crate) fn new(n_shapelets: usize, length: usize) -> Self {
         Self {
             n_shapelets: n_shapelets.max(1),
             length: length.max(2),
@@ -35987,7 +35988,7 @@ impl LearningShapelets {
 
 /// Fitted shapelet ridge.
 #[derive(Clone, Debug)]
-pub struct FittedShapelets {
+pub(crate) struct FittedShapelets {
     /// Shapelets (`k` × `L`).
     pub shapelets: Matrix,
     /// Ridge on min-distance features.
@@ -36015,7 +36016,7 @@ fn min_shapelet_dist(row: &Matrix, i: usize, shape: &Matrix, s: usize) -> f64 {
 impl Fit for LearningShapelets {
     type Fitted = FittedShapelets;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -36109,7 +36110,7 @@ impl Predict for FittedShapelets {
 ///
 /// Neighbour count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct KNeighborsTimeSeriesRegressor {
+pub(crate) struct KNeighborsTimeSeriesRegressor {
     /// Neighbourhood size.
     pub n_neighbors: usize,
 }
@@ -36122,7 +36123,7 @@ impl Default for KNeighborsTimeSeriesRegressor {
 
 impl KNeighborsTimeSeriesRegressor {
     /// `k`-NN DTW regressor.
-    pub fn new(n_neighbors: usize) -> Self {
+    pub(crate) fn new(n_neighbors: usize) -> Self {
         Self {
             n_neighbors: n_neighbors.max(1),
         }
@@ -36131,7 +36132,7 @@ impl KNeighborsTimeSeriesRegressor {
 
 /// Fitted DTW neighbour store for regression.
 #[derive(Clone, Debug)]
-pub struct FittedKnnTsRegressor {
+pub(crate) struct FittedKnnTsRegressor {
     x_train: Matrix,
     y_train: Vector,
     k: usize,
@@ -36140,7 +36141,7 @@ pub struct FittedKnnTsRegressor {
 impl Fit for KNeighborsTimeSeriesRegressor {
     type Fitted = FittedKnnTsRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -36188,7 +36189,7 @@ impl Predict for FittedKnnTsRegressor {
 ///
 /// Shapelet count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ShapeletTransform {
+pub(crate) struct ShapeletTransform {
     /// Number of random shapelets.
     pub n_shapelets: usize,
     /// Shapelet length.
@@ -36209,7 +36210,7 @@ impl Default for ShapeletTransform {
 
 impl ShapeletTransform {
     /// `k` shapelets of length `length`.
-    pub fn new(n_shapelets: usize, length: usize) -> Self {
+    pub(crate) fn new(n_shapelets: usize, length: usize) -> Self {
         Self {
             n_shapelets: n_shapelets.max(1),
             length: length.max(2),
@@ -36220,7 +36221,7 @@ impl ShapeletTransform {
 
 /// Fitted shapelet dictionary.
 #[derive(Clone, Debug)]
-pub struct FittedShapeletTransform {
+pub(crate) struct FittedShapeletTransform {
     /// Shapelets (`k` × `L`).
     pub shapelets: Matrix,
 }
@@ -36228,7 +36229,7 @@ pub struct FittedShapeletTransform {
 impl FitUnsupervised for ShapeletTransform {
     type Fitted = FittedShapeletTransform;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedShapeletTransform>> {
@@ -36307,11 +36308,11 @@ impl Transform for FittedShapeletTransform {
 /// Each row is treated as a 2-d path \((t, x_t)\). Feature count is not
 /// identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct SignatureTransformer;
+pub(crate) struct SignatureTransformer;
 
 impl SignatureTransformer {
     /// Default order-2 lead–lag signature.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
@@ -36363,7 +36364,7 @@ impl Transform for SignatureTransformer {
 ///
 /// Member / kernel counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Arsenal {
+pub(crate) struct Arsenal {
     /// Ensemble size.
     pub n_members: usize,
     /// Kernels per member.
@@ -36390,21 +36391,21 @@ impl Default for Arsenal {
 
 impl Arsenal {
     /// Default Arsenal lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted Arsenal vote.
 #[derive(Clone, Debug)]
-pub struct FittedArsenal {
+pub(crate) struct FittedArsenal {
     members: Vec<FittedRocketClassifier>,
 }
 
 impl Fit for Arsenal {
     type Fitted = FittedArsenal;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -36481,7 +36482,7 @@ impl Predict for FittedArsenal {
 ///
 /// Feature count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct FreshPrince {
+pub(crate) struct FreshPrince {
     /// Ridge \(\alpha\).
     pub alpha: f64,
     /// Rotation seed.
@@ -36499,14 +36500,14 @@ impl Default for FreshPrince {
 
 impl FreshPrince {
     /// Default FreshPRINCE lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted FreshPRINCE lite.
 #[derive(Clone, Debug)]
-pub struct FittedFreshPrince {
+pub(crate) struct FittedFreshPrince {
     rot: Matrix,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -36550,7 +36551,7 @@ fn apply_rotation(z: &Matrix, rot: &Matrix) -> Matrix {
 impl Fit for FreshPrince {
     type Fitted = FittedFreshPrince;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -36627,7 +36628,7 @@ impl Predict for FittedFreshPrince {
 
 /// Shapelet distances plus ridge (sktime `ShapeletTransformClassifier` lite).
 #[derive(Clone, Debug)]
-pub struct ShapeletTransformClassifier {
+pub(crate) struct ShapeletTransformClassifier {
     /// Shapelets.
     pub n_shapelets: usize,
     /// Shapelet length.
@@ -36651,14 +36652,14 @@ impl Default for ShapeletTransformClassifier {
 
 impl ShapeletTransformClassifier {
     /// Default shapelet transform classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted shapelet-transform classifier.
 #[derive(Clone, Debug)]
-pub struct FittedShapeletTransformClassifier {
+pub(crate) struct FittedShapeletTransformClassifier {
     shapelets: FittedShapeletTransform,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -36666,7 +36667,7 @@ pub struct FittedShapeletTransformClassifier {
 impl Fit for ShapeletTransformClassifier {
     type Fitted = FittedShapeletTransformClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -36732,7 +36733,7 @@ impl Predict for FittedShapeletTransformClassifier {
 ///
 /// Cluster count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SoftDtwKMeans {
+pub(crate) struct SoftDtwKMeans {
     /// Clusters.
     pub n_clusters: usize,
     /// Soft-DTW smoothness.
@@ -36756,7 +36757,7 @@ impl Default for SoftDtwKMeans {
 
 impl SoftDtwKMeans {
     /// Soft-DTW k-means with `k` clusters.
-    pub fn new(n_clusters: usize) -> Self {
+    pub(crate) fn new(n_clusters: usize) -> Self {
         Self {
             n_clusters,
             ..Self::default()
@@ -36766,7 +36767,7 @@ impl SoftDtwKMeans {
 
 /// Fitted soft-DTW k-means.
 #[derive(Clone, Debug)]
-pub struct FittedSoftDtwKMeans {
+pub(crate) struct FittedSoftDtwKMeans {
     /// Centroids.
     pub centers: Matrix,
     /// Training labels.
@@ -36777,7 +36778,7 @@ pub struct FittedSoftDtwKMeans {
 impl FitUnsupervised for SoftDtwKMeans {
     type Fitted = FittedSoftDtwKMeans;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedSoftDtwKMeans>> {
@@ -36952,7 +36953,7 @@ fn interval_feats_drcif(x: &Matrix, intervals: &[Interval]) -> Matrix {
 /// Interval count is not identification `p`. Catch22 on short intervals is
 /// omitted so a constant window cannot abort the outer fit.
 #[derive(Clone, Debug)]
-pub struct DrCif {
+pub(crate) struct DrCif {
     /// Trees.
     pub n_estimators: usize,
     /// Random intervals per tree.
@@ -36976,14 +36977,14 @@ impl Default for DrCif {
 
 impl DrCif {
     /// Default DrCIF lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted DrCIF vote.
 #[derive(Clone, Debug)]
-pub struct FittedDrCif {
+pub(crate) struct FittedDrCif {
     trees: Vec<crate::tree::FittedTreeClassifier>,
     intervals: Vec<Vec<Interval>>,
     /// Sorted class labels.
@@ -36992,7 +36993,7 @@ pub struct FittedDrCif {
 
 impl Fit for DrCif {
     type Fitted = FittedDrCif;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedDrCif>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedDrCif>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -37097,7 +37098,7 @@ impl Predict for FittedDrCif {
 /// Each member splits on DTW proximity to two class exemplars. Tree count is
 /// not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ProximityForest {
+pub(crate) struct ProximityForest {
     /// Stumps.
     pub n_trees: usize,
     /// Seed.
@@ -37115,7 +37116,7 @@ impl Default for ProximityForest {
 
 impl ProximityForest {
     /// Default proximity forest lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -37130,7 +37131,7 @@ struct ProxStump {
 
 /// Fitted proximity forest.
 #[derive(Clone, Debug)]
-pub struct FittedProximityForest {
+pub(crate) struct FittedProximityForest {
     trees: Vec<ProxStump>,
     /// Majority class fallback.
     pub default_label: f64,
@@ -37139,7 +37140,7 @@ pub struct FittedProximityForest {
 impl Fit for ProximityForest {
     type Fitted = FittedProximityForest;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -37280,7 +37281,7 @@ fn binary_ridge_from_features(
 ///
 /// Prefix length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct EarlyClassifier {
+pub(crate) struct EarlyClassifier {
     /// Ridge \(\alpha\).
     pub alpha: f64,
     /// PAA segments on each prefix.
@@ -37298,14 +37299,14 @@ impl Default for EarlyClassifier {
 
 impl EarlyClassifier {
     /// Default early classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted prefix committee.
 #[derive(Clone, Debug)]
-pub struct FittedEarlyClassifier {
+pub(crate) struct FittedEarlyClassifier {
     fracs: Vec<f64>,
     models: Vec<crate::classification::FittedRidgeClassifier>,
     segs: usize,
@@ -37321,7 +37322,7 @@ fn prefix_cols(x: &Matrix, frac: f64) -> Matrix {
 impl Fit for EarlyClassifier {
     type Fitted = FittedEarlyClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -37412,7 +37413,7 @@ impl Predict for FittedEarlyClassifier {
 ///
 /// Member / word counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ContractableBoss {
+pub(crate) struct ContractableBoss {
     /// Ensemble size.
     pub n_members: usize,
     /// Base window.
@@ -37433,21 +37434,21 @@ impl Default for ContractableBoss {
 
 impl ContractableBoss {
     /// Default cBOSS lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted cBOSS vote.
 #[derive(Clone, Debug)]
-pub struct FittedContractableBoss {
+pub(crate) struct FittedContractableBoss {
     members: Vec<FittedBoss>,
 }
 
 impl Fit for ContractableBoss {
     type Fitted = FittedContractableBoss;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -37525,7 +37526,7 @@ impl Predict for FittedContractableBoss {
 ///
 /// Column count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ColumnEnsembleClassifier {
+pub(crate) struct ColumnEnsembleClassifier {
     /// Tree depth.
     pub max_depth: usize,
 }
@@ -37538,14 +37539,14 @@ impl Default for ColumnEnsembleClassifier {
 
 impl ColumnEnsembleClassifier {
     /// Default column ensemble.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted per-column vote.
 #[derive(Clone, Debug)]
-pub struct FittedColumnEnsembleClassifier {
+pub(crate) struct FittedColumnEnsembleClassifier {
     trees: Vec<crate::tree::FittedTreeClassifier>,
     /// Fallback label.
     pub default_label: f64,
@@ -37554,7 +37555,7 @@ pub struct FittedColumnEnsembleClassifier {
 impl Fit for ColumnEnsembleClassifier {
     type Fitted = FittedColumnEnsembleClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -37638,7 +37639,7 @@ impl Predict for FittedColumnEnsembleClassifier {
 ///
 /// A vote of BOSS and WEASEL. Word / window counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct TemporalDictionaryEnsemble {
+pub(crate) struct TemporalDictionaryEnsemble {
     /// BOSS window.
     pub window: usize,
     /// Words kept by WEASEL.
@@ -37656,14 +37657,14 @@ impl Default for TemporalDictionaryEnsemble {
 
 impl TemporalDictionaryEnsemble {
     /// Default TDE lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted TDE vote.
 #[derive(Clone, Debug)]
-pub struct FittedTemporalDictionaryEnsemble {
+pub(crate) struct FittedTemporalDictionaryEnsemble {
     boss: Option<FittedBoss>,
     weasel: Option<FittedBoss>,
 }
@@ -37671,7 +37672,7 @@ pub struct FittedTemporalDictionaryEnsemble {
 impl Fit for TemporalDictionaryEnsemble {
     type Fitted = FittedTemporalDictionaryEnsemble;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -37808,7 +37809,7 @@ fn interval_feats_rise(x: &Matrix, intervals: &[Interval]) -> Matrix {
 ///
 /// Interval / tree counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Rise {
+pub(crate) struct Rise {
     /// Trees.
     pub n_estimators: usize,
     /// Random intervals per tree.
@@ -37832,14 +37833,14 @@ impl Default for Rise {
 
 impl Rise {
     /// Default RISE lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted RISE vote.
 #[derive(Clone, Debug)]
-pub struct FittedRise {
+pub(crate) struct FittedRise {
     trees: Vec<crate::tree::FittedTreeClassifier>,
     intervals: Vec<Vec<Interval>>,
     /// Fallback label.
@@ -37848,7 +37849,7 @@ pub struct FittedRise {
 
 impl Fit for Rise {
     type Fitted = FittedRise;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRise>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRise>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -37953,7 +37954,7 @@ impl Predict for FittedRise {
 
 /// Elastic 1-NN vote over DTW/MSM/TWE/Euclidean (sktime `ElasticEnsemble` lite).
 #[derive(Clone, Debug)]
-pub struct ElasticEnsemble {
+pub(crate) struct ElasticEnsemble {
     /// MSM move cost.
     pub msm_c: f64,
     /// TWE stiffness.
@@ -37971,14 +37972,14 @@ impl Default for ElasticEnsemble {
 
 impl ElasticEnsemble {
     /// Default elastic ensemble.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted elastic 1-NN committee.
 #[derive(Clone, Debug)]
-pub struct FittedElasticEnsemble {
+pub(crate) struct FittedElasticEnsemble {
     x: Matrix,
     y: Vector,
     msm_c: f64,
@@ -37988,7 +37989,7 @@ pub struct FittedElasticEnsemble {
 impl Fit for ElasticEnsemble {
     type Fitted = FittedElasticEnsemble;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -38081,7 +38082,7 @@ impl Predict for FittedElasticEnsemble {
 
 /// Catch22 + ridge regression (sktime `Catch22Regressor` lite).
 #[derive(Clone, Debug)]
-pub struct Catch22Regressor {
+pub(crate) struct Catch22Regressor {
     /// Ridge \(\alpha\).
     pub alpha: f64,
 }
@@ -38094,21 +38095,21 @@ impl Default for Catch22Regressor {
 
 impl Catch22Regressor {
     /// Catch22 regressor with ridge penalty `alpha`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self { alpha }
     }
 }
 
 /// Fitted Catch22 ridge regressor.
 #[derive(Clone, Debug)]
-pub struct FittedCatch22Regressor {
+pub(crate) struct FittedCatch22Regressor {
     inner: FittedPenalized,
 }
 
 impl Fit for Catch22Regressor {
     type Fitted = FittedCatch22Regressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -38168,7 +38169,7 @@ impl Predict for FittedCatch22Regressor {
 ///
 /// Neighbor count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SoftDtwKnn {
+pub(crate) struct SoftDtwKnn {
     /// Neighbors.
     pub k: usize,
     /// Soft-DTW smoothness.
@@ -38183,7 +38184,7 @@ impl Default for SoftDtwKnn {
 
 impl SoftDtwKnn {
     /// Soft-DTW k-NN with `k` neighbors.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k,
             ..Self::default()
@@ -38193,7 +38194,7 @@ impl SoftDtwKnn {
 
 /// Fitted soft-DTW k-NN.
 #[derive(Clone, Debug)]
-pub struct FittedSoftDtwKnn {
+pub(crate) struct FittedSoftDtwKnn {
     x: Matrix,
     y: Vector,
     k: usize,
@@ -38203,7 +38204,7 @@ pub struct FittedSoftDtwKnn {
 impl Fit for SoftDtwKnn {
     type Fitted = FittedSoftDtwKnn;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -38282,7 +38283,7 @@ impl Predict for FittedSoftDtwKnn {
 ///
 /// Neighbor count is fixed at 1 and is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SoftDtwClassifier {
+pub(crate) struct SoftDtwClassifier {
     /// Soft-DTW smoothness.
     pub gamma: f64,
 }
@@ -38295,7 +38296,7 @@ impl Default for SoftDtwClassifier {
 
 impl SoftDtwClassifier {
     /// Soft-DTW 1-NN classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -38303,7 +38304,7 @@ impl SoftDtwClassifier {
 impl Fit for SoftDtwClassifier {
     type Fitted = FittedSoftDtwKnn;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -38318,7 +38319,7 @@ impl Fit for SoftDtwClassifier {
 
 /// Summary statistics + ridge (sktime `SummaryClassifier` lite).
 #[derive(Clone, Debug)]
-pub struct SummaryClassifier {
+pub(crate) struct SummaryClassifier {
     /// Ridge \(\alpha\).
     pub alpha: f64,
 }
@@ -38331,14 +38332,14 @@ impl Default for SummaryClassifier {
 
 impl SummaryClassifier {
     /// Default summary classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted summary ridge.
 #[derive(Clone, Debug)]
-pub struct FittedSummaryClassifier {
+pub(crate) struct FittedSummaryClassifier {
     inner: crate::classification::FittedRidgeClassifier,
 }
 
@@ -38386,7 +38387,7 @@ fn summary_rows(x: &Matrix) -> Matrix {
 impl Fit for SummaryClassifier {
     type Fitted = FittedSummaryClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -38500,7 +38501,7 @@ fn hydra_kernels(
 ///
 /// Kernel and group counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Hydra {
+pub(crate) struct Hydra {
     /// Kernels.
     pub n_kernels: usize,
     /// Groups (two pooled features each).
@@ -38524,7 +38525,7 @@ impl Default for Hydra {
 
 impl Hydra {
     /// Default Hydra map.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -38547,7 +38548,7 @@ impl Transform for Hydra {
 
 /// Hydra features + ridge (sktime `HydraClassifier` lite).
 #[derive(Clone, Debug)]
-pub struct HydraClassifier {
+pub(crate) struct HydraClassifier {
     /// Kernels.
     pub n_kernels: usize,
     /// Groups.
@@ -38574,14 +38575,14 @@ impl Default for HydraClassifier {
 
 impl HydraClassifier {
     /// Default Hydra classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted Hydra ridge.
 #[derive(Clone, Debug)]
-pub struct FittedHydraClassifier {
+pub(crate) struct FittedHydraClassifier {
     kernels: Vec<(Vec<f64>, usize)>,
     n_groups: usize,
     inner: crate::classification::FittedRidgeClassifier,
@@ -38590,7 +38591,7 @@ pub struct FittedHydraClassifier {
 impl Fit for HydraClassifier {
     type Fitted = FittedHydraClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -38619,7 +38620,7 @@ impl Predict for FittedHydraClassifier {
 
 /// Catch22 + rotation + ridge (sktime `FreshPRINCERegressor` lite).
 #[derive(Clone, Debug)]
-pub struct FreshPrinceRegressor {
+pub(crate) struct FreshPrinceRegressor {
     /// Ridge \(\alpha\).
     pub alpha: f64,
     /// Rotation seed.
@@ -38637,14 +38638,14 @@ impl Default for FreshPrinceRegressor {
 
 impl FreshPrinceRegressor {
     /// Default FreshPRINCE regressor lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted FreshPRINCE regressor.
 #[derive(Clone, Debug)]
-pub struct FittedFreshPrinceRegressor {
+pub(crate) struct FittedFreshPrinceRegressor {
     rot: Matrix,
     inner: FittedPenalized,
 }
@@ -38652,7 +38653,7 @@ pub struct FittedFreshPrinceRegressor {
 impl Fit for FreshPrinceRegressor {
     type Fitted = FittedFreshPrinceRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -38715,7 +38716,7 @@ impl Predict for FittedFreshPrinceRegressor {
 
 /// Summary statistics + ridge (sktime `SummaryRegressor` lite).
 #[derive(Clone, Debug)]
-pub struct SummaryRegressor {
+pub(crate) struct SummaryRegressor {
     /// Ridge \(\alpha\).
     pub alpha: f64,
 }
@@ -38728,21 +38729,21 @@ impl Default for SummaryRegressor {
 
 impl SummaryRegressor {
     /// Default summary regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted summary ridge regressor.
 #[derive(Clone, Debug)]
-pub struct FittedSummaryRegressor {
+pub(crate) struct FittedSummaryRegressor {
     inner: FittedPenalized,
 }
 
 impl Fit for SummaryRegressor {
     type Fitted = FittedSummaryRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -38788,7 +38789,7 @@ impl Predict for FittedSummaryRegressor {
 
 /// Path signature + ridge (sktime `SignatureClassifier` lite).
 #[derive(Clone, Debug)]
-pub struct SignatureClassifier {
+pub(crate) struct SignatureClassifier {
     /// Ridge \(\alpha\).
     pub alpha: f64,
 }
@@ -38801,21 +38802,21 @@ impl Default for SignatureClassifier {
 
 impl SignatureClassifier {
     /// Default signature classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted signature ridge.
 #[derive(Clone, Debug)]
-pub struct FittedSignatureClassifier {
+pub(crate) struct FittedSignatureClassifier {
     inner: crate::classification::FittedRidgeClassifier,
 }
 
 impl Fit for SignatureClassifier {
     type Fitted = FittedSignatureClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -38839,7 +38840,7 @@ impl Predict for FittedSignatureClassifier {
 
 /// Diverse-representation CIF regressor (sktime `DrCIFRegressor` lite).
 #[derive(Clone, Debug)]
-pub struct DrCifRegressor {
+pub(crate) struct DrCifRegressor {
     /// Trees.
     pub n_estimators: usize,
     /// Random intervals per tree.
@@ -38863,14 +38864,14 @@ impl Default for DrCifRegressor {
 
 impl DrCifRegressor {
     /// Default DrCIF regressor lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted DrCIF regressor vote.
 #[derive(Clone, Debug)]
-pub struct FittedDrCifRegressor {
+pub(crate) struct FittedDrCifRegressor {
     trees: Vec<crate::tree::FittedTreeRegressor>,
     intervals: Vec<Vec<Interval>>,
 }
@@ -38878,7 +38879,7 @@ pub struct FittedDrCifRegressor {
 impl Fit for DrCifRegressor {
     type Fitted = FittedDrCifRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -38974,7 +38975,7 @@ impl Predict for FittedDrCifRegressor {
 
 /// Single DTW-proximity stump (sktime `ProximityTree` lite).
 #[derive(Clone, Debug)]
-pub struct ProximityTree {
+pub(crate) struct ProximityTree {
     /// Seed.
     pub seed: u64,
 }
@@ -38987,14 +38988,14 @@ impl Default for ProximityTree {
 
 impl ProximityTree {
     /// Default proximity tree.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted proximity stump.
 #[derive(Clone, Debug)]
-pub struct FittedProximityTree {
+pub(crate) struct FittedProximityTree {
     stump: Option<ProxStump>,
     /// Majority class fallback.
     pub default_label: f64,
@@ -39003,7 +39004,7 @@ pub struct FittedProximityTree {
 impl Fit for ProximityTree {
     type Fitted = FittedProximityTree;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -39092,7 +39093,7 @@ fn supervised_intervals(
 /// Intervals are ranked by class-mean gap. Interval count is not identification
 /// `p`.
 #[derive(Clone, Debug)]
-pub struct Stsf {
+pub(crate) struct Stsf {
     /// Trees.
     pub n_estimators: usize,
     /// Supervised intervals per tree.
@@ -39116,14 +39117,14 @@ impl Default for Stsf {
 
 impl Stsf {
     /// Default STSF lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted STSF vote.
 #[derive(Clone, Debug)]
-pub struct FittedStsf {
+pub(crate) struct FittedStsf {
     trees: Vec<crate::tree::FittedTreeClassifier>,
     intervals: Vec<Vec<Interval>>,
     /// Sorted class labels.
@@ -39132,7 +39133,7 @@ pub struct FittedStsf {
 
 impl Fit for Stsf {
     type Fitted = FittedStsf;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedStsf>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedStsf>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -39252,7 +39253,7 @@ fn sax_symbols(row: &[f64], n_pieces: usize, alphabet: usize) -> Vec<f64> {
 /// Pairwise SAX MINDIST / Hamming (tslearn `cdist_sax`).
 ///
 /// Piece / alphabet counts are not identification `p`.
-pub fn cdist_sax(
+pub(crate) fn cdist_sax(
     a: &Matrix,
     b: &Matrix,
     n_pieces: usize,
@@ -39298,7 +39299,7 @@ pub fn cdist_sax(
 /// One-step canonical time warping (tslearn `ctw` lite).
 ///
 /// DTW-align, OLS-scale the first series onto the second, then DTW again.
-pub fn canonical_time_warping(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn canonical_time_warping(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if a.is_empty() || b.is_empty() {
         ctx.push(Issue::builder(IssueCode::EmptyMatrix).build());
@@ -39351,7 +39352,7 @@ pub fn canonical_time_warping(a: &Vector, b: &Vector, session: &Session) -> Resu
 
 /// Hydra + MultiROCKET concatenation (sktime `HydraMultiRocketClassifier` lite).
 #[derive(Clone, Debug)]
-pub struct HydraMultiRocket {
+pub(crate) struct HydraMultiRocket {
     /// Hydra kernels.
     pub n_kernels: usize,
     /// Hydra groups.
@@ -39378,14 +39379,14 @@ impl Default for HydraMultiRocket {
 
 impl HydraMultiRocket {
     /// Default Hydra+MultiROCKET classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted Hydra+MultiROCKET ridge.
 #[derive(Clone, Debug)]
-pub struct FittedHydraMultiRocket {
+pub(crate) struct FittedHydraMultiRocket {
     hydra: Vec<(Vec<f64>, usize)>,
     n_groups: usize,
     rocket: MultiRocket,
@@ -39395,7 +39396,7 @@ pub struct FittedHydraMultiRocket {
 impl Fit for HydraMultiRocket {
     type Fitted = FittedHydraMultiRocket;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -39439,7 +39440,7 @@ impl Predict for FittedHydraMultiRocket {
 
 /// Path signature + ridge (sktime `SignatureRegressor` lite).
 #[derive(Clone, Debug)]
-pub struct SignatureRegressor {
+pub(crate) struct SignatureRegressor {
     /// Ridge \(\alpha\).
     pub alpha: f64,
 }
@@ -39452,21 +39453,21 @@ impl Default for SignatureRegressor {
 
 impl SignatureRegressor {
     /// Default signature regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted signature ridge regressor.
 #[derive(Clone, Debug)]
-pub struct FittedSignatureRegressor {
+pub(crate) struct FittedSignatureRegressor {
     inner: FittedPenalized,
 }
 
 impl Fit for SignatureRegressor {
     type Fitted = FittedSignatureRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -39537,7 +39538,7 @@ fn interval_quantiles(x: &Matrix, intervals: &[Interval]) -> Matrix {
 
 /// Interval quantile forest/ridge (sktime `QUANT` lite).
 #[derive(Clone, Debug)]
-pub struct QuantClassifier {
+pub(crate) struct QuantClassifier {
     /// Random intervals.
     pub n_intervals: usize,
     /// Ridge \(\alpha\).
@@ -39558,14 +39559,14 @@ impl Default for QuantClassifier {
 
 impl QuantClassifier {
     /// Default QUANT lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted QUANT ridge.
 #[derive(Clone, Debug)]
-pub struct FittedQuantClassifier {
+pub(crate) struct FittedQuantClassifier {
     intervals: Vec<Interval>,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -39573,7 +39574,7 @@ pub struct FittedQuantClassifier {
 impl Fit for QuantClassifier {
     type Fitted = FittedQuantClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -39612,7 +39613,7 @@ impl Predict for FittedQuantClassifier {
 
 /// WEASEL+MUSE lite: two WEASEL windows voted (sktime `MUSE`).
 #[derive(Clone, Debug)]
-pub struct WeaselMuse {
+pub(crate) struct WeaselMuse {
     /// Short window.
     pub window_short: usize,
     /// Long window.
@@ -39630,14 +39631,14 @@ impl Default for WeaselMuse {
 
 impl WeaselMuse {
     /// Default MUSE lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted two-window WEASEL vote.
 #[derive(Clone, Debug)]
-pub struct FittedWeaselMuse {
+pub(crate) struct FittedWeaselMuse {
     short: FittedBoss,
     long: FittedBoss,
 }
@@ -39645,7 +39646,7 @@ pub struct FittedWeaselMuse {
 impl Fit for WeaselMuse {
     type Fitted = FittedWeaselMuse;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -39750,7 +39751,7 @@ impl Predict for FittedWeaselMuse {
 /// Pairwise canonical time warping (tslearn `cdist_ctw`).
 ///
 /// Series count is not identification `p`.
-pub fn cdist_ctw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_ctw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -39780,7 +39781,7 @@ fn erp_raw(a: &[f64], b: &[f64], g: f64) -> f64 {
 /// Pairwise ERP (tslearn `cdist_erp`).
 ///
 /// Gap reference `g` is not identification `p`.
-pub fn cdist_erp(a: &Matrix, b: &Matrix, g: f64, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn cdist_erp(a: &Matrix, b: &Matrix, g: f64, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -39805,7 +39806,7 @@ pub fn cdist_erp(a: &Matrix, b: &Matrix, g: f64, session: &Session) -> Result<Qu
 ///
 /// Cluster count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct TimeSeriesKMedoids {
+pub(crate) struct TimeSeriesKMedoids {
     /// Number of medoids.
     pub n_clusters: usize,
     /// PAM iterations.
@@ -39826,7 +39827,7 @@ impl Default for TimeSeriesKMedoids {
 
 impl TimeSeriesKMedoids {
     /// DTW PAM with `k` medoids.
-    pub fn new(n_clusters: usize) -> Self {
+    pub(crate) fn new(n_clusters: usize) -> Self {
         Self {
             n_clusters,
             ..Self::default()
@@ -39836,7 +39837,7 @@ impl TimeSeriesKMedoids {
 
 /// Fitted DTW medoids.
 #[derive(Clone, Debug)]
-pub struct FittedTsKMedoids {
+pub(crate) struct FittedTsKMedoids {
     /// Medoid series (`k × T`).
     pub centers: Matrix,
     /// Training assignments.
@@ -39846,7 +39847,7 @@ pub struct FittedTsKMedoids {
 impl FitUnsupervised for TimeSeriesKMedoids {
     type Fitted = FittedTsKMedoids;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedTsKMedoids>> {
@@ -39950,7 +39951,7 @@ impl Predict for FittedTsKMedoids {
 /// Pairwise LCSS (tslearn `cdist_lcss`).
 ///
 /// `eps` is not identification `p`.
-pub fn cdist_lcss(
+pub(crate) fn cdist_lcss(
     a: &Matrix,
     b: &Matrix,
     eps: f64,
@@ -39980,7 +39981,7 @@ pub fn cdist_lcss(
 ///
 /// Kernel count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct CnnClassifier {
+pub(crate) struct CnnClassifier {
     /// Random kernels.
     pub n_kernels: usize,
     /// Kernel width.
@@ -40004,17 +40005,17 @@ impl Default for CnnClassifier {
 
 impl CnnClassifier {
     /// Default CNN-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Named CNN-lite classifier (sktime `CNNClassifier`).
-pub type TimeCnnClassifier = CnnClassifier;
+pub(crate) type TimeCnnClassifier = CnnClassifier;
 
 /// Fitted CNN-lite ridge.
 #[derive(Clone, Debug)]
-pub struct FittedCnnClassifier {
+pub(crate) struct FittedCnnClassifier {
     kernels: Vec<Vec<f64>>,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -40049,7 +40050,7 @@ fn conv_maxpool(x: &Matrix, kernels: &[Vec<f64>]) -> Matrix {
 impl Fit for CnnClassifier {
     type Fitted = FittedCnnClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -40091,7 +40092,7 @@ impl Predict for FittedCnnClassifier {
 ///
 /// Does **not** call [`inspect_xy`]: NaN is the point of the transform.
 #[derive(Clone, Debug)]
-pub struct TimeSeriesImputer {
+pub(crate) struct TimeSeriesImputer {
     col_mean: Vector,
 }
 
@@ -40105,14 +40106,15 @@ impl Default for TimeSeriesImputer {
 
 impl TimeSeriesImputer {
     /// Empty imputer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl FitUnsupervised for TimeSeriesImputer {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         let mut means = vec![0.0; x.ncols()];
         for j in 0..x.ncols() {
@@ -40137,8 +40139,8 @@ impl FitUnsupervised for TimeSeriesImputer {
                 means[j] = s / n;
             }
         }
-        self.col_mean = Vector::from_slice(&means);
-        ctx.finish(self.clone())
+        this.col_mean = Vector::from_slice(&means);
+        ctx.finish(this.clone())
     }
 }
 
@@ -40173,7 +40175,7 @@ impl Transform for TimeSeriesImputer {
 ///
 /// Kernel count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct InceptionTimeClassifier {
+pub(crate) struct InceptionTimeClassifier {
     /// Kernels per width.
     pub n_kernels: usize,
     /// Ridge \(\alpha\).
@@ -40194,14 +40196,14 @@ impl Default for InceptionTimeClassifier {
 
 impl InceptionTimeClassifier {
     /// Default InceptionTime-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted InceptionTime-lite ridge.
 #[derive(Clone, Debug)]
-pub struct FittedInceptionTimeClassifier {
+pub(crate) struct FittedInceptionTimeClassifier {
     kernels: Vec<Vec<f64>>,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -40209,7 +40211,7 @@ pub struct FittedInceptionTimeClassifier {
 impl Fit for InceptionTimeClassifier {
     type Fitted = FittedInceptionTimeClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -40253,7 +40255,7 @@ impl Predict for FittedInceptionTimeClassifier {
 /// ClaSP change-point index (sktime `ClaSPSegmentation` lite).
 ///
 /// Split count is not identification `p`.
-pub fn clasp_change_point(y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn clasp_change_point(y: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(
         &mut ctx.report,
@@ -40314,7 +40316,7 @@ pub fn clasp_change_point(y: &Vector, session: &Session) -> Result<Qualified<f64
 /// PELT mean-change points (sktime `Pelt` / ruptures `Pelt`).
 ///
 /// Change-point count is not identification `p`.
-pub fn pelt(y: &Vector, penalty: f64, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn pelt(y: &Vector, penalty: f64, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(
         &mut ctx.report,
@@ -40392,7 +40394,7 @@ pub fn pelt(y: &Vector, penalty: f64, session: &Session) -> Result<Qualified<Vec
 ///
 /// The ClaSP split index is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ClaSPClassifier {
+pub(crate) struct ClaSPClassifier {
     /// Ridge \(\alpha\).
     pub alpha: f64,
 }
@@ -40405,14 +40407,14 @@ impl Default for ClaSPClassifier {
 
 impl ClaSPClassifier {
     /// Default ClaSP-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted ClaSP-lite ridge.
 #[derive(Clone, Debug)]
-pub struct FittedClaSPClassifier {
+pub(crate) struct FittedClaSPClassifier {
     inner: crate::classification::FittedRidgeClassifier,
 }
 
@@ -40456,7 +40458,7 @@ fn clasp_row_features(row: &Vector) -> [f64; 4] {
 impl Fit for ClaSPClassifier {
     type Fitted = FittedClaSPClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -40488,7 +40490,7 @@ impl Predict for FittedClaSPClassifier {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MatrixProfileClassifier {
+pub(crate) struct MatrixProfileClassifier {
     /// Ridge \(\alpha\).
     pub alpha: f64,
     /// Subsequence length for the per-row profile.
@@ -40506,12 +40508,12 @@ impl Default for MatrixProfileClassifier {
 
 impl MatrixProfileClassifier {
     /// Default matrix-profile classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Classifier with subsequence length `window`.
-    pub fn with_window(window: usize) -> Self {
+    pub(crate) fn with_window(window: usize) -> Self {
         Self {
             window: window.max(2),
             ..Self::default()
@@ -40521,7 +40523,7 @@ impl MatrixProfileClassifier {
 
 /// Fitted matrix-profile ridge.
 #[derive(Clone, Debug)]
-pub struct FittedMatrixProfileClassifier {
+pub(crate) struct FittedMatrixProfileClassifier {
     inner: crate::classification::FittedRidgeClassifier,
     window: usize,
 }
@@ -40556,7 +40558,7 @@ fn mp_row_features(row: &Vector, window: usize, session: &Session) -> [f64; 4] {
 impl Fit for MatrixProfileClassifier {
     type Fitted = FittedMatrixProfileClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -40588,7 +40590,7 @@ impl Predict for FittedMatrixProfileClassifier {
 /// Greedy Gaussian segmentation (sktime `GreedyGaussianSegmentation`).
 ///
 /// Change-point count is not identification `p`.
-pub fn ggs(y: &Vector, max_changes: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn ggs(y: &Vector, max_changes: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(
         &mut ctx.report,
@@ -40661,7 +40663,7 @@ pub fn ggs(y: &Vector, max_changes: usize, session: &Session) -> Result<Qualifie
 ///
 /// Word / alphabet counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MrSeqlClassifier {
+pub(crate) struct MrSeqlClassifier {
     /// PAA segments.
     pub n_segments: usize,
     /// SAX alphabet size.
@@ -40685,14 +40687,14 @@ impl Default for MrSeqlClassifier {
 
 impl MrSeqlClassifier {
     /// Default MrSEQL-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted MrSEQL-lite ridge.
 #[derive(Clone, Debug)]
-pub struct FittedMrSeqlClassifier {
+pub(crate) struct FittedMrSeqlClassifier {
     inner: crate::classification::FittedRidgeClassifier,
     n_segments: usize,
     alphabet: usize,
@@ -40732,7 +40734,7 @@ fn mrseql_row_bag(row: &Vector, n_segments: usize, alphabet: usize, n_words: usi
 impl Fit for MrSeqlClassifier {
     type Fitted = FittedMrSeqlClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -40768,24 +40770,25 @@ impl Predict for FittedMrSeqlClassifier {
 ///
 /// Feature count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct Catch22Transformer {
+pub(crate) struct Catch22Transformer {
     fitted: bool,
 }
 
 impl Catch22Transformer {
     /// Empty Catch22 transformer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl FitUnsupervised for Catch22Transformer {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -40808,7 +40811,7 @@ impl Transform for Catch22Transformer {
 ///
 /// Kernel count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ResNetClassifier {
+pub(crate) struct ResNetClassifier {
     /// Kernels per residual block.
     pub n_kernels: usize,
     /// Ridge \(\alpha\).
@@ -40829,14 +40832,14 @@ impl Default for ResNetClassifier {
 
 impl ResNetClassifier {
     /// Default ResNet-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted ResNet-lite ridge.
 #[derive(Clone, Debug)]
-pub struct FittedResNetClassifier {
+pub(crate) struct FittedResNetClassifier {
     kernels: Vec<Vec<f64>>,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -40856,7 +40859,7 @@ fn residual_conv_pool(x: &Matrix, kernels: &[Vec<f64>]) -> Matrix {
 impl Fit for ResNetClassifier {
     type Fitted = FittedResNetClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -40894,7 +40897,7 @@ impl Predict for FittedResNetClassifier {
 ///
 /// Hidden width is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct LstmFcnClassifier {
+pub(crate) struct LstmFcnClassifier {
     /// Recurrent hidden size.
     pub hidden: usize,
     /// Conv kernels.
@@ -40918,14 +40921,14 @@ impl Default for LstmFcnClassifier {
 
 impl LstmFcnClassifier {
     /// Default LSTM-FCN-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted LSTM-FCN-lite ridge.
 #[derive(Clone, Debug)]
-pub struct FittedLstmFcnClassifier {
+pub(crate) struct FittedLstmFcnClassifier {
     wx: Vector,
     uh: Vector,
     kernels: Vec<Vec<f64>>,
@@ -40957,7 +40960,7 @@ fn elman_pool(x: &Matrix, wx: &Vector, uh: &Vector) -> Matrix {
 impl Fit for LstmFcnClassifier {
     type Fitted = FittedLstmFcnClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -41011,22 +41014,22 @@ impl Predict for FittedLstmFcnClassifier {
 /// Binary segmentation change-point (sktime `BinarySegmentation`).
 ///
 /// Split count is not identification `p`.
-pub fn binary_segmentation(y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn binary_segmentation(y: &Vector, session: &Session) -> Result<Qualified<f64>> {
     clasp_change_point(y, session)
 }
 
 /// Named binary-segmentation detector (sktime `BinarySegmentation` / ruptures `Binseg`).
 #[derive(Clone, Debug, Default)]
-pub struct Binseg;
+pub(crate) struct Binseg;
 
 impl Binseg {
     /// Default binary segmentation.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Index of the principal mean-change split.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
         binary_segmentation(y, session)
     }
 }
@@ -41035,7 +41038,7 @@ impl Binseg {
 ///
 /// Penalty and change-point count are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Pelt {
+pub(crate) struct Pelt {
     /// Mean-change penalty. Non-positive values fall back to \(2\log n\).
     pub penalty: f64,
 }
@@ -41048,12 +41051,12 @@ impl Default for Pelt {
 
 impl Pelt {
     /// Default PELT (BIC-like \(2\log n\) penalty).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Change-point locations as a vector of indices.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         pelt(y, self.penalty, session)
     }
 }
@@ -41062,16 +41065,16 @@ impl Pelt {
 ///
 /// Split count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct ClaSPSegmentation;
+pub(crate) struct ClaSPSegmentation;
 
 impl ClaSPSegmentation {
     /// Default ClaSP segmentation.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Index of the principal ClaSP split.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
         clasp_change_point(y, session)
     }
 }
@@ -41080,7 +41083,7 @@ impl ClaSPSegmentation {
 ///
 /// Change-point count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Ggs {
+pub(crate) struct Ggs {
     /// Maximum number of splits. Not identification `p`.
     pub max_changes: usize,
 }
@@ -41093,12 +41096,12 @@ impl Default for Ggs {
 
 impl Ggs {
     /// Default GGS (at most two splits).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Change-point locations as a vector of indices.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         ggs(y, self.max_changes, session)
     }
 }
@@ -41107,7 +41110,7 @@ impl Ggs {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Stamp {
+pub(crate) struct Stamp {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
 }
@@ -41120,14 +41123,14 @@ impl Default for Stamp {
 
 impl Stamp {
     /// STAMP with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
         }
     }
 
     /// Matrix profile and nearest-neighbour index.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StampResult>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StampResult>> {
         stamp(y, self.window, session)
     }
 }
@@ -41136,7 +41139,7 @@ impl Stamp {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Stray {
+pub(crate) struct Stray {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
 }
@@ -41149,14 +41152,14 @@ impl Default for Stray {
 
 impl Stray {
     /// STRAY with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
         }
     }
 
     /// Robust z-scores of the matrix profile.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         stray(y, self.window, session)
     }
 }
@@ -41193,7 +41196,7 @@ fn hist_entropy(y: &Vector, a: usize, b: usize, lo: f64, hi: f64, n_bins: usize)
 /// Information-gain change points (sktime `InformationGainSegmentation`).
 ///
 /// Bin / split counts are not identification `p`.
-pub fn information_gain_segmentation(
+pub(crate) fn information_gain_segmentation(
     y: &Vector,
     max_changes: usize,
     n_bins: usize,
@@ -41267,7 +41270,7 @@ pub fn information_gain_segmentation(
 /// Sliding-window mean-change peaks (sktime `WindowSegmenter` lite).
 ///
 /// Window length is not identification `p`.
-pub fn window_segment(
+pub(crate) fn window_segment(
     y: &Vector,
     window: usize,
     session: &Session,
@@ -41328,7 +41331,7 @@ fn sse_seg(y: &Vector, a: usize, b: usize) -> f64 {
 /// Bottom-up adjacent merge (ruptures `BottomUp` / sktime `BottomUpSegmenter`).
 ///
 /// Merge / segment counts are not identification `p`.
-pub fn bottom_up_segment(
+pub(crate) fn bottom_up_segment(
     y: &Vector,
     max_changes: usize,
     session: &Session,
@@ -41379,7 +41382,7 @@ pub fn bottom_up_segment(
 /// Recursive binary segmentation (sktime `TopDownSegmenter` / ruptures `Binseg`).
 ///
 /// Split count is not identification `p`. Distinct from a single [`binary_segmentation`] cut.
-pub fn top_down_segment(
+pub(crate) fn top_down_segment(
     y: &Vector,
     max_changes: usize,
     session: &Session,
@@ -41441,7 +41444,7 @@ pub fn top_down_segment(
 ///
 /// Neighbor count is not identification `p`. Points are labelled by a median
 /// split on local dimension, not by calling k-means.
-pub fn hidalgo(x: &Matrix, n_neighbors: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn hidalgo(x: &Matrix, n_neighbors: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, None, &ctx.policy);
     let n = x.nrows();
@@ -41493,7 +41496,7 @@ pub fn hidalgo(x: &Matrix, n_neighbors: usize, session: &Session) -> Result<Qual
 
 /// Named information-gain segmenter.
 #[derive(Clone, Debug)]
-pub struct InformationGainSegmentation {
+pub(crate) struct InformationGainSegmentation {
     /// Maximum splits. Not identification `p`.
     pub max_changes: usize,
     /// Histogram bins. Not identification `p`.
@@ -41511,19 +41514,19 @@ impl Default for InformationGainSegmentation {
 
 impl InformationGainSegmentation {
     /// Default IG segmenter.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Change-point locations.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         information_gain_segmentation(y, self.max_changes, self.n_bins, session)
     }
 }
 
 /// Named sliding-window segmenter.
 #[derive(Clone, Debug)]
-pub struct WindowSegmenter {
+pub(crate) struct WindowSegmenter {
     /// Half-window. Not identification `p`.
     pub window: usize,
 }
@@ -41536,21 +41539,21 @@ impl Default for WindowSegmenter {
 
 impl WindowSegmenter {
     /// Window of length `window`.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
         }
     }
 
     /// Peak locations of the windowed mean-change score.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         window_segment(y, self.window, session)
     }
 }
 
 /// Named bottom-up segmenter.
 #[derive(Clone, Debug)]
-pub struct BottomUpSegmenter {
+pub(crate) struct BottomUpSegmenter {
     /// Kept change points. Not identification `p`.
     pub max_changes: usize,
 }
@@ -41563,21 +41566,21 @@ impl Default for BottomUpSegmenter {
 
 impl BottomUpSegmenter {
     /// Keep at most `max_changes` cuts.
-    pub fn new(max_changes: usize) -> Self {
+    pub(crate) fn new(max_changes: usize) -> Self {
         Self {
             max_changes: max_changes.max(1),
         }
     }
 
     /// Change-point locations.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         bottom_up_segment(y, self.max_changes, session)
     }
 }
 
 /// Named top-down / recursive binary segmenter.
 #[derive(Clone, Debug)]
-pub struct TopDownSegmenter {
+pub(crate) struct TopDownSegmenter {
     /// Maximum splits. Not identification `p`.
     pub max_changes: usize,
 }
@@ -41590,21 +41593,21 @@ impl Default for TopDownSegmenter {
 
 impl TopDownSegmenter {
     /// At most `max_changes` recursive SSE splits.
-    pub fn new(max_changes: usize) -> Self {
+    pub(crate) fn new(max_changes: usize) -> Self {
         Self {
             max_changes: max_changes.max(1),
         }
     }
 
     /// Change-point locations.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         top_down_segment(y, self.max_changes, session)
     }
 }
 
 /// Named Hidalgo local-dimension annotator.
 #[derive(Clone, Debug)]
-pub struct Hidalgo {
+pub(crate) struct Hidalgo {
     /// Neighbors used for \(d_k/d_1\). Not identification `p`.
     pub n_neighbors: usize,
 }
@@ -41617,48 +41620,48 @@ impl Default for Hidalgo {
 
 impl Hidalgo {
     /// Hidalgo-lite with `n_neighbors` (not identification `p`).
-    pub fn new(n_neighbors: usize) -> Self {
+    pub(crate) fn new(n_neighbors: usize) -> Self {
         Self {
             n_neighbors: n_neighbors.max(2),
         }
     }
 
     /// Two-manifold labels from local intrinsic dimension.
-    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         hidalgo(x, self.n_neighbors, session)
     }
 }
 
 /// Named greedy Gaussian segmentation.
 #[derive(Clone, Debug, Default)]
-pub struct GreedyGaussianSegmentation {
+pub(crate) struct GreedyGaussianSegmentation {
     inner: Ggs,
 }
 
 impl GreedyGaussianSegmentation {
     /// Default GGS.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Change-point locations.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         self.inner.fit(y, session)
     }
 }
 
 /// Named binary segmentation.
 #[derive(Clone, Debug, Default)]
-pub struct BinarySegmentation;
+pub(crate) struct BinarySegmentation;
 
 impl BinarySegmentation {
     /// Single mean-change split.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Index of the principal split.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
         Binseg::new().fit(y, session)
     }
 }
@@ -41686,7 +41689,7 @@ fn ridge_reg_from_features(
 ///
 /// Kernel count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct InceptionTimeRegressor {
+pub(crate) struct InceptionTimeRegressor {
     /// Kernels per width.
     pub n_kernels: usize,
     /// Ridge \(\alpha\).
@@ -41707,14 +41710,14 @@ impl Default for InceptionTimeRegressor {
 
 impl InceptionTimeRegressor {
     /// Default InceptionTime-lite regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted InceptionTime-lite ridge regressor.
 #[derive(Clone, Debug)]
-pub struct FittedInceptionTimeRegressor {
+pub(crate) struct FittedInceptionTimeRegressor {
     kernels: Vec<Vec<f64>>,
     inner: FittedPenalized,
 }
@@ -41740,7 +41743,7 @@ fn inception_kernels(n_kernels: usize, t: usize, seed: u64) -> Vec<Vec<f64>> {
 impl Fit for InceptionTimeRegressor {
     type Fitted = FittedInceptionTimeRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -41766,7 +41769,7 @@ impl Predict for FittedInceptionTimeRegressor {
 ///
 /// Projection width is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct TapNetClassifier {
+pub(crate) struct TapNetClassifier {
     /// Projected length.
     pub proj: usize,
     /// Conv kernels.
@@ -41790,14 +41793,14 @@ impl Default for TapNetClassifier {
 
 impl TapNetClassifier {
     /// Default TapNet-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted TapNet-lite ridge.
 #[derive(Clone, Debug)]
-pub struct FittedTapNetClassifier {
+pub(crate) struct FittedTapNetClassifier {
     proj: Matrix,
     kernels: Vec<Vec<f64>>,
     inner: crate::classification::FittedRidgeClassifier,
@@ -41816,7 +41819,7 @@ fn tap_project(x: &Matrix, proj: &Matrix) -> Matrix {
 impl Fit for TapNetClassifier {
     type Fitted = FittedTapNetClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -41856,7 +41859,7 @@ impl Predict for FittedTapNetClassifier {
 /// Each series is used as a flattened feature map; the temporal length is not
 /// identification `p`.
 #[derive(Clone, Debug)]
-pub struct FCNClassifier {
+pub(crate) struct FCNClassifier {
     /// Ridge \(\alpha\).
     pub alpha: f64,
 }
@@ -41869,21 +41872,21 @@ impl Default for FCNClassifier {
 
 impl FCNClassifier {
     /// Default FCN-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted FCN-lite ridge.
 #[derive(Clone, Debug)]
-pub struct FittedFCNClassifier {
+pub(crate) struct FittedFCNClassifier {
     inner: crate::classification::FittedRidgeClassifier,
 }
 
 impl Fit for FCNClassifier {
     type Fitted = FittedFCNClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -41945,7 +41948,7 @@ fn macnn_attend(raw: &Matrix, ctx: &mut FitCtx) -> Matrix {
 ///
 /// Kernel count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MacnnClassifier {
+pub(crate) struct MacnnClassifier {
     /// Kernels per width.
     pub n_kernels: usize,
     /// Ridge \(\alpha\).
@@ -41955,7 +41958,7 @@ pub struct MacnnClassifier {
 }
 
 /// sktime `MACNNClassifier` spelling of [`MacnnClassifier`].
-pub type MACNN = MacnnClassifier;
+pub(crate) type MACNN = MacnnClassifier;
 
 impl Default for MacnnClassifier {
     fn default() -> Self {
@@ -41969,14 +41972,14 @@ impl Default for MacnnClassifier {
 
 impl MacnnClassifier {
     /// Default MACNN-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted MACNN-lite ridge.
 #[derive(Clone, Debug)]
-pub struct FittedMacnnClassifier {
+pub(crate) struct FittedMacnnClassifier {
     kernels: Vec<Vec<f64>>,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -41984,7 +41987,7 @@ pub struct FittedMacnnClassifier {
 impl Fit for MacnnClassifier {
     type Fitted = FittedMacnnClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -42015,7 +42018,7 @@ impl Predict for FittedMacnnClassifier {
 ///
 /// Projection width is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct TapNetRegressor {
+pub(crate) struct TapNetRegressor {
     /// Projected length.
     pub proj: usize,
     /// Conv kernels.
@@ -42039,14 +42042,14 @@ impl Default for TapNetRegressor {
 
 impl TapNetRegressor {
     /// Default TapNet-lite regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted TapNet-lite ridge regressor.
 #[derive(Clone, Debug)]
-pub struct FittedTapNetRegressor {
+pub(crate) struct FittedTapNetRegressor {
     proj: Matrix,
     kernels: Vec<Vec<f64>>,
     inner: FittedPenalized,
@@ -42055,7 +42058,7 @@ pub struct FittedTapNetRegressor {
 impl Fit for TapNetRegressor {
     type Fitted = FittedTapNetRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -42093,7 +42096,7 @@ impl Predict for FittedTapNetRegressor {
 ///
 /// Encoder width is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct EncoderClassifier {
+pub(crate) struct EncoderClassifier {
     /// Bottleneck width.
     pub latent: usize,
     /// Ridge \(\alpha\).
@@ -42114,14 +42117,14 @@ impl Default for EncoderClassifier {
 
 impl EncoderClassifier {
     /// Default encoder-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted encoder-lite ridge.
 #[derive(Clone, Debug)]
-pub struct FittedEncoderClassifier {
+pub(crate) struct FittedEncoderClassifier {
     enc: Matrix,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -42140,7 +42143,7 @@ fn encode_series(x: &Matrix, enc: &Matrix) -> Matrix {
 impl Fit for EncoderClassifier {
     type Fitted = FittedEncoderClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -42169,7 +42172,7 @@ impl Predict for FittedEncoderClassifier {
 ///
 /// Hidden width is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MlpTimeClassifier {
+pub(crate) struct MlpTimeClassifier {
     /// Hidden units.
     pub hidden: usize,
     /// Ridge \(\alpha\).
@@ -42190,14 +42193,14 @@ impl Default for MlpTimeClassifier {
 
 impl MlpTimeClassifier {
     /// Default MLP-lite time classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted MLP-lite ridge.
 #[derive(Clone, Debug)]
-pub struct FittedMlpTimeClassifier {
+pub(crate) struct FittedMlpTimeClassifier {
     hidden: Matrix,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -42216,7 +42219,7 @@ fn mlp_hidden(x: &Matrix, w: &Matrix) -> Matrix {
 impl Fit for MlpTimeClassifier {
     type Fitted = FittedMlpTimeClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -42245,7 +42248,7 @@ impl Predict for FittedMlpTimeClassifier {
 ///
 /// Kernel count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MultiRocketRegressor {
+pub(crate) struct MultiRocketRegressor {
     /// Random kernels.
     pub n_kernels: usize,
     /// Ridge \(\alpha\).
@@ -42266,14 +42269,14 @@ impl Default for MultiRocketRegressor {
 
 impl MultiRocketRegressor {
     /// Default MultiROCKET regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted MultiROCKET ridge.
 #[derive(Clone, Debug)]
-pub struct FittedMultiRocketRegressor {
+pub(crate) struct FittedMultiRocketRegressor {
     rocket: MultiRocket,
     inner: FittedPenalized,
 }
@@ -42281,7 +42284,7 @@ pub struct FittedMultiRocketRegressor {
 impl Fit for MultiRocketRegressor {
     type Fitted = FittedMultiRocketRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -42334,7 +42337,7 @@ impl Predict for FittedMultiRocketRegressor {
 ///
 /// Kernel / group counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct HydraRegressor {
+pub(crate) struct HydraRegressor {
     /// Kernels.
     pub n_kernels: usize,
     /// Groups.
@@ -42361,14 +42364,14 @@ impl Default for HydraRegressor {
 
 impl HydraRegressor {
     /// Default Hydra regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted Hydra ridge regressor.
 #[derive(Clone, Debug)]
-pub struct FittedHydraRegressor {
+pub(crate) struct FittedHydraRegressor {
     kernels: Vec<(Vec<f64>, usize)>,
     n_groups: usize,
     inner: FittedPenalized,
@@ -42377,7 +42380,7 @@ pub struct FittedHydraRegressor {
 impl Fit for HydraRegressor {
     type Fitted = FittedHydraRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -42428,7 +42431,7 @@ impl Predict for FittedHydraRegressor {
 ///
 /// Word count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct IndividualBoss {
+pub(crate) struct IndividualBoss {
     /// Sliding-window length.
     pub window: usize,
     /// DFT coefficients kept per window.
@@ -42449,14 +42452,14 @@ impl Default for IndividualBoss {
 
 impl IndividualBoss {
     /// Default individual BOSS.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for IndividualBoss {
     type Fitted = FittedBoss;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedBoss>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedBoss>> {
         let mut ens = BossEnsemble {
             window: self.window,
             word_len: self.word_len,
@@ -42470,7 +42473,7 @@ impl Fit for IndividualBoss {
 ///
 /// Window length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MatrixProfileRegressor {
+pub(crate) struct MatrixProfileRegressor {
     /// Ridge \(\alpha\).
     pub alpha: f64,
     /// Subsequence length.
@@ -42488,14 +42491,14 @@ impl Default for MatrixProfileRegressor {
 
 impl MatrixProfileRegressor {
     /// Default matrix-profile regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted matrix-profile ridge.
 #[derive(Clone, Debug)]
-pub struct FittedMatrixProfileRegressor {
+pub(crate) struct FittedMatrixProfileRegressor {
     inner: FittedPenalized,
     window: usize,
 }
@@ -42503,7 +42506,7 @@ pub struct FittedMatrixProfileRegressor {
 impl Fit for MatrixProfileRegressor {
     type Fitted = FittedMatrixProfileRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -42559,7 +42562,7 @@ impl Predict for FittedMatrixProfileRegressor {
 ///
 /// Interval count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RandomIntervalClassifier {
+pub(crate) struct RandomIntervalClassifier {
     /// Random intervals.
     pub n_intervals: usize,
     /// Ridge \(\alpha\).
@@ -42580,14 +42583,14 @@ impl Default for RandomIntervalClassifier {
 
 impl RandomIntervalClassifier {
     /// Default random-interval classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted random-interval ridge.
 #[derive(Clone, Debug)]
-pub struct FittedRandomIntervalClassifier {
+pub(crate) struct FittedRandomIntervalClassifier {
     intervals: Vec<Interval>,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -42595,7 +42598,7 @@ pub struct FittedRandomIntervalClassifier {
 impl Fit for RandomIntervalClassifier {
     type Fitted = FittedRandomIntervalClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -42634,7 +42637,7 @@ impl Predict for FittedRandomIntervalClassifier {
 ///
 /// Member / kernel / tree counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct HiveCoteV2 {
+pub(crate) struct HiveCoteV2 {
     /// ROCKET kernels.
     pub n_kernels: usize,
     /// Forest trees.
@@ -42655,14 +42658,14 @@ impl Default for HiveCoteV2 {
 
 impl HiveCoteV2 {
     /// Default HIVE-COTE v2 lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted three-member HIVE-COTE v2 vote.
 #[derive(Clone, Debug)]
-pub struct FittedHiveCoteV2 {
+pub(crate) struct FittedHiveCoteV2 {
     rocket: FittedRocketClassifier,
     forest: FittedTimeSeriesForest,
     catch22: FittedCatch22Classifier,
@@ -42671,7 +42674,7 @@ pub struct FittedHiveCoteV2 {
 impl Fit for HiveCoteV2 {
     type Fitted = FittedHiveCoteV2;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -42748,7 +42751,7 @@ impl Predict for FittedHiveCoteV2 {
 ///
 /// Member / shapelet / tree / word counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct HiveCoteV1 {
+pub(crate) struct HiveCoteV1 {
     /// Shapelets.
     pub n_shapelets: usize,
     /// Forest trees.
@@ -42772,14 +42775,14 @@ impl Default for HiveCoteV1 {
 
 impl HiveCoteV1 {
     /// Default HIVE-COTE v1 lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted three-member HIVE-COTE v1 vote.
 #[derive(Clone, Debug)]
-pub struct FittedHiveCoteV1 {
+pub(crate) struct FittedHiveCoteV1 {
     shapelet: FittedShapeletTransformClassifier,
     forest: FittedTimeSeriesForest,
     boss: FittedBoss,
@@ -42788,7 +42791,7 @@ pub struct FittedHiveCoteV1 {
 impl Fit for HiveCoteV1 {
     type Fitted = FittedHiveCoteV1;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -42867,7 +42870,7 @@ impl Predict for FittedHiveCoteV1 {
 ///
 /// Catch22 width and tree count are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Catch22El {
+pub(crate) struct Catch22El {
     /// ExtraTrees count.
     pub n_estimators: usize,
     /// Tree depth.
@@ -42888,21 +42891,21 @@ impl Default for Catch22El {
 
 impl Catch22El {
     /// Default Catch22–ExtraTrees ensemble.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted Catch22–ExtraTrees (ridge fallback if the forest is vacuous).
 #[derive(Clone, Debug)]
-pub struct FittedCatch22El {
+pub(crate) struct FittedCatch22El {
     forest: Option<crate::tree::FittedForestClassifier>,
     ridge: Option<FittedCatch22Classifier>,
 }
 
 impl Fit for Catch22El {
     type Fitted = FittedCatch22El;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedCatch22El>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedCatch22El>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -42990,7 +42993,7 @@ impl Predict for FittedCatch22El {
 ///
 /// Catch22 width and tree count are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RotationForestClassifier {
+pub(crate) struct RotationForestClassifier {
     /// Rotation-forest members.
     pub n_estimators: usize,
     /// Tree depth.
@@ -43011,14 +43014,14 @@ impl Default for RotationForestClassifier {
 
 impl RotationForestClassifier {
     /// Default Catch22–rotation-forest ensemble.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted Catch22–rotation forest (ridge fallback if every rotated tree fails).
 #[derive(Clone, Debug)]
-pub struct FittedRotationForestClassifier {
+pub(crate) struct FittedRotationForestClassifier {
     forest: Option<crate::ensemble::FittedRotationForest>,
     ridge: Option<FittedCatch22Classifier>,
 }
@@ -43026,7 +43029,7 @@ pub struct FittedRotationForestClassifier {
 impl Fit for RotationForestClassifier {
     type Fitted = FittedRotationForestClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -43117,7 +43120,7 @@ impl Predict for FittedRotationForestClassifier {
 /// Each stump is two random exemplars; the closer series donates its response.
 /// Tree count is not identification `p`. Do not call `inspect_classes`.
 #[derive(Clone, Debug)]
-pub struct ProximityForestRegressor {
+pub(crate) struct ProximityForestRegressor {
     /// Number of proximity stumps. Not identification `p`.
     pub n_trees: usize,
     /// Seed.
@@ -43135,7 +43138,7 @@ impl Default for ProximityForestRegressor {
 
 impl ProximityForestRegressor {
     /// Default five-stump proximity regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -43150,7 +43153,7 @@ struct ProxRegStump {
 
 /// Fitted DTW proximity-forest regressor.
 #[derive(Clone, Debug)]
-pub struct FittedProximityForestRegressor {
+pub(crate) struct FittedProximityForestRegressor {
     trees: Vec<ProxRegStump>,
     /// Fallback mean response.
     pub default_value: f64,
@@ -43159,7 +43162,7 @@ pub struct FittedProximityForestRegressor {
 impl Fit for ProximityForestRegressor {
     type Fitted = FittedProximityForestRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -43243,7 +43246,7 @@ impl Predict for FittedProximityForestRegressor {
 ///
 /// Interval / tree counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Rstsf {
+pub(crate) struct Rstsf {
     /// Trees.
     pub n_estimators: usize,
     /// Random intervals per tree.
@@ -43267,14 +43270,14 @@ impl Default for Rstsf {
 
 impl Rstsf {
     /// Default RSTSF lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted RSTSF vote.
 #[derive(Clone, Debug)]
-pub struct FittedRstsf {
+pub(crate) struct FittedRstsf {
     trees: Vec<crate::tree::FittedTreeClassifier>,
     intervals: Vec<Vec<Interval>>,
     /// Sorted class labels.
@@ -43283,7 +43286,7 @@ pub struct FittedRstsf {
 
 impl Fit for Rstsf {
     type Fitted = FittedRstsf;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRstsf>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRstsf>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -43378,7 +43381,7 @@ impl Predict for FittedRstsf {
 ///
 /// Kernel / width counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct LiteTime {
+pub(crate) struct LiteTime {
     /// Kernels per width.
     pub n_kernels: usize,
     /// Ridge \(\alpha\).
@@ -43399,14 +43402,14 @@ impl Default for LiteTime {
 
 impl LiteTime {
     /// Default LITETime-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted LITETime-lite ridge.
 #[derive(Clone, Debug)]
-pub struct FittedLiteTime {
+pub(crate) struct FittedLiteTime {
     kernels: Vec<Vec<f64>>,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -43414,7 +43417,7 @@ pub struct FittedLiteTime {
 impl Fit for LiteTime {
     type Fitted = FittedLiteTime;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -43459,7 +43462,7 @@ impl Predict for FittedLiteTime {
 ///
 /// Piece / alphabet counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MrSqm {
+pub(crate) struct MrSqm {
     /// PAA pieces.
     pub n_pieces: usize,
     /// SAX alphabet size.
@@ -43480,14 +43483,14 @@ impl Default for MrSqm {
 
 impl MrSqm {
     /// Default MrSQM-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted SAX-ridge classifier.
 #[derive(Clone, Debug)]
-pub struct FittedMrSqm {
+pub(crate) struct FittedMrSqm {
     n_pieces: usize,
     alphabet: usize,
     inner: crate::classification::FittedRidgeClassifier,
@@ -43504,7 +43507,7 @@ fn sax_feature_rows(x: &Matrix, n_pieces: usize, alphabet: usize) -> Matrix {
 
 impl Fit for MrSqm {
     type Fitted = FittedMrSqm;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedMrSqm>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedMrSqm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -43530,7 +43533,7 @@ impl Predict for FittedMrSqm {
 ///
 /// Word count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct IndividualTde {
+pub(crate) struct IndividualTde {
     /// Sliding-window length.
     pub window: usize,
     /// DFT coefficients kept per window.
@@ -43554,14 +43557,14 @@ impl Default for IndividualTde {
 
 impl IndividualTde {
     /// Default single-dictionary TDE member.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for IndividualTde {
     type Fitted = FittedBoss;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedBoss>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedBoss>> {
         Weasel {
             window: self.window,
             word_len: self.word_len,
@@ -43576,7 +43579,7 @@ impl Fit for IndividualTde {
 ///
 /// Feature count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct TsFreshClassifier {
+pub(crate) struct TsFreshClassifier {
     /// Ridge \(\alpha\).
     pub alpha: f64,
 }
@@ -43589,21 +43592,21 @@ impl Default for TsFreshClassifier {
 
 impl TsFreshClassifier {
     /// Default tsfresh-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted tsfresh-lite ridge.
 #[derive(Clone, Debug)]
-pub struct FittedTsFreshClassifier {
+pub(crate) struct FittedTsFreshClassifier {
     inner: crate::classification::FittedRidgeClassifier,
 }
 
 impl Fit for TsFreshClassifier {
     type Fitted = FittedTsFreshClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -43630,7 +43633,7 @@ impl Predict for FittedTsFreshClassifier {
 ///
 /// Interval count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SupervisedIntervals {
+pub(crate) struct SupervisedIntervals {
     /// Intervals ranked by class-mean gap.
     pub n_intervals: usize,
     /// Ridge \(\alpha\).
@@ -43651,14 +43654,14 @@ impl Default for SupervisedIntervals {
 
 impl SupervisedIntervals {
     /// Default supervised-interval classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted supervised-interval ridge.
 #[derive(Clone, Debug)]
-pub struct FittedSupervisedIntervals {
+pub(crate) struct FittedSupervisedIntervals {
     intervals: Vec<Interval>,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -43666,7 +43669,7 @@ pub struct FittedSupervisedIntervals {
 impl Fit for SupervisedIntervals {
     type Fitted = FittedSupervisedIntervals;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -43694,7 +43697,7 @@ impl Predict for FittedSupervisedIntervals {
 ///
 /// Word / window counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct WeaselV2 {
+pub(crate) struct WeaselV2 {
     /// First sliding-window length.
     pub window_a: usize,
     /// Second sliding-window length.
@@ -43724,14 +43727,14 @@ impl Default for WeaselV2 {
 
 impl WeaselV2 {
     /// Default two-window WEASEL.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted two-window WEASEL ridge.
 #[derive(Clone, Debug)]
-pub struct FittedWeaselV2 {
+pub(crate) struct FittedWeaselV2 {
     spec_a: (usize, usize, usize),
     spec_b: (usize, usize, usize),
     idx_a: Vec<usize>,
@@ -43807,7 +43810,7 @@ fn weasel_v2_features(
 
 impl Fit for WeaselV2 {
     type Fitted = FittedWeaselV2;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedWeaselV2>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedWeaselV2>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -43841,7 +43844,7 @@ impl Predict for FittedWeaselV2 {
 ///
 /// Prefix length is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Teaser {
+pub(crate) struct Teaser {
     /// Ridge \(\alpha\).
     pub alpha: f64,
 }
@@ -43854,14 +43857,14 @@ impl Default for Teaser {
 
 impl Teaser {
     /// Default TEASER-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted prefix-summary ridge.
 #[derive(Clone, Debug)]
-pub struct FittedTeaser {
+pub(crate) struct FittedTeaser {
     inner: crate::classification::FittedRidgeClassifier,
 }
 
@@ -43873,7 +43876,7 @@ fn prefix_summary(x: &Matrix) -> Matrix {
 
 impl Fit for Teaser {
     type Fitted = FittedTeaser;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedTeaser>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedTeaser>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -43895,7 +43898,7 @@ impl Predict for FittedTeaser {
 ///
 /// Kernel count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MultiRocketClassifier {
+pub(crate) struct MultiRocketClassifier {
     /// Random kernels.
     pub n_kernels: usize,
     /// Ridge \(\alpha\).
@@ -43916,14 +43919,14 @@ impl Default for MultiRocketClassifier {
 
 impl MultiRocketClassifier {
     /// Default MultiROCKET classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted MultiROCKET ridge classifier.
 #[derive(Clone, Debug)]
-pub struct FittedMultiRocketClassifier {
+pub(crate) struct FittedMultiRocketClassifier {
     rocket: MultiRocket,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -43931,7 +43934,7 @@ pub struct FittedMultiRocketClassifier {
 impl Fit for MultiRocketClassifier {
     type Fitted = FittedMultiRocketClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -43961,7 +43964,7 @@ impl Predict for FittedMultiRocketClassifier {
 ///
 /// Kernel count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MiniRocketRegressor {
+pub(crate) struct MiniRocketRegressor {
     /// Random dilated kernels.
     pub n_kernels: usize,
     /// Ridge \(\alpha\).
@@ -43982,14 +43985,14 @@ impl Default for MiniRocketRegressor {
 
 impl MiniRocketRegressor {
     /// Default MiniROCKET regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted MiniROCKET ridge.
 #[derive(Clone, Debug)]
-pub struct FittedMiniRocketRegressor {
+pub(crate) struct FittedMiniRocketRegressor {
     rocket: MiniRocket,
     inner: FittedPenalized,
 }
@@ -43997,7 +44000,7 @@ pub struct FittedMiniRocketRegressor {
 impl Fit for MiniRocketRegressor {
     type Fitted = FittedMiniRocketRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -44050,7 +44053,7 @@ impl Predict for FittedMiniRocketRegressor {
 ///
 /// Interval count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RandomIntervalRegressor {
+pub(crate) struct RandomIntervalRegressor {
     /// Random intervals.
     pub n_intervals: usize,
     /// Ridge \(\alpha\).
@@ -44071,14 +44074,14 @@ impl Default for RandomIntervalRegressor {
 
 impl RandomIntervalRegressor {
     /// Default random-interval regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted random-interval ridge regressor.
 #[derive(Clone, Debug)]
-pub struct FittedRandomIntervalRegressor {
+pub(crate) struct FittedRandomIntervalRegressor {
     intervals: Vec<Interval>,
     inner: FittedPenalized,
 }
@@ -44086,7 +44089,7 @@ pub struct FittedRandomIntervalRegressor {
 impl Fit for RandomIntervalRegressor {
     type Fitted = FittedRandomIntervalRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -44148,7 +44151,7 @@ impl Predict for FittedRandomIntervalRegressor {
 ///
 /// Kernel count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct CnnRegressor {
+pub(crate) struct CnnRegressor {
     /// Random kernels.
     pub n_kernels: usize,
     /// Kernel width.
@@ -44172,14 +44175,14 @@ impl Default for CnnRegressor {
 
 impl CnnRegressor {
     /// Default CNN-lite regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted CNN-lite ridge regressor.
 #[derive(Clone, Debug)]
-pub struct FittedCnnRegressor {
+pub(crate) struct FittedCnnRegressor {
     kernels: Vec<Vec<f64>>,
     inner: FittedPenalized,
 }
@@ -44187,7 +44190,7 @@ pub struct FittedCnnRegressor {
 impl Fit for CnnRegressor {
     type Fitted = FittedCnnRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -44228,7 +44231,7 @@ impl Predict for FittedCnnRegressor {
 ///
 /// Kernel count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ResNetRegressor {
+pub(crate) struct ResNetRegressor {
     /// Kernels.
     pub n_kernels: usize,
     /// Ridge \(\alpha\).
@@ -44249,14 +44252,14 @@ impl Default for ResNetRegressor {
 
 impl ResNetRegressor {
     /// Default ResNet-lite regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted ResNet-lite ridge regressor.
 #[derive(Clone, Debug)]
-pub struct FittedResNetRegressor {
+pub(crate) struct FittedResNetRegressor {
     kernels: Vec<Vec<f64>>,
     inner: FittedPenalized,
 }
@@ -44264,7 +44267,7 @@ pub struct FittedResNetRegressor {
 impl Fit for ResNetRegressor {
     type Fitted = FittedResNetRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -44299,7 +44302,7 @@ impl Predict for FittedResNetRegressor {
 
 /// Fully-convolutional ridge on the raw series (sktime `FCNRegressor` lite).
 #[derive(Clone, Debug)]
-pub struct FCNRegressor {
+pub(crate) struct FCNRegressor {
     /// Ridge \(\alpha\).
     pub alpha: f64,
 }
@@ -44312,21 +44315,21 @@ impl Default for FCNRegressor {
 
 impl FCNRegressor {
     /// Default FCN-lite regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted FCN-lite ridge.
 #[derive(Clone, Debug)]
-pub struct FittedFCNRegressor {
+pub(crate) struct FittedFCNRegressor {
     inner: FittedPenalized,
 }
 
 impl Fit for FCNRegressor {
     type Fitted = FittedFCNRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -44349,7 +44352,7 @@ impl Predict for FittedFCNRegressor {
 ///
 /// Latent width is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct EncoderRegressor {
+pub(crate) struct EncoderRegressor {
     /// Bottleneck width.
     pub latent: usize,
     /// Ridge \(\alpha\).
@@ -44370,14 +44373,14 @@ impl Default for EncoderRegressor {
 
 impl EncoderRegressor {
     /// Default encoder-lite regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted encoder-lite ridge.
 #[derive(Clone, Debug)]
-pub struct FittedEncoderRegressor {
+pub(crate) struct FittedEncoderRegressor {
     enc: Matrix,
     inner: FittedPenalized,
 }
@@ -44385,7 +44388,7 @@ pub struct FittedEncoderRegressor {
 impl Fit for EncoderRegressor {
     type Fitted = FittedEncoderRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -44413,7 +44416,7 @@ impl Predict for FittedEncoderRegressor {
 ///
 /// Hidden width is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct MlpTimeRegressor {
+pub(crate) struct MlpTimeRegressor {
     /// Hidden units.
     pub hidden: usize,
     /// Ridge \(\alpha\).
@@ -44434,14 +44437,14 @@ impl Default for MlpTimeRegressor {
 
 impl MlpTimeRegressor {
     /// Default MLP-lite time regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted MLP-lite time ridge.
 #[derive(Clone, Debug)]
-pub struct FittedMlpTimeRegressor {
+pub(crate) struct FittedMlpTimeRegressor {
     hidden: Matrix,
     inner: FittedPenalized,
 }
@@ -44449,7 +44452,7 @@ pub struct FittedMlpTimeRegressor {
 impl Fit for MlpTimeRegressor {
     type Fitted = FittedMlpTimeRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -44477,7 +44480,7 @@ impl Predict for FittedMlpTimeRegressor {
 ///
 /// Shapelet count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ShapeletTransformRegressor {
+pub(crate) struct ShapeletTransformRegressor {
     /// Shapelets.
     pub n_shapelets: usize,
     /// Shapelet length.
@@ -44501,14 +44504,14 @@ impl Default for ShapeletTransformRegressor {
 
 impl ShapeletTransformRegressor {
     /// Default shapelet-transform regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted shapelet-transform ridge.
 #[derive(Clone, Debug)]
-pub struct FittedShapeletTransformRegressor {
+pub(crate) struct FittedShapeletTransformRegressor {
     shapelets: FittedShapeletTransform,
     inner: FittedPenalized,
 }
@@ -44516,7 +44519,7 @@ pub struct FittedShapeletTransformRegressor {
 impl Fit for ShapeletTransformRegressor {
     type Fitted = FittedShapeletTransformRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -44551,7 +44554,7 @@ impl Predict for FittedShapeletTransformRegressor {
 ///
 /// Feature count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct TsFreshRegressor {
+pub(crate) struct TsFreshRegressor {
     /// Ridge \(\alpha\).
     pub alpha: f64,
 }
@@ -44564,21 +44567,21 @@ impl Default for TsFreshRegressor {
 
 impl TsFreshRegressor {
     /// Default tsfresh-lite regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted tsfresh-lite ridge.
 #[derive(Clone, Debug)]
-pub struct FittedTsFreshRegressor {
+pub(crate) struct FittedTsFreshRegressor {
     inner: FittedPenalized,
 }
 
 impl Fit for TsFreshRegressor {
     type Fitted = FittedTsFreshRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -44604,7 +44607,7 @@ impl Predict for FittedTsFreshRegressor {
 ///
 /// Interval count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct QuantRegressor {
+pub(crate) struct QuantRegressor {
     /// Random intervals.
     pub n_intervals: usize,
     /// Ridge \(\alpha\).
@@ -44625,14 +44628,14 @@ impl Default for QuantRegressor {
 
 impl QuantRegressor {
     /// Default QUANT-lite regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted QUANT-lite ridge.
 #[derive(Clone, Debug)]
-pub struct FittedQuantRegressor {
+pub(crate) struct FittedQuantRegressor {
     intervals: Vec<Interval>,
     inner: FittedPenalized,
 }
@@ -44640,7 +44643,7 @@ pub struct FittedQuantRegressor {
 impl Fit for QuantRegressor {
     type Fitted = FittedQuantRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -44680,7 +44683,7 @@ impl Predict for FittedQuantRegressor {
 ///
 /// Piece / alphabet counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SaxVsm {
+pub(crate) struct SaxVsm {
     /// PAA pieces.
     pub n_pieces: usize,
     /// SAX alphabet size.
@@ -44701,14 +44704,14 @@ impl Default for SaxVsm {
 
 impl SaxVsm {
     /// Default SAX-VSM classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted SAX-VSM ridge.
 #[derive(Clone, Debug)]
-pub struct FittedSaxVsm {
+pub(crate) struct FittedSaxVsm {
     n_pieces: usize,
     alphabet: usize,
     inner: crate::classification::FittedRidgeClassifier,
@@ -44728,7 +44731,7 @@ fn sax_bow_rows(x: &Matrix, n_pieces: usize, alphabet: usize) -> Matrix {
 
 impl Fit for SaxVsm {
     type Fitted = FittedSaxVsm;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSaxVsm>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSaxVsm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -44774,7 +44777,7 @@ fn sfa_feature_rows(x: &Matrix, n_coefs: usize, alphabet: usize) -> Matrix {
 ///
 /// Word / alphabet counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Sfa {
+pub(crate) struct Sfa {
     /// Retained DFT magnitudes.
     pub n_coefs: usize,
     /// Alphabet size.
@@ -44795,14 +44798,14 @@ impl Default for Sfa {
 
 impl Sfa {
     /// Default SFA classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted SFA ridge.
 #[derive(Clone, Debug)]
-pub struct FittedSfa {
+pub(crate) struct FittedSfa {
     n_coefs: usize,
     alphabet: usize,
     inner: crate::classification::FittedRidgeClassifier,
@@ -44810,7 +44813,7 @@ pub struct FittedSfa {
 
 impl Fit for Sfa {
     type Fitted = FittedSfa;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSfa>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSfa>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -44844,7 +44847,7 @@ fn softdtw_kernel_rows(x: &Matrix, train: &Matrix, gamma: f64) -> Matrix {
 ///
 /// Kernel count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SoftDtwSvm {
+pub(crate) struct SoftDtwSvm {
     /// Soft-DTW \(\gamma\).
     pub gamma: f64,
     /// Ridge \(\alpha\).
@@ -44862,14 +44865,14 @@ impl Default for SoftDtwSvm {
 
 impl SoftDtwSvm {
     /// Default soft-DTW kernel SVM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted soft-DTW kernel ridge.
 #[derive(Clone, Debug)]
-pub struct FittedSoftDtwSvm {
+pub(crate) struct FittedSoftDtwSvm {
     x_train: Matrix,
     gamma: f64,
     inner: crate::classification::FittedRidgeClassifier,
@@ -44878,7 +44881,7 @@ pub struct FittedSoftDtwSvm {
 impl Fit for SoftDtwSvm {
     type Fitted = FittedSoftDtwSvm;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -44906,7 +44909,7 @@ impl Predict for FittedSoftDtwSvm {
 
 /// Named DTW 1-NN wrapper (sktime `KNeighborsTimeSeriesClassifier`).
 #[derive(Clone, Debug)]
-pub struct KNeighborsTimeSeriesClassifier {
+pub(crate) struct KNeighborsTimeSeriesClassifier {
     inner: KNeighborsTimeSeries,
 }
 
@@ -44920,14 +44923,14 @@ impl Default for KNeighborsTimeSeriesClassifier {
 
 impl KNeighborsTimeSeriesClassifier {
     /// DTW 1-NN classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for KNeighborsTimeSeriesClassifier {
     type Fitted = FittedKnnTs;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedKnnTs>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedKnnTs>> {
         self.inner.fit(x, y, session)
     }
 }
@@ -44937,7 +44940,7 @@ impl Fit for KNeighborsTimeSeriesClassifier {
 /// Component count is not identification `p`. SVD uses a scratch report so a
 /// Fatal inner `SvdDidNotConverge` cannot abort a valid embedding.
 #[derive(Clone, Debug)]
-pub struct TimeSeriesPca {
+pub(crate) struct TimeSeriesPca {
     /// Retained axes.
     pub n_components: usize,
 }
@@ -44950,19 +44953,19 @@ impl Default for TimeSeriesPca {
 
 impl TimeSeriesPca {
     /// Keep `n_components` axes.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self { n_components }
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedTimeSeriesPca>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedTimeSeriesPca>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 /// Fitted series-row PCA.
 #[derive(Clone, Debug)]
-pub struct FittedTimeSeriesPca {
+pub(crate) struct FittedTimeSeriesPca {
     /// Principal axes (`k` × width).
     pub components: Matrix,
     /// Column means of the training series.
@@ -44974,7 +44977,7 @@ pub struct FittedTimeSeriesPca {
 impl FitUnsupervised for TimeSeriesPca {
     type Fitted = FittedTimeSeriesPca;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedTimeSeriesPca>> {
@@ -45069,7 +45072,7 @@ impl Transform for FittedTimeSeriesPca {
 /// [`CanonicalIntervalForest`]. Tree / interval counts are not identification
 /// `p`. Inner `MeaninglessFit` is not promoted.
 #[derive(Clone, Debug)]
-pub struct ComposableTimeSeriesForest {
+pub(crate) struct ComposableTimeSeriesForest {
     /// Trees per member.
     pub n_estimators: usize,
     /// Intervals per tree.
@@ -45093,14 +45096,14 @@ impl Default for ComposableTimeSeriesForest {
 
 impl ComposableTimeSeriesForest {
     /// Default two-member interval forest.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted TSF+CIF vote with a Catch22 ridge fallback.
 #[derive(Clone, Debug)]
-pub struct FittedComposableTimeSeriesForest {
+pub(crate) struct FittedComposableTimeSeriesForest {
     tsf: Option<FittedTimeSeriesForest>,
     cif: Option<FittedCanonicalIntervalForest>,
     ridge: Option<FittedCatch22Classifier>,
@@ -45109,7 +45112,7 @@ pub struct FittedComposableTimeSeriesForest {
 impl Fit for ComposableTimeSeriesForest {
     type Fitted = FittedComposableTimeSeriesForest;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -45241,7 +45244,7 @@ impl Predict for FittedComposableTimeSeriesForest {
 ///
 /// Coefficient / alphabet counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SfaTransformer {
+pub(crate) struct SfaTransformer {
     /// Retained DFT magnitudes.
     pub n_coefs: usize,
     /// Alphabet size.
@@ -45259,14 +45262,14 @@ impl Default for SfaTransformer {
 
 impl SfaTransformer {
     /// Default SFA feature map.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted SFA feature map.
 #[derive(Clone, Debug)]
-pub struct FittedSfaTransformer {
+pub(crate) struct FittedSfaTransformer {
     n_coefs: usize,
     alphabet: usize,
 }
@@ -45274,7 +45277,7 @@ pub struct FittedSfaTransformer {
 impl FitUnsupervised for SfaTransformer {
     type Fitted = FittedSfaTransformer;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedSfaTransformer>> {
@@ -45309,7 +45312,7 @@ impl Transform for FittedSfaTransformer {
 
 /// Named soft-DTW barycentre (tslearn `softdtw_barycenter`).
 #[derive(Clone, Debug)]
-pub struct SoftDtwBarycenter {
+pub(crate) struct SoftDtwBarycenter {
     /// Soft-DTW \(\gamma\).
     pub gamma: f64,
     /// Gradient steps.
@@ -45327,19 +45330,19 @@ impl Default for SoftDtwBarycenter {
 
 impl SoftDtwBarycenter {
     /// Default soft-DTW barycentre.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit the barycentre of equal-length series rows.
-    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         softdtw_barycenter(x, self.gamma, self.max_iter, session)
     }
 }
 
 /// Named alias of [`LearningShapelets`] (tslearn `ShapeletModel`).
 #[derive(Clone, Debug)]
-pub struct ShapeletModel {
+pub(crate) struct ShapeletModel {
     inner: LearningShapelets,
 }
 
@@ -45353,7 +45356,7 @@ impl Default for ShapeletModel {
 
 impl ShapeletModel {
     /// `k` shapelets of length `length`.
-    pub fn new(n_shapelets: usize, length: usize) -> Self {
+    pub(crate) fn new(n_shapelets: usize, length: usize) -> Self {
         Self {
             inner: LearningShapelets::new(n_shapelets, length),
         }
@@ -45363,7 +45366,7 @@ impl ShapeletModel {
 impl Fit for ShapeletModel {
     type Fitted = FittedShapelets;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -45376,7 +45379,7 @@ impl Fit for ShapeletModel {
 ///
 /// Shapelet count is not identification `p`. Does not call `inspect_classes`.
 #[derive(Clone, Debug)]
-pub struct LearningShapeletsRegressor {
+pub(crate) struct LearningShapeletsRegressor {
     /// Random shapelets.
     pub n_shapelets: usize,
     /// Shapelet length.
@@ -45400,14 +45403,14 @@ impl Default for LearningShapeletsRegressor {
 
 impl LearningShapeletsRegressor {
     /// Default shapelet regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted shapelet distances + ridge.
 #[derive(Clone, Debug)]
-pub struct FittedLearningShapeletsReg {
+pub(crate) struct FittedLearningShapeletsReg {
     shapelets: Matrix,
     ridge: FittedPenalized,
 }
@@ -45415,7 +45418,7 @@ pub struct FittedLearningShapeletsReg {
 impl Fit for LearningShapeletsRegressor {
     type Fitted = FittedLearningShapeletsReg;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -45494,7 +45497,7 @@ impl Predict for FittedLearningShapeletsReg {
 ///
 /// Neighbour count is not identification `p`. SVD uses a scratch report.
 #[derive(Clone, Debug)]
-pub struct OneDLle {
+pub(crate) struct OneDLle {
     /// Neighbourhood size.
     pub n_neighbors: usize,
 }
@@ -45507,21 +45510,21 @@ impl Default for OneDLle {
 
 impl OneDLle {
     /// 1-D LLE with `n_neighbors`.
-    pub fn new(n_neighbors: usize) -> Self {
+    pub(crate) fn new(n_neighbors: usize) -> Self {
         Self {
             n_neighbors: n_neighbors.max(2),
         }
     }
 
     /// Fit alias.
-    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         self.fit_unsupervised(x, session)
     }
 }
 
 impl FitUnsupervised for OneDLle {
     type Fitted = Vector;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let n = x.nrows();
@@ -45608,7 +45611,7 @@ impl FitUnsupervised for OneDLle {
 ///
 /// Component count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct TimeSeriesSvd {
+pub(crate) struct TimeSeriesSvd {
     /// Retained axes.
     pub n_components: usize,
 }
@@ -45621,15 +45624,15 @@ impl Default for TimeSeriesSvd {
 
 impl TimeSeriesSvd {
     /// Keep `n_components` axes.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(1),
         }
     }
 
     /// Fit alias.
-    pub fn fit(
-        &mut self,
+    pub(crate) fn fit(
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedTimeSeriesPca>> {
@@ -45640,7 +45643,7 @@ impl TimeSeriesSvd {
 impl FitUnsupervised for TimeSeriesSvd {
     type Fitted = FittedTimeSeriesPca;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedTimeSeriesPca>> {
@@ -45650,7 +45653,7 @@ impl FitUnsupervised for TimeSeriesSvd {
 
 /// Named Petitjean DBA (tslearn `DTWBarycenterAveraging`).
 #[derive(Clone, Debug)]
-pub struct DbaBarycenter {
+pub(crate) struct DbaBarycenter {
     /// Alignment iterations.
     pub max_iter: usize,
 }
@@ -45663,28 +45666,28 @@ impl Default for DbaBarycenter {
 
 impl DbaBarycenter {
     /// Default DBA barycentre.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit the DTW barycentre of equal-length series rows.
-    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         dba(x, self.max_iter, session)
     }
 }
 
 /// Named Euclidean barycentre (tslearn `euclidean_barycenter`).
 #[derive(Clone, Debug, Default)]
-pub struct EuclideanBarycenter;
+pub(crate) struct EuclideanBarycenter;
 
 impl EuclideanBarycenter {
     /// Default column-mean barycentre.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit the Euclidean mean of equal-length series rows.
-    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         euclidean_barycenter(x, session)
     }
 }
@@ -45694,7 +45697,7 @@ impl EuclideanBarycenter {
 /// Interval count is not identification `p`. ExtraTrees may abort as a vacuous
 /// stump; ridge on the same interval map is the fallback.
 #[derive(Clone, Debug)]
-pub struct Rist {
+pub(crate) struct Rist {
     /// ExtraTrees count.
     pub n_estimators: usize,
     /// Random intervals.
@@ -45718,14 +45721,14 @@ impl Default for Rist {
 
 impl Rist {
     /// Default RIST lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted RIST forest or ridge fallback.
 #[derive(Clone, Debug)]
-pub struct FittedRist {
+pub(crate) struct FittedRist {
     forest: Option<crate::tree::FittedForestClassifier>,
     ridge: Option<crate::classification::FittedRidgeClassifier>,
     intervals: Vec<Interval>,
@@ -45734,7 +45737,7 @@ pub struct FittedRist {
 
 impl Fit for Rist {
     type Fitted = FittedRist;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRist>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRist>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -45836,7 +45839,7 @@ impl Predict for FittedRist {
 ///
 /// Vocabulary size is not identification `p`. Window must be ≤ series length.
 #[derive(Clone, Debug)]
-pub struct BossVs {
+pub(crate) struct BossVs {
     /// Sliding-window length.
     pub window: usize,
     /// DFT coefficients kept per window.
@@ -45857,14 +45860,14 @@ impl Default for BossVs {
 
 impl BossVs {
     /// Default BOSS-VS.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted BOSS-VS class centroids.
 #[derive(Clone, Debug)]
-pub struct FittedBossVs {
+pub(crate) struct FittedBossVs {
     spec: (usize, usize, usize),
     centroids: BTreeMap<i64, Vector>,
     default_label: f64,
@@ -45872,7 +45875,7 @@ pub struct FittedBossVs {
 
 impl Fit for BossVs {
     type Fitted = FittedBossVs;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedBossVs>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedBossVs>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -45981,43 +45984,43 @@ impl Predict for FittedBossVs {
 
 /// Named PELT annotator (sktime `Pelt`).
 #[derive(Clone, Debug, Default)]
-pub struct PeltAnnotator {
+pub(crate) struct PeltAnnotator {
     inner: Pelt,
 }
 
 impl PeltAnnotator {
     /// Default PELT annotator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             inner: Pelt::default(),
         }
     }
 
     /// Change-point locations.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         self.inner.fit(y, session)
     }
 }
 
 /// Named ClaSP annotator (sktime `ClaSP`).
 #[derive(Clone, Debug, Default)]
-pub struct ClaSPAnnotator;
+pub(crate) struct ClaSPAnnotator;
 
 impl ClaSPAnnotator {
     /// Default ClaSP annotator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Index of the principal ClaSP split.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
         ClaSPSegmentation::new().fit(y, session)
     }
 }
 
 /// Named Hydra+MultiROCKET classifier (sktime `HydraMultiRocketClassifier`).
 #[derive(Clone, Debug)]
-pub struct HydraMultiRocketClassifier {
+pub(crate) struct HydraMultiRocketClassifier {
     inner: HydraMultiRocket,
 }
 
@@ -46031,7 +46034,7 @@ impl Default for HydraMultiRocketClassifier {
 
 impl HydraMultiRocketClassifier {
     /// Default Hydra+MultiROCKET classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -46039,7 +46042,7 @@ impl HydraMultiRocketClassifier {
 impl Fit for HydraMultiRocketClassifier {
     type Fitted = FittedHydraMultiRocket;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -46053,7 +46056,7 @@ impl Fit for HydraMultiRocketClassifier {
 /// Interval count is not identification `p`. ExtraTrees may abort as a vacuous
 /// stump; ridge on the same interval map is the fallback.
 #[derive(Clone, Debug)]
-pub struct RiseRegressor {
+pub(crate) struct RiseRegressor {
     /// ExtraTrees count.
     pub n_estimators: usize,
     /// Random intervals.
@@ -46077,14 +46080,14 @@ impl Default for RiseRegressor {
 
 impl RiseRegressor {
     /// Default RISE regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted RISE forest or ridge fallback.
 #[derive(Clone, Debug)]
-pub struct FittedRiseRegressor {
+pub(crate) struct FittedRiseRegressor {
     forest: Option<crate::tree::FittedForestRegressor>,
     ridge: Option<FittedPenalized>,
     intervals: Vec<Interval>,
@@ -46093,7 +46096,7 @@ pub struct FittedRiseRegressor {
 impl Fit for RiseRegressor {
     type Fitted = FittedRiseRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -46201,7 +46204,7 @@ impl Predict for FittedRiseRegressor {
 /// Kernel count is not identification `p`. ExtraTrees may abort as a vacuous
 /// stump; ridge on the same map is the fallback.
 #[derive(Clone, Debug)]
-pub struct MiniRocketClassifier {
+pub(crate) struct MiniRocketClassifier {
     /// Random dilated kernels.
     pub n_kernels: usize,
     /// ExtraTrees count.
@@ -46228,14 +46231,14 @@ impl Default for MiniRocketClassifier {
 
 impl MiniRocketClassifier {
     /// Default MiniROCKET classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted MiniROCKET forest or ridge fallback.
 #[derive(Clone, Debug)]
-pub struct FittedMiniRocketClassifier {
+pub(crate) struct FittedMiniRocketClassifier {
     rocket: MiniRocket,
     forest: Option<crate::tree::FittedForestClassifier>,
     ridge: Option<crate::classification::FittedRidgeClassifier>,
@@ -46244,7 +46247,7 @@ pub struct FittedMiniRocketClassifier {
 impl Fit for MiniRocketClassifier {
     type Fitted = FittedMiniRocketClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -46342,7 +46345,7 @@ impl Predict for FittedMiniRocketClassifier {
 /// Catch22 width and tree count are not identification `p`. ExtraTrees may
 /// abort as a vacuous stump; ridge on the same map is the fallback.
 #[derive(Clone, Debug)]
-pub struct Catch22ForestRegressor {
+pub(crate) struct Catch22ForestRegressor {
     /// ExtraTrees count.
     pub n_estimators: usize,
     /// Tree depth.
@@ -46363,14 +46366,14 @@ impl Default for Catch22ForestRegressor {
 
 impl Catch22ForestRegressor {
     /// Default Catch22 forest regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted Catch22 ExtraTrees or ridge fallback.
 #[derive(Clone, Debug)]
-pub struct FittedCatch22ForestRegressor {
+pub(crate) struct FittedCatch22ForestRegressor {
     forest: Option<crate::tree::FittedForestRegressor>,
     ridge: Option<FittedPenalized>,
 }
@@ -46378,7 +46381,7 @@ pub struct FittedCatch22ForestRegressor {
 impl Fit for Catch22ForestRegressor {
     type Fitted = FittedCatch22ForestRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -46479,7 +46482,7 @@ fn dilated_columns(x: &Matrix, dil: usize) -> Matrix {
 ///
 /// Dilation / vocab counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct WeaselD {
+pub(crate) struct WeaselD {
     /// Base window (clamped to series length).
     pub window: usize,
     /// DFT coefficients kept per window.
@@ -46509,14 +46512,14 @@ impl Default for WeaselD {
 
 impl WeaselD {
     /// Default two-dilation WEASEL.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted WEASEL-D ridge.
 #[derive(Clone, Debug)]
-pub struct FittedWeaselD {
+pub(crate) struct FittedWeaselD {
     spec: (usize, usize, usize),
     dilation: usize,
     idx_a: Vec<usize>,
@@ -46526,7 +46529,7 @@ pub struct FittedWeaselD {
 
 impl Fit for WeaselD {
     type Fitted = FittedWeaselD;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedWeaselD>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedWeaselD>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -46595,7 +46598,7 @@ impl Predict for FittedWeaselD {
 ///
 /// Catch22 width and tree count are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Catch22ForestClassifier {
+pub(crate) struct Catch22ForestClassifier {
     inner: Catch22El,
 }
 
@@ -46609,7 +46612,7 @@ impl Default for Catch22ForestClassifier {
 
 impl Catch22ForestClassifier {
     /// Default Catch22 forest classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -46617,7 +46620,7 @@ impl Catch22ForestClassifier {
 impl Fit for Catch22ForestClassifier {
     type Fitted = FittedCatch22El;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -46631,7 +46634,7 @@ impl Fit for Catch22ForestClassifier {
 /// Catch22 width and tree count are not identification `p`. ExtraTrees /
 /// rotation failures fall back to ridge. Do not call `inspect_classes`.
 #[derive(Clone, Debug)]
-pub struct RotationForestRegressor {
+pub(crate) struct RotationForestRegressor {
     /// Rotation-forest members.
     pub n_estimators: usize,
     /// Tree depth.
@@ -46652,14 +46655,14 @@ impl Default for RotationForestRegressor {
 
 impl RotationForestRegressor {
     /// Default Catch22–rotation-forest regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted Catch22 rotation forest or ridge fallback.
 #[derive(Clone, Debug)]
-pub struct FittedRotationForestRegressor {
+pub(crate) struct FittedRotationForestRegressor {
     forest: Option<crate::ensemble::FittedRotationForestRegressor>,
     ridge: Option<FittedPenalized>,
 }
@@ -46667,7 +46670,7 @@ pub struct FittedRotationForestRegressor {
 impl Fit for RotationForestRegressor {
     type Fitted = FittedRotationForestRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -46750,7 +46753,7 @@ impl Predict for FittedRotationForestRegressor {
 
 /// Named FreshPRINCE classifier (sktime `FreshPRINCEClassifier`).
 #[derive(Clone, Debug)]
-pub struct FreshPrinceClassifier {
+pub(crate) struct FreshPrinceClassifier {
     inner: FreshPrince,
 }
 
@@ -46764,7 +46767,7 @@ impl Default for FreshPrinceClassifier {
 
 impl FreshPrinceClassifier {
     /// Default FreshPRINCE classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -46772,7 +46775,7 @@ impl FreshPrinceClassifier {
 impl Fit for FreshPrinceClassifier {
     type Fitted = FittedFreshPrince;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -46783,7 +46786,7 @@ impl Fit for FreshPrinceClassifier {
 
 /// Named DrCIF classifier (sktime `DrCIF`).
 #[derive(Clone, Debug)]
-pub struct DrCifClassifier {
+pub(crate) struct DrCifClassifier {
     inner: DrCif,
 }
 
@@ -46797,21 +46800,21 @@ impl Default for DrCifClassifier {
 
 impl DrCifClassifier {
     /// Default DrCIF classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for DrCifClassifier {
     type Fitted = FittedDrCif;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedDrCif>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedDrCif>> {
         self.inner.fit(x, y, session)
     }
 }
 
 /// Named CIF classifier (sktime `CanonicalIntervalForest`).
 #[derive(Clone, Debug)]
-pub struct CanonicalIntervalForestClassifier {
+pub(crate) struct CanonicalIntervalForestClassifier {
     inner: CanonicalIntervalForest,
 }
 
@@ -46825,7 +46828,7 @@ impl Default for CanonicalIntervalForestClassifier {
 
 impl CanonicalIntervalForestClassifier {
     /// Default CIF classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -46833,7 +46836,7 @@ impl CanonicalIntervalForestClassifier {
 impl Fit for CanonicalIntervalForestClassifier {
     type Fitted = FittedCanonicalIntervalForest;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -46844,7 +46847,7 @@ impl Fit for CanonicalIntervalForestClassifier {
 
 /// Named RISE classifier (sktime `RandomIntervalSpectralForest`).
 #[derive(Clone, Debug)]
-pub struct RiseClassifier {
+pub(crate) struct RiseClassifier {
     inner: Rise,
 }
 
@@ -46858,21 +46861,21 @@ impl Default for RiseClassifier {
 
 impl RiseClassifier {
     /// Default RISE classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for RiseClassifier {
     type Fitted = FittedRise;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRise>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedRise>> {
         self.inner.fit(x, y, session)
     }
 }
 
 /// Named temporal dictionary ensemble (sktime `TemporalDictionaryEnsemble`).
 #[derive(Clone, Debug)]
-pub struct TdeClassifier {
+pub(crate) struct TdeClassifier {
     inner: TemporalDictionaryEnsemble,
 }
 
@@ -46889,7 +46892,7 @@ impl Default for TdeClassifier {
 
 impl TdeClassifier {
     /// TDE with a window that fits width-6 series.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
@@ -46897,7 +46900,7 @@ impl TdeClassifier {
 impl Fit for TdeClassifier {
     type Fitted = FittedTemporalDictionaryEnsemble;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -46976,7 +46979,7 @@ fn hstack_blocks(blocks: &[Matrix]) -> Matrix {
 /// Shared kernels are applied independently on contiguous blocks, then
 /// concatenated. Block count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct DisjointCnnClassifier {
+pub(crate) struct DisjointCnnClassifier {
     /// Contiguous blocks. Not identification `p`.
     pub n_blocks: usize,
     /// Kernels per block.
@@ -47003,14 +47006,14 @@ impl Default for DisjointCnnClassifier {
 
 impl DisjointCnnClassifier {
     /// Default disjoint-CNN classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted disjoint-CNN ridge.
 #[derive(Clone, Debug)]
-pub struct FittedDisjointCnnClassifier {
+pub(crate) struct FittedDisjointCnnClassifier {
     kernels: Vec<Vec<f64>>,
     n_blocks: usize,
     inner: crate::classification::FittedRidgeClassifier,
@@ -47019,7 +47022,7 @@ pub struct FittedDisjointCnnClassifier {
 impl Fit for DisjointCnnClassifier {
     type Fitted = FittedDisjointCnnClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -47087,7 +47090,7 @@ impl Predict for FittedDisjointCnnClassifier {
 /// Each channel is a contiguous block with its **own** kernel bank, then the
 /// pooled maps are concatenated. Channel count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct McdcnnClassifier {
+pub(crate) struct McdcnnClassifier {
     /// Channels (contiguous splits). Not identification `p`.
     pub n_channels: usize,
     /// Kernels per channel.
@@ -47114,14 +47117,14 @@ impl Default for McdcnnClassifier {
 
 impl McdcnnClassifier {
     /// Default MCDCNN-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted per-channel CNN ridge.
 #[derive(Clone, Debug)]
-pub struct FittedMcdcnnClassifier {
+pub(crate) struct FittedMcdcnnClassifier {
     banks: Vec<Vec<Vec<f64>>>,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -47129,7 +47132,7 @@ pub struct FittedMcdcnnClassifier {
 impl Fit for McdcnnClassifier {
     type Fitted = FittedMcdcnnClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -47232,7 +47235,7 @@ fn patch_embed(x: &Matrix, patch_len: usize, stride: usize) -> Matrix {
 ///
 /// Patch / stride counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct PatchTstClassifier {
+pub(crate) struct PatchTstClassifier {
     /// Patch length. Not identification `p`.
     pub patch_len: usize,
     /// Stride.
@@ -47253,14 +47256,14 @@ impl Default for PatchTstClassifier {
 
 impl PatchTstClassifier {
     /// Default PatchTST-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted patch-embedding ridge.
 #[derive(Clone, Debug)]
-pub struct FittedPatchTstClassifier {
+pub(crate) struct FittedPatchTstClassifier {
     patch_len: usize,
     stride: usize,
     inner: crate::classification::FittedRidgeClassifier,
@@ -47269,7 +47272,7 @@ pub struct FittedPatchTstClassifier {
 impl Fit for PatchTstClassifier {
     type Fitted = FittedPatchTstClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -47391,18 +47394,18 @@ fn timesnet_row(row: &[f64], period: usize) -> Vec<f64> {
 ///
 /// Period is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct TimesNetClassifier;
+pub(crate) struct TimesNetClassifier;
 
 impl TimesNetClassifier {
     /// Default TimesNet-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
 
 /// Fitted TimesNet ridge.
 #[derive(Clone, Debug)]
-pub struct FittedTimesNetClassifier {
+pub(crate) struct FittedTimesNetClassifier {
     period: usize,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -47420,7 +47423,7 @@ fn timesnet_matrix(x: &Matrix, period: usize) -> Matrix {
 impl Fit for TimesNetClassifier {
     type Fitted = FittedTimesNetClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -47497,7 +47500,7 @@ fn tcn_row(row: &[f64], w: &[f64], dilation: usize) -> f64 {
 ///
 /// Dilation / kernel counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct TcnClassifier {
+pub(crate) struct TcnClassifier {
     /// Kernels per dilation.
     pub n_kernels: usize,
     /// Kernel width.
@@ -47521,14 +47524,14 @@ impl Default for TcnClassifier {
 
 impl TcnClassifier {
     /// Default TCN-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted dilated-conv ridge.
 #[derive(Clone, Debug)]
-pub struct FittedTcnClassifier {
+pub(crate) struct FittedTcnClassifier {
     kernels: Vec<(usize, Vec<f64>)>,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -47536,7 +47539,7 @@ pub struct FittedTcnClassifier {
 impl Fit for TcnClassifier {
     type Fitted = FittedTcnClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -47640,7 +47643,7 @@ fn patch_attention(x: &Matrix, patch_len: usize) -> Matrix {
 ///
 /// Patch count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct TstClassifier {
+pub(crate) struct TstClassifier {
     /// Patch length. Not identification `p`.
     pub patch_len: usize,
     /// Ridge \(\alpha\).
@@ -47658,14 +47661,14 @@ impl Default for TstClassifier {
 
 impl TstClassifier {
     /// Default TST-lite classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted attention-pooled ridge.
 #[derive(Clone, Debug)]
-pub struct FittedTstClassifier {
+pub(crate) struct FittedTstClassifier {
     patch_len: usize,
     inner: crate::classification::FittedRidgeClassifier,
 }
@@ -47673,7 +47676,7 @@ pub struct FittedTstClassifier {
 impl Fit for TstClassifier {
     type Fitted = FittedTstClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -47714,7 +47717,7 @@ impl Predict for FittedTstClassifier {
 ///
 /// Window length is not identification `p`. Distinct from [`ClaSPSegmentation`]
 /// (two-mean F score) and [`Stamp`] (matrix-profile distances).
-pub fn floss_change_point(
+pub(crate) fn floss_change_point(
     y: &Vector,
     window: usize,
     session: &Session,
@@ -47816,7 +47819,7 @@ pub fn floss_change_point(
 
 /// FLOSS change-point payload.
 #[derive(Clone, Debug)]
-pub struct FlossResult {
+pub(crate) struct FlossResult {
     /// Argmin of the corrected arc curve.
     pub index: f64,
     /// Corrected arc curve (`n`).
@@ -47825,7 +47828,7 @@ pub struct FlossResult {
 
 /// Named FLOSS annotator (sktime `FLOSS`).
 #[derive(Clone, Debug)]
-pub struct Floss {
+pub(crate) struct Floss {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
 }
@@ -47838,14 +47841,14 @@ impl Default for Floss {
 
 impl Floss {
     /// FLOSS with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
         }
     }
 
     /// Corrected arc-curve change point.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FlossResult>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FlossResult>> {
         floss_change_point(y, self.window, session)
     }
 }
@@ -47855,7 +47858,7 @@ impl Floss {
 /// Regime count is not identification `p`. Distinct from [`Floss`] (single
 /// CAC argmin) and [`ClaSPSegmentation`] (two-mean F).
 #[derive(Clone, Debug)]
-pub struct Fluss {
+pub(crate) struct Fluss {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
     /// Number of regimes (change points = regimes − 1). Not identification `p`.
@@ -47873,7 +47876,7 @@ impl Default for Fluss {
 
 impl Fluss {
     /// FLUSS with `n_regimes` pieces.
-    pub fn new(n_regimes: usize) -> Self {
+    pub(crate) fn new(n_regimes: usize) -> Self {
         Self {
             n_regimes: n_regimes.max(2),
             ..Self::default()
@@ -47881,7 +47884,7 @@ impl Fluss {
     }
 
     /// Local minima of the corrected arc curve.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         let q = floss_change_point(y, self.window, session)?;
         let ctx = FitCtx::with_session(session.child("fluss"));
         let cac = &q.value.cac;
@@ -47921,7 +47924,7 @@ impl Fluss {
 /// Window length is not identification `p`. Distinct from [`Stamp`] (global
 /// argmin only) and [`matrix_profile`] (distances without the index vector).
 #[derive(Clone, Debug)]
-pub struct StompResult {
+pub(crate) struct StompResult {
     /// Distance profile.
     pub profile: Vector,
     /// Nearest-neighbour subsequence index for each window.
@@ -47930,7 +47933,7 @@ pub struct StompResult {
 
 /// Named STOMP detector.
 #[derive(Clone, Debug)]
-pub struct Stomp {
+pub(crate) struct Stomp {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
 }
@@ -47943,14 +47946,14 @@ impl Default for Stomp {
 
 impl Stomp {
     /// STOMP with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
         }
     }
 
     /// Full matrix profile and nearest-neighbour index vector.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(
             &mut ctx.report,
@@ -48020,7 +48023,7 @@ impl Stomp {
 ///
 /// Window length is not identification `p`. Distinct from [`Stamp`] (argmin /
 /// motif) and [`Stray`] (MAD z-scores).
-pub fn merlin_discord(
+pub(crate) fn merlin_discord(
     y: &Vector,
     window: usize,
     session: &Session,
@@ -48085,7 +48088,7 @@ pub fn merlin_discord(
 
 /// MERLIN discord payload.
 #[derive(Clone, Debug)]
-pub struct MerlinResult {
+pub(crate) struct MerlinResult {
     /// Argmax of the matrix profile.
     pub discord: f64,
     /// Distance at the discord.
@@ -48096,7 +48099,7 @@ pub struct MerlinResult {
 
 /// Named MERLIN discord annotator.
 #[derive(Clone, Debug)]
-pub struct Merlin {
+pub(crate) struct Merlin {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
 }
@@ -48109,14 +48112,14 @@ impl Default for Merlin {
 
 impl Merlin {
     /// MERLIN with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
         }
     }
 
     /// Matrix-profile discord.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<MerlinResult>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<MerlinResult>> {
         merlin_discord(y, self.window, session)
     }
 }
@@ -48126,7 +48129,7 @@ impl Merlin {
 /// Window count is not identification `p`. Distinct from [`Stomp`] (one
 /// window) and [`Merlin`] (single discord).
 #[derive(Clone, Debug)]
-pub struct PanMatrixProfile {
+pub(crate) struct PanMatrixProfile {
     /// Smallest window. Not identification `p`.
     pub min_window: usize,
     /// Number of consecutive windows. Not identification `p`.
@@ -48144,7 +48147,7 @@ impl Default for PanMatrixProfile {
 
 impl PanMatrixProfile {
     /// Pan-MP starting at `min_window` for `n_windows` lengths.
-    pub fn new(min_window: usize, n_windows: usize) -> Self {
+    pub(crate) fn new(min_window: usize, n_windows: usize) -> Self {
         Self {
             min_window: min_window.max(2),
             n_windows: n_windows.max(1),
@@ -48152,7 +48155,7 @@ impl PanMatrixProfile {
     }
 
     /// Motif and discord of the matrix profile at each window.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedPanMatrixProfile>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedPanMatrixProfile>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(
             &mut ctx.report,
@@ -48216,7 +48219,7 @@ impl PanMatrixProfile {
 
 /// Fitted pan matrix profile.
 #[derive(Clone, Debug)]
-pub struct FittedPanMatrixProfile {
+pub(crate) struct FittedPanMatrixProfile {
     /// Window lengths.
     pub windows: Vector,
     /// Motif (argmin) index per window.
@@ -48242,7 +48245,7 @@ fn subsequence_dist(a: &Vector, ia: usize, b: &Vector, ib: usize, m: usize) -> f
 ///
 /// Window length is not identification `p`. Distinct from [`dtw`] (alignment)
 /// and [`matrix_profile`] (self nearest neighbour).
-pub fn mpdist(
+pub(crate) fn mpdist(
     a: &Vector,
     b: &Vector,
     window: usize,
@@ -48322,7 +48325,7 @@ pub fn mpdist(
 /// `sample_frac` is not identification `p`. Distinct from [`Stomp`] (every
 /// diagonal) and [`Stamp`] (full nested loops).
 #[derive(Clone, Debug)]
-pub struct Scrimp {
+pub(crate) struct Scrimp {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
     /// Fraction of STOMP diagonals. Not identification `p`.
@@ -48343,7 +48346,7 @@ impl Default for Scrimp {
 
 impl Scrimp {
     /// SCRIMP with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             ..Self::default()
@@ -48351,7 +48354,7 @@ impl Scrimp {
     }
 
     /// Anytime matrix profile from a random diagonal subset.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(
             &mut ctx.report,
@@ -48447,7 +48450,7 @@ impl Scrimp {
 ///
 /// Query length is not identification `p`. Distinct from [`mpdist`] (two-way
 /// mean) and [`matrix_profile`] (self nearest neighbour).
-pub fn mass(query: &Vector, series: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn mass(query: &Vector, series: &Vector, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(
         &mut ctx.report,
@@ -48514,7 +48517,7 @@ pub fn mass(query: &Vector, series: &Vector, session: &Session) -> Result<Qualif
 /// Motif count is not identification `p`. Distinct from [`Stamp`] (single
 /// argmin) and [`Merlin`] (discord / argmax).
 #[derive(Clone, Debug)]
-pub struct Motif {
+pub(crate) struct Motif {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
     /// Number of motifs. Not identification `p`.
@@ -48532,7 +48535,7 @@ impl Default for Motif {
 
 impl Motif {
     /// Motif search with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             ..Self::default()
@@ -48540,7 +48543,7 @@ impl Motif {
     }
 
     /// Lowest-distance subsequences on the self matrix profile.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedMotif>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedMotif>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(
             &mut ctx.report,
@@ -48613,7 +48616,7 @@ impl Motif {
 
 /// Fitted motif set.
 #[derive(Clone, Debug)]
-pub struct FittedMotif {
+pub(crate) struct FittedMotif {
     /// Motif subsequence starts.
     pub indices: Vector,
     /// Motif distances.
@@ -48627,7 +48630,7 @@ pub struct FittedMotif {
 /// Window length is not identification `p`. Distinct from [`Stomp`] and
 /// [`matrix_profile`] (raw Euclidean).
 #[derive(Clone, Debug)]
-pub struct Mpx {
+pub(crate) struct Mpx {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
 }
@@ -48640,14 +48643,14 @@ impl Default for Mpx {
 
 impl Mpx {
     /// MPX with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
         }
     }
 
     /// Z-normalized self nearest-neighbour profile.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(
             &mut ctx.report,
@@ -48732,7 +48735,7 @@ impl Mpx {
 /// Snippet count is not identification `p`. Distinct from [`Motif`] (tightest
 /// nearest neighbours) and [`Merlin`] (discords).
 #[derive(Clone, Debug)]
-pub struct Snippets {
+pub(crate) struct Snippets {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
     /// Number of regimes. Not identification `p`.
@@ -48750,7 +48753,7 @@ impl Default for Snippets {
 
 impl Snippets {
     /// Snippet search with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             ..Self::default()
@@ -48758,7 +48761,7 @@ impl Snippets {
     }
 
     /// Greedy facility-location snippets on pairwise subsequence distances.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedSnippets>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedSnippets>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(
             &mut ctx.report,
@@ -48837,7 +48840,7 @@ impl Snippets {
 
 /// Fitted snippet set.
 #[derive(Clone, Debug)]
-pub struct FittedSnippets {
+pub(crate) struct FittedSnippets {
     /// Snippet starts.
     pub indices: Vector,
     /// Facility-location costs after each pick.
@@ -48849,7 +48852,7 @@ pub struct FittedSnippets {
 /// Window length is not identification `p`. Distinct from [`Stamp`] (batch
 /// nested loops) and [`Scrimp`] (random diagonals).
 #[derive(Clone, Debug)]
-pub struct Stampi {
+pub(crate) struct Stampi {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
 }
@@ -48862,14 +48865,14 @@ impl Default for Stampi {
 
 impl Stampi {
     /// STAMPI with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
         }
     }
 
     /// Left-to-right streaming matrix profile.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(
             &mut ctx.report,
@@ -48936,7 +48939,7 @@ impl Stampi {
 ///
 /// Window length is not identification `p`. Distinct from [`Motif`] (one
 /// series) and [`mpdist`] (scalar two-series distance).
-pub fn ostinato(x: &Matrix, window: usize, session: &Session) -> Result<Qualified<OstinatoResult>> {
+pub(crate) fn ostinato(x: &Matrix, window: usize, session: &Session) -> Result<Qualified<OstinatoResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, None, &ctx.policy);
     let m = window.max(2);
@@ -49016,7 +49019,7 @@ pub fn ostinato(x: &Matrix, window: usize, session: &Session) -> Result<Qualifie
 
 /// Consensus motif payload.
 #[derive(Clone, Debug)]
-pub struct OstinatoResult {
+pub(crate) struct OstinatoResult {
     /// Series (row) that hosts the motif.
     pub series: f64,
     /// Start index inside that series.
@@ -49027,7 +49030,7 @@ pub struct OstinatoResult {
 
 /// Named Ostinato consensus-motif search.
 #[derive(Clone, Debug)]
-pub struct Ostinato {
+pub(crate) struct Ostinato {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
 }
@@ -49040,14 +49043,14 @@ impl Default for Ostinato {
 
 impl Ostinato {
     /// Ostinato with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
         }
     }
 
     /// Consensus motif of the rows of `x`.
-    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<OstinatoResult>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<OstinatoResult>> {
         ostinato(x, self.window, session)
     }
 }
@@ -49057,7 +49060,7 @@ impl Ostinato {
 /// Stride is not identification `p`. Distinct from [`Scrimp`] (random
 /// diagonals) and [`Stampi`] (left-to-right prefix).
 #[derive(Clone, Debug)]
-pub struct Prescrimp {
+pub(crate) struct Prescrimp {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
     /// Coarse stride. Not identification `p`.
@@ -49075,7 +49078,7 @@ impl Default for Prescrimp {
 
 impl Prescrimp {
     /// PRESCIAMP with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             ..Self::default()
@@ -49083,7 +49086,7 @@ impl Prescrimp {
     }
 
     /// Coarse grid profile, then a local refinement around each neighbour.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(
             &mut ctx.report,
@@ -49166,7 +49169,7 @@ impl Prescrimp {
 /// Window length is not identification `p`. Distinct from [`Mpx`]
 /// (z-normalized) and [`Stampi`] (prefix only).
 #[derive(Clone, Debug)]
-pub struct Aamp {
+pub(crate) struct Aamp {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
 }
@@ -49179,14 +49182,14 @@ impl Default for Aamp {
 
 impl Aamp {
     /// AAMP with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
         }
     }
 
     /// Raw-Euclidean self nearest-neighbour profile.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<StompResult>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(
             &mut ctx.report,
@@ -49249,7 +49252,7 @@ impl Aamp {
 ///
 /// Query length is not identification `p`. Distinct from [`mass`]
 /// (z-normalized) and [`Aamp`] (self profile).
-pub fn mass_absolute(
+pub(crate) fn mass_absolute(
     query: &Vector,
     series: &Vector,
     session: &Session,
@@ -49298,7 +49301,7 @@ pub fn mass_absolute(
 ///
 /// Window length is not identification `p`. Distinct from [`Aamp`] (distances)
 /// and [`Motif`] (argmin selection).
-pub fn annotation_vector(
+pub(crate) fn annotation_vector(
     y: &Vector,
     window: usize,
     session: &Session,
@@ -49360,7 +49363,7 @@ pub fn annotation_vector(
 
 /// Named complexity annotation-vector transform.
 #[derive(Clone, Debug)]
-pub struct AnnotationVector {
+pub(crate) struct AnnotationVector {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
 }
@@ -49373,14 +49376,14 @@ impl Default for AnnotationVector {
 
 impl AnnotationVector {
     /// Annotation vector with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
         }
     }
 
     /// Complexity weights for every subsequence of `y`.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         annotation_vector(y, self.window, session)
     }
 }
@@ -49492,7 +49495,7 @@ fn panel_profile(
 /// Window length is not identification `p`. Distinct from [`Mpx`] (one
 /// series) and [`Ostinato`] (consensus host series).
 #[derive(Clone, Debug)]
-pub struct Mstump {
+pub(crate) struct Mstump {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
 }
@@ -49505,14 +49508,14 @@ impl Default for Mstump {
 
 impl Mstump {
     /// MSTUMP with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
         }
     }
 
     /// Mean z-normalized self-profile across the rows of `x`.
-    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<StompResult>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<StompResult>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let out = panel_profile(x, self.window, true, &mut ctx, "MSTUMP");
@@ -49537,7 +49540,7 @@ impl Mstump {
 /// Window length is not identification `p`. Distinct from [`Aamp`] (one
 /// series) and [`Mstump`] (z-normalized).
 #[derive(Clone, Debug)]
-pub struct Maamp {
+pub(crate) struct Maamp {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
 }
@@ -49550,14 +49553,14 @@ impl Default for Maamp {
 
 impl Maamp {
     /// MAAMP with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
         }
     }
 
     /// Mean raw-Euclidean self-profile across the rows of `x`.
-    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<StompResult>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<StompResult>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let out = panel_profile(x, self.window, false, &mut ctx, "MAAMP");
@@ -49582,7 +49585,7 @@ impl Maamp {
 /// Motif count is not identification `p`. Distinct from [`Motif`] (one series)
 /// and [`Ostinato`] (consensus radius).
 #[derive(Clone, Debug)]
-pub struct Mmotifs {
+pub(crate) struct Mmotifs {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
     /// Number of motifs. Not identification `p`.
@@ -49600,7 +49603,7 @@ impl Default for Mmotifs {
 
 /// Fitted multidimensional motif set.
 #[derive(Clone, Debug)]
-pub struct FittedMmotifs {
+pub(crate) struct FittedMmotifs {
     /// Motif starts.
     pub indices: Vector,
     /// MSTUMP distances at those starts.
@@ -49609,7 +49612,7 @@ pub struct FittedMmotifs {
 
 impl Mmotifs {
     /// Multidimensional motif search with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
             ..Self::default()
@@ -49617,7 +49620,7 @@ impl Mmotifs {
     }
 
     /// Top-\(k\) argmin of the MSTUMP profile with an exclusion zone.
-    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedMmotifs>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedMmotifs>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let mp = panel_profile(x, self.window, true, &mut ctx, "mmotifs");
@@ -49683,7 +49686,7 @@ impl Mmotifs {
 /// Window count is not identification `p`. Distinct from [`PanMatrixProfile`]
 /// (one series) and [`Mstump`] (one window).
 #[derive(Clone, Debug)]
-pub struct Mpstump {
+pub(crate) struct Mpstump {
     /// Smallest window. Not identification `p`.
     pub min_window: usize,
     /// Number of consecutive windows. Not identification `p`.
@@ -49701,7 +49704,7 @@ impl Default for Mpstump {
 
 impl Mpstump {
     /// MPSTUMP starting at `min_window` for `n_windows` lengths.
-    pub fn new(min_window: usize, n_windows: usize) -> Self {
+    pub(crate) fn new(min_window: usize, n_windows: usize) -> Self {
         Self {
             min_window: min_window.max(2),
             n_windows: n_windows.max(1),
@@ -49709,7 +49712,7 @@ impl Mpstump {
     }
 
     /// Motif and discord of the MSTUMP profile at each window.
-    pub fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedPanMatrixProfile>> {
+    pub(crate) fn fit(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedPanMatrixProfile>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let nw = self.n_windows.max(1);
@@ -49767,7 +49770,7 @@ impl Mpstump {
 ///
 /// Window length is not identification `p`. Distinct from [`Snippets`]
 /// (greedy selection) and [`Motif`] (nearest-neighbour only).
-pub fn snippet_area(y: &Vector, window: usize, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn snippet_area(y: &Vector, window: usize, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(
         &mut ctx.report,
@@ -49814,7 +49817,7 @@ pub fn snippet_area(y: &Vector, window: usize, session: &Session) -> Result<Qual
 
 /// Named snippet-area transform.
 #[derive(Clone, Debug)]
-pub struct SnippetArea {
+pub(crate) struct SnippetArea {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
 }
@@ -49827,14 +49830,14 @@ impl Default for SnippetArea {
 
 impl SnippetArea {
     /// Snippet-area profile with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
         }
     }
 
     /// Facility-location cost of every subsequence of `y`.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         snippet_area(y, self.window, session)
     }
 }
@@ -49844,7 +49847,7 @@ impl SnippetArea {
 /// Window length is not identification `p`. Distinct from [`Motif`] (argmin
 /// pair) and [`Merlin`] (discord).
 #[derive(Clone, Debug)]
-pub struct AllChains {
+pub(crate) struct AllChains {
     /// Subsequence length. Not identification `p`.
     pub window: usize,
 }
@@ -49857,14 +49860,14 @@ impl Default for AllChains {
 
 impl AllChains {
     /// Time-series chains with a given window.
-    pub fn new(window: usize) -> Self {
+    pub(crate) fn new(window: usize) -> Self {
         Self {
             window: window.max(2),
         }
     }
 
     /// Longest right-nearest-neighbour chain of `y`.
-    pub fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedAllChains>> {
+    pub(crate) fn fit(&self, y: &Vector, session: &Session) -> Result<Qualified<FittedAllChains>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(
             &mut ctx.report,
@@ -49943,7 +49946,7 @@ impl AllChains {
 
 /// Fitted time-series chain.
 #[derive(Clone, Debug)]
-pub struct FittedAllChains {
+pub(crate) struct FittedAllChains {
     /// Subsequence start indices of the longest right-NN chain.
     pub indices: Vector,
     /// Chain length.

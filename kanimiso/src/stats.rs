@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 
 /// Descriptive moments of a numeric sample.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Describe {
+pub(crate) struct Describe {
     /// Finite count used for the moments.
     pub n: usize,
     /// Arithmetic mean of finite entries.
@@ -43,7 +43,7 @@ pub struct Describe {
 
 /// Hypothesis-test payload shared by the classical tests.
 #[derive(Clone, Debug, PartialEq)]
-pub struct HypothesisTest {
+pub(crate) struct HypothesisTest {
     /// Test statistic.
     pub statistic: f64,
     /// Two-sided (or otherwise documented) p-value.
@@ -56,7 +56,7 @@ pub struct HypothesisTest {
 
 /// One-way ANOVA decomposition.
 #[derive(Clone, Debug, PartialEq)]
-pub struct AnovaResult {
+pub(crate) struct AnovaResult {
     /// `MSB / MSW`.
     pub f_stat: f64,
     /// Upper-tail F p-value.
@@ -73,7 +73,7 @@ pub struct AnovaResult {
 
 /// Pearson χ² test on a contingency table.
 #[derive(Clone, Debug)]
-pub struct Chi2Result {
+pub(crate) struct Chi2Result {
     /// Pearson χ² statistic.
     pub statistic: f64,
     /// Upper-tail χ² p-value.
@@ -88,7 +88,7 @@ pub struct Chi2Result {
 
 /// Augmented Dickey–Fuller unit-root regression.
 #[derive(Clone, Debug, PartialEq)]
-pub struct AdfullerResult {
+pub(crate) struct AdfullerResult {
     /// t-statistic on the lagged level.
     pub stat: f64,
     /// MacKinnon-style interpolated p-value (constant, no trend).
@@ -101,7 +101,7 @@ pub struct AdfullerResult {
 
 /// KPSS level-stationarity statistic (Newey–West long-run variance).
 #[derive(Clone, Debug, PartialEq)]
-pub struct KpssResult {
+pub(crate) struct KpssResult {
     /// KPSS η statistic.
     pub stat: f64,
     /// Interpolated p-value against Kwiatkowski et al. critical values.
@@ -114,7 +114,7 @@ pub struct KpssResult {
 
 /// Ljung–Box portmanteau of residual autocorrelation.
 #[derive(Clone, Debug, PartialEq)]
-pub struct LjungBoxResult {
+pub(crate) struct LjungBoxResult {
     /// `Q` statistic.
     pub stat: f64,
     /// χ² p-value with `lags` degrees of freedom.
@@ -125,7 +125,7 @@ pub struct LjungBoxResult {
 
 /// Granger causality F test (`x` → `y` at the stated lag).
 #[derive(Clone, Debug, PartialEq)]
-pub struct GrangerResult {
+pub(crate) struct GrangerResult {
     /// Restricted-vs-unrestricted F statistic.
     pub f_stat: f64,
     /// Upper-tail F p-value.
@@ -140,7 +140,7 @@ pub struct GrangerResult {
 
 /// Family-wise / FDR correction for a vector of p-values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MultiTest {
+pub(crate) enum MultiTest {
     /// Bonferroni: `min(1, m p_i)`.
     Bonferroni,
     /// Holm step-down FWER.
@@ -151,7 +151,7 @@ pub enum MultiTest {
 
 /// Percentile bootstrap of the mean.
 #[derive(Clone, Debug, PartialEq)]
-pub struct BootstrapMean {
+pub(crate) struct BootstrapMean {
     /// Original-sample mean.
     pub mean: f64,
     /// Lower 2.5% bootstrap percentile.
@@ -162,11 +162,11 @@ pub struct BootstrapMean {
 
 /// Kaplan–Meier product-limit estimator.
 #[derive(Clone, Debug, Default)]
-pub struct KaplanMeier {}
+pub(crate) struct KaplanMeier {}
 
 /// Fitted right-censored survival curve.
 #[derive(Clone, Debug)]
-pub struct FittedKaplanMeier {
+pub(crate) struct FittedKaplanMeier {
     /// Distinct event times (ascending).
     pub times: Vector,
     /// Survival function at each event time (right-continuous product-limit).
@@ -179,12 +179,12 @@ pub struct FittedKaplanMeier {
 
 impl KaplanMeier {
     /// Construct the default product-limit estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {}
     }
 
     /// Fit on durations and event indicators (`1` = event, `0` = censored).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -196,7 +196,7 @@ impl KaplanMeier {
 
 /// Cox proportional-hazards MLE via Newton on the Breslow partial likelihood.
 #[derive(Clone, Debug)]
-pub struct CoxPH {
+pub(crate) struct CoxPH {
     /// Newton iteration cap.
     pub max_iter: usize,
     /// Gradient-norm convergence tolerance.
@@ -214,12 +214,12 @@ impl Default for CoxPH {
 
 impl CoxPH {
     /// Default Newton settings.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit `h(t | x) = h0(t) exp(xβ)` on durations, events, and covariates.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -232,7 +232,7 @@ impl CoxPH {
 
 /// Fitted Cox partial-likelihood coefficients.
 #[derive(Clone, Debug)]
-pub struct FittedCoxPH {
+pub(crate) struct FittedCoxPH {
     /// Log-hazard coefficients.
     pub coef: Vector,
     /// Partial log-likelihood at the reported point.
@@ -251,18 +251,18 @@ pub struct FittedCoxPH {
 /// for events. Newton uses the inner Cox fit; a failed Cholesky is swallowed
 /// so a diagnostic session is not aborted by a Fatal inner issue.
 #[derive(Clone, Debug, Default)]
-pub struct PHReg {
+pub(crate) struct PHReg {
     inner: CoxPH,
 }
 
 impl PHReg {
     /// Default Breslow Cox wrapper.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit `h(t | x) = h0(t) exp(xβ)`.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -320,7 +320,7 @@ impl PHReg {
 
 /// Fitted PHReg coefficients.
 #[derive(Clone, Debug)]
-pub struct FittedPHReg {
+pub(crate) struct FittedPHReg {
     /// Log-hazard slopes.
     pub coef: Vector,
     /// Partial log-likelihood at the reported point.
@@ -337,16 +337,16 @@ pub struct FittedPHReg {
 ///
 /// Event count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct SurvfuncRight {}
+pub(crate) struct SurvfuncRight {}
 
 impl SurvfuncRight {
     /// Product-limit wrapper.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit on durations and event indicators (`1` = event).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -368,7 +368,7 @@ impl SurvfuncRight {
 
 /// Fitted right-censored survival function.
 #[derive(Clone, Debug)]
-pub struct FittedSurvfuncRight {
+pub(crate) struct FittedSurvfuncRight {
     /// Distinct event times.
     pub times: Vector,
     /// Product-limit survival.
@@ -381,7 +381,7 @@ pub struct FittedSurvfuncRight {
 
 /// Shapiro–Francia normal-probability-plot correlation.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ShapiroFranciaResult {
+pub(crate) struct ShapiroFranciaResult {
     /// Squared correlation of order statistics with Blom normal scores.
     pub w: f64,
     /// Approximate p-value (Royston-style logistic transform).
@@ -389,7 +389,7 @@ pub struct ShapiroFranciaResult {
 }
 
 /// Sample moments, skewness, and excess kurtosis.
-pub fn describe(x: &Vector, session: &Session) -> Result<Qualified<Describe>> {
+pub(crate) fn describe(x: &Vector, session: &Session) -> Result<Qualified<Describe>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     let st = slice_stats(x.as_slice());
@@ -417,7 +417,7 @@ pub fn describe(x: &Vector, session: &Session) -> Result<Qualified<Describe>> {
 }
 
 /// Pearson product-moment correlation.
-pub fn pearson(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn pearson(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_pair(&mut ctx, x, y);
     let r = pearson_raw(x.as_slice(), y.as_slice());
@@ -432,7 +432,7 @@ pub fn pearson(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<f6
 }
 
 /// Spearman rank correlation (Pearson of average ranks).
-pub fn spearman(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn spearman(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_pair(&mut ctx, x, y);
     let rx = rank_average(x.as_slice());
@@ -449,7 +449,7 @@ pub fn spearman(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<f
 }
 
 /// Kendall's τ-b (tie-corrected).
-pub fn kendall(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn kendall(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_pair(&mut ctx, x, y);
     let tau = kendall_tau_b(x.as_slice(), y.as_slice());
@@ -464,7 +464,7 @@ pub fn kendall(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<f6
 }
 
 /// Pairwise Pearson correlation matrix of the columns of `x`.
-pub fn corrcoef(x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn corrcoef(x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, None, &ctx.policy);
     let (n, p) = x.shape();
@@ -498,7 +498,7 @@ pub fn corrcoef(x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
 ///
 /// Residualizes both series on `z` (plus intercept) by OLS and returns the
 /// Pearson correlation of the residuals.
-pub fn partial_corr(
+pub(crate) fn partial_corr(
     x: &Vector,
     y: &Vector,
     z: &Matrix,
@@ -554,7 +554,7 @@ pub fn partial_corr(
 }
 
 /// Variance inflation factors: `1 / (1 − R²_j)` from OLS of column `j` on the rest.
-pub fn vif(x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn vif(x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, None, &ctx.policy);
     let (n, p) = x.shape();
@@ -645,7 +645,7 @@ pub fn vif(x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
 }
 
 /// One-sample t-test of `E[x] = popmean`.
-pub fn ttest_1samp(
+pub(crate) fn ttest_1samp(
     x: &Vector,
     popmean: f64,
     session: &Session,
@@ -709,7 +709,7 @@ pub fn ttest_1samp(
 }
 
 /// Two-sample t-test. `welch = true` uses the Welch–Satterthwaite df.
-pub fn ttest_ind(
+pub(crate) fn ttest_ind(
     x: &Vector,
     y: &Vector,
     welch: bool,
@@ -784,7 +784,7 @@ pub fn ttest_ind(
 }
 
 /// Paired t-test on `x − y`.
-pub fn ttest_rel(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn ttest_rel(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_pair(&mut ctx, x, y);
     if x.len() != y.len() {
@@ -844,7 +844,7 @@ pub fn ttest_rel(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<
 }
 
 /// One-way ANOVA F test on two or more groups.
-pub fn anova_oneway(groups: &[&Vector], session: &Session) -> Result<Qualified<AnovaResult>> {
+pub(crate) fn anova_oneway(groups: &[&Vector], session: &Session) -> Result<Qualified<AnovaResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if groups.len() < 2 {
         ctx.push(
@@ -929,12 +929,12 @@ pub fn anova_oneway(groups: &[&Vector], session: &Session) -> Result<Qualified<A
 }
 
 /// χ² test of independence on a contingency table.
-pub fn chi2_independence(table: &Matrix, session: &Session) -> Result<Qualified<Chi2Result>> {
+pub(crate) fn chi2_independence(table: &Matrix, session: &Session) -> Result<Qualified<Chi2Result>> {
     chi2_contingency(table, session)
 }
 
 /// Pearson χ² test of independence (same contract as [`chi2_independence`]).
-pub fn chi2_contingency(table: &Matrix, session: &Session) -> Result<Qualified<Chi2Result>> {
+pub(crate) fn chi2_contingency(table: &Matrix, session: &Session) -> Result<Qualified<Chi2Result>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, table, None, &ctx.policy);
     let (r, c) = table.shape();
@@ -1026,7 +1026,7 @@ pub fn chi2_contingency(table: &Matrix, session: &Session) -> Result<Qualified<C
 }
 
 /// Two-sample Kolmogorov–Smirnov test (asymptotic Smirnov p-value).
-pub fn ks_2samp(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn ks_2samp(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     inspect_series_as_target(&mut ctx, y);
@@ -1086,7 +1086,7 @@ pub fn ks_2samp(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<H
 }
 
 /// Shapiro–Francia W' (normal plot correlation of order statistics).
-pub fn shapiro_francia(x: &Vector, session: &Session) -> Result<Qualified<ShapiroFranciaResult>> {
+pub(crate) fn shapiro_francia(x: &Vector, session: &Session) -> Result<Qualified<ShapiroFranciaResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     let mut xs: Vec<f64> = x
@@ -1130,7 +1130,7 @@ pub fn shapiro_francia(x: &Vector, session: &Session) -> Result<Qualified<Shapir
 }
 
 /// Levene / Brown–Forsythe test (absolute deviations from group medians).
-pub fn levene(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn levene(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if groups.len() < 2 {
         ctx.push(
@@ -1216,7 +1216,7 @@ pub fn levene(groups: &[&Vector], session: &Session) -> Result<Qualified<Hypothe
 }
 
 /// Mann–Whitney U (two-sided normal approximation with tie correction).
-pub fn mannwhitneyu(
+pub(crate) fn mannwhitneyu(
     x: &Vector,
     y: &Vector,
     session: &Session,
@@ -1300,7 +1300,7 @@ pub fn mannwhitneyu(
 }
 
 /// Wilcoxon signed-rank test on paired differences `x − y` (normal approximation).
-pub fn wilcoxon_signed(
+pub(crate) fn wilcoxon_signed(
     x: &Vector,
     y: &Vector,
     session: &Session,
@@ -1354,7 +1354,7 @@ pub fn wilcoxon_signed(
 }
 
 /// Kruskal–Wallis H test (χ² approximation).
-pub fn kruskal(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn kruskal(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if groups.len() < 2 {
         ctx.push(
@@ -1412,7 +1412,7 @@ pub fn kruskal(groups: &[&Vector], session: &Session) -> Result<Qualified<Hypoth
 }
 
 /// Jarque–Bera normality test from sample skewness and excess kurtosis.
-pub fn jarque_bera(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn jarque_bera(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     let st = slice_stats(x.as_slice());
@@ -1470,7 +1470,7 @@ pub fn jarque_bera(x: &Vector, session: &Session) -> Result<Qualified<Hypothesis
 }
 
 /// Durbin–Watson statistic `Σ (e_t − e_{t−1})² / Σ e_t²`.
-pub fn durbin_watson(resid: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn durbin_watson(resid: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, resid);
     let e = resid.as_slice();
@@ -1507,7 +1507,7 @@ pub fn durbin_watson(resid: &Vector, session: &Session) -> Result<Qualified<f64>
 }
 
 /// Breusch–Pagan LM test: `n R²` from `e² ~ design`.
-pub fn breusch_pagan(
+pub(crate) fn breusch_pagan(
     resid: &Vector,
     design: &Matrix,
     session: &Session,
@@ -1593,7 +1593,7 @@ pub fn breusch_pagan(
 /// Auxiliary regression of \(e^2\) on the original columns and their
 /// cross-products. A perfect auxiliary fit is Misleading, not vacuous, so
 /// a well-specified outer model is not aborted.
-pub fn het_white(
+pub(crate) fn het_white(
     resid: &Vector,
     design: &Matrix,
     session: &Session,
@@ -1734,7 +1734,7 @@ pub fn het_white(
 }
 
 /// Alias of [`breusch_pagan`] (statsmodels `het_breuschpagan`).
-pub fn het_breuschpagan(
+pub(crate) fn het_breuschpagan(
     resid: &Vector,
     design: &Matrix,
     session: &Session,
@@ -1743,7 +1743,7 @@ pub fn het_breuschpagan(
 }
 
 /// Alias of [`ljung_box`] (statsmodels `acorr_ljungbox`).
-pub fn acorr_ljungbox(
+pub(crate) fn acorr_ljungbox(
     x: &Vector,
     lags: usize,
     session: &Session,
@@ -1752,7 +1752,7 @@ pub fn acorr_ljungbox(
 }
 
 /// Ljung–Box `Q` test on the first `lags` autocorrelations of `x`.
-pub fn ljung_box(x: &Vector, lags: usize, session: &Session) -> Result<Qualified<LjungBoxResult>> {
+pub(crate) fn ljung_box(x: &Vector, lags: usize, session: &Session) -> Result<Qualified<LjungBoxResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     let n = x.len();
@@ -1800,7 +1800,7 @@ pub fn ljung_box(x: &Vector, lags: usize, session: &Session) -> Result<Qualified
 }
 
 /// Augmented Dickey–Fuller test: Δy on `y_{t−1}` and lags of Δy (with intercept).
-pub fn adfuller(
+pub(crate) fn adfuller(
     y: &Vector,
     lags: Option<usize>,
     session: &Session,
@@ -1910,7 +1910,7 @@ pub fn adfuller(
 /// Default lag is 1 so identification `p` stays the ADF regressors, not a
 /// Schwert rule that would over-parameterize short samples. The p-value reuses
 /// the constant ADF interpolation and is recorded as unreliable for ERS tables.
-pub fn dfgls(
+pub(crate) fn dfgls(
     y: &Vector,
     lags: Option<usize>,
     session: &Session,
@@ -2023,7 +2023,7 @@ pub fn dfgls(
 /// Critical values are not the ZA tables; the p-value is the constant ADF
 /// interpolation and is recorded as unreliable.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ZivotAndrewsResult {
+pub(crate) struct ZivotAndrewsResult {
     /// Minimum ADF-style t-statistic.
     pub stat: f64,
     /// Interpolated p-value (not ZA tables).
@@ -2035,7 +2035,7 @@ pub struct ZivotAndrewsResult {
 }
 
 /// Zivot–Andrews unit-root test with a crash dummy.
-pub fn zivot_andrews(y: &Vector, session: &Session) -> Result<Qualified<ZivotAndrewsResult>> {
+pub(crate) fn zivot_andrews(y: &Vector, session: &Session) -> Result<Qualified<ZivotAndrewsResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, y);
     let n = y.len();
@@ -2143,7 +2143,7 @@ pub fn zivot_andrews(y: &Vector, session: &Session) -> Result<Qualified<ZivotAnd
 }
 
 /// KPSS level-stationarity test with a Newey–West long-run variance.
-pub fn kpss(y: &Vector, lags: Option<usize>, session: &Session) -> Result<Qualified<KpssResult>> {
+pub(crate) fn kpss(y: &Vector, lags: Option<usize>, session: &Session) -> Result<Qualified<KpssResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, y);
     let n = y.len();
@@ -2199,7 +2199,7 @@ pub fn kpss(y: &Vector, lags: Option<usize>, session: &Session) -> Result<Qualif
 
 /// Tukey HSD pairwise comparisons after a one-way ANOVA.
 #[derive(Clone, Debug)]
-pub struct TukeyHsdResult {
+pub(crate) struct TukeyHsdResult {
     /// Group means.
     pub means: Vector,
     /// Pairwise |t| statistics (`K` × `K`).
@@ -2209,7 +2209,7 @@ pub struct TukeyHsdResult {
 }
 
 /// Tukey honest significant differences on `groups`.
-pub fn tukey_hsd(groups: &[&Vector], session: &Session) -> Result<Qualified<TukeyHsdResult>> {
+pub(crate) fn tukey_hsd(groups: &[&Vector], session: &Session) -> Result<Qualified<TukeyHsdResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if groups.len() < 2 {
         ctx.push(
@@ -2282,7 +2282,7 @@ pub fn tukey_hsd(groups: &[&Vector], session: &Session) -> Result<Qualified<Tuke
 ///
 /// Rows are sorted by column 0 of `x`. The middle 20% is dropped. The F
 /// statistic is `SSE_high / SSE_low` from two scratch OLS fits.
-pub fn goldfeld_quandt(
+pub(crate) fn goldfeld_quandt(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -2362,7 +2362,7 @@ pub fn goldfeld_quandt(
 ///
 /// Inner OLS uses a scratch report; `ResidualTooLarge` / `NearSingular` are
 /// not promoted. A tiny `p`-value is [`IssueCode::StructuralBreak`].
-pub fn chow_test(
+pub(crate) fn chow_test(
     x: &Matrix,
     y: &Vector,
     split: usize,
@@ -2470,7 +2470,7 @@ pub fn chow_test(
 ///
 /// Inner OLS uses a scratch report. A large max-CUSUM is
 /// [`IssueCode::StructuralBreak`].
-pub fn cusum_ols(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn cusum_ols(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
     let n = x.nrows().min(y.len());
@@ -2540,7 +2540,7 @@ pub fn cusum_ols(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<
 ///
 /// Bandwidth `h` is the Gaussian scale. A tiny `h` is a warning, not a fatal
 /// [`IssueCode::InvalidWeight`].
-pub fn kernel_reg(x: &Vector, y: &Vector, h: f64, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn kernel_reg(x: &Vector, y: &Vector, h: f64, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_pair(&mut ctx, x, y);
     let mut bw = h;
@@ -2573,7 +2573,7 @@ pub fn kernel_reg(x: &Vector, y: &Vector, h: f64, session: &Session) -> Result<Q
 }
 
 /// Nelson–Aalen cumulative hazard from right-censored times.
-pub fn nelson_aalen(
+pub(crate) fn nelson_aalen(
     durations: &Vector,
     events: &Vector,
     session: &Session,
@@ -2600,7 +2600,7 @@ pub fn nelson_aalen(
 /// `events` is 0 = censored, `1..=k` = cause. Cause count is not identification
 /// `p`.
 #[derive(Clone, Debug)]
-pub struct AalenJohansenResult {
+pub(crate) struct AalenJohansenResult {
     /// Unique event times.
     pub times: Vector,
     /// CIF at each time (`n_times × n_causes`).
@@ -2610,7 +2610,7 @@ pub struct AalenJohansenResult {
 }
 
 /// Competing-risk CIF.
-pub fn aalen_johansen(
+pub(crate) fn aalen_johansen(
     times: &Vector,
     events: &Vector,
     session: &Session,
@@ -2710,7 +2710,7 @@ pub fn aalen_johansen(
 
 /// Fitted Fine–Gray subdistribution coefficients.
 #[derive(Clone, Debug)]
-pub struct FittedFineGray {
+pub(crate) struct FittedFineGray {
     /// Log subdistribution-hazard slopes.
     pub coef: Vector,
     /// Partial-likelihood value at the last Newton step.
@@ -2729,7 +2729,7 @@ pub struct FittedFineGray {
 ///
 /// `events` is 0 = censored, `1..=k` = cause. Cause count is not identification
 /// `p`. Competing events stay in the risk set with IPCW from the censoring KM.
-pub fn fine_gray(
+pub(crate) fn fine_gray(
     x: &Matrix,
     durations: &Vector,
     events: &Vector,
@@ -2993,7 +2993,7 @@ fn fine_gray_grad_hess(
 
 /// Baron–Kenny product-of-coefficients mediation.
 #[derive(Clone, Debug)]
-pub struct MediationResult {
+pub(crate) struct MediationResult {
     /// `M ~ a X`.
     pub a: f64,
     /// `Y ~ c' X + b M`.
@@ -3007,7 +3007,7 @@ pub struct MediationResult {
 }
 
 /// Three OLS paths for a single mediator.
-pub fn mediation(
+pub(crate) fn mediation(
     x: &Vector,
     m: &Vector,
     y: &Vector,
@@ -3052,7 +3052,7 @@ pub fn mediation(
 
 /// Two-by-two difference-in-differences (`y ~ treat + post + treat×post`).
 #[derive(Clone, Debug)]
-pub struct DidResult {
+pub(crate) struct DidResult {
     /// Interaction ATT.
     pub att: f64,
     /// Treat main effect.
@@ -3064,7 +3064,7 @@ pub struct DidResult {
 }
 
 /// Difference-in-differences on a stacked cross-section.
-pub fn difference_in_differences(
+pub(crate) fn difference_in_differences(
     y: &Vector,
     treat: &Vector,
     post: &Vector,
@@ -3108,7 +3108,7 @@ pub fn difference_in_differences(
 }
 
 /// Bartlett's test for equal variances.
-pub fn bartlett(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn bartlett(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if groups.len() < 2 {
         ctx.push(
@@ -3162,7 +3162,7 @@ pub fn bartlett(groups: &[&Vector], session: &Session) -> Result<Qualified<Hypot
 }
 
 /// Friedman rank test across `k` treatments (rows are blocks).
-pub fn friedman(table: &Matrix, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn friedman(table: &Matrix, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, table, None, &ctx.policy);
     let (n, k) = table.shape();
@@ -3200,7 +3200,7 @@ pub fn friedman(table: &Matrix, session: &Session) -> Result<Qualified<Hypothesi
 }
 
 /// One-sample proportion z-test (`H0: p = p0`).
-pub fn proportion_ztest(
+pub(crate) fn proportion_ztest(
     y: &Vector,
     p0: f64,
     session: &Session,
@@ -3231,7 +3231,7 @@ pub fn proportion_ztest(
 }
 
 /// Two-sample proportion z-test (`H0: p₁ = p₂`, statsmodels `proportions_ztest`).
-pub fn proportions_ztest(
+pub(crate) fn proportions_ztest(
     y1: &Vector,
     y2: &Vector,
     session: &Session,
@@ -3278,7 +3278,7 @@ pub fn proportions_ztest(
 }
 
 /// Ramsey RESET: augment OLS with \(\hat y^2,\hat y^3\) and F-test the extra powers.
-pub fn ramsey_reset(
+pub(crate) fn ramsey_reset(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -3373,7 +3373,7 @@ pub fn ramsey_reset(
 }
 
 /// Harvey–Collier: t-test that the mean of OLS recursive residuals is zero.
-pub fn harvey_collier(
+pub(crate) fn harvey_collier(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -3460,7 +3460,7 @@ pub fn harvey_collier(
 /// central `frac` of rows; the tails are a prediction hold-out. The F
 /// statistic compares tail prediction SSE to the central residual MSE.
 /// Subset size is not identification `p`.
-pub fn rainbow(
+pub(crate) fn rainbow(
     x: &Matrix,
     y: &Vector,
     frac: f64,
@@ -3580,7 +3580,7 @@ pub fn rainbow(
 }
 
 /// Engle ARCH-LM: \(e_t^2\) on lags of itself; \(n R^2 \sim \chi^2_q\).
-pub fn arch_lm(
+pub(crate) fn arch_lm(
     resid: &Vector,
     lags: usize,
     session: &Session,
@@ -3650,7 +3650,7 @@ pub fn arch_lm(
 }
 
 /// Breusch–Godfrey LM test for residual autocorrelation of order `lags`.
-pub fn breusch_godfrey(
+pub(crate) fn breusch_godfrey(
     resid: &Vector,
     design: &Matrix,
     lags: usize,
@@ -3759,7 +3759,7 @@ pub fn breusch_godfrey(
 }
 
 /// Phillips–Perron unit-root test (constant-only, Newey–West robust).
-pub fn phillips_perron(
+pub(crate) fn phillips_perron(
     y: &Vector,
     lags: Option<usize>,
     session: &Session,
@@ -3834,7 +3834,7 @@ pub fn phillips_perron(
 }
 
 /// Granger causality: does lagged `x` help predict `y` beyond lagged `y`?
-pub fn granger_causality(
+pub(crate) fn granger_causality(
     x: &Vector,
     y: &Vector,
     lag: usize,
@@ -3941,7 +3941,7 @@ pub fn granger_causality(
 }
 
 /// Adjusted p-values for Bonferroni, Holm, or Benjamini–Hochberg.
-pub fn multipletests(
+pub(crate) fn multipletests(
     p: &[f64],
     method: MultiTest,
     session: &Session,
@@ -3978,7 +3978,7 @@ pub fn multipletests(
 }
 
 /// Percentile bootstrap of the mean (`lo`, `hi` are the 2.5% / 97.5% percentiles).
-pub fn bootstrap_mean(
+pub(crate) fn bootstrap_mean(
     x: &Vector,
     n_boot: usize,
     seed: u64,
@@ -4024,7 +4024,7 @@ pub fn bootstrap_mean(
 }
 
 /// Gaussian kernel density evaluated on `grid` (Silverman bandwidth).
-pub fn gaussian_kde(x: &Vector, grid: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn gaussian_kde(x: &Vector, grid: &Vector, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     if let Some(issue) = scan_finite(grid.as_slice()).to_issue("kde-grid") {
@@ -4072,7 +4072,7 @@ pub fn gaussian_kde(x: &Vector, grid: &Vector, session: &Session) -> Result<Qual
 
 /// Univariate Gaussian KDE evaluated at the sample (statsmodels `KDEUnivariate`).
 #[derive(Clone, Debug)]
-pub struct KdeUnivariate {
+pub(crate) struct KdeUnivariate {
     /// Silverman (or floored) bandwidth.
     pub bandwidth: f64,
     /// Density at each sample point.
@@ -4082,7 +4082,7 @@ pub struct KdeUnivariate {
 }
 
 /// Silverman-bandwidth Gaussian KDE at the sample points.
-pub fn kde_univariate(y: &Vector, session: &Session) -> Result<Qualified<KdeUnivariate>> {
+pub(crate) fn kde_univariate(y: &Vector, session: &Session) -> Result<Qualified<KdeUnivariate>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(
         &mut ctx.report,
@@ -4131,7 +4131,7 @@ pub fn kde_univariate(y: &Vector, session: &Session) -> Result<Qualified<KdeUniv
 }
 
 /// Cleveland LOWESS: locally weighted linear fits with tricube weights.
-pub fn lowess(x: &Vector, y: &Vector, frac: f64, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn lowess(x: &Vector, y: &Vector, frac: f64, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_pair(&mut ctx, x, y);
     if !(frac.is_finite() && frac > 0.0 && frac <= 1.0) {
@@ -4191,7 +4191,7 @@ pub fn lowess(x: &Vector, y: &Vector, frac: f64, session: &Session) -> Result<Qu
 }
 
 /// Approximate two-sided t-test power for a one-sample design (shifted-t).
-pub fn ttest_power(
+pub(crate) fn ttest_power(
     effect_size: f64,
     n: f64,
     alpha: f64,
@@ -4952,7 +4952,7 @@ fn percentile_sorted(xs: &[f64], q: f64) -> f64 {
 }
 
 /// Inverse standard-normal CDF (Acklam's rational approximation).
-pub fn norm_ppf(p: f64) -> f64 {
+pub(crate) fn norm_ppf(p: f64) -> f64 {
     if p <= 0.0 {
         return f64::NEG_INFINITY;
     }
@@ -5089,7 +5089,7 @@ pub(crate) fn lowess_raw(x: &[f64], y: &[f64], frac: f64) -> Vec<f64> {
 
 /// OLS influence diagnostics (statsmodels `OLSInfluence`): leverage, DFFITS, DFBETAS.
 #[derive(Clone, Debug)]
-pub struct OlsInfluence {
+pub(crate) struct OlsInfluence {
     /// Residuals.
     pub resid: Vector,
     /// Hat-matrix diagonal \(h_{ii}\).
@@ -5101,7 +5101,7 @@ pub struct OlsInfluence {
 }
 
 /// Cook / DFFITS / DFBETAS from an intercept-on OLS of `y` on `X`.
-pub fn ols_influence(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<OlsInfluence>> {
+pub(crate) fn ols_influence(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<OlsInfluence>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
     let design = x.with_intercept();
@@ -5204,24 +5204,24 @@ pub fn ols_influence(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualif
 }
 
 /// DFFITS vector (statsmodels `OLSInfluence.dffits`).
-pub fn dffits(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn dffits(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
     Ok(ols_influence(x, y, session)?.map(|v| v.dffits))
 }
 
 /// DFBETAS matrix (statsmodels `OLSInfluence.dfbetas`).
-pub fn dfbetas(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
+pub(crate) fn dfbetas(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Matrix>> {
     Ok(ols_influence(x, y, session)?.map(|v| v.dfbetas))
 }
 
 /// Hat-matrix diagonal (statsmodels `OLSInfluence.hat_matrix_diag`).
-pub fn hat_matrix_diag(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn hat_matrix_diag(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
     Ok(ols_influence(x, y, session)?.map(|v| v.hat))
 }
 
 /// White specification / omitted-variable LM (statsmodels `spec_white`).
 ///
 /// Expanded feature count is not identification `p`.
-pub fn spec_white(
+pub(crate) fn spec_white(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -5333,7 +5333,7 @@ pub fn spec_white(
 /// Engle ARCH LM on squared residuals (statsmodels `het_arch`).
 ///
 /// Lag count is not identification `p`.
-pub fn het_arch(
+pub(crate) fn het_arch(
     resid: &Vector,
     lags: usize,
     session: &Session,
@@ -5344,7 +5344,7 @@ pub fn het_arch(
 /// Breusch–Godfrey residual AR LM (statsmodels `acorr_breusch_godfrey`).
 ///
 /// Lag count is not identification `p`.
-pub fn acorr_breusch_godfrey(
+pub(crate) fn acorr_breusch_godfrey(
     resid: &Vector,
     design: &Matrix,
     lags: usize,
@@ -5357,7 +5357,7 @@ pub fn acorr_breusch_godfrey(
 ///
 /// Observation count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct OutlierTest {
+pub(crate) struct OutlierTest {
     /// Internally studentized residuals \(e_i / (s\sqrt{1-h_{ii}})\).
     pub studentized: Vector,
     /// Two-sided Student-\(t\) p-values.
@@ -5367,7 +5367,7 @@ pub struct OutlierTest {
 }
 
 /// Outlier test from the OLS hat matrix and residuals.
-pub fn outlier_test(
+pub(crate) fn outlier_test(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -5441,7 +5441,7 @@ pub fn outlier_test(
 /// Medcouple robust skewness (statsmodels `stattools.medcouple`).
 ///
 /// Pair count is not identification `p`.
-pub fn medcouple(x: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn medcouple(x: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     let mut v: Vec<f64> = x.as_slice().iter().copied().filter(|z| z.is_finite()).collect();
@@ -5496,7 +5496,7 @@ pub fn medcouple(x: &Vector, session: &Session) -> Result<Qualified<f64>> {
 ///
 /// Observation count is not identification `p`. Equal weights (OLS) are used.
 #[derive(Clone, Debug)]
-pub struct WlsPredictionStd {
+pub(crate) struct WlsPredictionStd {
     /// Fitted mean.
     pub predicted: Vector,
     /// Standard error of the mean \(\,s\sqrt{h_{ii}}\).
@@ -5506,7 +5506,7 @@ pub struct WlsPredictionStd {
 }
 
 /// In-sample OLS prediction standard errors.
-pub fn wls_prediction_std(
+pub(crate) fn wls_prediction_std(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -5591,7 +5591,7 @@ pub fn wls_prediction_std(
 ///
 /// Residuals of \(y\) on \(x\) are regressed on \(x\) and column-0 squares.
 /// Expanded feature count is not identification `p`.
-pub fn linear_lm(
+pub(crate) fn linear_lm(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -5663,7 +5663,7 @@ pub fn linear_lm(
 /// Two-sample *t* from summary statistics (statsmodels `ttest_ind_from_stats`).
 ///
 /// Sample sizes are not identification `p`.
-pub fn ttest_ind_from_stats(
+pub(crate) fn ttest_ind_from_stats(
     mean1: f64,
     std1: f64,
     n1: f64,
@@ -5730,7 +5730,7 @@ pub fn ttest_ind_from_stats(
 
 /// Two-sample mean comparison (statsmodels `CompareMeans`).
 #[derive(Clone, Debug)]
-pub struct CompareMeansResult {
+pub(crate) struct CompareMeansResult {
     /// Sample mean of the first group.
     pub mean_a: f64,
     /// Sample mean of the second group.
@@ -5746,7 +5746,7 @@ pub struct CompareMeansResult {
 }
 
 /// Compare two independent samples with a Welch *t* test.
-pub fn compare_means(
+pub(crate) fn compare_means(
     a: &Vector,
     b: &Vector,
     session: &Session,
@@ -5772,7 +5772,7 @@ pub fn compare_means(
 ///
 /// `x_restr` must be nested in `x_unrestr` (fewer columns). Extra-column
 /// count is not identification `p`.
-pub fn compare_lr(
+pub(crate) fn compare_lr(
     y: &Vector,
     x_restr: &Matrix,
     x_unrestr: &Matrix,
@@ -5838,7 +5838,7 @@ pub fn compare_lr(
 /// Nested OLS extra-sum-of-squares *F* (statsmodels `compare_f_test`).
 ///
 /// Extra-column count is not identification `p`.
-pub fn compare_f(
+pub(crate) fn compare_f(
     y: &Vector,
     x_restr: &Matrix,
     x_unrestr: &Matrix,
@@ -5913,7 +5913,7 @@ pub fn compare_f(
 /// Joint Wald test that every slope in OLS is zero (statsmodels `wald_test`).
 ///
 /// Slope count is not identification `p`. The intercept is not restricted.
-pub fn wald_ols(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn wald_ols(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
     let design = x.with_intercept();
@@ -5992,14 +5992,14 @@ pub fn wald_ols(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<H
 }
 
 /// Named OLS Wald test (statsmodels `OLSResults.wald_test` for all slopes).
-pub fn wald_test(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn wald_test(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     wald_ols(x, y, session)
 }
 
 /// Box–Pierce portmanteau (statsmodels `acorr_ljungbox` `boxpierce=True`).
 ///
 /// Lag count is not identification `p`.
-pub fn box_pierce(x: &Vector, lags: usize, session: &Session) -> Result<Qualified<LjungBoxResult>> {
+pub(crate) fn box_pierce(x: &Vector, lags: usize, session: &Session) -> Result<Qualified<LjungBoxResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     let n = x.len();
@@ -6060,7 +6060,7 @@ pub fn box_pierce(x: &Vector, lags: usize, session: &Session) -> Result<Qualifie
 /// `events` is 1 = observed, 0 = right-censored. When more than two groups
 /// appear, the two most frequent labels are kept and a compromise is recorded.
 /// Group count is not identification `p`.
-pub fn logrank(
+pub(crate) fn logrank(
     times: &Vector,
     events: &Vector,
     groups: &Vector,
@@ -6213,7 +6213,7 @@ pub fn logrank(
 }
 
 /// Alias of [`logrank`] (R `survdiff` / statsmodels duration).
-pub fn survdiff(
+pub(crate) fn survdiff(
     times: &Vector,
     events: &Vector,
     groups: &Vector,
@@ -6379,7 +6379,7 @@ fn logrank_weighted(
 /// Survival is the pooled product-limit computed locally; do not call
 /// [`kaplan_meier_fit`] (zero events would vacuous-abort). Group count is not
 /// identification `p`.
-pub fn peto(
+pub(crate) fn peto(
     times: &Vector,
     events: &Vector,
     groups: &Vector,
@@ -6391,7 +6391,7 @@ pub fn peto(
 /// Tarone–Ware weighted log-rank (weight \(\sqrt{n_{\mathrm{risk}}}\)).
 ///
 /// Group count is not identification `p`.
-pub fn tarone_ware(
+pub(crate) fn tarone_ware(
     times: &Vector,
     events: &Vector,
     groups: &Vector,
@@ -6410,7 +6410,7 @@ pub fn tarone_ware(
 /// Gehan–Breslow–Wilcoxon weighted log-rank (weight \(n_{\mathrm{risk}}\)).
 ///
 /// Group count is not identification `p`.
-pub fn gehan_wilcoxon(
+pub(crate) fn gehan_wilcoxon(
     times: &Vector,
     events: &Vector,
     groups: &Vector,
@@ -6429,7 +6429,7 @@ pub fn gehan_wilcoxon(
 /// Ordered-group log-rank trend (scores \(0,\ldots,k-1\) on sorted labels).
 ///
 /// Group count is not identification `p`. Two groups reduce to Mantel–Haenszel.
-pub fn logrank_trend(
+pub(crate) fn logrank_trend(
     times: &Vector,
     events: &Vector,
     groups: &Vector,
@@ -6451,7 +6451,7 @@ pub fn logrank_trend(
 /// [`kaplan_meier_fit`] (zero events would vacuous-abort). The exponents `p`
 /// and `q` are weights, not identification dimension. Group count is not
 /// identification `p`. Inspect times with `y=None`.
-pub fn fleming_harrington(
+pub(crate) fn fleming_harrington(
     times: &Vector,
     events: &Vector,
     groups: &Vector,
@@ -6476,7 +6476,7 @@ pub fn fleming_harrington(
 ///
 /// `order` is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct LevinsonDurbin {
+pub(crate) struct LevinsonDurbin {
     /// AR coefficients \(a_1,\ldots,a_p\) (the leading 1 is omitted).
     pub ar: Vector,
     /// Innovation variance after the last reflection.
@@ -6486,7 +6486,7 @@ pub struct LevinsonDurbin {
 }
 
 /// Levinson–Durbin recursion on the sample ACF of `y`.
-pub fn levinson_durbin(
+pub(crate) fn levinson_durbin(
     y: &Vector,
     order: usize,
     session: &Session,
@@ -6577,7 +6577,7 @@ pub fn levinson_durbin(
 /// Expanding-window one-step OLS residuals (statsmodels `RecursiveLS` resid).
 ///
 /// Each prefix uses a scratch report. Prefix length is not identification `p`.
-pub fn recursive_olsresiduals(
+pub(crate) fn recursive_olsresiduals(
     x: &Matrix,
     y: &Vector,
     min_n: usize,
@@ -6654,7 +6654,7 @@ pub fn recursive_olsresiduals(
 ///
 /// Implemented via Levinson–Durbin on the sample ACF. `order` is not
 /// identification `p`.
-pub fn yule_walker(
+pub(crate) fn yule_walker(
     y: &Vector,
     order: usize,
     session: &Session,
@@ -6665,7 +6665,7 @@ pub fn yule_walker(
 /// Burg AR coefficients (statsmodels `tsa.ar_model.AutoReg` Burg).
 ///
 /// Reflection order is not identification `p`.
-pub fn burg_ar(y: &Vector, order: usize, session: &Session) -> Result<Qualified<LevinsonDurbin>> {
+pub(crate) fn burg_ar(y: &Vector, order: usize, session: &Session) -> Result<Qualified<LevinsonDurbin>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, y);
     let n = y.len();
@@ -6744,7 +6744,7 @@ pub fn burg_ar(y: &Vector, order: usize, session: &Session) -> Result<Qualified<
 /// \(y_t\) on lagged \(y\) and lagged residuals. Orders are not identification
 /// `p`.
 #[derive(Clone, Debug)]
-pub struct HannanRissanen {
+pub(crate) struct HannanRissanen {
     /// AR coefficients.
     pub ar: Vector,
     /// MA coefficients.
@@ -6754,7 +6754,7 @@ pub struct HannanRissanen {
 }
 
 /// Hannan–Rissanen ARMA(`p`,`q`).
-pub fn hannan_rissanen(
+pub(crate) fn hannan_rissanen(
     y: &Vector,
     p: usize,
     q: usize,
@@ -6856,7 +6856,7 @@ pub fn hannan_rissanen(
 /// Hansen (1992) parameter-stability statistic on recursive OLS residuals.
 ///
 /// Prefix length is not identification `p`.
-pub fn breaks_hansen(
+pub(crate) fn breaks_hansen(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -6922,7 +6922,7 @@ pub fn breaks_hansen(
 ///
 /// Each event row is \(x_i-\bar x(t_i)\). Event count is not identification
 /// `p`.
-pub fn schoenfeld(
+pub(crate) fn schoenfeld(
     durations: &Vector,
     events: &Vector,
     x: &Matrix,
@@ -7003,7 +7003,7 @@ pub fn schoenfeld(
 ///
 /// Correlates Schoenfeld residuals with event time. Feature count is not
 /// identification `p`.
-pub fn cox_zph(
+pub(crate) fn cox_zph(
     durations: &Vector,
     events: &Vector,
     x: &Matrix,
@@ -7122,7 +7122,7 @@ pub fn cox_zph(
 ///
 /// Uses the large-sample skew / excess-kurtosis \(z\)-scores. That is a
 /// documented compromise, not identification `p`.
-pub fn omni_normtest(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn omni_normtest(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     let st = slice_stats(x.as_slice());
@@ -7171,14 +7171,14 @@ pub fn omni_normtest(x: &Vector, session: &Session) -> Result<Qualified<Hypothes
 }
 
 /// Alias of [`omni_normtest`] (scipy `stats.normaltest`).
-pub fn normaltest(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn normaltest(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     omni_normtest(x, session)
 }
 
 /// Ljung–Box \(Q\) from the sample ACF (statsmodels `q_stat`).
 ///
 /// Lag count is not identification `p`.
-pub fn q_stat(x: &Vector, lags: usize, session: &Session) -> Result<Qualified<LjungBoxResult>> {
+pub(crate) fn q_stat(x: &Vector, lags: usize, session: &Session) -> Result<Qualified<LjungBoxResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     let h = lags.max(1).min(x.len().saturating_sub(1).max(1));
@@ -7214,7 +7214,7 @@ pub fn q_stat(x: &Vector, lags: usize, session: &Session) -> Result<Qualified<Lj
 /// Wald confidence interval for a binomial proportion (statsmodels
 /// `proportion_confint`).
 #[derive(Clone, Debug)]
-pub struct ProportionConfint {
+pub(crate) struct ProportionConfint {
     /// Point estimate.
     pub point: f64,
     /// Lower bound.
@@ -7226,7 +7226,7 @@ pub struct ProportionConfint {
 /// Wald interval for the mean of a 0/1 series.
 ///
 /// `alpha` is not identification `p`.
-pub fn proportion_confint(
+pub(crate) fn proportion_confint(
     y: &Vector,
     alpha: f64,
     session: &Session,
@@ -7290,7 +7290,7 @@ pub fn proportion_confint(
 /// Two-proportion z-test power (statsmodels `NormalIndPower` lite).
 ///
 /// Sample sizes are not identification `p`.
-pub fn proportions_ztest_power(
+pub(crate) fn proportions_ztest_power(
     p1: f64,
     p2: f64,
     nobs1: f64,
@@ -7362,7 +7362,7 @@ pub fn proportions_ztest_power(
 ///
 /// Fit `y ~ X₁`, append \(\hat y_1\) to `X₂`, and test that extra coefficient.
 /// Column counts are not identification `p`.
-pub fn compare_j(
+pub(crate) fn compare_j(
     y: &Vector,
     x1: &Matrix,
     x2: &Matrix,
@@ -7434,7 +7434,7 @@ pub fn compare_j(
 }
 
 /// Bowley robust skewness (statsmodels `robust_skewness`).
-pub fn robust_skewness(x: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn robust_skewness(x: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     let mut xs: Vec<f64> = x
@@ -7469,7 +7469,7 @@ pub fn robust_skewness(x: &Vector, session: &Session) -> Result<Qualified<f64>> 
 }
 
 /// Crow–Siddiqui robust kurtosis (statsmodels `robust_kurtosis`).
-pub fn robust_kurtosis(x: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn robust_kurtosis(x: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     let mut xs: Vec<f64> = x
@@ -7509,7 +7509,7 @@ pub fn robust_kurtosis(x: &Vector, session: &Session) -> Result<Qualified<f64>> 
 /// Engle–Granger cointegration ADF on OLS residuals (statsmodels `coint`).
 ///
 /// The residual ADF lag is not identification `p`.
-pub fn coint(y: &Vector, x: &Vector, session: &Session) -> Result<Qualified<AdfullerResult>> {
+pub(crate) fn coint(y: &Vector, x: &Vector, session: &Session) -> Result<Qualified<AdfullerResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_pair(&mut ctx, y, x);
     let n = y.len().min(x.len());
@@ -7591,7 +7591,7 @@ pub fn coint(y: &Vector, x: &Vector, session: &Session) -> Result<Qualified<Adfu
 ///
 /// Sample sizes are not identification `p`. The critical value uses a
 /// shifted central-*t* approximation and is recorded as a compromise.
-pub fn ttest_ind_power(
+pub(crate) fn ttest_ind_power(
     effect_size: f64,
     n1: f64,
     n2: f64,
@@ -7652,7 +7652,7 @@ pub fn ttest_ind_power(
 /// *F*-test power (statsmodels `FTestPower`).
 ///
 /// Numerator / denominator df are not identification `p`.
-pub fn ftest_power(
+pub(crate) fn ftest_power(
     effect_size: f64,
     df_num: f64,
     df_den: f64,
@@ -7713,7 +7713,7 @@ pub fn ftest_power(
 }
 
 /// Alias of [`ftest_power`] (statsmodels `power.ftest_power`).
-pub fn power_ftest(
+pub(crate) fn power_ftest(
     effect_size: f64,
     df_num: f64,
     df_den: f64,
@@ -7726,7 +7726,7 @@ pub fn power_ftest(
 /// χ² goodness-of-fit power (statsmodels `GofChisquarePower`).
 ///
 /// The non-centrality `lambda` is not identification `p`.
-pub fn gof_chisquare_power(
+pub(crate) fn gof_chisquare_power(
     ncp: f64,
     df: f64,
     alpha: f64,
@@ -7789,7 +7789,7 @@ pub fn gof_chisquare_power(
 /// Benjamini–Hochberg FDR (statsmodels `fdrcorrection`).
 ///
 /// Test count is not identification `p`.
-pub fn fdrcorrection(p: &Vector, alpha: f64, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn fdrcorrection(p: &Vector, alpha: f64, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if let Some(issue) = scan_finite(p.as_slice()).to_issue("p-values") {
         ctx.push(issue);
@@ -7832,7 +7832,7 @@ pub fn fdrcorrection(p: &Vector, alpha: f64, session: &Session) -> Result<Qualif
 /// Mantel–Haenszel pooled odds ratio (statsmodels `StratifiedTable`).
 ///
 /// Stratum count is not identification `p`. Each table must be 2×2.
-pub fn mantel_haenszel(tables: &[Matrix], session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn mantel_haenszel(tables: &[Matrix], session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if tables.is_empty() {
         ctx.push(
@@ -7935,7 +7935,7 @@ fn rankdata(xs: &[f64]) -> Vec<f64> {
 /// Fligner–Killeen scale test (statsmodels / scipy `fligner`).
 ///
 /// Group count is not identification `p`.
-pub fn fligner(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn fligner(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if groups.len() < 2 {
         ctx.push(
@@ -8015,7 +8015,7 @@ pub fn fligner(groups: &[&Vector], session: &Session) -> Result<Qualified<Hypoth
 }
 
 /// Ansari–Bradley two-sample scale test (scipy `ansari`).
-pub fn ansari(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn ansari(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_pair(&mut ctx, x, y);
     let mut vals = Vec::new();
@@ -8081,7 +8081,7 @@ pub fn ansari(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<Hyp
 }
 
 /// Mood two-sample scale test (scipy `mood`).
-pub fn mood(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn mood(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_pair(&mut ctx, x, y);
     let mut vals = Vec::new();
@@ -8137,7 +8137,7 @@ pub fn mood(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<Hypot
 /// Mood's median test (scipy `median_test`).
 ///
 /// Group count is not identification `p`.
-pub fn median_test(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn median_test(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if groups.len() < 2 {
         ctx.push(
@@ -8211,14 +8211,14 @@ pub fn median_test(groups: &[&Vector], session: &Session) -> Result<Qualified<Hy
 /// Pearson χ² goodness-of-fit against a uniform expected (scipy `chisquare`).
 ///
 /// Bin count is not identification `p`.
-pub fn chisquare(obs: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn chisquare(obs: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     power_divergence(obs, 1.0, session)
 }
 
 /// Cressie–Read power-divergence GOF (scipy `power_divergence`).
 ///
 /// `lambda = 1` is Pearson χ². Bin count is not identification `p`.
-pub fn power_divergence(
+pub(crate) fn power_divergence(
     obs: &Vector,
     lambda: f64,
     session: &Session,
@@ -8289,7 +8289,7 @@ pub fn power_divergence(
 /// Cochran's Q for binary repeated measures (statsmodels `cochrans_q`).
 ///
 /// Treatment count is not identification `p`.
-pub fn cochran_q(table: &Matrix, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn cochran_q(table: &Matrix, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, table, None, &ctx.policy);
     let (n, k) = table.shape();
@@ -8350,7 +8350,7 @@ pub fn cochran_q(table: &Matrix, session: &Session) -> Result<Qualified<Hypothes
 }
 
 /// Odds ratio of a 2×2 table (statsmodels `Table2x2.oddsratio`).
-pub fn odds_ratio(table: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn odds_ratio(table: &Matrix, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if table.nrows() != 2 || table.ncols() != 2 {
         ctx.push(
@@ -8385,7 +8385,7 @@ pub fn odds_ratio(table: &Matrix, session: &Session) -> Result<Qualified<f64>> {
 }
 
 /// Risk ratio of a 2×2 table (statsmodels `Table2x2.riskratio`).
-pub fn risk_ratio(table: &Matrix, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn risk_ratio(table: &Matrix, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if table.nrows() != 2 || table.ncols() != 2 {
         ctx.push(
@@ -8414,7 +8414,7 @@ pub fn risk_ratio(table: &Matrix, session: &Session) -> Result<Qualified<f64>> {
 }
 
 /// Paired two one-sided tests of equivalence (statsmodels `ttost_paired`).
-pub fn tost_paired(
+pub(crate) fn tost_paired(
     x: &Vector,
     y: &Vector,
     low: f64,
@@ -8495,7 +8495,7 @@ pub fn tost_paired(
 /// One-way ANOVA *F* power (statsmodels `FTestAnovaPower`).
 ///
 /// Group count is not identification `p`.
-pub fn ftest_anova_power(
+pub(crate) fn ftest_anova_power(
     effect_size: f64,
     k_groups: f64,
     n_per_group: f64,
@@ -8510,7 +8510,7 @@ pub fn ftest_anova_power(
 /// One-sample *z*-test (statsmodels `ztest`).
 ///
 /// Uses the sample standard error; `sigma` is not identification `p`.
-pub fn ztest(x: &Vector, value: f64, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn ztest(x: &Vector, value: f64, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     let st = slice_stats(x.as_slice());
@@ -8555,7 +8555,7 @@ pub fn ztest(x: &Vector, value: f64, session: &Session) -> Result<Qualified<Hypo
 /// Two-sample Hotelling *T*² (statsmodels `Hotelling`).
 ///
 /// Feature count is not identification `p`.
-pub fn hotelling(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn hotelling(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
@@ -8666,7 +8666,7 @@ pub fn hotelling(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<
 }
 
 /// Cohen's *h* for two proportions (statsmodels `proportion_effectsize`).
-pub fn proportion_effectsize(p1: f64, p2: f64, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn proportion_effectsize(p1: f64, p2: f64, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if ![p1, p2].iter().all(|v| v.is_finite()) {
         ctx.push(
@@ -8691,7 +8691,7 @@ pub fn proportion_effectsize(p1: f64, p2: f64, session: &Session) -> Result<Qual
 }
 
 /// Two-sample two one-sided tests of equivalence (statsmodels `ttost_ind`).
-pub fn ttost(
+pub(crate) fn ttost(
     x: &Vector,
     y: &Vector,
     low: f64,
@@ -8765,7 +8765,7 @@ pub fn ttost(
 ///
 /// The sample is standardized with its own mean and standard deviation before
 /// comparison to \(\Phi\). Sample size is not identification `p`.
-pub fn kstest(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn kstest(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     let mut xs: Vec<f64> = x
@@ -8823,19 +8823,19 @@ pub fn kstest(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>
 }
 
 /// Bonferroni FWER adjustment (statsmodels `multipletests` method=`bonferroni`).
-pub fn bonferroni(p: &[f64], session: &Session) -> Result<Qualified<Vec<f64>>> {
+pub(crate) fn bonferroni(p: &[f64], session: &Session) -> Result<Qualified<Vec<f64>>> {
     multipletests(p, MultiTest::Bonferroni, session)
 }
 
 /// Holm step-down FWER adjustment (statsmodels `multipletests` method=`holm`).
-pub fn holm(p: &[f64], session: &Session) -> Result<Qualified<Vec<f64>>> {
+pub(crate) fn holm(p: &[f64], session: &Session) -> Result<Qualified<Vec<f64>>> {
     multipletests(p, MultiTest::Holm, session)
 }
 
 /// Šidák FWER adjustment (statsmodels `multipletests` method=`sidak`).
 ///
 /// The comparison count is not identification `p`.
-pub fn sidak(p: &[f64], session: &Session) -> Result<Qualified<Vec<f64>>> {
+pub(crate) fn sidak(p: &[f64], session: &Session) -> Result<Qualified<Vec<f64>>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if p.is_empty() {
         ctx.push(
@@ -8879,7 +8879,7 @@ pub fn sidak(p: &[f64], session: &Session) -> Result<Qualified<Vec<f64>>> {
 ///
 /// Weight count is not identification `p`.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DescrStatsW {
+pub(crate) struct DescrStatsW {
     /// Weighted mean.
     pub mean: f64,
     /// Weighted sample standard deviation.
@@ -8901,7 +8901,7 @@ pub struct DescrStatsW {
 /// Weighted mean / variance / *t* interval (statsmodels `DescrStatsW`).
 ///
 /// `weights` defaults to ones. Weight count is not identification `p`.
-pub fn descr_stats_w(
+pub(crate) fn descr_stats_w(
     x: &Vector,
     weights: Option<&Vector>,
     session: &Session,
@@ -9020,7 +9020,7 @@ pub fn descr_stats_w(
 /// Imputation count is not identification `p`. The design may contain NaNs;
 /// do not call [`inspect_xy`] on it.
 #[derive(Clone, Debug)]
-pub struct Mice {
+pub(crate) struct Mice {
     /// Number of completed data sets.
     pub n_imputations: usize,
     /// Inner chained-equation cycles.
@@ -9044,7 +9044,7 @@ impl Default for Mice {
 
 impl Mice {
     /// `n_imputations` completed data sets.
-    pub fn new(n_imputations: usize) -> Self {
+    pub(crate) fn new(n_imputations: usize) -> Self {
         Self {
             n_imputations,
             ..Self::default()
@@ -9054,7 +9054,7 @@ impl Mice {
     /// Draw completed matrices. Missing cells are initialized at the column
     /// mean plus a small Gaussian jitter, then each column is ridge-regressed
     /// on the others.
-    pub fn impute(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vec<Matrix>>> {
+    pub(crate) fn impute(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vec<Matrix>>> {
         mice_impute(x, self, session)
     }
 }
@@ -9062,7 +9062,7 @@ impl Mice {
 /// Draw `n_imputations` MICE completions (statsmodels `MICE`).
 ///
 /// Imputation count is not identification `p`.
-pub fn mice(x: &Matrix, n_imputations: usize, session: &Session) -> Result<Qualified<Vec<Matrix>>> {
+pub(crate) fn mice(x: &Matrix, n_imputations: usize, session: &Session) -> Result<Qualified<Vec<Matrix>>> {
     Mice::new(n_imputations).impute(x, session)
 }
 
@@ -9186,7 +9186,7 @@ fn mice_impute(x: &Matrix, spec: &Mice, session: &Session) -> Result<Qualified<V
 
 /// Nested-model ANOVA (statsmodels `anova_lm`).
 #[derive(Clone, Debug)]
-pub struct AnovaLm {
+pub(crate) struct AnovaLm {
     /// Extra-sum-of-squares *F*.
     pub f_stat: f64,
     /// Upper-tail *F* p-value.
@@ -9229,7 +9229,7 @@ fn ols_sse(x: &Matrix, y: &Vector, policy: &signlred::Policy) -> (f64, usize) {
 ///
 /// Column counts are identification `p` only when `n` is large enough for the
 /// usual OLS gate. Residual-kind inner failures are not promoted.
-pub fn anova_lm(
+pub(crate) fn anova_lm(
     y: &Vector,
     x_restricted: &Matrix,
     x_full: &Matrix,
@@ -9326,7 +9326,7 @@ pub fn anova_lm(
 /// singular interaction block are recorded; they do not reuse cluster/`p`
 /// gates.
 #[derive(Clone, Debug)]
-pub struct AnovaTwoway {
+pub(crate) struct AnovaTwoway {
     /// Type-II *F* for factor A (after B).
     pub f_a: f64,
     /// Upper-tail *p* for A.
@@ -9405,7 +9405,7 @@ fn twoway_f(extra: f64, df_num: f64, sse: f64, df_den: f64) -> (f64, f64) {
 /// Two-way Type-II ANOVA of `y` on integer-coded factors `a` and `b`.
 ///
 /// Dummy-column counts are identification `p` only when \(n \ge 5p\).
-pub fn anova_twoway(
+pub(crate) fn anova_twoway(
     y: &Vector,
     a: &Vector,
     b: &Vector,
@@ -9564,7 +9564,7 @@ pub fn anova_twoway(
 /// One-way repeated-measures ANOVA (statsmodels `AnovaRM`).
 ///
 /// `table` is subjects × treatments. Treatment count is not identification `p`.
-pub fn anova_rm(table: &Matrix, session: &Session) -> Result<Qualified<AnovaResult>> {
+pub(crate) fn anova_rm(table: &Matrix, session: &Session) -> Result<Qualified<AnovaResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, table, None, &ctx.policy);
     let (n, k) = table.shape();
@@ -9684,7 +9684,7 @@ pub fn anova_rm(table: &Matrix, session: &Session) -> Result<Qualified<AnovaResu
 /// The quantile is not identification `p`. Inner residual / rank issues are
 /// kept on a scratch report so they do not abort a valid outer fit.
 #[derive(Clone, Debug)]
-pub struct QuantReg {
+pub(crate) struct QuantReg {
     /// Quantile in (0, 1).
     pub q: f64,
     /// IRLS iteration cap.
@@ -9702,7 +9702,7 @@ impl Default for QuantReg {
 
 impl QuantReg {
     /// Quantile `q`.
-    pub fn new(q: f64) -> Self {
+    pub(crate) fn new(q: f64) -> Self {
         Self {
             q,
             ..Self::default()
@@ -9712,7 +9712,7 @@ impl QuantReg {
 
 /// Fitted statsmodels-style quantile regression.
 #[derive(Clone, Debug)]
-pub struct FittedQuantReg {
+pub(crate) struct FittedQuantReg {
     /// Slopes.
     pub coef: Vector,
     /// Intercept.
@@ -9724,7 +9724,7 @@ pub struct FittedQuantReg {
 impl Fit for QuantReg {
     type Fitted = FittedQuantReg;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -9799,7 +9799,7 @@ impl Predict for FittedQuantReg {
 ///
 /// View / component counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct CanCorrResult {
+pub(crate) struct CanCorrResult {
     /// Canonical correlations (nonincreasing).
     pub correlations: Vector,
     /// Number of finite observations used.
@@ -9807,7 +9807,7 @@ pub struct CanCorrResult {
 }
 
 /// Canonical correlation of two views via SVD of the whitened cross-covariance.
-pub fn cancorr(x: &Matrix, y: &Matrix, session: &Session) -> Result<Qualified<CanCorrResult>> {
+pub(crate) fn cancorr(x: &Matrix, y: &Matrix, session: &Session) -> Result<Qualified<CanCorrResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, None, &ctx.policy);
     inspect_xy(&mut ctx.report, y, None, &ctx.policy);
@@ -9917,7 +9917,7 @@ pub fn cancorr(x: &Matrix, y: &Matrix, session: &Session) -> Result<Qualified<Ca
 /// Covariate count is not identification `p`. Inner least-squares issues on
 /// a risk-set increment are not promoted.
 #[derive(Clone, Debug)]
-pub struct AalenAdditiveResult {
+pub(crate) struct AalenAdditiveResult {
     /// Cumulative additive coefficients (`n_events` × `p`).
     pub cumulative: Matrix,
     /// Event times.
@@ -9927,7 +9927,7 @@ pub struct AalenAdditiveResult {
 }
 
 /// Fit Aalen's additive hazards model by accumulating risk-set OLS increments.
-pub fn aalen_additive(
+pub(crate) fn aalen_additive(
     durations: &Vector,
     events: &Vector,
     x: &Matrix,
@@ -10014,7 +10014,7 @@ pub fn aalen_additive(
 /// Group and response counts are **not** identification `p`. A singular
 /// total SSP is recorded; it does not reuse a cluster/`p` gate.
 #[derive(Clone, Debug)]
-pub struct ManovaResult {
+pub(crate) struct ManovaResult {
     /// Pillai's trace \(\mathrm{tr}((B+W)^{-1}B)\).
     pub pillai: f64,
     /// Approximate upper-tail *F* *p* for the Pillai statistic.
@@ -10030,7 +10030,7 @@ pub struct ManovaResult {
 }
 
 /// One-way MANOVA of the columns of `y` on integer-coded `groups`.
-pub fn manova(y: &Matrix, groups: &Vector, session: &Session) -> Result<Qualified<ManovaResult>> {
+pub(crate) fn manova(y: &Matrix, groups: &Vector, session: &Session) -> Result<Qualified<ManovaResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, y, None, &ctx.policy);
     if groups.len() != y.nrows() {
@@ -10218,7 +10218,7 @@ pub fn manova(y: &Matrix, groups: &Vector, session: &Session) -> Result<Qualifie
 /// McNemar test of paired binary outcomes (statsmodels `mcnemar`).
 ///
 /// Discordant-pair count is not identification `p`.
-pub fn mcnemar(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn mcnemar(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_pair(&mut ctx, y1, y2);
     let mut b = 0.0;
@@ -10263,7 +10263,7 @@ pub fn mcnemar(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<
 /// Fisher exact test on a 2×2 table (statsmodels `fisher_exact`).
 ///
 /// Cell counts are not identification `p`.
-pub fn fisher_exact(table: &Matrix, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn fisher_exact(table: &Matrix, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, table, None, &ctx.policy);
     if table.nrows() != 2 || table.ncols() != 2 {
@@ -10322,7 +10322,7 @@ pub fn fisher_exact(table: &Matrix, session: &Session) -> Result<Qualified<Hypot
 }
 
 /// Anderson–Darling normality test after studentization (statsmodels `normal_ad`).
-pub fn anderson_darling(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn anderson_darling(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     let st = slice_stats(x.as_slice());
@@ -10395,12 +10395,12 @@ pub fn anderson_darling(x: &Vector, session: &Session) -> Result<Qualified<Hypot
 }
 
 /// Alias of [`anderson_darling`] (statsmodels `normal_ad`).
-pub fn normal_ad(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn normal_ad(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     anderson_darling(x, session)
 }
 
 /// Lilliefors normality test (KS after estimated mean/variance).
-pub fn lilliefors(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn lilliefors(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     let st = slice_stats(x.as_slice());
@@ -10475,7 +10475,7 @@ pub fn lilliefors(x: &Vector, session: &Session) -> Result<Qualified<HypothesisT
 ///
 /// Candidate / break counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct BaiPerronResult {
+pub(crate) struct BaiPerronResult {
     /// First observation of the second regime (`0` if unidentified).
     pub break_index: usize,
     /// `SSR_full − (SSR_left + SSR_right)`.
@@ -10492,7 +10492,7 @@ fn ssr_mean(sl: &[f64]) -> f64 {
 }
 
 /// Locate one mean break by exhaustive SSR search.
-pub fn bai_perron(y: &Vector, session: &Session) -> Result<Qualified<BaiPerronResult>> {
+pub(crate) fn bai_perron(y: &Vector, session: &Session) -> Result<Qualified<BaiPerronResult>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, &Matrix::from_vector(y), None, &ctx.policy);
     let n = y.len();
@@ -10539,7 +10539,7 @@ pub fn bai_perron(y: &Vector, session: &Session) -> Result<Qualified<BaiPerronRe
 
 /// Fitted bivariate Gaussian copula (statsmodels `Copula` lite).
 #[derive(Clone, Debug)]
-pub struct GaussianCopula {
+pub(crate) struct GaussianCopula {
     /// Pearson correlation of normal scores.
     pub rho: f64,
     /// Gaussian-copula log-likelihood.
@@ -10549,7 +10549,7 @@ pub struct GaussianCopula {
 /// Fit a bivariate Gaussian copula via normal scores.
 ///
 /// Pair count is not identification `p`.
-pub fn gaussian_copula(
+pub(crate) fn gaussian_copula(
     y1: &Vector,
     y2: &Vector,
     session: &Session,
@@ -10659,7 +10659,7 @@ fn copula_uv(y1: &Vector, y2: &Vector) -> (Vec<f64>, Vec<f64>) {
 
 /// Fitted Clayton copula (statsmodels `ClaytonCopula`).
 #[derive(Clone, Debug)]
-pub struct ClaytonCopula {
+pub(crate) struct ClaytonCopula {
     /// Dependence \(\theta > 0\).
     pub theta: f64,
     /// Copula log-likelihood.
@@ -10688,7 +10688,7 @@ fn clayton_ll(u: &[f64], v: &[f64], theta: f64) -> f64 {
 /// Fit a bivariate Clayton copula by a \(\theta\) grid on ranks.
 ///
 /// Pair count is not identification `p`.
-pub fn clayton_copula(
+pub(crate) fn clayton_copula(
     y1: &Vector,
     y2: &Vector,
     session: &Session,
@@ -10728,7 +10728,7 @@ pub fn clayton_copula(
 
 /// Fitted Gumbel copula (statsmodels `GumbelCopula`).
 #[derive(Clone, Debug)]
-pub struct GumbelCopula {
+pub(crate) struct GumbelCopula {
     /// Dependence \(\theta \ge 1\).
     pub theta: f64,
     /// Copula log-likelihood.
@@ -10763,7 +10763,7 @@ fn gumbel_ll(u: &[f64], v: &[f64], theta: f64) -> f64 {
 /// Fit a bivariate Gumbel copula by a \(\theta\) grid on ranks.
 ///
 /// Pair count is not identification `p`.
-pub fn gumbel_copula(
+pub(crate) fn gumbel_copula(
     y1: &Vector,
     y2: &Vector,
     session: &Session,
@@ -10803,7 +10803,7 @@ pub fn gumbel_copula(
 
 /// Fitted Frank copula (statsmodels `FrankCopula`).
 #[derive(Clone, Debug)]
-pub struct FrankCopula {
+pub(crate) struct FrankCopula {
     /// Dependence \(\theta \neq 0\).
     pub theta: f64,
     /// Copula log-likelihood.
@@ -10839,7 +10839,7 @@ fn frank_ll(u: &[f64], v: &[f64], theta: f64) -> f64 {
 /// Fit a bivariate Frank copula by a \(\theta\) grid on ranks.
 ///
 /// Pair count is not identification `p`.
-pub fn frank_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<FrankCopula>> {
+pub(crate) fn frank_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<FrankCopula>> {
     let mut ctx = FitCtx::with_session(session.clone());
     let n = y1.len().min(y2.len());
     let x = Matrix::from_fn(n, 2, |i, j| if j == 0 { y1[i] } else { y2[i] });
@@ -10878,7 +10878,7 @@ pub fn frank_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Quali
 
 /// Fitted Student-\(t\) copula (statsmodels `StudentTCopula`).
 #[derive(Clone, Debug)]
-pub struct StudentTCopula {
+pub(crate) struct StudentTCopula {
     /// Correlation of \(t\) scores.
     pub rho: f64,
     /// Degrees of freedom used for the inverse CDF.
@@ -10890,7 +10890,7 @@ pub struct StudentTCopula {
 /// Fit a bivariate \(t\) copula via \(t\) scores and Pearson \(\rho\).
 ///
 /// Pair / df counts are not identification `p`.
-pub fn student_t_copula(
+pub(crate) fn student_t_copula(
     y1: &Vector,
     y2: &Vector,
     df: f64,
@@ -10952,7 +10952,7 @@ pub fn student_t_copula(
 
 /// Fitted Joe copula (statsmodels `JoeCopula`).
 #[derive(Clone, Debug)]
-pub struct JoeCopula {
+pub(crate) struct JoeCopula {
     /// Dependence \(\theta \ge 1\).
     pub theta: f64,
     /// Copula log-likelihood.
@@ -10988,7 +10988,7 @@ fn joe_ll(u: &[f64], v: &[f64], theta: f64) -> f64 {
 /// Fit a bivariate Joe copula by a \(\theta\) grid on ranks.
 ///
 /// Pair count is not identification `p`.
-pub fn joe_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<JoeCopula>> {
+pub(crate) fn joe_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<JoeCopula>> {
     let mut ctx = FitCtx::with_session(session.clone());
     let n = y1.len().min(y2.len());
     let x = Matrix::from_fn(n, 2, |i, j| if j == 0 { y1[i] } else { y2[i] });
@@ -11024,7 +11024,7 @@ pub fn joe_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualifi
 
 /// Fitted Plackett copula (statsmodels `PlackettCopula`).
 #[derive(Clone, Debug)]
-pub struct PlackettCopula {
+pub(crate) struct PlackettCopula {
     /// Odds-ratio dependence \(\theta > 0\).
     pub theta: f64,
     /// Copula log-likelihood.
@@ -11055,7 +11055,7 @@ fn plackett_ll(u: &[f64], v: &[f64], theta: f64) -> f64 {
 /// Fit a bivariate Plackett copula by a \(\theta\) grid on ranks.
 ///
 /// Pair count is not identification `p`.
-pub fn plackett_copula(
+pub(crate) fn plackett_copula(
     y1: &Vector,
     y2: &Vector,
     session: &Session,
@@ -11095,7 +11095,7 @@ pub fn plackett_copula(
 
 /// Fitted Ali–Mikhail–Haq copula (statsmodels `AliMikhailHaqCopula`).
 #[derive(Clone, Debug)]
-pub struct AmhCopula {
+pub(crate) struct AmhCopula {
     /// Dependence \(\theta \in [-1, 1)\).
     pub theta: f64,
     /// Copula log-likelihood.
@@ -11128,7 +11128,7 @@ fn amh_ll(u: &[f64], v: &[f64], theta: f64) -> f64 {
 /// Fit a bivariate AMH copula by a \(\theta\) grid on ranks.
 ///
 /// Pair count is not identification `p`.
-pub fn amh_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<AmhCopula>> {
+pub(crate) fn amh_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<AmhCopula>> {
     let mut ctx = FitCtx::with_session(session.clone());
     let n = y1.len().min(y2.len());
     let x = Matrix::from_fn(n, 2, |i, j| if j == 0 { y1[i] } else { y2[i] });
@@ -11169,7 +11169,7 @@ pub fn amh_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualifi
 ///
 /// Knot count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct UnivariateGam {
+pub(crate) struct UnivariateGam {
     /// Interior knots.
     pub n_knots: usize,
     /// Ridge on the spline coefficients.
@@ -11187,7 +11187,7 @@ impl Default for UnivariateGam {
 
 impl UnivariateGam {
     /// GAM with `n_knots` interior knots.
-    pub fn new(n_knots: usize) -> Self {
+    pub(crate) fn new(n_knots: usize) -> Self {
         Self {
             n_knots: n_knots.max(1),
             ridge: 1e-2,
@@ -11195,7 +11195,7 @@ impl UnivariateGam {
     }
 
     /// Fit \(y \approx a + b x + \sum_k (x-\kappa_k)_+^3\).
-    pub fn fit(&self, x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<FittedUnivariateGam>> {
+    pub(crate) fn fit(&self, x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<FittedUnivariateGam>> {
         let mut ctx = FitCtx::with_session(session.clone());
         let n = x.len().min(y.len());
         let design0 = Matrix::from_fn(n, 1, |i, _| x[i]);
@@ -11272,7 +11272,7 @@ impl UnivariateGam {
 
 /// Fitted univariate spline GAM.
 #[derive(Clone, Debug)]
-pub struct FittedUnivariateGam {
+pub(crate) struct FittedUnivariateGam {
     /// `[intercept, slope, knot coefs…]`.
     pub coef: Vector,
     /// Interior knots.
@@ -11281,7 +11281,7 @@ pub struct FittedUnivariateGam {
 
 impl FittedUnivariateGam {
     /// Predict at the supplied `x` locations.
-    pub fn predict(&self, x: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict(&self, x: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         let ctx = FitCtx::with_session(session.child("predict"));
         let y = Vector::from_iter((0..x.len()).map(|i| {
             let xi = x[i];
@@ -11305,7 +11305,7 @@ impl FittedUnivariateGam {
 ///
 /// Dimension is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct KdeMultivariate {
+pub(crate) struct KdeMultivariate {
     /// Density at each training row.
     pub density: Vector,
     /// Per-column Scott bandwidth.
@@ -11313,7 +11313,7 @@ pub struct KdeMultivariate {
 }
 
 /// Gaussian-product KDE on the rows of `x`.
-pub fn kde_multivariate(x: &Matrix, session: &Session) -> Result<Qualified<KdeMultivariate>> {
+pub(crate) fn kde_multivariate(x: &Matrix, session: &Session) -> Result<Qualified<KdeMultivariate>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, None, &ctx.policy);
     let (n, k) = x.shape();
@@ -11352,7 +11352,7 @@ pub fn kde_multivariate(x: &Matrix, session: &Session) -> Result<Qualified<KdeMu
 /// Empirical-likelihood test of a scalar mean (statsmodels `emplike`).
 ///
 /// The implied Lagrange multiplier is not identification `p`.
-pub fn empirical_likelihood_mean(
+pub(crate) fn empirical_likelihood_mean(
     y: &Vector,
     mu0: f64,
     session: &Session,
@@ -11445,7 +11445,7 @@ pub fn empirical_likelihood_mean(
 ///
 /// Equation count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SurResult {
+pub(crate) struct SurResult {
     /// First-equation coefficients (including intercept if `x` has none).
     pub beta1: Vector,
     /// Second-equation coefficients.
@@ -11455,7 +11455,7 @@ pub struct SurResult {
 }
 
 /// Fit a two-equation seemingly unrelated regression on a shared design.
-pub fn sur(
+pub(crate) fn sur(
     y1: &Vector,
     y2: &Vector,
     x: &Matrix,
@@ -11518,7 +11518,7 @@ pub fn sur(
 /// `indicator` is high-frequency; `period` of its values sum to one entry of
 /// `totals`. Period and year counts are not identification `p`. Annual totals
 /// may be level-stationary — they are not inspected as a regression target.
-pub fn denton(
+pub(crate) fn denton(
     indicator: &Vector,
     totals: &Vector,
     period: usize,
@@ -11650,7 +11650,7 @@ pub fn denton(
 /// Low-frequency OLS of `totals` on the aggregated `indicator`, then AR(1)
 /// residual distribution. Period is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ChowLinResult {
+pub(crate) struct ChowLinResult {
     /// High-frequency series.
     pub series: Vector,
     /// Intercept of the low-frequency regression.
@@ -11662,7 +11662,7 @@ pub struct ChowLinResult {
 }
 
 /// Chow–Lin disaggregation of `totals` using `indicator` at `period`.
-pub fn chow_lin(
+pub(crate) fn chow_lin(
     indicator: &Vector,
     totals: &Vector,
     period: usize,
@@ -11793,7 +11793,7 @@ pub fn chow_lin(
 /// Litterman temporal disaggregation (random-walk residuals).
 ///
 /// Period is not identification `p`.
-pub fn litterman(
+pub(crate) fn litterman(
     indicator: &Vector,
     totals: &Vector,
     period: usize,
@@ -11864,7 +11864,7 @@ pub fn litterman(
 
 /// Fitted Farlie–Gumbel–Morgenstern copula (statsmodels `FGMCopula`).
 #[derive(Clone, Debug)]
-pub struct FgmCopula {
+pub(crate) struct FgmCopula {
     /// Dependence \(\theta \in [-1, 1]\).
     pub theta: f64,
     /// Copula log-likelihood.
@@ -11889,7 +11889,7 @@ fn fgm_ll(u: &[f64], v: &[f64], theta: f64) -> f64 {
 /// Fit a bivariate FGM copula by a \(\theta\) grid on ranks.
 ///
 /// Pair count is not identification `p`.
-pub fn fgm_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<FgmCopula>> {
+pub(crate) fn fgm_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<FgmCopula>> {
     let mut ctx = FitCtx::with_session(session.clone());
     let n = y1.len().min(y2.len());
     let x = Matrix::from_fn(n, 2, |i, j| if j == 0 { y1[i] } else { y2[i] });
@@ -11925,7 +11925,7 @@ pub fn fgm_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualifi
 
 /// Empirical / rank copula summary (statsmodels `EmpiricalCopula`).
 #[derive(Clone, Debug)]
-pub struct EmpiricalCopula {
+pub(crate) struct EmpiricalCopula {
     /// Finite pair count.
     pub n: usize,
     /// Mean of \(C_n(U_i,V_i)\). Independence is near \(1/4\); comonotonic near \(1/3\).
@@ -11935,7 +11935,7 @@ pub struct EmpiricalCopula {
 /// Evaluate the bivariate empirical copula on the sample ranks.
 ///
 /// Pair count is not identification `p`.
-pub fn empirical_copula(
+pub(crate) fn empirical_copula(
     y1: &Vector,
     y2: &Vector,
     session: &Session,
@@ -12006,7 +12006,7 @@ fn double_center(d: &mut [f64], n: usize) {
 /// Distance correlation (Szekely / scipy `distance_correlation`).
 ///
 /// Pair count is not identification `p`.
-pub fn distance_corr(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn distance_corr(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_pair(&mut ctx, x, y);
     let n = x.len().min(y.len());
@@ -12059,7 +12059,7 @@ pub fn distance_corr(x: &Vector, y: &Vector, session: &Session) -> Result<Qualif
 /// Energy distance between two samples (scipy `energy_distance`).
 ///
 /// Sample sizes are not identification `p`.
-pub fn energy_distance(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
+pub(crate) fn energy_distance(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(
         &mut ctx.report,
@@ -12109,7 +12109,7 @@ pub fn energy_distance(x: &Vector, y: &Vector, session: &Session) -> Result<Qual
 }
 
 /// One-sample Cramér–von Mises normality statistic (scipy `cramervonmises`).
-pub fn cramer_von_mises(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn cramer_von_mises(x: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, x);
     let st = slice_stats(x.as_slice());
@@ -12170,7 +12170,7 @@ pub fn cramer_von_mises(x: &Vector, session: &Session) -> Result<Qualified<Hypot
 /// k-sample Anderson–Darling (scipy `anderson_ksamp` / Scholz–Stephens).
 ///
 /// Group count is not identification `p`.
-pub fn anderson_ksamp(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn anderson_ksamp(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if groups.len() < 2 {
         ctx.push(
@@ -12248,7 +12248,7 @@ pub fn anderson_ksamp(groups: &[&Vector], session: &Session) -> Result<Qualified
 }
 
 /// Brunner–Munzel two-sample test (scipy `brunnermunzel`).
-pub fn brunner_munzel(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn brunner_munzel(x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(
         &mut ctx.report,
@@ -12335,7 +12335,7 @@ pub fn brunner_munzel(x: &Vector, y: &Vector, session: &Session) -> Result<Quali
 /// Jonckheere–Terpstra ordered-alternative test (statsmodels `jonckheere`).
 ///
 /// Group count is not identification `p`. Groups are taken in the given order.
-pub fn jonckheere(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn jonckheere(groups: &[&Vector], session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if groups.len() < 2 {
         ctx.push(
@@ -12433,7 +12433,7 @@ fn square_counts(y1: &Vector, y2: &Vector, labels: &[i64]) -> Matrix {
 /// Bowker symmetry test on paired categorical labels (statsmodels `bowker`).
 ///
 /// Category count is not identification `p`.
-pub fn bowker(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn bowker(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_pair(&mut ctx, y1, y2);
     let (labels, n) = paired_labels(y1, y2);
@@ -12476,7 +12476,7 @@ pub fn bowker(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<H
 /// Stuart–Maxwell marginal-homogeneity test (statsmodels `stuart_maxwell`).
 ///
 /// Category count is not identification `p`.
-pub fn stuart_maxwell(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn stuart_maxwell(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_pair(&mut ctx, y1, y2);
     let (labels, n) = paired_labels(y1, y2);
@@ -12552,7 +12552,7 @@ pub fn stuart_maxwell(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qua
 /// Leybourne–McCabe stationarity test (statsmodels `LeybourneMcCabe`).
 ///
 /// The AR lag used to prewhiten is not identification `p`.
-pub fn leybourne_mccabe(y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn leybourne_mccabe(y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, y);
     if y.len() < 8 {
@@ -12609,7 +12609,7 @@ pub fn leybourne_mccabe(y: &Vector, session: &Session) -> Result<Qualified<Hypot
 }
 
 /// Range unit-root statistic (Aparicio / statsmodels `RangeUnitRoot`).
-pub fn range_unit_root(y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn range_unit_root(y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_series_as_target(&mut ctx, y);
     let st = slice_stats(y.as_slice());
@@ -12652,7 +12652,7 @@ pub fn range_unit_root(y: &Vector, session: &Session) -> Result<Qualified<Hypoth
 /// Residual variance-break F test (statsmodels `breaks_breakvar`).
 ///
 /// The split index is not identification `p`.
-pub fn breakvar(e: &Vector, split: usize, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn breakvar(e: &Vector, split: usize, session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(
         &mut ctx.report,
@@ -12697,7 +12697,7 @@ pub fn breakvar(e: &Vector, split: usize, session: &Session) -> Result<Qualified
 
 /// Fitted C-vine pair-copula (statsmodels `VineCopula` lite).
 #[derive(Clone, Debug)]
-pub struct VineCopula {
+pub(crate) struct VineCopula {
     /// Pair-copula count (one edge for two series).
     pub n_trees: usize,
     /// Clayton \(\theta\) on the first tree.
@@ -12709,7 +12709,7 @@ pub struct VineCopula {
 /// Fit a bivariate C-vine (one Clayton pair) on ranks.
 ///
 /// Tree count is not identification `p`.
-pub fn vine_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<VineCopula>> {
+pub(crate) fn vine_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualified<VineCopula>> {
     let q = clayton_copula(y1, y2, session)?;
     let mut ctx = FitCtx::with_session(session.child("vine"));
     ctx.finish(VineCopula {
@@ -12722,7 +12722,7 @@ pub fn vine_copula(y1: &Vector, y2: &Vector, session: &Session) -> Result<Qualif
 /// Equal-n sample size for a two-proportion z-test (statsmodels `samplesize_proportions_2indep`).
 ///
 /// Returns \(n\) per arm. Arm count is not identification `p`.
-pub fn samplesize_proportions(
+pub(crate) fn samplesize_proportions(
     p1: f64,
     p2: f64,
     alpha: f64,
@@ -12783,7 +12783,7 @@ pub fn samplesize_proportions(
 /// Likelihood-ratio comparison of a Cox model against the nested null (β = 0).
 ///
 /// Covariate / cause counts are not identification `p`.
-pub fn compare_cox(
+pub(crate) fn compare_cox(
     durations: &Vector,
     events: &Vector,
     x: &Matrix,
@@ -12904,7 +12904,7 @@ pub fn compare_cox(
 }
 
 /// Alias of [`goldfeld_quandt`] (statsmodels `het_goldfeldquandt`).
-pub fn het_goldfeldquandt(
+pub(crate) fn het_goldfeldquandt(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -12913,7 +12913,7 @@ pub fn het_goldfeldquandt(
 }
 
 /// Alias of [`harvey_collier`] (statsmodels `linear_harvey_collier`).
-pub fn linear_harvey_collier(
+pub(crate) fn linear_harvey_collier(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -12923,7 +12923,7 @@ pub fn linear_harvey_collier(
 
 /// Alias of [`rainbow`] at the default central fraction 0.5
 /// (statsmodels `linear_rainbow`).
-pub fn linear_rainbow(
+pub(crate) fn linear_rainbow(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -12932,7 +12932,7 @@ pub fn linear_rainbow(
 }
 
 /// Alias of [`cusum_ols`] (statsmodels `breaks_cusumolsresid`).
-pub fn breaks_cusumolsresid(
+pub(crate) fn breaks_cusumolsresid(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -12945,7 +12945,7 @@ pub fn breaks_cusumolsresid(
 ///
 /// Concatenates `(t1, e1)` and `(t2, e2)` and runs the Mantel–Haenszel
 /// log-rank. Sample sizes are not identification `p`.
-pub fn compare_survfunc(
+pub(crate) fn compare_survfunc(
     t1: &Vector,
     e1: &Vector,
     t2: &Vector,
@@ -13008,7 +13008,7 @@ pub fn compare_survfunc(
 /// (statsmodels `OLSInfluence.cooks_distance`).
 ///
 /// Observation count is not identification `p`.
-pub fn cooks_distance(
+pub(crate) fn cooks_distance(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -13058,7 +13058,7 @@ pub fn cooks_distance(
 /// Savitzky–Golay local polynomial smoother (SciPy `savgol_filter`).
 ///
 /// Window length and polynomial degree are not identification `p`.
-pub fn savgol_filter(
+pub(crate) fn savgol_filter(
     y: &Vector,
     window: usize,
     polyorder: usize,
@@ -13217,7 +13217,7 @@ fn savgol_at(y: &[f64], t: usize, h: usize, deg: usize) -> f64 {
 ///
 /// Minimizes first differences of \(x_t/I_t\) subject to the low-frequency
 /// aggregation. Period is not identification `p`.
-pub fn denton_cholette(
+pub(crate) fn denton_cholette(
     indicator: &Vector,
     totals: &Vector,
     period: usize,
@@ -13366,7 +13366,7 @@ pub fn denton_cholette(
 /// Observation count is not identification `p`. The interval uses
 /// \(\Phi^{-1}(1-\alpha/2)\,s\sqrt{1+h_{ii}}\), not a Student-\(t\) quantile.
 #[derive(Clone, Debug)]
-pub struct PredictionResults {
+pub(crate) struct PredictionResults {
     /// Fitted mean.
     pub predicted: Vector,
     /// Standard error of the mean.
@@ -13380,7 +13380,7 @@ pub struct PredictionResults {
 }
 
 /// In-sample OLS prediction summary.
-pub fn get_prediction(
+pub(crate) fn get_prediction(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -13435,7 +13435,7 @@ pub fn get_prediction(
 /// Coefficient count is the design width (including intercept), which is the
 /// model's identification `p`.
 #[derive(Clone, Debug)]
-pub struct OlsTTest {
+pub(crate) struct OlsTTest {
     /// Intercept then slopes.
     pub params: Vector,
     /// Standard errors.
@@ -13449,7 +13449,7 @@ pub struct OlsTTest {
 }
 
 /// Individual OLS t-tests of \(H_0:\beta_j=0\).
-pub fn t_test(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<OlsTTest>> {
+pub(crate) fn t_test(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<OlsTTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
     let design = x.with_intercept();
@@ -13536,7 +13536,7 @@ pub fn t_test(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Ols
 
 /// Joint OLS Wald / F test that every slope is zero
 /// (statsmodels `OLSResults.f_test` for H0: slopes = 0).
-pub fn f_test(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn f_test(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
     wald_ols(x, y, session)
 }
 
@@ -13545,7 +13545,7 @@ pub fn f_test(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Hyp
 /// Uses a normal quantile times the OLS SE. Coefficient count is the design
 /// width.
 #[derive(Clone, Debug)]
-pub struct OlsConfInt {
+pub(crate) struct OlsConfInt {
     /// Lower bounds (intercept then slopes).
     pub low: Vector,
     /// Upper bounds.
@@ -13555,7 +13555,7 @@ pub struct OlsConfInt {
 }
 
 /// Two-sided OLS coefficient intervals at level `1 − alpha`.
-pub fn conf_int(
+pub(crate) fn conf_int(
     x: &Matrix,
     y: &Vector,
     alpha: f64,
@@ -13618,7 +13618,7 @@ pub fn conf_int(
 ///
 /// Bandwidth `h` is not identification `p`. Censoring weights are computed
 /// locally; a fully uncensored sample reduces to [`kernel_reg`].
-pub fn kernel_censored_reg(
+pub(crate) fn kernel_censored_reg(
     x: &Vector,
     y: &Vector,
     event: &Vector,
@@ -13736,7 +13736,7 @@ pub fn kernel_censored_reg(
 ///
 /// Covariance parameters are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ProcessMleFit {
+pub(crate) struct ProcessMleFit {
     /// Estimated mean.
     pub mean: f64,
     /// Marginal variance.
@@ -13749,7 +13749,7 @@ pub struct ProcessMleFit {
 ///
 /// `t` is the observation time; `y` is the response. A small grid over \(\rho\)
 /// is scored by GLS residual quadratic form. Failed Cholesky trials are skipped.
-pub fn process_mle(t: &Vector, y: &Vector, session: &Session) -> Result<Qualified<ProcessMleFit>> {
+pub(crate) fn process_mle(t: &Vector, y: &Vector, session: &Session) -> Result<Qualified<ProcessMleFit>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_pair(&mut ctx, t, y);
     let n = t.len().min(y.len());
@@ -13859,7 +13859,7 @@ pub fn process_mle(t: &Vector, y: &Vector, session: &Session) -> Result<Qualifie
 /// unrestricted design. The statistic is \(n R^2\) against \(\chi^2_{p_u-p_r}\).
 /// Extra-column count is not identification `p`. Inner OLS failures are not
 /// promoted as fatal Cholesky / rank issues.
-pub fn compare_lm(
+pub(crate) fn compare_lm(
     y: &Vector,
     x_restr: &Matrix,
     x_unrestr: &Matrix,
@@ -13951,7 +13951,7 @@ pub fn compare_lm(
 }
 
 /// Ramsey RESET under the statsmodels `linear_reset` name.
-pub fn linear_reset(
+pub(crate) fn linear_reset(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -13963,7 +13963,7 @@ pub fn linear_reset(
 ///
 /// At risk at \(t\) are rows with `entry ≤ t ≤ time`. Entry times are not
 /// identification `p`. Zero events abort as vacuous, same as Kaplan–Meier.
-pub fn survfunc_left(
+pub(crate) fn survfunc_left(
     entry: &Vector,
     time: &Vector,
     event: &Vector,
@@ -14067,16 +14067,16 @@ pub fn survfunc_left(
 
 /// Named delayed-entry Kaplan–Meier (statsmodels `SurvfuncRight` + `entry`).
 #[derive(Clone, Debug, Default)]
-pub struct LeftTruncatedKM;
+pub(crate) struct LeftTruncatedKM;
 
 impl LeftTruncatedKM {
     /// Default delayed-entry product-limit estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on entry times, exit times, and event indicators.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         entry: &Vector,
         time: &Vector,
@@ -14105,7 +14105,7 @@ fn turnbull_covers(t: f64, lo: f64, hi: f64) -> bool {
 /// identification `p`. Do not call [`kaplan_meier_fit`] here: complementary
 /// censoring with zero events would vacuous-abort. Zero probability mass
 /// (every interval empty of candidates) is vacuous.
-pub fn survfunc_dc(
+pub(crate) fn survfunc_dc(
     left: &Vector,
     right: &Vector,
     session: &Session,
@@ -14269,16 +14269,16 @@ pub fn survfunc_dc(
 
 /// Named interval-censored survival (statsmodels `survfunc_dc` / Turnbull).
 #[derive(Clone, Debug, Default)]
-pub struct Turnbull;
+pub(crate) struct Turnbull;
 
 impl Turnbull {
     /// Default Turnbull NPMLE.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on left and right interval endpoints (`right` may be \(+\infty\)).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         left: &Vector,
         right: &Vector,
@@ -14292,7 +14292,7 @@ impl Turnbull {
 ///
 /// Cut count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct FittedPiecewiseExponential {
+pub(crate) struct FittedPiecewiseExponential {
     /// Right endpoints of the hazard pieces.
     pub cuts: Vector,
     /// Constant hazard on each piece.
@@ -14312,7 +14312,7 @@ pub struct FittedPiecewiseExponential {
 /// Equal-width cuts on \([0, t_{\max}]\). Cut count is not identification `p`.
 /// Do not call [`kaplan_meier_fit`]: this is a rate model, and a complementary
 /// KM with zero events would vacuous-abort. Inspect times with `y=None`.
-pub fn piecewise_exponential(
+pub(crate) fn piecewise_exponential(
     time: &Vector,
     event: &Vector,
     n_cuts: usize,
@@ -14448,7 +14448,7 @@ pub fn piecewise_exponential(
 
 /// Named piecewise exponential (statsmodels duration PE).
 #[derive(Clone, Debug)]
-pub struct PiecewiseExponential {
+pub(crate) struct PiecewiseExponential {
     /// Number of equal-width pieces. Not identification `p`.
     pub n_cuts: usize,
 }
@@ -14461,12 +14461,12 @@ impl Default for PiecewiseExponential {
 
 impl PiecewiseExponential {
     /// Default four-piece PE.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit constant hazards on right-censored times.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         time: &Vector,
         event: &Vector,
@@ -14530,7 +14530,7 @@ fn discrete_logit_irls(
 
 /// Fitted discrete-time logistic proportional hazards.
 #[derive(Clone, Debug)]
-pub struct FittedLogisticPH {
+pub(crate) struct FittedLogisticPH {
     /// Intercept of \(\mathrm{logit}\,h(t)\).
     pub intercept: f64,
     /// Slope on the integer period index.
@@ -14546,7 +14546,7 @@ pub struct FittedLogisticPH {
 /// Each subject is expanded to integer periods \(1,\ldots,\lceil t\rceil\) with
 /// an event only on the last period when uncensored. Period count is not
 /// identification `p`. Inspect times with `y=None`.
-pub fn logistic_ph(
+pub(crate) fn logistic_ph(
     time: &Vector,
     event: &Vector,
     session: &Session,
@@ -14654,16 +14654,16 @@ pub fn logistic_ph(
 
 /// Named discrete-time logistic PH (statsmodels `LogisticPH`).
 #[derive(Clone, Debug, Default)]
-pub struct LogisticPH;
+pub(crate) struct LogisticPH;
 
 impl LogisticPH {
     /// Default person-period logistic PH.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on right-censored times and event indicators.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         time: &Vector,
         event: &Vector,
@@ -14678,7 +14678,7 @@ impl LogisticPH {
 /// Covariate count is identification `p`. Newton uses a scratch Cholesky so a
 /// non-SPD information matrix does not Fatal-abort the outer session.
 #[derive(Clone, Debug)]
-pub struct EfronCox {
+pub(crate) struct EfronCox {
     /// Newton iteration cap.
     pub max_iter: usize,
     /// Gradient-norm convergence tolerance.
@@ -14696,12 +14696,12 @@ impl Default for EfronCox {
 
 impl EfronCox {
     /// Default Efron-tie Cox.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit \(h(t\mid x)=h_0(t)\exp(x\beta)\) with Efron tie correction.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -14926,7 +14926,7 @@ fn efron_cox_fit(
 /// Shared \(\beta\), Breslow risk sets *within* each stratum. Stratum count is
 /// not identification `p`. Newton uses a scratch Cholesky.
 #[derive(Clone, Debug)]
-pub struct StratifiedCox {
+pub(crate) struct StratifiedCox {
     /// Newton iteration cap.
     pub max_iter: usize,
     /// Gradient-norm convergence tolerance.
@@ -14944,12 +14944,12 @@ impl Default for StratifiedCox {
 
 impl StratifiedCox {
     /// Default stratified Breslow Cox.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit \(h_s(t\mid x)=h_{0s}(t)\exp(x\beta)\) on durations, events, covariates, and strata.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -15121,7 +15121,7 @@ fn stratified_cox_fit(
 
 /// Fitted exponential proportional hazards.
 #[derive(Clone, Debug)]
-pub struct FittedExponentialPH {
+pub(crate) struct FittedExponentialPH {
     /// Log-hazard slopes (no intercept).
     pub coef: Vector,
     /// Log-baseline \(\log\lambda_0\).
@@ -15136,7 +15136,7 @@ pub struct FittedExponentialPH {
 ///
 /// \(\ell=\sum\delta_i\eta_i-\sum t_i e^{\eta_i}\), \(\eta=x\beta\) with intercept.
 /// Covariate count is identification `p`. Scratch Cholesky on Newton.
-pub fn exponential_ph(
+pub(crate) fn exponential_ph(
     durations: &Vector,
     events: &Vector,
     x: &Matrix,
@@ -15275,16 +15275,16 @@ pub fn exponential_ph(
 
 /// Named exponential PH (statsmodels `PHReg` exponential).
 #[derive(Clone, Debug, Default)]
-pub struct ExponentialPH;
+pub(crate) struct ExponentialPH;
 
 impl ExponentialPH {
     /// Default exponential PH.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit \(h(t\mid x)=\exp(\alpha+x\beta)\).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -15371,7 +15371,7 @@ fn cox_tv_grad_hess(
 ///
 /// At risk at \(t\) are rows with `start < t ≤ stop`. Interval count is not
 /// identification `p`. Scratch Cholesky on Newton.
-pub fn time_varying_cox(
+pub(crate) fn time_varying_cox(
     start: &Vector,
     stop: &Vector,
     events: &Vector,
@@ -15489,16 +15489,16 @@ pub fn time_varying_cox(
 
 /// Named counting-process Cox (statsmodels `PHReg` start/stop).
 #[derive(Clone, Debug, Default)]
-pub struct TimeVaryingCox;
+pub(crate) struct TimeVaryingCox;
 
 impl TimeVaryingCox {
     /// Default start/stop Cox.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on interval starts, stops, events, and covariates.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         start: &Vector,
         stop: &Vector,
@@ -15512,7 +15512,7 @@ impl TimeVaryingCox {
 
 /// Fitted Weibull PH (power-transform exponential PH).
 #[derive(Clone, Debug)]
-pub struct FittedWeibullPH {
+pub(crate) struct FittedWeibullPH {
     /// Log-hazard slopes.
     pub coef: Vector,
     /// Log-baseline.
@@ -15528,7 +15528,7 @@ pub struct FittedWeibullPH {
 /// Weibull PH via \(t\mapsto t^p\) then exponential PH (statsmodels `PHReg` Weibull).
 ///
 /// Shape is a Gumbel moment of event log-times, not identification `p`.
-pub fn weibull_ph(
+pub(crate) fn weibull_ph(
     durations: &Vector,
     events: &Vector,
     x: &Matrix,
@@ -15636,16 +15636,16 @@ pub fn weibull_ph(
 
 /// Named Weibull PH (statsmodels `PHReg` Weibull).
 #[derive(Clone, Debug, Default)]
-pub struct WeibullPH;
+pub(crate) struct WeibullPH;
 
 impl WeibullPH {
     /// Default Weibull PH.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit \(h(t\mid x)=p t^{p-1}\exp(\alpha+x\beta)\) via a \(t^p\) transform.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -15658,7 +15658,7 @@ impl WeibullPH {
 
 /// Fitted Gompertz PH (log-linear hazard in calendar time).
 #[derive(Clone, Debug)]
-pub struct FittedGompertzPH {
+pub(crate) struct FittedGompertzPH {
     /// Slopes on the original covariates.
     pub coef: Vector,
     /// Log-linear time slope \(\gamma\).
@@ -15675,7 +15675,7 @@ pub struct FittedGompertzPH {
 ///
 /// Time is appended as a covariate of the exponential PH; that extra column is
 /// not a substitute identification `p` beyond the expanded design width.
-pub fn gompertz_ph(
+pub(crate) fn gompertz_ph(
     durations: &Vector,
     events: &Vector,
     x: &Matrix,
@@ -15758,16 +15758,16 @@ pub fn gompertz_ph(
 
 /// Named Gompertz PH.
 #[derive(Clone, Debug, Default)]
-pub struct GompertzPH;
+pub(crate) struct GompertzPH;
 
 impl GompertzPH {
     /// Default Gompertz PH.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit \(h(t\mid x)=\exp(\alpha+\gamma t+x\beta)\).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -15780,7 +15780,7 @@ impl GompertzPH {
 
 /// Fitted discrete log-logistic / proportional-odds PH.
 #[derive(Clone, Debug)]
-pub struct FittedLogLogisticPH {
+pub(crate) struct FittedLogLogisticPH {
     /// Intercept of \(\mathrm{logit}\,h\).
     pub intercept: f64,
     /// Slope on \(\log t\).
@@ -15795,7 +15795,7 @@ pub struct FittedLogLogisticPH {
 
 /// Log-logistic / proportional-odds discrete PH (person-period logit on
 /// \([1,\log t,x]\)). Period count is not identification `p`.
-pub fn loglogistic_ph(
+pub(crate) fn loglogistic_ph(
     time: &Vector,
     event: &Vector,
     x: &Matrix,
@@ -15902,16 +15902,16 @@ pub fn loglogistic_ph(
 
 /// Named log-logistic / proportional-odds PH.
 #[derive(Clone, Debug, Default)]
-pub struct LogLogisticPH;
+pub(crate) struct LogLogisticPH;
 
 impl LogLogisticPH {
     /// Default person-period log-logistic PH.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on times, events, and covariates.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         time: &Vector,
         event: &Vector,
@@ -15927,7 +15927,7 @@ impl LogLogisticPH {
 /// Equal-width intervals on \([0, t_{\max}]\). Cut count is not identification
 /// `p`. Do not call [`kaplan_meier_fit`]. Inspect times with `y=None`.
 #[derive(Clone, Debug)]
-pub struct FittedLifeTable {
+pub(crate) struct FittedLifeTable {
     /// Right endpoints of the intervals.
     pub cuts: Vector,
     /// Actuarial \(\hat S\) at each right endpoint.
@@ -15945,7 +15945,7 @@ pub struct FittedLifeTable {
 /// Actuarial life table on right-censored times.
 ///
 /// \(n'_j = n_j - c_j/2\), \(q_j = d_j / n'_j\), \(S_j = S_{j-1}(1-q_j)\).
-pub fn life_table(
+pub(crate) fn life_table(
     time: &Vector,
     event: &Vector,
     n_cuts: usize,
@@ -16069,7 +16069,7 @@ pub fn life_table(
 
 /// Named actuarial life table.
 #[derive(Clone, Debug)]
-pub struct LifeTable {
+pub(crate) struct LifeTable {
     /// Number of equal-width intervals. Not identification `p`.
     pub n_cuts: usize,
 }
@@ -16082,12 +16082,12 @@ impl Default for LifeTable {
 
 impl LifeTable {
     /// Default four-interval life table.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit on right-censored times.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         time: &Vector,
         event: &Vector,
@@ -16101,7 +16101,7 @@ impl LifeTable {
 ///
 /// Case-weight count is not identification `p`. Do not call
 /// [`kaplan_meier_fit`]. Inspect times with `y=None`.
-pub fn weighted_km(
+pub(crate) fn weighted_km(
     durations: &Vector,
     events: &Vector,
     weights: &Vector,
@@ -16215,16 +16215,16 @@ pub fn weighted_km(
 
 /// Named weighted product-limit estimator.
 #[derive(Clone, Debug, Default)]
-pub struct WeightedKm;
+pub(crate) struct WeightedKm;
 
 impl WeightedKm {
     /// Default weighted KM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit with case weights (`weights[i] ≤ 0` rows are dropped).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -16253,7 +16253,7 @@ fn skip_aborting_inner(issue: &Issue) -> bool {
 ///
 /// At risk at \(t\) are rows with `start < t ≤ stop`. Interval / subject counts
 /// are not identification `p`. Independent increments are assumed (no frailty).
-pub fn andersen_gill(
+pub(crate) fn andersen_gill(
     start: &Vector,
     stop: &Vector,
     events: &Vector,
@@ -16333,16 +16333,16 @@ pub fn andersen_gill(
 
 /// Named Andersen–Gill recurrent-event Cox.
 #[derive(Clone, Debug, Default)]
-pub struct AndersenGill;
+pub(crate) struct AndersenGill;
 
 impl AndersenGill {
     /// Default AG counting-process Cox.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on interval starts, stops, events, and covariates.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         start: &Vector,
         stop: &Vector,
@@ -16358,7 +16358,7 @@ impl AndersenGill {
 ///
 /// Event-order count is not identification `p`. Calendar time is used as-is;
 /// the caller must pass gap times for a gap-time PWP.
-pub fn pwp_cox(
+pub(crate) fn pwp_cox(
     durations: &Vector,
     events: &Vector,
     x: &Matrix,
@@ -16462,16 +16462,16 @@ pub fn pwp_cox(
 
 /// Named Prentice–Williams–Peterson total-time Cox.
 #[derive(Clone, Debug, Default)]
-pub struct PwpCox;
+pub(crate) struct PwpCox;
 
 impl PwpCox {
     /// Default PWP total-time Cox.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit with `event_order` as the PWP stratum (1 = first event, …).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -16531,7 +16531,7 @@ fn discrete_cloglog_irls(
 
 /// Fitted discrete complementary-log-log proportional hazards.
 #[derive(Clone, Debug)]
-pub struct FittedCloglogPH {
+pub(crate) struct FittedCloglogPH {
     /// Intercept of \(\mathrm{cloglog}\,h\).
     pub intercept: f64,
     /// Slope on the integer period index.
@@ -16547,7 +16547,7 @@ pub struct FittedCloglogPH {
 /// Discrete-time complementary log-log PH (person-period cloglog on
 /// \([1, t, x]\)). Period count is not identification `p`. Inspect times with
 /// `y=None`.
-pub fn cloglog_ph(
+pub(crate) fn cloglog_ph(
     time: &Vector,
     event: &Vector,
     x: &Matrix,
@@ -16654,16 +16654,16 @@ pub fn cloglog_ph(
 
 /// Named discrete complementary-log-log PH.
 #[derive(Clone, Debug, Default)]
-pub struct CloglogPH;
+pub(crate) struct CloglogPH;
 
 impl CloglogPH {
     /// Default person-period cloglog PH.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on times, events, and covariates.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         time: &Vector,
         event: &Vector,
@@ -16676,7 +16676,7 @@ impl CloglogPH {
 
 /// Greenwood standard errors for a product-limit curve.
 #[derive(Clone, Debug)]
-pub struct GreenwoodResult {
+pub(crate) struct GreenwoodResult {
     /// Event times.
     pub times: Vector,
     /// \(\hat S(t)\).
@@ -16690,7 +16690,7 @@ pub struct GreenwoodResult {
 /// \(\mathrm{Var}\hat S(t)=\hat S(t)^2\sum_{t_j\le t}d_j/(n_j(n_j-d_j))\).
 /// Do not call [`kaplan_meier_fit`]. Inspect times with `y=None`. Event count
 /// is not identification `p`.
-pub fn greenwood(
+pub(crate) fn greenwood(
     durations: &Vector,
     events: &Vector,
     session: &Session,
@@ -16774,16 +16774,16 @@ pub fn greenwood(
 
 /// Named Greenwood SE wrapper.
 #[derive(Clone, Debug, Default)]
-pub struct Greenwood;
+pub(crate) struct Greenwood;
 
 impl Greenwood {
     /// Default Greenwood calculator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit Greenwood SEs on right-censored times.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -16876,7 +16876,7 @@ fn cox_beta_or_zero(
 ///
 /// Do not call [`kaplan_meier_fit`] / [`nelson_aalen`] (zero events abort).
 /// Covariate count is identification `p`. Inspect times with `y=None`.
-pub fn cox_snell(
+pub(crate) fn cox_snell(
     durations: &Vector,
     events: &Vector,
     x: &Matrix,
@@ -16921,7 +16921,7 @@ pub fn cox_snell(
 /// Martingale residuals \(\delta_i-\hat\Lambda(t_i\mid x_i)\).
 ///
 /// Same Breslow path as [`cox_snell`]. Event count is not a substitute `p`.
-pub fn martingale_resid(
+pub(crate) fn martingale_resid(
     durations: &Vector,
     events: &Vector,
     x: &Matrix,
@@ -16948,7 +16948,7 @@ pub fn martingale_resid(
 
 /// Harrell concordance (lifelines `concordance_index` / sksurv).
 #[derive(Clone, Debug)]
-pub struct ConcordanceResult {
+pub(crate) struct ConcordanceResult {
     /// \(C = (n_{\mathrm{conc}}+0.5\,n_{\mathrm{tie}})/n_{\mathrm{pair}}\).
     pub c_index: f64,
     /// Comparable pairs (earlier time is an event).
@@ -16962,7 +16962,7 @@ pub struct ConcordanceResult {
 /// Harrell's \(C\) from durations, events, and risk scores (higher = higher hazard).
 ///
 /// Pair count is not identification `p`. Inspect times with `y=None`.
-pub fn concordance_index(
+pub(crate) fn concordance_index(
     durations: &Vector,
     events: &Vector,
     scores: &Vector,
@@ -17040,7 +17040,7 @@ pub fn concordance_index(
 }
 
 /// Named alias of [`concordance_index`].
-pub fn c_index(
+pub(crate) fn c_index(
     durations: &Vector,
     events: &Vector,
     scores: &Vector,
@@ -17051,7 +17051,7 @@ pub fn c_index(
 
 /// Breslow baseline hazard / survival from a Cox fit.
 #[derive(Clone, Debug)]
-pub struct BaselineHazard {
+pub(crate) struct BaselineHazard {
     /// Event times.
     pub times: Vector,
     /// Increments \(d\hat H_0(t)\).
@@ -17066,7 +17066,7 @@ pub struct BaselineHazard {
 ///
 /// Do not call [`nelson_aalen`] / [`kaplan_meier_fit`]. Covariate count is
 /// identification `p`. Inspect times with `y=None`.
-pub fn baseline_hazard(
+pub(crate) fn baseline_hazard(
     durations: &Vector,
     events: &Vector,
     x: &Matrix,
@@ -17145,7 +17145,7 @@ pub fn baseline_hazard(
 }
 
 /// Baseline survival \(S_0(t)=\exp(-H_0(t))\) from [`baseline_hazard`].
-pub fn baseline_survival(
+pub(crate) fn baseline_survival(
     durations: &Vector,
     events: &Vector,
     x: &Matrix,
@@ -17158,7 +17158,7 @@ pub fn baseline_survival(
 /// Cox deviance residuals from martingale residuals.
 ///
 /// \(d_i=\mathrm{sign}(M_i)\sqrt{-2[M_i+\delta_i\log(\delta_i-M_i)]}\).
-pub fn deviance_resid(
+pub(crate) fn deviance_resid(
     durations: &Vector,
     events: &Vector,
     x: &Matrix,
@@ -17196,7 +17196,7 @@ pub fn deviance_resid(
 
 /// Fitted gamma shared-frailty Cox.
 #[derive(Clone, Debug)]
-pub struct FittedSharedFrailty {
+pub(crate) struct FittedSharedFrailty {
     /// Partial-likelihood slopes.
     pub coef: Vector,
     /// Posterior mean frailty \(Z_g\) for each row's group.
@@ -17218,7 +17218,7 @@ pub struct FittedSharedFrailty {
 /// Group count is not identification `p`. EM: posterior
 /// \(Z_g=(D_g+1/\theta)/(\Lambda_g+1/\theta)\) then Breslow Newton with
 /// frailty-weighted risk sets. Scratch Cholesky.
-pub fn shared_frailty(
+pub(crate) fn shared_frailty(
     durations: &Vector,
     events: &Vector,
     x: &Matrix,
@@ -17551,7 +17551,7 @@ fn breslow_cumhaz_frailty(
 
 /// Named shared-frailty Cox.
 #[derive(Clone, Debug)]
-pub struct SharedFrailty {
+pub(crate) struct SharedFrailty {
     /// Gamma variance \(\theta>0\). Not identification `p`.
     pub theta: f64,
 }
@@ -17564,12 +17564,12 @@ impl Default for SharedFrailty {
 
 impl SharedFrailty {
     /// Default \(\theta=0.5\) shared frailty.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit \(h_i(t)=Z_{g(i)}h_0(t)\exp(x\beta)\).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -17586,7 +17586,7 @@ impl SharedFrailty {
 /// A finite right endpoint is treated as an event at \((L+R)/2\); \(+\infty\)
 /// is right-censoring at \(L\). Interval count is not identification `p`.
 /// Do not `scan_finite` the right endpoints (\(+\infty\) is allowed).
-pub fn interval_censored_ph(
+pub(crate) fn interval_censored_ph(
     left: &Vector,
     right: &Vector,
     x: &Matrix,
@@ -17716,16 +17716,16 @@ pub fn interval_censored_ph(
 
 /// Named interval-censored midpoint Cox.
 #[derive(Clone, Debug, Default)]
-pub struct IntervalCensoredPH;
+pub(crate) struct IntervalCensoredPH;
 
 impl IntervalCensoredPH {
     /// Default midpoint IC PH.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on left/right endpoints and covariates.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         left: &Vector,
         right: &Vector,
@@ -17742,7 +17742,7 @@ impl IntervalCensoredPH {
 /// [`shared_frailty`]; aborting inner codes are not promoted. The score is
 /// a central difference of the fixed-\(\theta\) EM log-likelihood, not the
 /// analytic penalized-partial-likelihood derivative.
-pub fn profile_frailty(
+pub(crate) fn profile_frailty(
     durations: &Vector,
     events: &Vector,
     x: &Matrix,
@@ -17869,16 +17869,16 @@ pub fn profile_frailty(
 
 /// Named profiled-θ frailty wrapper.
 #[derive(Clone, Debug, Default)]
-pub struct ProfileFrailty;
+pub(crate) struct ProfileFrailty;
 
 impl ProfileFrailty {
     /// Default finite-difference θ Newton.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit the profiled-θ frailty proxy.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -17895,7 +17895,7 @@ impl ProfileFrailty {
 /// Unique finite endpoints define discrete intervals. Period count is not
 /// identification `p`. \(+\infty\) rights are allowed (right censoring) and
 /// are not passed through [`scan_finite`]. Inspect times with `y=None`.
-pub fn finkelstein_ph(
+pub(crate) fn finkelstein_ph(
     left: &Vector,
     right: &Vector,
     x: &Matrix,
@@ -18061,16 +18061,16 @@ pub fn finkelstein_ph(
 
 /// Named Finkelstein grouped PH.
 #[derive(Clone, Debug, Default)]
-pub struct FinkelsteinPH;
+pub(crate) struct FinkelsteinPH;
 
 impl FinkelsteinPH {
     /// Default grouped IC PH.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on left/right endpoints and covariates.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         left: &Vector,
         right: &Vector,
@@ -18084,7 +18084,7 @@ impl FinkelsteinPH {
 /// Breslow–Day test of odds-ratio homogeneity across 2×2 strata.
 ///
 /// Stratum count is not identification `p`.
-pub fn breslow_day(tables: &[Matrix], session: &Session) -> Result<Qualified<HypothesisTest>> {
+pub(crate) fn breslow_day(tables: &[Matrix], session: &Session) -> Result<Qualified<HypothesisTest>> {
     let mut ctx = FitCtx::with_session(session.clone());
     if tables.len() < 2 {
         ctx.push(
@@ -18202,7 +18202,7 @@ pub fn breslow_day(tables: &[Matrix], session: &Session) -> Result<Qualified<Hyp
 /// Two-sample normal (z) power (statsmodels `NormalIndPower`).
 ///
 /// Sample sizes are not identification `p`.
-pub fn normal_ind_power(
+pub(crate) fn normal_ind_power(
     effect_size: f64,
     n1: f64,
     n2: f64,
@@ -18261,16 +18261,16 @@ pub fn normal_ind_power(
 
 /// Named two-sample *t* power (statsmodels `TTestIndPower`).
 #[derive(Clone, Debug, Default)]
-pub struct TTestIndPower;
+pub(crate) struct TTestIndPower;
 
 impl TTestIndPower {
     /// Default two-sample t power.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Power at `effect_size`, `n1`, `n2`, `alpha`.
-    pub fn power(
+    pub(crate) fn power(
         &self,
         effect_size: f64,
         n1: f64,
@@ -18284,16 +18284,16 @@ impl TTestIndPower {
 
 /// Named two-sample normal power (statsmodels `NormalIndPower`).
 #[derive(Clone, Debug, Default)]
-pub struct NormalIndPower;
+pub(crate) struct NormalIndPower;
 
 impl NormalIndPower {
     /// Default known-variance power.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Power at `effect_size`, `n1`, `n2`, `alpha`.
-    pub fn power(
+    pub(crate) fn power(
         &self,
         effect_size: f64,
         n1: f64,
@@ -18307,16 +18307,16 @@ impl NormalIndPower {
 
 /// Named χ² GOF power (statsmodels `GofChisquarePower`).
 #[derive(Clone, Debug, Default)]
-pub struct GofChisquarePower;
+pub(crate) struct GofChisquarePower;
 
 impl GofChisquarePower {
     /// Default χ² GOF power.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Power at non-centrality `ncp`, `df`, `alpha`.
-    pub fn power(
+    pub(crate) fn power(
         &self,
         ncp: f64,
         df: f64,
@@ -18328,7 +18328,7 @@ impl GofChisquarePower {
 }
 
 /// Named alias of [`tukey_hsd`].
-pub fn pairwise_tukeyhsd(
+pub(crate) fn pairwise_tukeyhsd(
     groups: &[&Vector],
     session: &Session,
 ) -> Result<Qualified<TukeyHsdResult>> {
@@ -18336,7 +18336,7 @@ pub fn pairwise_tukeyhsd(
 }
 
 /// Named alias of [`bowker`] (statsmodels `mcnemar_bowker`).
-pub fn mcnemar_bowker(
+pub(crate) fn mcnemar_bowker(
     y1: &Vector,
     y2: &Vector,
     session: &Session,
@@ -18348,7 +18348,7 @@ pub fn mcnemar_bowker(
 ///
 /// Group / cause counts are not identification `p`. Inspect times with
 /// `y=None`. Competing events stay in the risk set.
-pub fn gray_test(
+pub(crate) fn gray_test(
     times: &Vector,
     events: &Vector,
     groups: &Vector,
@@ -18517,7 +18517,7 @@ pub fn gray_test(
 ///
 /// Cause count is not identification `p`. Inner Fatal Cox codes are not
 /// promoted. Inspect times with `y=None`.
-pub fn cause_specific_cox(
+pub(crate) fn cause_specific_cox(
     durations: &Vector,
     events: &Vector,
     x: &Matrix,
@@ -18603,7 +18603,7 @@ pub fn cause_specific_cox(
 /// Uno IPCW concordance (sksurv `concordance_index_ipcw`).
 ///
 /// Pair count is not identification `p`. Inspect times with `y=None`.
-pub fn ipcw_cindex(
+pub(crate) fn ipcw_cindex(
     durations: &Vector,
     events: &Vector,
     scores: &Vector,
@@ -18693,7 +18693,7 @@ pub fn ipcw_cindex(
 /// IPCW Brier score at a fixed time (sksurv `brier_score`).
 ///
 /// The horizon is not identification `p`. Inspect times with `y=None`.
-pub fn brier_survival(
+pub(crate) fn brier_survival(
     durations: &Vector,
     events: &Vector,
     pred_surv: &Vector,
@@ -18761,7 +18761,7 @@ pub fn brier_survival(
 
 /// Fitted parametric lifetime (lifelines `*Fitter`).
 #[derive(Clone, Debug)]
-pub struct FittedParametricSurv {
+pub(crate) struct FittedParametricSurv {
     /// Shape (\(k=1\) for exponential).
     pub shape: f64,
     /// Scale \(\lambda\).
@@ -18775,7 +18775,7 @@ pub struct FittedParametricSurv {
 /// Exponential lifetime MLE (lifelines `ExponentialFitter`).
 ///
 /// Event count is not identification `p`. Inspect times with `y=None`.
-pub fn exponential_fitter(
+pub(crate) fn exponential_fitter(
     durations: &Vector,
     events: &Vector,
     session: &Session,
@@ -18828,16 +18828,16 @@ pub fn exponential_fitter(
 
 /// Named exponential fitter.
 #[derive(Clone, Debug, Default)]
-pub struct ExponentialFitter;
+pub(crate) struct ExponentialFitter;
 
 impl ExponentialFitter {
     /// Default exponential lifetime.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on durations and event indicators.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -18850,7 +18850,7 @@ impl ExponentialFitter {
 /// Weibull lifetime via Gumbel moments on log event times (lifelines `WeibullFitter`).
 ///
 /// Event count is not identification `p`. Inspect times with `y=None`.
-pub fn weibull_fitter(
+pub(crate) fn weibull_fitter(
     durations: &Vector,
     events: &Vector,
     session: &Session,
@@ -18927,16 +18927,16 @@ pub fn weibull_fitter(
 
 /// Named Weibull fitter.
 #[derive(Clone, Debug, Default)]
-pub struct WeibullFitter;
+pub(crate) struct WeibullFitter;
 
 impl WeibullFitter {
     /// Default Weibull lifetime.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on durations and event indicators.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -18949,7 +18949,7 @@ impl WeibullFitter {
 /// Log-normal lifetime via moments of log event times (lifelines `LogNormalFitter`).
 ///
 /// Event count is not identification `p`. Inspect times with `y=None`.
-pub fn lognormal_fitter(
+pub(crate) fn lognormal_fitter(
     durations: &Vector,
     events: &Vector,
     session: &Session,
@@ -19025,16 +19025,16 @@ pub fn lognormal_fitter(
 
 /// Named log-normal fitter.
 #[derive(Clone, Debug, Default)]
-pub struct LogNormalFitter;
+pub(crate) struct LogNormalFitter;
 
 impl LogNormalFitter {
     /// Default log-normal lifetime.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on durations and event indicators.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -19048,7 +19048,7 @@ impl LogNormalFitter {
 /// (lifelines `LogLogisticFitter`).
 ///
 /// Event count is not identification `p`. Inspect times with `y=None`.
-pub fn loglogistic_fitter(
+pub(crate) fn loglogistic_fitter(
     durations: &Vector,
     events: &Vector,
     session: &Session,
@@ -19127,16 +19127,16 @@ pub fn loglogistic_fitter(
 
 /// Named log-logistic fitter.
 #[derive(Clone, Debug, Default)]
-pub struct LogLogisticFitter;
+pub(crate) struct LogLogisticFitter;
 
 impl LogLogisticFitter {
     /// Default log-logistic lifetime.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on durations and event indicators.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -19151,7 +19151,7 @@ impl LogLogisticFitter {
 ///
 /// Event-time count is not identification `p`. Inspect times with `y=None`.
 /// Does not call `kaplan_meier_fit`.
-pub fn gompertz_fitter(
+pub(crate) fn gompertz_fitter(
     durations: &Vector,
     events: &Vector,
     session: &Session,
@@ -19266,16 +19266,16 @@ pub fn gompertz_fitter(
 
 /// Named Gompertz fitter.
 #[derive(Clone, Debug, Default)]
-pub struct GompertzFitter;
+pub(crate) struct GompertzFitter;
 
 impl GompertzFitter {
     /// Default Gompertz lifetime.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on durations and event indicators.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -19289,7 +19289,7 @@ impl GompertzFitter {
 ///
 /// Cure fraction is \(1 - n_{\mathrm{events}}/n\), not a Kaplan–Meier plateau.
 /// Event count is not identification `p`. Inspect times with `y=None`.
-pub fn mixture_cure_fitter(
+pub(crate) fn mixture_cure_fitter(
     durations: &Vector,
     events: &Vector,
     session: &Session,
@@ -19355,7 +19355,7 @@ pub fn mixture_cure_fitter(
 
 /// Fitted mixture-cure exponential.
 #[derive(Clone, Debug)]
-pub struct FittedMixtureCure {
+pub(crate) struct FittedMixtureCure {
     /// Incidence-complement cure fraction.
     pub cure_fraction: f64,
     /// Exponential latency scale.
@@ -19368,16 +19368,16 @@ pub struct FittedMixtureCure {
 
 /// Named mixture-cure fitter.
 #[derive(Clone, Debug, Default)]
-pub struct MixtureCureFitter;
+pub(crate) struct MixtureCureFitter;
 
 impl MixtureCureFitter {
     /// Default mixture-cure exponential.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on durations and event indicators.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -19391,7 +19391,7 @@ impl MixtureCureFitter {
 ///
 /// Cause count is not identification `p`. Inspect times with `y=None`.
 /// Does not call `kaplan_meier_fit`.
-pub fn aalen_johansen_se(
+pub(crate) fn aalen_johansen_se(
     times: &Vector,
     events: &Vector,
     cause: i64,
@@ -19495,7 +19495,7 @@ pub fn aalen_johansen_se(
 }
 
 /// Named alias of [`aalen_johansen_se`].
-pub fn cif_se(
+pub(crate) fn cif_se(
     times: &Vector,
     events: &Vector,
     cause: i64,
@@ -19506,7 +19506,7 @@ pub fn cif_se(
 
 /// Greenwood-Aalen CIF payload.
 #[derive(Clone, Debug)]
-pub struct AalenJohansenSe {
+pub(crate) struct AalenJohansenSe {
     /// Cumulative incidence at the last event time.
     pub cif: f64,
     /// Greenwood-style standard error.
@@ -19520,7 +19520,7 @@ pub struct AalenJohansenSe {
 /// Column-standardised Schoenfeld residuals (lifelines `scaled_schoenfeld`).
 ///
 /// Event count is not identification `p`. Inspect covariates with `y=None`.
-pub fn scaled_schoenfeld(
+pub(crate) fn scaled_schoenfeld(
     durations: &Vector,
     events: &Vector,
     x: &Matrix,
@@ -19569,7 +19569,7 @@ pub fn scaled_schoenfeld(
 /// `GeneralizedGammaFitter`).
 ///
 /// Event count is not identification `p`. Inspect times with `y=None`.
-pub fn generalized_gamma_fitter(
+pub(crate) fn generalized_gamma_fitter(
     durations: &Vector,
     events: &Vector,
     session: &Session,
@@ -19657,7 +19657,7 @@ pub fn generalized_gamma_fitter(
 
 /// Fitted generalized-gamma lifetime.
 #[derive(Clone, Debug)]
-pub struct FittedGeneralizedGamma {
+pub(crate) struct FittedGeneralizedGamma {
     /// Stacy shape \(d\).
     pub shape: f64,
     /// Stacy power \(p\).
@@ -19672,16 +19672,16 @@ pub struct FittedGeneralizedGamma {
 
 /// Named generalized-gamma fitter.
 #[derive(Clone, Debug, Default)]
-pub struct GeneralizedGammaFitter;
+pub(crate) struct GeneralizedGammaFitter;
 
 impl GeneralizedGammaFitter {
     /// Default generalized-gamma lifetime.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on durations and event indicators.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -19693,16 +19693,16 @@ impl GeneralizedGammaFitter {
 
 /// Named Aalen additive hazards (lifelines `AalenAdditiveFitter`).
 #[derive(Clone, Debug, Default)]
-pub struct AalenAdditiveFitter;
+pub(crate) struct AalenAdditiveFitter;
 
 impl AalenAdditiveFitter {
     /// Default additive hazards.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit cumulative additive coefficients.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -19715,16 +19715,16 @@ impl AalenAdditiveFitter {
 
 /// Named Kaplan–Meier fitter (lifelines `KaplanMeierFitter`).
 #[derive(Clone, Debug, Default)]
-pub struct KaplanMeierFitter;
+pub(crate) struct KaplanMeierFitter;
 
 impl KaplanMeierFitter {
     /// Default product-limit estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on durations and event indicators.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -19738,16 +19738,16 @@ impl KaplanMeierFitter {
 ///
 /// Delegates to [`nelson_aalen`], which uses the product-limit event table.
 #[derive(Clone, Debug, Default)]
-pub struct NelsonAalenFitter;
+pub(crate) struct NelsonAalenFitter;
 
 impl NelsonAalenFitter {
     /// Default Nelson–Aalen estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit the cumulative hazard.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -19759,16 +19759,16 @@ impl NelsonAalenFitter {
 
 /// Named Aalen–Johansen fitter (lifelines `AalenJohansenFitter`).
 #[derive(Clone, Debug, Default)]
-pub struct AalenJohansenFitter;
+pub(crate) struct AalenJohansenFitter;
 
 impl AalenJohansenFitter {
     /// Default competing-risk CIF.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit cause-specific cumulative incidence.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         times: &Vector,
         events: &Vector,
@@ -19782,18 +19782,18 @@ impl AalenJohansenFitter {
 ///
 /// Inner Newton `CholeskyFailed` is not promoted (same contract as [`PHReg`]).
 #[derive(Clone, Debug, Default)]
-pub struct CoxPHFitter {
+pub(crate) struct CoxPHFitter {
     inner: CoxPH,
 }
 
 impl CoxPHFitter {
     /// Default Breslow Cox.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit `h(t | x) = h0(t) exp(xβ)`.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -19832,16 +19832,16 @@ impl CoxPHFitter {
 
 /// Named Fine–Gray estimator (lifelines / sksurv).
 #[derive(Clone, Debug, Default)]
-pub struct FineGray;
+pub(crate) struct FineGray;
 
 impl FineGray {
     /// Default subdistribution-hazard fit.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit cause `cause` (default 1 if `cause == 0`).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         durations: &Vector,
@@ -19878,16 +19878,16 @@ impl FineGray {
 
 /// Named cause-specific Cox (sksurv `CauseSpecificCox`).
 #[derive(Clone, Debug, Default)]
-pub struct CauseSpecificCox;
+pub(crate) struct CauseSpecificCox;
 
 impl CauseSpecificCox {
     /// Default cause-specific Cox.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit treating other causes as censored.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -19923,7 +19923,7 @@ impl CauseSpecificCox {
 /// Blinder–Oaxaca two-group mean decomposition (statsmodels `Oaxaca`).
 ///
 /// Group count is not identification `p`.
-pub fn oaxaca(
+pub(crate) fn oaxaca(
     x: &Matrix,
     y: &Vector,
     groups: &Vector,
@@ -20039,7 +20039,7 @@ pub fn oaxaca(
 
 /// Blinder–Oaxaca payload.
 #[derive(Clone, Debug)]
-pub struct OaxacaResult {
+pub(crate) struct OaxacaResult {
     /// \(\bar y_B - \bar y_A\) reconstructed as endowment + coefficient + interaction.
     pub gap: f64,
     /// Endowment \((\bar x_B-\bar x_A)\hat\beta_A\).
@@ -20057,7 +20057,7 @@ pub struct OaxacaResult {
 /// Gaussian knockoff filter (statsmodels `RegressionFDR` / Barber–Candès lite).
 ///
 /// Knockoff copies are not identification `p`.
-pub fn knockoff(
+pub(crate) fn knockoff(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -20129,7 +20129,7 @@ pub fn knockoff(
 
 /// Knockoff filter payload.
 #[derive(Clone, Debug)]
-pub struct KnockoffResult {
+pub(crate) struct KnockoffResult {
     /// 1 if \(W_j>0\).
     pub selected: Vector,
     /// \(W_j = |c_j| - |c_j^{\mathrm{knock}}|\).
@@ -20138,7 +20138,7 @@ pub struct KnockoffResult {
 
 /// Named piecewise-exponential fitter (lifelines `PiecewiseExponentialFitter`).
 #[derive(Clone, Debug)]
-pub struct PiecewiseExponentialFitter {
+pub(crate) struct PiecewiseExponentialFitter {
     inner: PiecewiseExponential,
 }
 
@@ -20152,12 +20152,12 @@ impl Default for PiecewiseExponentialFitter {
 
 impl PiecewiseExponentialFitter {
     /// Default four-piece PE.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit constant hazards on right-censored times.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         time: &Vector,
         event: &Vector,
@@ -20169,7 +20169,7 @@ impl PiecewiseExponentialFitter {
 
 /// Named Nadaraya–Watson estimator (statsmodels `nonparametric.KernelReg`).
 #[derive(Clone, Debug)]
-pub struct KernelReg {
+pub(crate) struct KernelReg {
     /// Gaussian bandwidth. Not identification `p`.
     pub bandwidth: f64,
 }
@@ -20182,19 +20182,19 @@ impl Default for KernelReg {
 
 impl KernelReg {
     /// Kernel regression with bandwidth `bandwidth`.
-    pub fn new(bandwidth: f64) -> Self {
+    pub(crate) fn new(bandwidth: f64) -> Self {
         Self { bandwidth }
     }
 
     /// Fit \(\hat m(x_i)\) at the observed abscissae.
-    pub fn fit(&self, x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         kernel_reg(x, y, self.bandwidth, session)
     }
 }
 
 /// Named Cleveland LOWESS (statsmodels `nonparametric.lowess`).
 #[derive(Clone, Debug)]
-pub struct Lowess {
+pub(crate) struct Lowess {
     /// Neighbourhood fraction in \((0,1]\). Not identification `p`.
     pub frac: f64,
 }
@@ -20207,19 +20207,19 @@ impl Default for Lowess {
 
 impl Lowess {
     /// LOWESS with span `frac`.
-    pub fn new(frac: f64) -> Self {
+    pub(crate) fn new(frac: f64) -> Self {
         Self { frac }
     }
 
     /// Fit locally weighted lines at each \(x_i\).
-    pub fn fit(&self, x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn fit(&self, x: &Vector, y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         lowess(x, y, self.frac, session)
     }
 }
 
 /// Named empirical-likelihood mean test (statsmodels `emplike`).
 #[derive(Clone, Debug)]
-pub struct EmpiricalLikelihood {
+pub(crate) struct EmpiricalLikelihood {
     /// Null mean \(\mu_0\).
     pub mu0: f64,
 }
@@ -20232,12 +20232,12 @@ impl Default for EmpiricalLikelihood {
 
 impl EmpiricalLikelihood {
     /// EL test of mean `mu0`.
-    pub fn new(mu0: f64) -> Self {
+    pub(crate) fn new(mu0: f64) -> Self {
         Self { mu0 }
     }
 
     /// Owen \(W(\mu_0)\) against a \(\chi^2_1\).
-    pub fn test(&self, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
+    pub(crate) fn test(&self, y: &Vector, session: &Session) -> Result<Qualified<HypothesisTest>> {
         empirical_likelihood_mean(y, self.mu0, session)
     }
 }
@@ -20334,7 +20334,7 @@ fn local_breslow_h(time: &Vector, event: &Vector) -> Vector {
 ///
 /// Knot count is not identification `p`. Inner Cox `CholeskyFailed` is not promoted.
 #[derive(Clone, Debug)]
-pub struct SplinePH {
+pub(crate) struct SplinePH {
     /// RCS knots on \(\log t\). Not identification `p`.
     pub n_knots: usize,
 }
@@ -20347,12 +20347,12 @@ impl Default for SplinePH {
 
 impl SplinePH {
     /// Default three-knot spline PH.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit \(h(t\mid x)=h_0(t)\exp(x\beta + \mathrm{rcs}(\log t)\gamma)\).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -20464,7 +20464,7 @@ impl SplinePH {
 /// \(\log H(t\mid x)=\mathrm{rcs}(\log t)\gamma + x\beta\) by OLS on event-time
 /// Breslow \(H\). Knot count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RoystonParmar {
+pub(crate) struct RoystonParmar {
     /// RCS knots on \(\log t\). Not identification `p`.
     pub n_knots: usize,
 }
@@ -20477,12 +20477,12 @@ impl Default for RoystonParmar {
 
 impl RoystonParmar {
     /// Default three-knot RP.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit the log-cumulative-hazard spline plus covariate slopes.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -20495,7 +20495,7 @@ impl RoystonParmar {
 
 /// Fitted Royston–Parmar / CRC spline.
 #[derive(Clone, Debug)]
-pub struct FittedRoystonParmar {
+pub(crate) struct FittedRoystonParmar {
     /// Intercept plus RCS coefficients of \(\log t\).
     pub gamma: Vector,
     /// Covariate log-hazard slopes.
@@ -20606,7 +20606,7 @@ fn royston_parmar_fit(
 
 /// Named CRC / restricted cubic spline PH (lifelines `CRCSplineFitter`).
 #[derive(Clone, Debug)]
-pub struct CrcSpline {
+pub(crate) struct CrcSpline {
     inner: RoystonParmar,
 }
 
@@ -20620,12 +20620,12 @@ impl Default for CrcSpline {
 
 impl CrcSpline {
     /// Four-knot CRC spline.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit the four-knot log-cumulative-hazard spline.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -20638,16 +20638,16 @@ impl CrcSpline {
 
 /// Named two-sample log-rank (lifelines `logrank_test` / statsmodels `survdiff`).
 #[derive(Clone, Debug, Default)]
-pub struct LogrankTest;
+pub(crate) struct LogrankTest;
 
 impl LogrankTest {
     /// Default Mantel–Haenszel log-rank.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Two-sample log-rank on `groups` (extra codes are dropped by [`logrank`]).
-    pub fn test(
+    pub(crate) fn test(
         &self,
         times: &Vector,
         events: &Vector,
@@ -20662,7 +20662,7 @@ impl LogrankTest {
 ///
 /// Group count is not identification `p`. Inspect times with `y=None`. Do not
 /// call [`kaplan_meier_fit`].
-pub fn multivariate_logrank(
+pub(crate) fn multivariate_logrank(
     times: &Vector,
     events: &Vector,
     groups: &Vector,
@@ -20805,16 +20805,16 @@ pub fn multivariate_logrank(
 
 /// Named k-sample log-rank.
 #[derive(Clone, Debug, Default)]
-pub struct MultivariateLogrank;
+pub(crate) struct MultivariateLogrank;
 
 impl MultivariateLogrank {
     /// Default k-sample log-rank.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Mantel–Haenszel k-sample test.
-    pub fn test(
+    pub(crate) fn test(
         &self,
         times: &Vector,
         events: &Vector,
@@ -20827,18 +20827,18 @@ impl MultivariateLogrank {
 
 /// Named counting-process Cox (lifelines `CoxTimeVaryingFitter`).
 #[derive(Clone, Debug, Default)]
-pub struct CoxTimeVaryingFitter {
+pub(crate) struct CoxTimeVaryingFitter {
     inner: TimeVaryingCox,
 }
 
 impl CoxTimeVaryingFitter {
     /// Default start/stop Cox.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit on interval starts, stops, events, and covariates.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         start: &Vector,
         stop: &Vector,
@@ -20852,16 +20852,16 @@ impl CoxTimeVaryingFitter {
 
 /// Named Weibull PH (lifelines / statsmodels `PHReg` Weibull).
 #[derive(Clone, Debug, Default)]
-pub struct WeibullPHFitter;
+pub(crate) struct WeibullPHFitter;
 
 impl WeibullPHFitter {
     /// Default Weibull PH.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit \(h(t\mid x)=p t^{p-1}\exp(x\beta)\).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -20874,7 +20874,7 @@ impl WeibullPHFitter {
 
 /// Named Granger test (statsmodels `stattools.grangercausalitytests`).
 #[derive(Clone, Debug)]
-pub struct GrangerCausality {
+pub(crate) struct GrangerCausality {
     /// VAR lag. Not identification `p` by itself; the unrestricted width is.
     pub lag: usize,
 }
@@ -20887,12 +20887,12 @@ impl Default for GrangerCausality {
 
 impl GrangerCausality {
     /// Granger test at lag `lag`.
-    pub fn new(lag: usize) -> Self {
+    pub(crate) fn new(lag: usize) -> Self {
         Self { lag: lag.max(1) }
     }
 
     /// Test whether `x` Granger-causes `y`.
-    pub fn test(
+    pub(crate) fn test(
         &self,
         x: &Vector,
         y: &Vector,
@@ -20943,7 +20943,7 @@ fn weighted_pava(y: &[f64], w: &[f64]) -> Vec<f64> {
 /// Interval / support counts are not identification `p`. Do not call
 /// [`kaplan_meier_fit`]. `+∞` rights are right-censoring and must not go
 /// through [`scan_finite`].
-pub fn iterative_convex_minorant(
+pub(crate) fn iterative_convex_minorant(
     left: &Vector,
     right: &Vector,
     session: &Session,
@@ -21124,16 +21124,16 @@ pub fn iterative_convex_minorant(
 
 /// Named ICM estimator (statsmodels / Groeneboom–Wellner).
 #[derive(Clone, Debug, Default)]
-pub struct IterativeConvexMinorant;
+pub(crate) struct IterativeConvexMinorant;
 
 impl IterativeConvexMinorant {
     /// Default ICM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit on left and right interval endpoints (`right` may be \(+\infty\)).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         left: &Vector,
         right: &Vector,
@@ -21145,18 +21145,18 @@ impl IterativeConvexMinorant {
 
 /// Named Finkelstein ICM (interval-censored NPMLE, not grouped cloglog PH).
 #[derive(Clone, Debug, Default)]
-pub struct FinkelsteinIcm {
+pub(crate) struct FinkelsteinIcm {
     inner: IterativeConvexMinorant,
 }
 
 impl FinkelsteinIcm {
     /// Default Finkelstein ICM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit the interval-censored NPMLE.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         left: &Vector,
         right: &Vector,
@@ -21372,7 +21372,7 @@ fn surv_node_risk(node: &SurvNode, x: &Matrix, i: usize) -> f64 {
 /// \(H(\infty)\). Tree / try counts are not identification `p`. Does not call
 /// [`nelson_aalen`]. Inspect times via `X` (durations are not a class).
 #[derive(Clone, Debug)]
-pub struct RandomSurvivalForest {
+pub(crate) struct RandomSurvivalForest {
     /// Trees. Not identification `p`.
     pub n_estimators: usize,
     /// Maximum depth.
@@ -21399,12 +21399,12 @@ impl Default for RandomSurvivalForest {
 
 impl RandomSurvivalForest {
     /// Default extra-trees survival forest.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit log-rank extra-trees on durations, events, and covariates.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -21466,7 +21466,7 @@ impl RandomSurvivalForest {
 
 /// Fitted extra-trees survival forest (leaf Nelson–Aalen risk).
 #[derive(Clone, Debug)]
-pub struct FittedRandomSurvivalForest {
+pub(crate) struct FittedRandomSurvivalForest {
     trees: Vec<SurvNode>,
     /// Training feature count.
     pub n_features: usize,
@@ -21474,7 +21474,7 @@ pub struct FittedRandomSurvivalForest {
 
 impl FittedRandomSurvivalForest {
     /// Ensemble-mean leaf Nelson–Aalen risk.
-    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         if x.ncols() != self.n_features {
@@ -21502,7 +21502,7 @@ impl FittedRandomSurvivalForest {
 
 /// Extra-trees survival forest (sksurv `ExtraSurvivalTrees`).
 #[derive(Clone, Debug)]
-pub struct ExtraSurvivalTrees {
+pub(crate) struct ExtraSurvivalTrees {
     inner: RandomSurvivalForest,
 }
 
@@ -21522,12 +21522,12 @@ impl Default for ExtraSurvivalTrees {
 
 impl ExtraSurvivalTrees {
     /// Default extra-trees survival forest.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit the extra-trees survival forest.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -21543,7 +21543,7 @@ impl ExtraSurvivalTrees {
 /// ISTA on the Breslow partial likelihood. Penalty / iteration counts are not
 /// identification `p`. Inner information is never Cholesky-factorized.
 #[derive(Clone, Debug)]
-pub struct Coxnet {
+pub(crate) struct Coxnet {
     /// Elastic-net \(\alpha\).
     pub alpha: f64,
     /// L1 fraction in \([0,1]\).
@@ -21564,12 +21564,12 @@ impl Default for Coxnet {
 
 impl Coxnet {
     /// Default elastic-net Cox.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit \(\hat\beta\) by ISTA on the Breslow partial likelihood.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -21690,7 +21690,7 @@ impl Coxnet {
 
 /// Fitted elastic-net Cox coefficients.
 #[derive(Clone, Debug)]
-pub struct FittedCoxnet {
+pub(crate) struct FittedCoxnet {
     /// Penalized log-hazard slopes.
     pub coef: Vector,
     /// Elastic-net \(\alpha\).
@@ -21707,7 +21707,7 @@ pub struct FittedCoxnet {
 
 impl FittedCoxnet {
     /// Linear predictor \(x\hat\beta\).
-    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(x.matvec(&self.coef))
@@ -21716,18 +21716,18 @@ impl FittedCoxnet {
 
 /// Named Coxnet wrapper (sksurv `CoxnetSurvivalAnalysis`).
 #[derive(Clone, Debug, Default)]
-pub struct CoxnetFitter {
+pub(crate) struct CoxnetFitter {
     inner: Coxnet,
 }
 
 impl CoxnetFitter {
     /// Default elastic-net Cox wrapper.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit the ISTA Coxnet.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -21743,7 +21743,7 @@ impl CoxnetFitter {
 /// Comparable pairs are \((i,j)\) with \(T_i<T_j\) and \(i\) uncensored.
 /// Pair count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SurvivalSvm {
+pub(crate) struct SurvivalSvm {
     /// SGD step size.
     pub eta: f64,
     /// Passes over the pair list. Not identification `p`.
@@ -21761,12 +21761,12 @@ impl Default for SurvivalSvm {
 
 impl SurvivalSvm {
     /// Default linear ranking survival SVM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit a linear ranking SVM on comparable pairs.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -21855,7 +21855,7 @@ impl SurvivalSvm {
 
 /// Fitted linear ranking survival SVM.
 #[derive(Clone, Debug)]
-pub struct FittedSurvivalSvm {
+pub(crate) struct FittedSurvivalSvm {
     /// Ranking slopes (higher score ⇒ earlier event).
     pub coef: Vector,
     /// Comparable-pair count used in the hinge.
@@ -21864,7 +21864,7 @@ pub struct FittedSurvivalSvm {
 
 impl FittedSurvivalSvm {
     /// Linear ranking score \(xw\).
-    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(x.matvec(&self.coef))
@@ -21873,18 +21873,18 @@ impl FittedSurvivalSvm {
 
 /// Named FastSurvivalSVM wrapper.
 #[derive(Clone, Debug, Default)]
-pub struct FastSurvivalSvm {
+pub(crate) struct FastSurvivalSvm {
     inner: SurvivalSvm,
 }
 
 impl FastSurvivalSvm {
     /// Default linear ranking SVM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit the ranking SVM.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -21951,7 +21951,7 @@ fn apply_surv_stumps(stumps: &[SurvStump], x: &Matrix) -> Vector {
 /// Each step fits an extra-trees stump to the Breslow PL score \(\partial\ell/\partial\eta\).
 /// Tree count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct GradientBoostingSurvival {
+pub(crate) struct GradientBoostingSurvival {
     /// Stumps. Not identification `p`.
     pub n_estimators: usize,
     /// Shrinkage.
@@ -21972,12 +21972,12 @@ impl Default for GradientBoostingSurvival {
 
 impl GradientBoostingSurvival {
     /// Default componentwise-stump Cox booster.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit stumps on the Breslow score.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -22085,7 +22085,7 @@ impl GradientBoostingSurvival {
 
 /// Fitted PL-score survival booster.
 #[derive(Clone, Debug)]
-pub struct FittedGradientBoostingSurvival {
+pub(crate) struct FittedGradientBoostingSurvival {
     stumps: Vec<SurvStump>,
     /// Training feature count.
     pub n_features: usize,
@@ -22093,7 +22093,7 @@ pub struct FittedGradientBoostingSurvival {
 
 impl FittedGradientBoostingSurvival {
     /// Boosted log-hazard \(\hat\eta(x)\).
-    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         if x.ncols() != self.n_features {
@@ -22113,7 +22113,7 @@ impl FittedGradientBoostingSurvival {
 /// Each step updates a single coordinate of \(\beta\) by the PL score. Step
 /// count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct ComponentwiseGradientBoostingSurvival {
+pub(crate) struct ComponentwiseGradientBoostingSurvival {
     /// Coordinate steps. Not identification `p`.
     pub n_estimators: usize,
     /// Shrinkage.
@@ -22131,12 +22131,12 @@ impl Default for ComponentwiseGradientBoostingSurvival {
 
 impl ComponentwiseGradientBoostingSurvival {
     /// Default componentwise booster.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit by greedy one-coordinate PL steps.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -22228,14 +22228,14 @@ impl ComponentwiseGradientBoostingSurvival {
 
 /// Fitted componentwise Cox booster.
 #[derive(Clone, Debug)]
-pub struct FittedComponentwiseGbs {
+pub(crate) struct FittedComponentwiseGbs {
     /// Accumulated linear log-hazard slopes.
     pub coef: Vector,
 }
 
 impl FittedComponentwiseGbs {
     /// Linear predictor \(x\hat\beta\).
-    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(x.matvec(&self.coef))
@@ -22246,7 +22246,7 @@ impl FittedComponentwiseGbs {
 ///
 /// Tree depth is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SurvivalTree {
+pub(crate) struct SurvivalTree {
     inner: RandomSurvivalForest,
 }
 
@@ -22266,12 +22266,12 @@ impl Default for SurvivalTree {
 
 impl SurvivalTree {
     /// Default extra-trees survival stump forest of size 1.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit one log-rank extra-tree.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -22284,16 +22284,16 @@ impl SurvivalTree {
 
 /// Named Harrell \(C\) (sksurv `concordance_index_censored`).
 #[derive(Clone, Debug, Default)]
-pub struct ConcordanceIndex;
+pub(crate) struct ConcordanceIndex;
 
 impl ConcordanceIndex {
     /// Default Harrell C.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Score risk ranks against right-censored times.
-    pub fn score(
+    pub(crate) fn score(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -22306,18 +22306,18 @@ impl ConcordanceIndex {
 
 /// Named Harrell \(C\) alias.
 #[derive(Clone, Debug, Default)]
-pub struct HarrellC {
+pub(crate) struct HarrellC {
     inner: ConcordanceIndex,
 }
 
 impl HarrellC {
     /// Default Harrell C.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Score risk ranks.
-    pub fn score(
+    pub(crate) fn score(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -22330,16 +22330,16 @@ impl HarrellC {
 
 /// Named Uno IPCW \(C\) (sksurv `concordance_index_ipcw`).
 #[derive(Clone, Debug, Default)]
-pub struct UnoC;
+pub(crate) struct UnoC;
 
 impl UnoC {
     /// Default Uno C.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// IPCW concordance on right-censored times.
-    pub fn score(
+    pub(crate) fn score(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -22352,18 +22352,18 @@ impl UnoC {
 
 /// Named IPCW C-index wrapper.
 #[derive(Clone, Debug, Default)]
-pub struct IpcwCindex {
+pub(crate) struct IpcwCindex {
     inner: UnoC,
 }
 
 impl IpcwCindex {
     /// Default IPCW C.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Score IPCW concordance.
-    pub fn score(
+    pub(crate) fn score(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -22379,7 +22379,7 @@ impl IpcwCindex {
 /// `pred_surv` is \(n\times m\) predicted \(S(t_k\mid x_i)\). Time-grid width is
 /// not identification `p`. Censoring KM is local ([`censoring_km`]); this does
 /// not call [`nelson_aalen`]. Inspect times with `y=None`.
-pub fn integrated_brier_score(
+pub(crate) fn integrated_brier_score(
     durations: &Vector,
     events: &Vector,
     pred_surv: &Matrix,
@@ -22481,16 +22481,16 @@ pub fn integrated_brier_score(
 
 /// Named Graf IBS wrapper.
 #[derive(Clone, Debug, Default)]
-pub struct IntegratedBrierScore;
+pub(crate) struct IntegratedBrierScore;
 
 impl IntegratedBrierScore {
     /// Default rectangle-rule IBS.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Score predicted survivals on a time grid.
-    pub fn score(
+    pub(crate) fn score(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -22506,18 +22506,18 @@ impl IntegratedBrierScore {
 ///
 /// Inner Newton `CholeskyFailed` is not promoted.
 #[derive(Clone, Debug, Default)]
-pub struct CoxPHSurvivalAnalysis {
+pub(crate) struct CoxPHSurvivalAnalysis {
     inner: CoxPH,
 }
 
 impl CoxPHSurvivalAnalysis {
     /// Default Breslow Cox.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit \(h(t\mid x)=h_0(t)\exp(x\beta)\).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -22559,16 +22559,16 @@ impl CoxPHSurvivalAnalysis {
 /// Event / time counts are not identification `p`. Does not call
 /// [`nelson_aalen`]. Inspect times with `y=None`.
 #[derive(Clone, Debug, Default)]
-pub struct BreslowEstimator;
+pub(crate) struct BreslowEstimator;
 
 impl BreslowEstimator {
     /// Default Breslow baseline.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit a subject-level Breslow \(H(T_i)\).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -22607,16 +22607,16 @@ impl BreslowEstimator {
 
 /// Named Grambsch–Therneau PH check (lifelines / statsmodels `cox.zph`).
 #[derive(Clone, Debug, Default)]
-pub struct CoxZph;
+pub(crate) struct CoxZph;
 
 impl CoxZph {
     /// Default Schoenfeld-vs-time test.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Correlate Schoenfeld residuals with event time.
-    pub fn test(
+    pub(crate) fn test(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -22702,7 +22702,7 @@ fn cox_grad_hess_weighted(
 /// Pair / weight counts are not identification `p`. Censoring KM is local
 /// ([`censoring_km`]). Inner Cholesky uses a scratch report.
 #[derive(Clone, Debug)]
-pub struct IpcwCox {
+pub(crate) struct IpcwCox {
     /// Newton iteration cap. Not identification `p`.
     pub max_iter: usize,
 }
@@ -22715,12 +22715,12 @@ impl Default for IpcwCox {
 
 impl IpcwCox {
     /// Default IPCW Cox.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit event-weighted Breslow partial likelihood.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -22846,7 +22846,7 @@ impl IpcwCox {
 /// Cumulative/dynamic AUC at a time grid (sksurv `cumulative_dynamic_auc`).
 ///
 /// Time-grid width is not identification `p`. Inspect times with `y=None`.
-pub fn cumulative_dynamic_auc(
+pub(crate) fn cumulative_dynamic_auc(
     durations: &Vector,
     events: &Vector,
     scores: &Vector,
@@ -22934,16 +22934,16 @@ pub fn cumulative_dynamic_auc(
 
 /// Named cumulative/dynamic AUC wrapper.
 #[derive(Clone, Debug, Default)]
-pub struct CumulativeDynamicAuc;
+pub(crate) struct CumulativeDynamicAuc;
 
 impl CumulativeDynamicAuc {
     /// Default C/D AUC.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Score risk ranks on a time grid.
-    pub fn score(
+    pub(crate) fn score(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -22959,7 +22959,7 @@ impl CumulativeDynamicAuc {
 ///
 /// Time-grid width is not identification `p`. Local censoring KM; does not
 /// call [`nelson_aalen`]. Inspect times with `y=None`.
-pub fn brier_score_survival(
+pub(crate) fn brier_score_survival(
     durations: &Vector,
     events: &Vector,
     pred_surv: &Matrix,
@@ -23040,16 +23040,16 @@ pub fn brier_score_survival(
 
 /// Named pointwise Brier wrapper.
 #[derive(Clone, Debug, Default)]
-pub struct BrierScoreSurvival;
+pub(crate) struct BrierScoreSurvival;
 
 impl BrierScoreSurvival {
     /// Default pointwise Brier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Score predicted survivals on a time grid.
-    pub fn score(
+    pub(crate) fn score(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -23066,7 +23066,7 @@ impl BrierScoreSurvival {
 /// Interval count is not identification `p`. Poisson log-rate
 /// \(\log\mu_{ij}=\log e_{ij}+x_i\beta+\alpha_j\) by ISTA. Inspect times via `X`.
 #[derive(Clone, Debug)]
-pub struct PiecewiseExponentialRegression {
+pub(crate) struct PiecewiseExponentialRegression {
     /// Number of equal-width intervals. Not identification `p`.
     pub n_cuts: usize,
     /// ISTA steps. Not identification `p`.
@@ -23084,12 +23084,12 @@ impl Default for PiecewiseExponentialRegression {
 
 impl PiecewiseExponentialRegression {
     /// Default three-interval PE regression.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit \(\beta\) and interval log-hazards \(\alpha\).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -23203,7 +23203,7 @@ impl PiecewiseExponentialRegression {
 
 /// Fitted piecewise-exponential PH regression.
 #[derive(Clone, Debug)]
-pub struct FittedPeRegression {
+pub(crate) struct FittedPeRegression {
     /// Covariate log-rate slopes.
     pub coef: Vector,
     /// Interval log-hazards \(\alpha_j\).
@@ -23216,7 +23216,7 @@ pub struct FittedPeRegression {
 
 impl FittedPeRegression {
     /// Relative log-rate \(x\hat\beta\).
-    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(x.matvec(&self.coef))
@@ -23225,18 +23225,18 @@ impl FittedPeRegression {
 
 /// Named PE regression wrapper.
 #[derive(Clone, Debug, Default)]
-pub struct PiecewiseExponentialRegressionFitter {
+pub(crate) struct PiecewiseExponentialRegressionFitter {
     inner: PiecewiseExponentialRegression,
 }
 
 impl PiecewiseExponentialRegressionFitter {
     /// Default three-interval PE regression.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit the Poisson PE regression.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -23253,7 +23253,7 @@ impl PiecewiseExponentialRegressionFitter {
 /// censored. Cause count is not identification `p`. Inner aborting codes are
 /// not promoted.
 #[derive(Clone, Debug)]
-pub struct CompetingRisksForest {
+pub(crate) struct CompetingRisksForest {
     /// Trees per cause. Not identification `p`.
     pub n_estimators: usize,
     /// Maximum depth.
@@ -23274,12 +23274,12 @@ impl Default for CompetingRisksForest {
 
 impl CompetingRisksForest {
     /// Default cause-specific RSF ensemble.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit one RSF per observed cause.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -23387,7 +23387,7 @@ impl CompetingRisksForest {
 
 /// Fitted cause-specific survival forests.
 #[derive(Clone, Debug)]
-pub struct FittedCompetingRisksForest {
+pub(crate) struct FittedCompetingRisksForest {
     forests: Vec<(i64, FittedRandomSurvivalForest)>,
     /// Observed cause codes.
     pub causes: Vector,
@@ -23397,7 +23397,7 @@ pub struct FittedCompetingRisksForest {
 
 impl FittedCompetingRisksForest {
     /// Cause-specific leaf Nelson–Aalen risks (`n` × `n_causes`).
-    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let k = self.forests.len().max(self.causes.len());
@@ -23421,18 +23421,18 @@ impl FittedCompetingRisksForest {
 
 /// Named cause-specific forest alias.
 #[derive(Clone, Debug, Default)]
-pub struct CauseSpecificForest {
+pub(crate) struct CauseSpecificForest {
     inner: CompetingRisksForest,
 }
 
 impl CauseSpecificForest {
     /// Default cause-specific RSF.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit one RSF per cause.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -23640,7 +23640,7 @@ fn grow_fg_tree(
 /// (competing events stay at risk). Tree / cause counts are not identification
 /// `p`. Does not call [`aalen_johansen`].
 #[derive(Clone, Debug)]
-pub struct FineGrayForest {
+pub(crate) struct FineGrayForest {
     /// Trees. Not identification `p`.
     pub n_estimators: usize,
     /// Maximum depth.
@@ -23664,12 +23664,12 @@ impl Default for FineGrayForest {
 
 impl FineGrayForest {
     /// Default Fine–Gray extra-trees forest.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit CIF extra-trees for one cause.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -23738,7 +23738,7 @@ impl FineGrayForest {
 /// Events are weighted by \(1/\hat G(T)\). Quantile \(\tau\) is not
 /// identification `p`. Local censoring KM; does not call [`nelson_aalen`].
 #[derive(Clone, Debug)]
-pub struct CensoredQuantileRegressor {
+pub(crate) struct CensoredQuantileRegressor {
     /// Quantile in \((0,1)\). Not identification `p`.
     pub tau: f64,
     /// ISTA steps. Not identification `p`.
@@ -23756,7 +23756,7 @@ impl Default for CensoredQuantileRegressor {
 
 impl CensoredQuantileRegressor {
     /// Quantile \(\tau\) (clamped to \((0,1)\)).
-    pub fn new(tau: f64) -> Self {
+    pub(crate) fn new(tau: f64) -> Self {
         Self {
             tau,
             ..Self::default()
@@ -23764,7 +23764,7 @@ impl CensoredQuantileRegressor {
     }
 
     /// Fit \(Q_\tau(T\mid x)=x\beta+b\) on IPCW events.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -23863,7 +23863,7 @@ impl CensoredQuantileRegressor {
 
 /// Fitted IPCW censored quantile.
 #[derive(Clone, Debug)]
-pub struct FittedCensoredQuantile {
+pub(crate) struct FittedCensoredQuantile {
     /// Slopes.
     pub coef: Vector,
     /// Intercept.
@@ -23874,7 +23874,7 @@ pub struct FittedCensoredQuantile {
 
 impl FittedCensoredQuantile {
     /// Predicted \(Q_\tau(T\mid x)\).
-    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let mut s = x.matvec(&self.coef);
@@ -23887,18 +23887,18 @@ impl FittedCensoredQuantile {
 
 /// Named Portnoy CRQ alias.
 #[derive(Clone, Debug, Default)]
-pub struct PortnoyQuantile {
+pub(crate) struct PortnoyQuantile {
     inner: CensoredQuantileRegressor,
 }
 
 impl PortnoyQuantile {
     /// Median IPCW CRQ.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit the IPCW check-loss.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -24080,7 +24080,7 @@ fn grow_ipcw_tree(
 /// Extra-trees log-rank splits weight events by \(1/\hat G(T)\). Tree count is
 /// not identification `p`. Local censoring KM; does not call [`nelson_aalen`].
 #[derive(Clone, Debug)]
-pub struct IpcwSurvivalForest {
+pub(crate) struct IpcwSurvivalForest {
     /// Trees. Not identification `p`.
     pub n_estimators: usize,
     /// Maximum depth.
@@ -24101,12 +24101,12 @@ impl Default for IpcwSurvivalForest {
 
 impl IpcwSurvivalForest {
     /// Default IPCW extra-trees survival forest.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit IPCW-weighted log-rank extra-trees.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -24179,18 +24179,18 @@ impl IpcwSurvivalForest {
 
 /// Named IPCW RSF alias.
 #[derive(Clone, Debug, Default)]
-pub struct IpcwRandomSurvivalForest {
+pub(crate) struct IpcwRandomSurvivalForest {
     inner: IpcwSurvivalForest,
 }
 
 impl IpcwRandomSurvivalForest {
     /// Default IPCW RSF.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit the weighted extra-trees forest.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -24206,23 +24206,23 @@ impl IpcwRandomSurvivalForest {
 /// Member count is not identification `p`. Inner aborting codes are not
 /// promoted.
 #[derive(Clone, Debug, Default)]
-pub struct SurvivalStacking;
+pub(crate) struct SurvivalStacking;
 
 /// Fitted Cox + RSF stack.
 #[derive(Clone, Debug)]
-pub struct FittedSurvivalStacking {
+pub(crate) struct FittedSurvivalStacking {
     cox: Option<Vector>,
     rsf: Option<FittedRandomSurvivalForest>,
 }
 
 impl SurvivalStacking {
     /// Default two-member stack.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit Breslow Cox and extra-trees RSF, then average their scores.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -24308,7 +24308,7 @@ impl SurvivalStacking {
 
 impl FittedSurvivalStacking {
     /// Mean of available member scores.
-    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let mut acc = Vector::zeros(x.nrows());
@@ -24384,11 +24384,11 @@ fn propensity_row(x: &Matrix, i: usize, beta: &Vector, b: f64) -> f64 {
 ///
 /// Propensity is ISTA logistic. Treatment count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct IpwAte;
+pub(crate) struct IpwAte;
 
 /// Hajek IPW average treatment effect.
 #[derive(Clone, Debug)]
-pub struct FittedIpwAte {
+pub(crate) struct FittedIpwAte {
     /// \(\hat\tau\).
     pub ate: f64,
     /// Propensity slopes.
@@ -24399,12 +24399,12 @@ pub struct FittedIpwAte {
 
 impl IpwAte {
     /// Default IPW ATE.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit Hajek IPW: \(\hat\tau=\bar y_1^w-\bar y_0^w\).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -24471,11 +24471,11 @@ impl IpwAte {
 
 /// 1-NN propensity-score matching ATT.
 #[derive(Clone, Debug, Default)]
-pub struct PsmAte;
+pub(crate) struct PsmAte;
 
 /// Matched ATT.
 #[derive(Clone, Debug)]
-pub struct FittedPsmAte {
+pub(crate) struct FittedPsmAte {
     /// \(\widehat{\mathrm{ATT}}\).
     pub att: f64,
     /// Matches used.
@@ -24484,12 +24484,12 @@ pub struct FittedPsmAte {
 
 impl PsmAte {
     /// Default 1-NN PSM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Match each treated row to the nearest control on \(\hat e(x)\).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -24558,23 +24558,23 @@ impl PsmAte {
 
 /// Augmented IPW / doubly robust ATE.
 #[derive(Clone, Debug, Default)]
-pub struct AipwAte;
+pub(crate) struct AipwAte;
 
 /// Doubly robust ATE.
 #[derive(Clone, Debug)]
-pub struct FittedAipwAte {
+pub(crate) struct FittedAipwAte {
     /// \(\hat\tau_{\mathrm{AIPW}}\).
     pub ate: f64,
 }
 
 impl AipwAte {
     /// Default AIPW.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// AIPW with ISTA propensity and scratch OLS outcome regressions.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -24660,7 +24660,7 @@ impl AipwAte {
 ///
 /// Bandwidth / side counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct RegressionDiscontinuity {
+pub(crate) struct RegressionDiscontinuity {
     /// Cutoff on the running variable (column 0).
     pub cutoff: f64,
 }
@@ -24673,7 +24673,7 @@ impl Default for RegressionDiscontinuity {
 
 /// RD jump at the cutoff.
 #[derive(Clone, Debug)]
-pub struct FittedRegressionDiscontinuity {
+pub(crate) struct FittedRegressionDiscontinuity {
     /// \(\hat\tau = a_+ - a_-\).
     pub tau: f64,
     /// Left intercept.
@@ -24684,12 +24684,12 @@ pub struct FittedRegressionDiscontinuity {
 
 impl RegressionDiscontinuity {
     /// RD at `cutoff`.
-    pub fn new(cutoff: f64) -> Self {
+    pub(crate) fn new(cutoff: f64) -> Self {
         Self { cutoff }
     }
 
     /// Local linear \(y\sim 1+(r-c)\) on each side of column 0.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -24774,7 +24774,7 @@ fn local_linear_intercept(x: &Matrix, y: &Vector, idx: &[usize], cutoff: f64, po
 /// First-stage and reduced-form jumps are local linear. The first-stage
 /// jump is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct FuzzyRd {
+pub(crate) struct FuzzyRd {
     /// Cutoff on the running variable (column 0).
     pub cutoff: f64,
 }
@@ -24787,7 +24787,7 @@ impl Default for FuzzyRd {
 
 /// Wald RD ratio.
 #[derive(Clone, Debug)]
-pub struct FittedFuzzyRd {
+pub(crate) struct FittedFuzzyRd {
     /// \(\hat\tau = \Delta Y / \Delta D\).
     pub tau: f64,
     /// Reduced-form jump.
@@ -24798,12 +24798,12 @@ pub struct FittedFuzzyRd {
 
 impl FuzzyRd {
     /// Fuzzy RD at `cutoff`.
-    pub fn new(cutoff: f64) -> Self {
+    pub(crate) fn new(cutoff: f64) -> Self {
         Self { cutoff }
     }
 
     /// Wald ratio of local-linear jumps in `y` and `treat`.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -24880,11 +24880,11 @@ impl FuzzyRd {
 /// Dual dimension equals covariate width, not a substitute `p` for the
 /// treated count. ISTA on the dual matches treated moments.
 #[derive(Clone, Debug, Default)]
-pub struct EntropyBalancing;
+pub(crate) struct EntropyBalancing;
 
 /// Balanced ATT.
 #[derive(Clone, Debug)]
-pub struct FittedEntropyBalancing {
+pub(crate) struct FittedEntropyBalancing {
     /// \(\widehat{\mathrm{ATT}}\).
     pub att: f64,
     /// Dual multipliers.
@@ -24895,12 +24895,12 @@ pub struct FittedEntropyBalancing {
 
 impl EntropyBalancing {
     /// Default entropy balancer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Match treated covariate means with exponential control weights.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -25096,7 +25096,7 @@ fn largest_eigs(ctx: &mut FitCtx, m: &Mat<f64>, k: usize, abs_order: bool) -> Ma
 ///
 /// Slice count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SlicedInverseRegression {
+pub(crate) struct SlicedInverseRegression {
     /// Number of response slices. Not identification `p`.
     pub n_slices: usize,
     /// Number of directions.
@@ -25114,7 +25114,7 @@ impl Default for SlicedInverseRegression {
 
 impl SlicedInverseRegression {
     /// SIR with `h` slices onto `k` directions.
-    pub fn new(n_slices: usize, n_components: usize) -> Self {
+    pub(crate) fn new(n_slices: usize, n_components: usize) -> Self {
         Self {
             n_slices,
             n_components,
@@ -25124,7 +25124,7 @@ impl SlicedInverseRegression {
 
 /// Fitted SIR directions.
 #[derive(Clone, Debug)]
-pub struct FittedSir {
+pub(crate) struct FittedSir {
     /// \(p \times k\) eigenvectors of the slice-mean covariance.
     pub directions: Matrix,
     /// Standardised scores \(Z\hat\beta\).
@@ -25133,7 +25133,7 @@ pub struct FittedSir {
 
 impl Fit for SlicedInverseRegression {
     type Fitted = FittedSir;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSir>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSir>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let n = x.nrows().min(y.len());
@@ -25197,7 +25197,7 @@ impl Fit for SlicedInverseRegression {
 ///
 /// Slice count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SlicedAverageVariance {
+pub(crate) struct SlicedAverageVariance {
     /// Number of response slices. Not identification `p`.
     pub n_slices: usize,
     /// Number of directions.
@@ -25215,7 +25215,7 @@ impl Default for SlicedAverageVariance {
 
 impl SlicedAverageVariance {
     /// SAVE with `h` slices onto `k` directions.
-    pub fn new(n_slices: usize, n_components: usize) -> Self {
+    pub(crate) fn new(n_slices: usize, n_components: usize) -> Self {
         Self {
             n_slices,
             n_components,
@@ -25224,11 +25224,11 @@ impl SlicedAverageVariance {
 }
 
 /// Named SAVE spelling.
-pub type Save = SlicedAverageVariance;
+pub(crate) type Save = SlicedAverageVariance;
 
 /// Fitted SAVE directions.
 #[derive(Clone, Debug)]
-pub struct FittedSave {
+pub(crate) struct FittedSave {
     /// \(p \times k\) eigenvectors of \(\sum \pi_h (I-\Sigma_h)^2\).
     pub directions: Matrix,
     /// Standardised scores.
@@ -25237,7 +25237,7 @@ pub struct FittedSave {
 
 impl Fit for SlicedAverageVariance {
     type Fitted = FittedSave;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSave>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedSave>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let n = x.nrows().min(y.len());
@@ -25331,7 +25331,7 @@ impl Fit for SlicedAverageVariance {
 /// The average residual Hessian \(\frac{1}{n}\sum (y_i-\bar y)\,x_i x_i^\top\)
 /// is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct PrincipalHessianDirections {
+pub(crate) struct PrincipalHessianDirections {
     /// Number of directions.
     pub n_components: usize,
 }
@@ -25344,17 +25344,17 @@ impl Default for PrincipalHessianDirections {
 
 impl PrincipalHessianDirections {
     /// PHD onto `k` directions.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self { n_components }
     }
 }
 
 /// Named PHD spelling.
-pub type Phd = PrincipalHessianDirections;
+pub(crate) type Phd = PrincipalHessianDirections;
 
 /// Fitted PHD directions.
 #[derive(Clone, Debug)]
-pub struct FittedPhd {
+pub(crate) struct FittedPhd {
     /// \(p \times k\) eigenvectors of the residual Hessian.
     pub directions: Matrix,
     /// Standardised scores.
@@ -25363,7 +25363,7 @@ pub struct FittedPhd {
 
 impl Fit for PrincipalHessianDirections {
     type Fitted = FittedPhd;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedPhd>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedPhd>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let n = x.nrows().min(y.len());
@@ -25423,11 +25423,11 @@ impl Fit for PrincipalHessianDirections {
 ///
 /// `pi` are inclusion probabilities. Weight count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct HorvitzThompson;
+pub(crate) struct HorvitzThompson;
 
 /// HT total and Hájek mean.
 #[derive(Clone, Debug)]
-pub struct FittedHorvitzThompson {
+pub(crate) struct FittedHorvitzThompson {
     /// \(\sum y_i/\pi_i\).
     pub total: f64,
     /// Hájek \(\sum (y_i/\pi_i) / \sum (1/\pi_i)\).
@@ -25438,12 +25438,12 @@ pub struct FittedHorvitzThompson {
 
 impl HorvitzThompson {
     /// Default HT estimator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Estimate the total and Hájek mean from inclusion probabilities.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Vector,
         pi: &Vector,
@@ -25531,11 +25531,11 @@ impl HorvitzThompson {
 ///
 /// Margin count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct Raking;
+pub(crate) struct Raking;
 
 /// Calibrated weights.
 #[derive(Clone, Debug)]
-pub struct FittedRaking {
+pub(crate) struct FittedRaking {
     /// Raked weights.
     pub weights: Vector,
     /// Weighted column totals after IPF.
@@ -25544,7 +25544,7 @@ pub struct FittedRaking {
 
 impl Raking {
     /// Default raker.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
@@ -25552,7 +25552,7 @@ impl Raking {
     ///
     /// `indicators` are non-negative category / dummy columns. Sequential IPF
     /// scales each column in turn.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         indicators: &Matrix,
         targets: &Vector,
@@ -25657,11 +25657,11 @@ impl Raking {
 /// Stratum count is not identification `p`. `pop_sizes[i]` is \(N_h\) for the
 /// stratum of row `i`.
 #[derive(Clone, Debug, Default)]
-pub struct PostStratification;
+pub(crate) struct PostStratification;
 
 /// Post-stratified mean.
 #[derive(Clone, Debug)]
-pub struct FittedPostStratification {
+pub(crate) struct FittedPostStratification {
     /// \(\sum w'_i y_i / \sum w'_i\).
     pub mean: f64,
     /// Calibrated weights.
@@ -25670,12 +25670,12 @@ pub struct FittedPostStratification {
 
 impl PostStratification {
     /// Default post-stratifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Scale base weights so each stratum totals \(N_h\).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Vector,
         strata: &Vector,
@@ -25769,11 +25769,11 @@ impl PostStratification {
 ///
 /// Weight count is not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct SurveyWls;
+pub(crate) struct SurveyWls;
 
 /// Weighted slopes.
 #[derive(Clone, Debug)]
-pub struct FittedSurveyWls {
+pub(crate) struct FittedSurveyWls {
     /// Slopes (no intercept column).
     pub coef: Vector,
     /// Intercept.
@@ -25782,12 +25782,12 @@ pub struct FittedSurveyWls {
 
 impl SurveyWls {
     /// Default survey WLS.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// \(\hat\beta = (X^\top W X)^{-1} X^\top W y\) via a \(\sqrt{w}\) transform.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -25884,7 +25884,7 @@ fn comparable_pairs(durations: &Vector, events: &Vector, n: usize) -> Vec<(usize
 /// Pair count is not identification `p`. The coefficient is projected onto the
 /// unit sphere after hinge ISTA so \(\|\beta\|_2=1\).
 #[derive(Clone, Debug)]
-pub struct MinlipSurvival {
+pub(crate) struct MinlipSurvival {
     /// ISTA step size.
     pub eta: f64,
     /// Passes over comparable pairs.
@@ -25902,12 +25902,12 @@ impl Default for MinlipSurvival {
 
 impl MinlipSurvival {
     /// Default Minlip ranking.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit a unit-norm linear ranking on comparable pairs.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -25982,7 +25982,7 @@ impl MinlipSurvival {
 
 /// Fitted Minlip ranking.
 #[derive(Clone, Debug)]
-pub struct FittedMinlip {
+pub(crate) struct FittedMinlip {
     /// Unit-norm ranking coefficients.
     pub coef: Vector,
     /// Comparable pair count.
@@ -25991,7 +25991,7 @@ pub struct FittedMinlip {
 
 impl FittedMinlip {
     /// Linear risk scores.
-    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         if x.ncols() != self.coef.len() {
@@ -26017,7 +26017,7 @@ impl FittedMinlip {
 ///
 /// Dual / pair counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct KernelSurvivalSvm {
+pub(crate) struct KernelSurvivalSvm {
     /// RBF bandwidth. Not identification `p`.
     pub gamma: f64,
     /// ISTA step size.
@@ -26038,12 +26038,12 @@ impl Default for KernelSurvivalSvm {
 
 impl KernelSurvivalSvm {
     /// Default RBF ranking SVM.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fit dual coefficients on the RBF Gram of comparable pairs.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         durations: &Vector,
         events: &Vector,
@@ -26141,7 +26141,7 @@ impl KernelSurvivalSvm {
 
 /// Fitted kernel ranking SVM.
 #[derive(Clone, Debug)]
-pub struct FittedKernelSurvivalSvm {
+pub(crate) struct FittedKernelSurvivalSvm {
     /// Dual coefficients.
     pub dual: Vector,
     /// Training rows.
@@ -26154,7 +26154,7 @@ pub struct FittedKernelSurvivalSvm {
 
 impl FittedKernelSurvivalSvm {
     /// Kernel risk scores.
-    pub fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let n = self.support.nrows();
@@ -26190,7 +26190,7 @@ fn rotate_pair(loadings: &mut Matrix, j: usize, k: usize, phi: f64) {
 ///
 /// Factor count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Varimax {
+pub(crate) struct Varimax {
     /// Givens sweeps.
     pub max_iter: usize,
 }
@@ -26203,12 +26203,12 @@ impl Default for Varimax {
 
 impl Varimax {
     /// Default varimax.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Rotate the columns of a loading matrix.
-    pub fn rotate(&self, loadings: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn rotate(&self, loadings: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, loadings, None, &ctx.policy);
         let (p, k) = loadings.shape();
@@ -26269,7 +26269,7 @@ impl Varimax {
 ///
 /// Target power is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Promax {
+pub(crate) struct Promax {
     /// Power on the varimax target.
     pub power: f64,
 }
@@ -26282,12 +26282,12 @@ impl Default for Promax {
 
 impl Promax {
     /// Promax with the given target power.
-    pub fn new(power: f64) -> Self {
+    pub(crate) fn new(power: f64) -> Self {
         Self { power }
     }
 
     /// Varimax, then OLS toward a powered target.
-    pub fn rotate(&self, loadings: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn rotate(&self, loadings: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
         let q = Varimax::new().rotate(loadings, &session.child("varimax"))?;
         let mut ctx = FitCtx::with_session(session.child("promax"));
         let (p, k) = q.value.shape();
@@ -26378,11 +26378,11 @@ fn both_arms(treat: &Vector, idx: &[usize]) -> bool {
 ///
 /// Treatment / interaction counts are not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct SLearner;
+pub(crate) struct SLearner;
 
 /// Fitted S-learner.
 #[derive(Clone, Debug)]
-pub struct FittedSLearner {
+pub(crate) struct FittedSLearner {
     /// Slopes on \(X\).
     pub coef_x: Vector,
     /// Treatment main effect.
@@ -26395,12 +26395,12 @@ pub struct FittedSLearner {
 
 impl SLearner {
     /// Default S-learner.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit \(Y\sim 1+X+D+X D\).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -26477,7 +26477,7 @@ impl SLearner {
 
 impl FittedSLearner {
     /// \(\hat\tau(x)=\beta_D + x^\top\beta_{XD}\).
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let p = x.ncols().min(self.coef_xd.len());
@@ -26493,11 +26493,11 @@ impl FittedSLearner {
 
 /// T-learner CATE: separate outcome regressions per arm (Künzel et al.).
 #[derive(Clone, Debug, Default)]
-pub struct TLearner;
+pub(crate) struct TLearner;
 
 /// Fitted T-learner.
 #[derive(Clone, Debug)]
-pub struct FittedTLearner {
+pub(crate) struct FittedTLearner {
     /// Treated slopes.
     pub coef1: Vector,
     /// Treated intercept.
@@ -26510,12 +26510,12 @@ pub struct FittedTLearner {
 
 impl TLearner {
     /// Default T-learner.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit two OLS outcome models.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -26572,7 +26572,7 @@ impl TLearner {
 
 impl FittedTLearner {
     /// \(\hat\mu_1(x)-\hat\mu_0(x)\).
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
@@ -26585,11 +26585,11 @@ impl FittedTLearner {
 ///
 /// Propensity is ISTA logistic. Arm counts are not identification `p`.
 #[derive(Clone, Debug, Default)]
-pub struct XLearner;
+pub(crate) struct XLearner;
 
 /// Fitted X-learner.
 #[derive(Clone, Debug)]
-pub struct FittedXLearner {
+pub(crate) struct FittedXLearner {
     /// Imputed-effect slopes on the treated.
     pub tau1: Vector,
     /// Treated intercept.
@@ -26606,12 +26606,12 @@ pub struct FittedXLearner {
 
 impl XLearner {
     /// Default X-learner.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit T-learner means, impute τ, then mix with propensity.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -26679,7 +26679,7 @@ impl XLearner {
 
 impl FittedXLearner {
     /// \(e(x)\hat\tau_0(x)+(1-e(x))\hat\tau_1(x)\).
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
@@ -26695,23 +26695,23 @@ impl FittedXLearner {
 ///
 /// \((Y-m(X))=(D-e(X))\,x^\top\beta\). Propensity is ISTA logistic.
 #[derive(Clone, Debug, Default)]
-pub struct RLearner;
+pub(crate) struct RLearner;
 
 /// Fitted R-learner.
 #[derive(Clone, Debug)]
-pub struct FittedRLearner {
+pub(crate) struct FittedRLearner {
     /// CATE slopes on \([1, X]\).
     pub coef: Vector,
 }
 
 impl RLearner {
     /// Default R-learner.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit Robinson residual-on-residual CATE.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -26778,7 +26778,7 @@ impl RLearner {
 
 impl FittedRLearner {
     /// Linear CATE.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
@@ -26797,23 +26797,23 @@ impl FittedRLearner {
 ///
 /// \(\hat\theta=\sum(D-\hat e)(Y-\hat m)/\sum(D-\hat e)^2\). Distinct from AIPW.
 #[derive(Clone, Debug, Default)]
-pub struct DoubleMl;
+pub(crate) struct DoubleMl;
 
 /// Fitted DML ATE.
 #[derive(Clone, Debug)]
-pub struct FittedDoubleMl {
+pub(crate) struct FittedDoubleMl {
     /// Residual-on-residual ATE.
     pub ate: f64,
 }
 
 impl DoubleMl {
     /// Default DML ATE.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit the partially linear DML ATE (no cross-fit).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -27007,7 +27007,7 @@ fn walk_cate(node: &CateNode, x: &Matrix, i: usize) -> f64 {
 /// Tree / try counts are not identification `p`. Split score is the
 /// \(\sqrt{n_L n_R}\,|\hat\tau_L-\hat\tau_R|\) gap; leaves store arm-mean gaps.
 #[derive(Clone, Debug)]
-pub struct CausalForest {
+pub(crate) struct CausalForest {
     /// Trees. Not identification `p`.
     pub n_estimators: usize,
     /// Depth cap.
@@ -27028,20 +27028,20 @@ impl Default for CausalForest {
 
 impl CausalForest {
     /// Default causal forest.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted CATE forest.
 #[derive(Clone, Debug)]
-pub struct FittedCausalForest {
+pub(crate) struct FittedCausalForest {
     trees: Vec<CateNode>,
 }
 
 impl CausalForest {
     /// Grow extra-trees CATE forest.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -27098,7 +27098,7 @@ impl CausalForest {
 
 impl FittedCausalForest {
     /// Ensemble-mean leaf CATE.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let m = self.trees.len().max(1) as f64;
@@ -27362,23 +27362,23 @@ fn grow_iv_tree(
 /// \(\psi\) on \([1,X]\). Distinct from [`AipwAte`] (scalar ATE) and
 /// [`DoubleMl`] (residual-on-residual ATE).
 #[derive(Clone, Debug, Default)]
-pub struct DrLearner;
+pub(crate) struct DrLearner;
 
 /// Fitted linear DR-learner.
 #[derive(Clone, Debug)]
-pub struct FittedDrLearner {
+pub(crate) struct FittedDrLearner {
     /// CATE slopes on \([1, X]\).
     pub coef: Vector,
 }
 
 impl DrLearner {
     /// Default linear DR-learner.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit the AIPW pseudo-outcome CATE.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -27440,7 +27440,7 @@ impl DrLearner {
 
 impl FittedDrLearner {
     /// Linear CATE on the DR pseudo-outcome.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
@@ -27461,11 +27461,11 @@ impl FittedDrLearner {
 /// \(Y-\mu_0(X)\) on \(X\). Distinct from [`XLearner`] (two-sided imputed
 /// \(\tau\) plus propensity mix) and [`TLearner`] (two raw outcome models).
 #[derive(Clone, Debug, Default)]
-pub struct DomainAdaptationLearner;
+pub(crate) struct DomainAdaptationLearner;
 
 /// Fitted domain-adaptation CATE.
 #[derive(Clone, Debug)]
-pub struct FittedDomainAdaptation {
+pub(crate) struct FittedDomainAdaptation {
     /// Treated-side residual slopes.
     pub coef: Vector,
     /// Treated-side residual intercept.
@@ -27474,12 +27474,12 @@ pub struct FittedDomainAdaptation {
 
 impl DomainAdaptationLearner {
     /// Default domain-adaptation learner.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit \(\mu_0\) on control, then treated residual CATE.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -27532,7 +27532,7 @@ impl DomainAdaptationLearner {
 
 impl FittedDomainAdaptation {
     /// Treated-side residual CATE.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(Vector::from_iter(
@@ -27546,7 +27546,7 @@ impl FittedDomainAdaptation {
 /// Same residual-on-residual design as [`RLearner`], then ISTA soft-threshold
 /// instead of OLS. Penalty is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct SparseLinearDml {
+pub(crate) struct SparseLinearDml {
     /// L1 penalty. Not identification `p`.
     pub l1: f64,
 }
@@ -27559,12 +27559,12 @@ impl Default for SparseLinearDml {
 
 impl SparseLinearDml {
     /// Sparse DML with L1 `l1`.
-    pub fn new(l1: f64) -> Self {
+    pub(crate) fn new(l1: f64) -> Self {
         Self { l1 }
     }
 
     /// Fit ISTA residual-on-residual CATE.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -27649,14 +27649,14 @@ impl SparseLinearDml {
 
 /// Fitted sparse linear DML.
 #[derive(Clone, Debug)]
-pub struct FittedSparseLinearDml {
+pub(crate) struct FittedSparseLinearDml {
     /// CATE slopes on \([1, X]\).
     pub coef: Vector,
 }
 
 impl FittedSparseLinearDml {
     /// Linear CATE.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
@@ -27677,23 +27677,23 @@ impl FittedSparseLinearDml {
 /// residualization of \(Y,D,Z\) on \(X\). Distinct from [`DoubleMl`]
 /// (uses \(D\) as its own instrument) and from a Wald LATE (no \(X\)).
 #[derive(Clone, Debug, Default)]
-pub struct DmlIv;
+pub(crate) struct DmlIv;
 
 /// Fitted residualized IV ATE.
 #[derive(Clone, Debug)]
-pub struct FittedDmlIv {
+pub(crate) struct FittedDmlIv {
     /// Residualized IV ATE.
     pub ate: f64,
 }
 
 impl DmlIv {
     /// Default DML-IV.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit residualized IV.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -27773,23 +27773,23 @@ impl DmlIv {
 /// Instrument / arm counts are not identification `p`. Distinct from
 /// [`DmlIv`] (no \(X\) residualization).
 #[derive(Clone, Debug, Default)]
-pub struct WaldLate;
+pub(crate) struct WaldLate;
 
 /// Fitted Wald LATE.
 #[derive(Clone, Debug)]
-pub struct FittedWaldLate {
+pub(crate) struct FittedWaldLate {
     /// Wald ratio.
     pub late: f64,
 }
 
 impl WaldLate {
     /// Default Wald LATE.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit the two-mean Wald ratio.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Vector,
         treat: &Vector,
@@ -27853,7 +27853,7 @@ impl WaldLate {
 /// \(\sqrt{n_L n_R}\,|\hat\tau_L-\hat\tau_R|\). Tree count is not
 /// identification `p`. Distinct from [`CausalForest`] (unconfounded arm gap).
 #[derive(Clone, Debug)]
-pub struct InstrumentalForest {
+pub(crate) struct InstrumentalForest {
     /// Trees. Not identification `p`.
     pub n_estimators: usize,
     /// Depth cap.
@@ -27874,20 +27874,20 @@ impl Default for InstrumentalForest {
 
 impl InstrumentalForest {
     /// Default instrumental forest.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted IV forest.
 #[derive(Clone, Debug)]
-pub struct FittedInstrumentalForest {
+pub(crate) struct FittedInstrumentalForest {
     trees: Vec<CateNode>,
 }
 
 impl InstrumentalForest {
     /// Grow extra-trees Wald forest.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -27950,7 +27950,7 @@ impl InstrumentalForest {
 
 impl FittedInstrumentalForest {
     /// Ensemble-mean leaf Wald.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let m = self.trees.len().max(1) as f64;
@@ -27969,7 +27969,7 @@ impl FittedInstrumentalForest {
 /// AIPW pseudo-outcome as in [`DrLearner`], then extra-trees regression on
 /// \(\psi\). Distinct from [`CausalForest`] (arm-mean gaps, no propensity).
 #[derive(Clone, Debug)]
-pub struct ForestDrLearner {
+pub(crate) struct ForestDrLearner {
     /// Trees. Not identification `p`.
     pub n_estimators: usize,
     /// Depth cap.
@@ -27990,20 +27990,20 @@ impl Default for ForestDrLearner {
 
 impl ForestDrLearner {
     /// Default forest DR-learner.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted forest DR-learner.
 #[derive(Clone, Debug)]
-pub struct FittedForestDr {
+pub(crate) struct FittedForestDr {
     trees: Vec<CateNode>,
 }
 
 impl ForestDrLearner {
     /// Grow extra-trees on the DR pseudo-outcome.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -28060,7 +28060,7 @@ impl ForestDrLearner {
 
 impl FittedForestDr {
     /// Ensemble-mean leaf of \(\psi\).
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let m = self.trees.len().max(1) as f64;
@@ -28180,7 +28180,7 @@ fn grow_ortho_tree(
 /// \(\hat\tau=\sum\tilde D\tilde Y/\sum\tilde D^2\). Distinct from
 /// [`CausalForest`] (raw arm-mean gaps) and [`DoubleMl`] (scalar ATE).
 #[derive(Clone, Debug)]
-pub struct CausalForestDml {
+pub(crate) struct CausalForestDml {
     /// Trees. Not identification `p`.
     pub n_estimators: usize,
     /// Depth cap.
@@ -28201,20 +28201,20 @@ impl Default for CausalForestDml {
 
 impl CausalForestDml {
     /// Default orthogonal causal forest.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted orthogonal causal forest.
 #[derive(Clone, Debug)]
-pub struct FittedCausalForestDml {
+pub(crate) struct FittedCausalForestDml {
     trees: Vec<CateNode>,
 }
 
 impl CausalForestDml {
     /// Residualize then grow extra-trees on \(\tilde D,\tilde Y\).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -28288,7 +28288,7 @@ impl CausalForestDml {
 
 impl FittedCausalForestDml {
     /// Ensemble-mean residual-ratio leaf.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let m = self.trees.len().max(1) as f64;
@@ -28308,7 +28308,7 @@ impl FittedCausalForestDml {
 /// ratio. Distinct from [`RLearner`] / [`DoubleMl`] (global linear) and
 /// [`CausalForestDml`] (tree partitions). Bandwidth is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct NonParamDml {
+pub(crate) struct NonParamDml {
     /// RBF length-scale. Not identification `p`.
     pub bandwidth: f64,
 }
@@ -28321,14 +28321,14 @@ impl Default for NonParamDml {
 
 impl NonParamDml {
     /// Kernel DML with bandwidth `h`.
-    pub fn new(bandwidth: f64) -> Self {
+    pub(crate) fn new(bandwidth: f64) -> Self {
         Self { bandwidth }
     }
 }
 
 /// Fitted kernel residual-on-residual CATE.
 #[derive(Clone, Debug)]
-pub struct FittedNonParamDml {
+pub(crate) struct FittedNonParamDml {
     x_train: Matrix,
     yres: Vector,
     dres: Vector,
@@ -28337,7 +28337,7 @@ pub struct FittedNonParamDml {
 
 impl NonParamDml {
     /// Fit residuals and store the kernel table.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -28405,7 +28405,7 @@ impl NonParamDml {
 
 impl FittedNonParamDml {
     /// Kernel residual-ratio CATE.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let h2 = (2.0 * self.bandwidth * self.bandwidth).max(1e-12);
@@ -28445,7 +28445,7 @@ impl FittedNonParamDml {
 /// identification `p`. Distinct from [`DmlIv`] (linear residual Wald) and
 /// [`WaldLate`] (no covariates).
 #[derive(Clone, Debug)]
-pub struct DeepIv {
+pub(crate) struct DeepIv {
     /// SGD steps. Not identification `p`.
     pub max_iter: usize,
 }
@@ -28458,14 +28458,14 @@ impl Default for DeepIv {
 
 impl DeepIv {
     /// Default DeepIV-lite.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted two-stage deep IV.
 #[derive(Clone, Debug)]
-pub struct FittedDeepIv {
+pub(crate) struct FittedDeepIv {
     /// Coefficient on \(\hat D\).
     pub ate: f64,
     wx: Vector,
@@ -28479,7 +28479,7 @@ pub struct FittedDeepIv {
 
 impl DeepIv {
     /// Fit the tanh first stage, then OLS second stage.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -28603,7 +28603,7 @@ impl DeepIv {
 
 impl FittedDeepIv {
     /// Second-stage structural prediction using the fitted first stage.
-    pub fn predict(&self, x: &Matrix, instrument: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict(&self, x: &Matrix, instrument: &Vector, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
@@ -28638,7 +28638,7 @@ fn sieve_row(x: &Matrix, i: usize, degree: usize) -> Vec<f64> {
 /// \((D-e)\,[1,\varphi(X)]\) with \(\varphi_j=(x,x^2,\ldots)\). Degree is
 /// not identification `p`. Distinct from [`RLearner`] (linear \(\varphi\)).
 #[derive(Clone, Debug)]
-pub struct SieveCate {
+pub(crate) struct SieveCate {
     /// Polynomial degree. Not identification `p`.
     pub degree: usize,
 }
@@ -28651,14 +28651,14 @@ impl Default for SieveCate {
 
 impl SieveCate {
     /// Sieve CATE of degree `degree`.
-    pub fn new(degree: usize) -> Self {
+    pub(crate) fn new(degree: usize) -> Self {
         Self {
             degree: degree.max(1),
         }
     }
 
     /// Fit residual-on-residual CATE on a polynomial sieve.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -28728,7 +28728,7 @@ impl SieveCate {
 
 /// Fitted sieve CATE.
 #[derive(Clone, Debug)]
-pub struct FittedSieveCate {
+pub(crate) struct FittedSieveCate {
     /// Slopes on \([1,\varphi(X)]\).
     pub coef: Vector,
     /// Polynomial degree.
@@ -28737,7 +28737,7 @@ pub struct FittedSieveCate {
 
 impl FittedSieveCate {
     /// Polynomial CATE.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
@@ -28758,23 +28758,23 @@ impl FittedSieveCate {
 /// Distinct from [`WaldLate`] (does not divide by the first stage) and
 /// [`Driv`] (no AIPW residualization).
 #[derive(Clone, Debug, Default)]
-pub struct IntentToTreat;
+pub(crate) struct IntentToTreat;
 
 /// Fitted ITT.
 #[derive(Clone, Debug)]
-pub struct FittedIntentToTreat {
+pub(crate) struct FittedIntentToTreat {
     /// Reduced-form gap.
     pub itt: f64,
 }
 
 impl IntentToTreat {
     /// Default ITT.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Two-mean reduced form of \(Y\) on \(Z\).
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         y: &Vector,
         instrument: &Vector,
@@ -28844,11 +28844,11 @@ impl IntentToTreat {
 /// AIPW of \(Z\) on \(Y\) over AIPW of \(Z\) on \(D\). Distinct from
 /// [`DmlIv`] (residual Wald) and [`WaldLate`] (raw means).
 #[derive(Clone, Debug, Default)]
-pub struct Driv;
+pub(crate) struct Driv;
 
 /// Fitted DRIV LATE.
 #[derive(Clone, Debug)]
-pub struct FittedDriv {
+pub(crate) struct FittedDriv {
     /// AIPW ITT.
     pub itt: f64,
     /// AIPW first stage.
@@ -28859,12 +28859,12 @@ pub struct FittedDriv {
 
 impl Driv {
     /// Default DRIV.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit AIPW ITT / AIPW first stage.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -28960,7 +28960,7 @@ fn rbf_pair(a: f64, b: f64, bw: f64) -> f64 {
 /// Dual size is not identification `p`. Distinct from [`DmlIv`] (linear
 /// residual Wald) and [`SieveIv`] (polynomial first stage).
 #[derive(Clone, Debug)]
-pub struct KernelIv {
+pub(crate) struct KernelIv {
     /// RBF length-scale. Not identification `p`.
     pub bandwidth: f64,
     /// Dual ridge. Not identification `p`.
@@ -28978,7 +28978,7 @@ impl Default for KernelIv {
 
 impl KernelIv {
     /// Kernel IV with bandwidth `h`.
-    pub fn new(bandwidth: f64) -> Self {
+    pub(crate) fn new(bandwidth: f64) -> Self {
         Self {
             bandwidth,
             ..Self::default()
@@ -28986,7 +28986,7 @@ impl KernelIv {
     }
 
     /// Fit kernel-ridge first stage then 2SLS second stage.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -29105,7 +29105,7 @@ impl KernelIv {
 
 /// Fitted kernel IV.
 #[derive(Clone, Debug)]
-pub struct FittedKernelIv {
+pub(crate) struct FittedKernelIv {
     /// Intercept.
     pub intercept: f64,
     /// Second-stage treatment slope.
@@ -29121,7 +29121,7 @@ pub struct FittedKernelIv {
 
 impl FittedKernelIv {
     /// Structural prediction using the stored kernel first stage.
-    pub fn predict(
+    pub(crate) fn predict(
         &self,
         x: &Matrix,
         instrument: &Vector,
@@ -29150,7 +29150,7 @@ impl FittedKernelIv {
 /// Degree is not identification `p`. Distinct from [`KernelIv`] (RBF dual)
 /// and [`WaldLate`] (raw means).
 #[derive(Clone, Debug)]
-pub struct SieveIv {
+pub(crate) struct SieveIv {
     /// Polynomial degree of \(Z\). Not identification `p`.
     pub degree: usize,
 }
@@ -29163,14 +29163,14 @@ impl Default for SieveIv {
 
 impl SieveIv {
     /// Sieve IV of degree `degree`.
-    pub fn new(degree: usize) -> Self {
+    pub(crate) fn new(degree: usize) -> Self {
         Self {
             degree: degree.max(1),
         }
     }
 
     /// Fit polynomial first stage then 2SLS.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -29274,7 +29274,7 @@ impl SieveIv {
 
 /// Fitted sieve IV.
 #[derive(Clone, Debug)]
-pub struct FittedSieveIv {
+pub(crate) struct FittedSieveIv {
     /// Intercept.
     pub intercept: f64,
     /// Second-stage treatment slope.
@@ -29291,7 +29291,7 @@ pub struct FittedSieveIv {
 /// \(Y\) on \((\hat D,X)\). Bandwidth is not identification `p`. Distinct
 /// from [`KernelIv`] (dual ridge) and [`WaldLate`] (unconditional means).
 #[derive(Clone, Debug)]
-pub struct NonparametricIv {
+pub(crate) struct NonparametricIv {
     /// RBF length-scale. Not identification `p`.
     pub bandwidth: f64,
 }
@@ -29304,12 +29304,12 @@ impl Default for NonparametricIv {
 
 impl NonparametricIv {
     /// NW-IV with bandwidth `h`.
-    pub fn new(bandwidth: f64) -> Self {
+    pub(crate) fn new(bandwidth: f64) -> Self {
         Self { bandwidth }
     }
 
     /// Fit Nadaraya–Watson first stage then 2SLS.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -29411,7 +29411,7 @@ impl NonparametricIv {
 
 /// Fitted nonparametric IV.
 #[derive(Clone, Debug)]
-pub struct FittedNonparametricIv {
+pub(crate) struct FittedNonparametricIv {
     /// Intercept.
     pub intercept: f64,
     /// Second-stage treatment slope.
@@ -29425,7 +29425,7 @@ pub struct FittedNonparametricIv {
 
 impl FittedNonparametricIv {
     /// Structural prediction using the stored NW first stage.
-    pub fn predict(
+    pub(crate) fn predict(
         &self,
         x: &Matrix,
         instrument: &Vector,
@@ -29458,16 +29458,16 @@ impl FittedNonparametricIv {
 /// \(\tilde D\,[1,X]\). Distinct from [`RLearner`] (full-\(X\) residualize)
 /// and [`DoubleMl`] (scalar ATE).
 #[derive(Clone, Debug, Default)]
-pub struct ProjectedDml;
+pub(crate) struct ProjectedDml;
 
 impl ProjectedDml {
     /// Default projected DML.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit propensity-partialled Robinson CATE.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -29549,14 +29549,14 @@ impl ProjectedDml {
 
 /// Fitted projected DML.
 #[derive(Clone, Debug)]
-pub struct FittedProjectedDml {
+pub(crate) struct FittedProjectedDml {
     /// Slopes on \([1,X]\).
     pub coef: Vector,
 }
 
 impl FittedProjectedDml {
     /// Linear CATE.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
@@ -29644,7 +29644,7 @@ fn grow_ortho_forest_tree(
 /// \(Y\) SSE; leaves store \(\sum\tilde D\tilde Y/\sum\tilde D^2\). Distinct
 /// from [`CausalForestDml`] (splits on \(|\tau_L-\tau_R|\)).
 #[derive(Clone, Debug)]
-pub struct OrthoForest {
+pub(crate) struct OrthoForest {
     /// Trees. Not identification `p`.
     pub n_estimators: usize,
     /// Depth cap.
@@ -29665,12 +29665,12 @@ impl Default for OrthoForest {
 
 impl OrthoForest {
     /// Default orthogonal forest.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Residualize then grow residual-SSE trees with residual-ratio leaves.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -29744,13 +29744,13 @@ impl OrthoForest {
 
 /// Fitted orthogonal forest.
 #[derive(Clone, Debug)]
-pub struct FittedOrthoForest {
+pub(crate) struct FittedOrthoForest {
     trees: Vec<CateNode>,
 }
 
 impl FittedOrthoForest {
     /// Ensemble-mean residual-ratio leaf.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let m = self.trees.len().max(1) as f64;
@@ -29861,7 +29861,7 @@ fn grow_ortho_iv_tree(
 /// \(\sum\tilde Z\tilde Y/\sum\tilde Z\tilde D\). Distinct from
 /// [`InstrumentalForest`] (raw Wald) and [`DmlIv`] (scalar residual Wald).
 #[derive(Clone, Debug)]
-pub struct OrthoIv {
+pub(crate) struct OrthoIv {
     /// Trees. Not identification `p`.
     pub n_estimators: usize,
     /// Depth cap.
@@ -29882,12 +29882,12 @@ impl Default for OrthoIv {
 
 impl OrthoIv {
     /// Default orthogonal IV forest.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Residualize then grow residual-Wald trees.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -29969,13 +29969,13 @@ impl OrthoIv {
 
 /// Fitted orthogonal IV forest.
 #[derive(Clone, Debug)]
-pub struct FittedOrthoIv {
+pub(crate) struct FittedOrthoIv {
     trees: Vec<CateNode>,
 }
 
 impl FittedOrthoIv {
     /// Ensemble-mean residual-Wald leaf.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let m = self.trees.len().max(1) as f64;
@@ -29996,7 +29996,7 @@ impl FittedOrthoIv {
 /// `p`. Distinct from [`DeepIv`] (instrumented first stage) and [`RLearner`]
 /// (linear \(\varphi\)).
 #[derive(Clone, Debug)]
-pub struct DeepCate {
+pub(crate) struct DeepCate {
     /// SGD steps for the hidden map. Not identification `p`.
     pub max_iter: usize,
 }
@@ -30009,12 +30009,12 @@ impl Default for DeepCate {
 
 impl DeepCate {
     /// Default deep CATE.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Residualize, train a tanh sketch of \(X\), then Robinson OLS.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -30113,7 +30113,7 @@ impl DeepCate {
 
 /// Fitted deep CATE.
 #[derive(Clone, Debug)]
-pub struct FittedDeepCate {
+pub(crate) struct FittedDeepCate {
     /// Unused intercept placeholder kept for API symmetry.
     pub intercept: f64,
     /// Slope on \(\tilde D\).
@@ -30126,7 +30126,7 @@ pub struct FittedDeepCate {
 
 impl FittedDeepCate {
     /// Hidden-feature CATE.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
@@ -30178,7 +30178,7 @@ fn ista_l1(x: &Matrix, y: &Vector, alpha: f64, max_iter: usize) -> Vector {
 /// \(\alpha\) is not identification `p`. Distinct from [`Driv`] (scalar ratio)
 /// and [`SparseLinearDml`] (no instrument).
 #[derive(Clone, Debug)]
-pub struct SparseLinearDriv {
+pub(crate) struct SparseLinearDriv {
     /// L1 level. Not identification `p`.
     pub alpha: f64,
 }
@@ -30191,12 +30191,12 @@ impl Default for SparseLinearDriv {
 
 impl SparseLinearDriv {
     /// Sparse DRIV with L1 `alpha`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self { alpha }
     }
 
     /// Fit ISTA Robinson on AIPW scores.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -30257,14 +30257,14 @@ impl SparseLinearDriv {
 
 /// Fitted sparse linear DRIV.
 #[derive(Clone, Debug)]
-pub struct FittedSparseLinearDriv {
+pub(crate) struct FittedSparseLinearDriv {
     /// Slopes on \([1,X]\).
     pub coef: Vector,
 }
 
 impl FittedSparseLinearDriv {
     /// Linear CATE.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
@@ -30286,7 +30286,7 @@ impl FittedSparseLinearDriv {
 /// identification `p`. Distinct from [`NonParamDml`] (local ratio, no
 /// intercept) and [`RLearner`] (global linear Robinson).
 #[derive(Clone, Debug)]
-pub struct LocalLinearCate {
+pub(crate) struct LocalLinearCate {
     /// RBF length-scale. Not identification `p`.
     pub bandwidth: f64,
 }
@@ -30299,12 +30299,12 @@ impl Default for LocalLinearCate {
 
 impl LocalLinearCate {
     /// Local-linear CATE with bandwidth `h`.
-    pub fn new(bandwidth: f64) -> Self {
+    pub(crate) fn new(bandwidth: f64) -> Self {
         Self { bandwidth }
     }
 
     /// Residualize then store the kernel table.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -30372,7 +30372,7 @@ impl LocalLinearCate {
 
 /// Fitted local-linear CATE.
 #[derive(Clone, Debug)]
-pub struct FittedLocalLinearCate {
+pub(crate) struct FittedLocalLinearCate {
     x_train: Matrix,
     yres: Vector,
     dres: Vector,
@@ -30381,7 +30381,7 @@ pub struct FittedLocalLinearCate {
 
 impl FittedLocalLinearCate {
     /// Local-linear residual slope at each query row.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let h2 = (2.0 * self.bandwidth * self.bandwidth).max(1e-12);
@@ -30430,7 +30430,7 @@ impl FittedLocalLinearCate {
 /// identification `p`. Distinct from [`SieveCate`] (CATE on \(\varphi\) after
 /// residualizing on raw \(X\)) and [`DoubleMl`] (residualize on raw \(X\)).
 #[derive(Clone, Debug)]
-pub struct SieveDml {
+pub(crate) struct SieveDml {
     /// Polynomial degree. Not identification `p`.
     pub degree: usize,
 }
@@ -30443,14 +30443,14 @@ impl Default for SieveDml {
 
 impl SieveDml {
     /// Sieve DML of degree `degree`.
-    pub fn new(degree: usize) -> Self {
+    pub(crate) fn new(degree: usize) -> Self {
         Self {
             degree: degree.max(1),
         }
     }
 
     /// Residualize on the sieve, then a scalar residual ratio.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -30534,7 +30534,7 @@ impl SieveDml {
 
 /// Fitted sieve-nuisance DML.
 #[derive(Clone, Debug)]
-pub struct FittedSieveDml {
+pub(crate) struct FittedSieveDml {
     /// Scalar residual-on-residual ATE.
     pub ate: f64,
     /// Polynomial degree.
@@ -30548,7 +30548,7 @@ pub struct FittedSieveDml {
 /// identification `p`. Distinct from [`NonParamDml`] (local ratio) and
 /// [`DeepCate`] (tanh hidden).
 #[derive(Clone, Debug)]
-pub struct RbfCate {
+pub(crate) struct RbfCate {
     /// RBF length-scale. Not identification `p`.
     pub bandwidth: f64,
 }
@@ -30561,12 +30561,12 @@ impl Default for RbfCate {
 
 impl RbfCate {
     /// RBF CATE with bandwidth `h`.
-    pub fn new(bandwidth: f64) -> Self {
+    pub(crate) fn new(bandwidth: f64) -> Self {
         Self { bandwidth }
     }
 
     /// Residualize, build landmark features, then Robinson OLS.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -30660,7 +30660,7 @@ impl RbfCate {
 
 /// Fitted RBF-landmark CATE.
 #[derive(Clone, Debug)]
-pub struct FittedRbfCate {
+pub(crate) struct FittedRbfCate {
     /// Slope on \(\tilde D\).
     pub intercept: f64,
     /// Slopes on \(\tilde D\,\varphi_k\).
@@ -30671,7 +30671,7 @@ pub struct FittedRbfCate {
 
 impl FittedRbfCate {
     /// Landmark RBF CATE.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let h2 = (2.0 * self.bandwidth * self.bandwidth).max(1e-12);
@@ -30697,16 +30697,16 @@ impl FittedRbfCate {
 /// AIPW \(\psi_Y,\psi_D\), then OLS of \(\psi_Y\) on \(\psi_D[1,X]\). Distinct
 /// from [`SparseLinearDriv`] (ISTA \(L_1\)) and [`Driv`] (scalar ratio).
 #[derive(Clone, Debug, Default)]
-pub struct LinearDriv;
+pub(crate) struct LinearDriv;
 
 impl LinearDriv {
     /// Default linear DRIV.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Fit OLS Robinson on AIPW scores.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -30775,14 +30775,14 @@ impl LinearDriv {
 
 /// Fitted linear DRIV.
 #[derive(Clone, Debug)]
-pub struct FittedLinearDriv {
+pub(crate) struct FittedLinearDriv {
     /// Slopes on \([1,X]\).
     pub coef: Vector,
 }
 
 impl FittedLinearDriv {
     /// Linear CATE.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
@@ -30804,7 +30804,7 @@ impl FittedLinearDriv {
 /// Dual size is not identification `p`. Distinct from [`NonParamDml`] (local
 /// ratio) and [`RbfCate`] (landmark OLS).
 #[derive(Clone, Debug)]
-pub struct KernelDml {
+pub(crate) struct KernelDml {
     /// RBF length-scale. Not identification `p`.
     pub bandwidth: f64,
     /// Dual ridge. Not identification `p`.
@@ -30822,7 +30822,7 @@ impl Default for KernelDml {
 
 impl KernelDml {
     /// Kernel DML with bandwidth `h`.
-    pub fn new(bandwidth: f64) -> Self {
+    pub(crate) fn new(bandwidth: f64) -> Self {
         Self {
             bandwidth,
             ..Self::default()
@@ -30830,7 +30830,7 @@ impl KernelDml {
     }
 
     /// Residualize then solve the dual R-learner.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -30935,7 +30935,7 @@ impl KernelDml {
 
 /// Fitted kernel DML.
 #[derive(Clone, Debug)]
-pub struct FittedKernelDml {
+pub(crate) struct FittedKernelDml {
     alpha: Vector,
     x_train: Matrix,
     bandwidth: f64,
@@ -30945,7 +30945,7 @@ pub struct FittedKernelDml {
 
 impl FittedKernelDml {
     /// Dual kernel CATE \(f(x)=\sum_j\alpha_j k(x,x_j)\).
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let h2 = (2.0 * self.bandwidth * self.bandwidth).max(1e-12);
@@ -30971,16 +30971,16 @@ impl FittedKernelDml {
 /// \(\tilde D[1,X]\). Distinct from [`RLearner`] (logistic propensity) and
 /// [`SparseLinearDml`] (ISTA \(L_1\)).
 #[derive(Clone, Debug, Default)]
-pub struct LinearDml;
+pub(crate) struct LinearDml;
 
 impl LinearDml {
     /// Default linear DML.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Residual-on-residual OLS CATE.
-    pub fn fit(
+    pub(crate) fn fit(
         &self,
         x: &Matrix,
         y: &Vector,
@@ -31046,14 +31046,14 @@ impl LinearDml {
 
 /// Fitted linear DML.
 #[derive(Clone, Debug)]
-pub struct FittedLinearDml {
+pub(crate) struct FittedLinearDml {
     /// Slopes on \([1,X]\).
     pub coef: Vector,
 }
 
 impl FittedLinearDml {
     /// Linear CATE.
-    pub fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+    pub(crate) fn predict_cate(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         let mut ctx = FitCtx::with_session(session.child("predict"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {

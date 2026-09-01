@@ -121,7 +121,7 @@ impl Predict for FittedAnomalyForest {
 impl FitUnsupervised for IsolationForest {
     type Fitted = FittedAnomalyForest;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedAnomalyForest>> {
@@ -220,7 +220,7 @@ impl Predict for FittedAnomalyLof {
 impl FitUnsupervised for LocalOutlierFactor {
     type Fitted = FittedAnomalyLof;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedAnomalyLof>> {
@@ -294,7 +294,7 @@ impl Predict for FittedHypersphere {
 impl FitUnsupervised for OneClassHypersphere {
     type Fitted = FittedHypersphere;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
     ) -> Result<Qualified<FittedHypersphere>> {
@@ -344,17 +344,36 @@ impl EllipticEnvelope {
     }
 }
 
-/// Fitted elliptic envelope (re-export of the covariance fit).
-pub type FittedAnomalyEnvelope = FittedEllipticEnvelope;
+/// Fitted elliptic envelope.
+#[derive(Clone, Debug)]
+pub struct FittedAnomalyEnvelope {
+    inner: FittedEllipticEnvelope,
+}
+
+impl FittedAnomalyEnvelope {
+    /// Mahalanobis scores (higher = more outlying).
+    pub fn scores(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.scores(x, session)
+    }
+}
+
+impl Predict for FittedAnomalyEnvelope {
+    type Output = Vector;
+    fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
+        self.inner.predict(x, session)
+    }
+}
 
 impl FitUnsupervised for EllipticEnvelope {
-    type Fitted = FittedEllipticEnvelope;
+    type Fitted = FittedAnomalyEnvelope;
     fn fit_unsupervised(
-        &mut self,
+        &self,
         x: &Matrix,
         session: &Session,
-    ) -> Result<Qualified<FittedEllipticEnvelope>> {
-        self.inner.fit_unsupervised(x, session)
+    ) -> Result<Qualified<FittedAnomalyEnvelope>> {
+        self.inner
+            .fit_unsupervised(x, session)
+            .map(|q| q.map(|inner| FittedAnomalyEnvelope { inner }))
     }
 }
 

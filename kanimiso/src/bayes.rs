@@ -15,7 +15,7 @@ use signlred::{Issue, IssueCode, NumericalCompromise, Qualified, Result};
 
 /// Bayesian ridge regression (automatic relevance of the noise / weight precisions).
 #[derive(Clone, Debug)]
-pub struct BayesianRidge {
+pub(crate) struct BayesianRidge {
     /// Max evidence iterations.
     pub max_iter: usize,
     /// Prepend an intercept.
@@ -33,14 +33,14 @@ impl Default for BayesianRidge {
 
 impl BayesianRidge {
     /// Default Bayesian ridge.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted Bayesian ridge.
 #[derive(Clone, Debug)]
-pub struct FittedBayesianRidge {
+pub(crate) struct FittedBayesianRidge {
     /// Slopes.
     pub coef: Vector,
     /// Intercept.
@@ -54,7 +54,7 @@ pub struct FittedBayesianRidge {
 impl Fit for BayesianRidge {
     type Fitted = FittedBayesianRidge;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
@@ -201,7 +201,7 @@ impl Predict for FittedBayesianRidge {
 /// \(\gamma_j = 1 - \lambda_j S_{jj}\), \(\lambda_j = \gamma_j / \mu_j^2\).
 /// A column that is unused for \(y\) has \(\lambda_j \to \infty\).
 #[derive(Clone, Debug)]
-pub struct ArdRegression {
+pub(crate) struct ArdRegression {
     /// Max evidence iterations.
     pub max_iter: usize,
     /// Prepend an intercept.
@@ -219,14 +219,14 @@ impl Default for ArdRegression {
 
 impl ArdRegression {
     /// Default ARD regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted ARD model.
 #[derive(Clone, Debug)]
-pub struct FittedArd {
+pub(crate) struct FittedArd {
     /// Posterior mean slopes.
     pub coef: Vector,
     /// Intercept.
@@ -239,7 +239,7 @@ pub struct FittedArd {
 
 impl Fit for ArdRegression {
     type Fitted = FittedArd;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedArd>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedArd>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         if ctx.report.contains(IssueCode::ConstantTarget)

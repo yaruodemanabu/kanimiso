@@ -21,11 +21,11 @@ use signlred::{
 
 /// Re-export of [`crate::preprocess::PolynomialFeatures`] for a sklearn-like
 /// `feature_extraction` surface.
-pub use crate::preprocess::PolynomialFeatures;
+pub(crate) use crate::preprocess::PolynomialFeatures;
 
 /// Drop columns whose sample variance is at or below `threshold`.
 #[derive(Clone, Debug)]
-pub struct VarianceThreshold {
+pub(crate) struct VarianceThreshold {
     /// Variance cutoff (0 drops exact constants).
     pub threshold: f64,
     variances: Vector,
@@ -46,7 +46,7 @@ impl Default for VarianceThreshold {
 
 impl VarianceThreshold {
     /// Drop columns with variance ≤ `threshold`.
-    pub fn new(threshold: f64) -> Self {
+    pub(crate) fn new(threshold: f64) -> Self {
         Self {
             threshold,
             ..Self::default()
@@ -54,34 +54,35 @@ impl VarianceThreshold {
     }
 
     /// Fitted per-column variances.
-    pub fn variances(&self) -> &Vector {
+    pub(crate) fn variances(&self) -> &Vector {
         &self.variances
     }
 
     /// Mask of kept columns.
-    pub fn support(&self) -> &[bool] {
+    pub(crate) fn support(&self) -> &[bool] {
         &self.support
     }
 }
 
 impl FitUnsupervised for VarianceThreshold {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let (n, p) = x.shape();
-        self.variances = Vector::zeros(p);
-        self.support = vec![false; p];
+        this.variances = Vector::zeros(p);
+        this.support = vec![false; p];
         for j in 0..p {
             let col: Vec<f64> = (0..n).map(|i| x.get(i, j)).collect();
             let st = slice_stats(&col);
-            self.variances[j] = st.variance;
-            self.support[j] = st.count >= 2 && st.variance > self.threshold;
+            this.variances[j] = st.variance;
+            this.support[j] = st.count >= 2 && st.variance > this.threshold;
             if st.count > 0 && st.is_constant(ctx.policy.near_zero_variance) {
                 ctx.push(constant_col_issue(j, st));
             }
         }
-        if self.support.iter().all(|s| !*s) {
+        if this.support.iter().all(|s| !*s) {
             ctx.push(
                 Issue::builder(IssueCode::MeaninglessFit)
                     .message("VarianceThreshold dropped every column")
@@ -93,8 +94,8 @@ impl FitUnsupervised for VarianceThreshold {
                     .build(),
             );
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -111,7 +112,7 @@ impl Transform for VarianceThreshold {
 
 /// Keep the `k` features with largest f-regression scores (`corr²` with `y`).
 #[derive(Clone, Debug)]
-pub struct SelectKBest {
+pub(crate) struct SelectKBest {
     /// Number of features to keep.
     pub k: usize,
     scores: Vector,
@@ -132,7 +133,7 @@ impl Default for SelectKBest {
 
 impl SelectKBest {
     /// Keep `k` features.
-    pub fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k: k.max(1),
             ..Self::default()
@@ -140,19 +141,20 @@ impl SelectKBest {
     }
 
     /// `corr²` scores (NaN for constant / unidentified columns).
-    pub fn scores(&self) -> &Vector {
+    pub(crate) fn scores(&self) -> &Vector {
         &self.scores
     }
 
     /// Mask of kept columns.
-    pub fn support(&self) -> &[bool] {
+    pub(crate) fn support(&self) -> &[bool] {
         &self.support
     }
 }
 
 impl Fit for SelectKBest {
     type Fitted = Self;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         ctx.push(
@@ -164,30 +166,30 @@ impl Fit for SelectKBest {
                 .build(),
         );
         let (n, p) = x.shape();
-        self.scores = Vector::zeros(p);
+        this.scores = Vector::zeros(p);
         let yst = slice_stats(y.as_slice());
         for j in 0..p {
             let col: Vec<f64> = (0..n).map(|i| x.get(i, j)).collect();
             let xst = slice_stats(&col);
-            self.scores[j] = pearson_sq(&col, xst, y.as_slice(), yst);
+            this.scores[j] = pearson_sq(&col, xst, y.as_slice(), yst);
         }
         let mut order: Vec<usize> = (0..p).collect();
         order.sort_by(|a, b| {
-            self.scores[*b]
-                .partial_cmp(&self.scores[*a])
+            this.scores[*b]
+                .partial_cmp(&this.scores[*a])
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        self.support = vec![false; p];
-        for &j in order.iter().take(self.k.min(p)) {
-            if self.scores[j].is_finite() {
-                self.support[j] = true;
+        this.support = vec![false; p];
+        for &j in order.iter().take(this.k.min(p)) {
+            if this.scores[j].is_finite() {
+                this.support[j] = true;
             }
         }
-        if self.support.iter().all(|s| !*s) && p > 0 {
-            self.support[order[0]] = true;
+        if this.support.iter().all(|s| !*s) && p > 0 {
+            this.support[order[0]] = true;
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -204,7 +206,7 @@ impl Transform for SelectKBest {
 
 /// Recursive feature elimination wrapping a plain OLS score (`|β|`).
 #[derive(Clone, Debug)]
-pub struct Rfe {
+pub(crate) struct Rfe {
     /// Features to keep.
     pub n_features_to_select: usize,
     support: Vec<bool>,
@@ -224,11 +226,11 @@ impl Default for Rfe {
 }
 
 /// sklearn spelling of [`Rfe`].
-pub type RFE = Rfe;
+pub(crate) type RFE = Rfe;
 
 impl Rfe {
     /// Eliminate down to `n_features_to_select` columns.
-    pub fn new(n_features_to_select: usize) -> Self {
+    pub(crate) fn new(n_features_to_select: usize) -> Self {
         Self {
             n_features_to_select: n_features_to_select.max(1),
             ..Self::default()
@@ -236,19 +238,20 @@ impl Rfe {
     }
 
     /// Mask of kept columns.
-    pub fn support(&self) -> &[bool] {
+    pub(crate) fn support(&self) -> &[bool] {
         &self.support
     }
 
     /// Elimination rank (1 = kept in the final set).
-    pub fn ranking(&self) -> &[usize] {
+    pub(crate) fn ranking(&self) -> &[usize] {
         &self.ranking
     }
 }
 
 impl Fit for Rfe {
     type Fitted = Self;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         ctx.push(
@@ -260,9 +263,9 @@ impl Fit for Rfe {
                 .build(),
         );
         let p = x.ncols();
-        let keep = self.n_features_to_select.min(p.max(1));
+        let keep = this.n_features_to_select.min(p.max(1));
         let mut active: Vec<usize> = (0..p).collect();
-        self.ranking = vec![0; p];
+        this.ranking = vec![0; p];
         let mut rank = p;
         while active.len() > keep {
             let sub = take_columns(x, &active);
@@ -284,16 +287,16 @@ impl Fit for Rfe {
                 }
             }
             let dropped = active.remove(worst);
-            self.ranking[dropped] = rank;
+            this.ranking[dropped] = rank;
             rank -= 1;
         }
-        self.support = vec![false; p];
+        this.support = vec![false; p];
         for &j in &active {
-            self.support[j] = true;
-            self.ranking[j] = 1;
+            this.support[j] = true;
+            this.ranking[j] = 1;
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -310,7 +313,7 @@ impl Transform for Rfe {
 
 /// Keep the top `percentile` of features by f-regression score.
 #[derive(Clone, Debug)]
-pub struct SelectPercentile {
+pub(crate) struct SelectPercentile {
     /// Percentile in `(0, 100]`.
     pub percentile: f64,
     scores: Vector,
@@ -331,7 +334,7 @@ impl Default for SelectPercentile {
 
 impl SelectPercentile {
     /// Keep the top `percentile` percent of columns.
-    pub fn new(percentile: f64) -> Self {
+    pub(crate) fn new(percentile: f64) -> Self {
         Self {
             percentile,
             ..Self::default()
@@ -339,28 +342,29 @@ impl SelectPercentile {
     }
 
     /// `corr²` scores.
-    pub fn scores(&self) -> &Vector {
+    pub(crate) fn scores(&self) -> &Vector {
         &self.scores
     }
 
     /// Mask of kept columns.
-    pub fn support(&self) -> &[bool] {
+    pub(crate) fn support(&self) -> &[bool] {
         &self.support
     }
 }
 
 impl Fit for SelectPercentile {
     type Fitted = Self;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        if !self.percentile.is_finite() || self.percentile <= 0.0 || self.percentile > 100.0 {
+        if !this.percentile.is_finite() || this.percentile <= 0.0 || this.percentile > 100.0 {
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
                     .severity(Severity::Warning)
                     .message(format!(
                         "SelectPercentile percentile={} not in (0, 100]; using 50",
-                        self.percentile
+                        this.percentile
                     ))
                     .build(),
             );
@@ -372,33 +376,33 @@ impl Fit for SelectPercentile {
                 .build(),
         );
         let (n, p) = x.shape();
-        self.scores = Vector::zeros(p);
+        this.scores = Vector::zeros(p);
         let yst = slice_stats(y.as_slice());
         for j in 0..p {
             let col: Vec<f64> = (0..n).map(|i| x.get(i, j)).collect();
             let xst = slice_stats(&col);
-            self.scores[j] = pearson_sq(&col, xst, y.as_slice(), yst);
+            this.scores[j] = pearson_sq(&col, xst, y.as_slice(), yst);
         }
-        let pct = self.percentile.clamp(1e-6, 100.0);
+        let pct = this.percentile.clamp(1e-6, 100.0);
         let k = ((p as f64) * pct / 100.0).ceil() as usize;
         let k = k.clamp(1, p.max(1));
         let mut order: Vec<usize> = (0..p).collect();
         order.sort_by(|a, b| {
-            self.scores[*b]
-                .partial_cmp(&self.scores[*a])
+            this.scores[*b]
+                .partial_cmp(&this.scores[*a])
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        self.support = vec![false; p];
+        this.support = vec![false; p];
         for &j in order.iter().take(k) {
-            if self.scores[j].is_finite() {
-                self.support[j] = true;
+            if this.scores[j].is_finite() {
+                this.support[j] = true;
             }
         }
-        if self.support.iter().all(|s| !*s) && p > 0 {
-            self.support[order[0]] = true;
+        if this.support.iter().all(|s| !*s) && p > 0 {
+            this.support[order[0]] = true;
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -426,7 +430,7 @@ fn ols_mse(x: &Matrix, y: &Vector, policy: &signlred::Policy) -> f64 {
 
 /// Recursive feature elimination with K-fold OLS MSE to pick the subset size.
 #[derive(Clone, Debug)]
-pub struct RfeCv {
+pub(crate) struct RfeCv {
     /// Number of CV folds.
     pub n_splits: usize,
     support: Vec<bool>,
@@ -435,7 +439,7 @@ pub struct RfeCv {
 }
 
 /// sklearn spelling of [`RfeCv`].
-pub type RFECV = RfeCv;
+pub(crate) type RFECV = RfeCv;
 
 impl Default for RfeCv {
     fn default() -> Self {
@@ -450,7 +454,7 @@ impl Default for RfeCv {
 
 impl RfeCv {
     /// RFECV with `n_splits` folds.
-    pub fn new(n_splits: usize) -> Self {
+    pub(crate) fn new(n_splits: usize) -> Self {
         Self {
             n_splits: n_splits.max(2),
             ..Self::default()
@@ -458,19 +462,20 @@ impl RfeCv {
     }
 
     /// Mask of kept columns.
-    pub fn support(&self) -> &[bool] {
+    pub(crate) fn support(&self) -> &[bool] {
         &self.support
     }
 
     /// Chosen number of features.
-    pub fn n_features(&self) -> usize {
+    pub(crate) fn n_features(&self) -> usize {
         self.n_features
     }
 }
 
 impl Fit for RfeCv {
     type Fitted = Self;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         ctx.push(
@@ -481,11 +486,11 @@ impl Fit for RfeCv {
         );
         let p = x.ncols();
         if p == 0 {
-            self.support.clear();
-            self.fitted = true;
-            return ctx.finish(self.clone());
+            this.support.clear();
+            this.fitted = true;
+            return ctx.finish(this.clone());
         }
-        let kf = KFold::new(self.n_splits.max(2));
+        let kf = KFold::new(this.n_splits.max(2));
         let folds = match kf.split(x.nrows(), &session.child("kfold")) {
             Ok(q) => q.value,
             Err(_) => Vec::new(),
@@ -535,10 +540,10 @@ impl Fit for RfeCv {
         }
         let mut final_rfe = Rfe::new(best_k);
         let q = final_rfe.fit(x, y, &session.child("rfe-final"))?;
-        self.support = q.value.support().to_vec();
-        self.n_features = self.support.iter().filter(|s| **s).count().max(1);
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.support = q.value.support().to_vec();
+        this.n_features = this.support.iter().filter(|s| **s).count().max(1);
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -555,7 +560,7 @@ impl Transform for RfeCv {
 
 /// Forward sequential selection by in-sample OLS MSE (sklearn `SequentialFeatureSelector`).
 #[derive(Clone, Debug)]
-pub struct SequentialFeatureSelector {
+pub(crate) struct SequentialFeatureSelector {
     /// Features to keep.
     pub n_features_to_select: usize,
     support: Vec<bool>,
@@ -574,7 +579,7 @@ impl Default for SequentialFeatureSelector {
 
 impl SequentialFeatureSelector {
     /// Keep `n` features.
-    pub fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         Self {
             n_features_to_select: n.max(1),
             ..Self::default()
@@ -582,14 +587,15 @@ impl SequentialFeatureSelector {
     }
 
     /// Mask of kept columns.
-    pub fn support(&self) -> &[bool] {
+    pub(crate) fn support(&self) -> &[bool] {
         &self.support
     }
 }
 
 impl Fit for SequentialFeatureSelector {
     type Fitted = Self;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         ctx.push(
@@ -599,7 +605,7 @@ impl Fit for SequentialFeatureSelector {
                 .build(),
         );
         let p = x.ncols();
-        let keep = self.n_features_to_select.min(p.max(1));
+        let keep = this.n_features_to_select.min(p.max(1));
         let mut chosen: Vec<usize> = Vec::new();
         let mut remaining: Vec<usize> = (0..p).collect();
         while chosen.len() < keep && !remaining.is_empty() {
@@ -623,15 +629,15 @@ impl Fit for SequentialFeatureSelector {
             }
             chosen.push(remaining.remove(best_j));
         }
-        self.support = vec![false; p];
+        this.support = vec![false; p];
         for j in chosen {
-            self.support[j] = true;
+            this.support[j] = true;
         }
-        if self.support.iter().all(|s| !*s) && p > 0 {
-            self.support[0] = true;
+        if this.support.iter().all(|s| !*s) && p > 0 {
+            this.support[0] = true;
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -680,7 +686,7 @@ fn apply_univariate_mask(
 
 /// Keep columns with F-test p-value below `alpha` (sklearn `SelectFpr`).
 #[derive(Clone, Debug)]
-pub struct SelectFpr {
+pub(crate) struct SelectFpr {
     /// Family-wise type-I rate for a single test.
     pub alpha: f64,
     support: Vec<bool>,
@@ -699,7 +705,7 @@ impl Default for SelectFpr {
 
 impl SelectFpr {
     /// FPR selector with the given `α`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self {
             alpha,
             ..Self::default()
@@ -707,24 +713,25 @@ impl SelectFpr {
     }
 
     /// Mask of kept columns.
-    pub fn support(&self) -> &[bool] {
+    pub(crate) fn support(&self) -> &[bool] {
         &self.support
     }
 }
 
 impl Fit for SelectFpr {
     type Fitted = Self;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
-        let alpha = if self.alpha.is_finite() && self.alpha > 0.0 && self.alpha < 1.0 {
-            self.alpha
+        let alpha = if this.alpha.is_finite() && this.alpha > 0.0 && this.alpha < 1.0 {
+            this.alpha
         } else {
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
                     .severity(Severity::Warning)
                     .message(format!(
                         "SelectFpr α={} not in (0, 1); using 0.05",
-                        self.alpha
+                        this.alpha
                     ))
                     .build(),
             );
@@ -734,14 +741,14 @@ impl Fit for SelectFpr {
             Ok(q) => q.value,
             Err(e) => {
                 ctx.push(e.primary);
-                self.support = vec![true; x.ncols().min(1)];
-                self.fitted = true;
-                return ctx.finish(self.clone());
+                this.support = vec![true; x.ncols().min(1)];
+                this.fitted = true;
+                return ctx.finish(this.clone());
             }
         };
-        self.support = apply_univariate_mask(&scores, |_, p| p <= alpha, &mut ctx);
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.support = apply_univariate_mask(&scores, |_, p| p <= alpha, &mut ctx);
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -758,7 +765,7 @@ impl Transform for SelectFpr {
 
 /// Benjamini–Hochberg FDR control (sklearn `SelectFdr`).
 #[derive(Clone, Debug)]
-pub struct SelectFdr {
+pub(crate) struct SelectFdr {
     /// Target false-discovery rate.
     pub alpha: f64,
     support: Vec<bool>,
@@ -777,7 +784,7 @@ impl Default for SelectFdr {
 
 impl SelectFdr {
     /// FDR selector with the given `α`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self {
             alpha,
             ..Self::default()
@@ -785,24 +792,25 @@ impl SelectFdr {
     }
 
     /// Mask of kept columns.
-    pub fn support(&self) -> &[bool] {
+    pub(crate) fn support(&self) -> &[bool] {
         &self.support
     }
 }
 
 impl Fit for SelectFdr {
     type Fitted = Self;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
-        let alpha = if self.alpha.is_finite() && self.alpha > 0.0 && self.alpha < 1.0 {
-            self.alpha
+        let alpha = if this.alpha.is_finite() && this.alpha > 0.0 && this.alpha < 1.0 {
+            this.alpha
         } else {
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
                     .severity(Severity::Warning)
                     .message(format!(
                         "SelectFdr α={} not in (0, 1); using 0.05",
-                        self.alpha
+                        this.alpha
                     ))
                     .build(),
             );
@@ -812,12 +820,12 @@ impl Fit for SelectFdr {
             Ok(q) => q.value,
             Err(e) => {
                 ctx.push(e.primary);
-                self.support = vec![x.ncols() > 0];
+                this.support = vec![x.ncols() > 0];
                 if x.ncols() > 1 {
-                    self.support.resize(x.ncols(), false);
+                    this.support.resize(x.ncols(), false);
                 }
-                self.fitted = true;
-                return ctx.finish(self.clone());
+                this.fitted = true;
+                return ctx.finish(this.clone());
             }
         };
         let p = scores.pvalues.len();
@@ -840,9 +848,9 @@ impl Fit for SelectFdr {
                 keep_idx[j] = true;
             }
         }
-        self.support = apply_univariate_mask(&scores, |j, _| keep_idx[j], &mut ctx);
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.support = apply_univariate_mask(&scores, |j, _| keep_idx[j], &mut ctx);
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -859,7 +867,7 @@ impl Transform for SelectFdr {
 
 /// Bonferroni family-wise error selector (sklearn `SelectFwe`).
 #[derive(Clone, Debug)]
-pub struct SelectFwe {
+pub(crate) struct SelectFwe {
     /// Family-wise type-I rate.
     pub alpha: f64,
     support: Vec<bool>,
@@ -878,7 +886,7 @@ impl Default for SelectFwe {
 
 impl SelectFwe {
     /// FWE selector with the given `α`.
-    pub fn new(alpha: f64) -> Self {
+    pub(crate) fn new(alpha: f64) -> Self {
         Self {
             alpha,
             ..Self::default()
@@ -886,24 +894,25 @@ impl SelectFwe {
     }
 
     /// Mask of kept columns.
-    pub fn support(&self) -> &[bool] {
+    pub(crate) fn support(&self) -> &[bool] {
         &self.support
     }
 }
 
 impl Fit for SelectFwe {
     type Fitted = Self;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
-        let alpha = if self.alpha.is_finite() && self.alpha > 0.0 && self.alpha < 1.0 {
-            self.alpha
+        let alpha = if this.alpha.is_finite() && this.alpha > 0.0 && this.alpha < 1.0 {
+            this.alpha
         } else {
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
                     .severity(Severity::Warning)
                     .message(format!(
                         "SelectFwe α={} not in (0, 1); using 0.05",
-                        self.alpha
+                        this.alpha
                     ))
                     .build(),
             );
@@ -913,19 +922,19 @@ impl Fit for SelectFwe {
             Ok(q) => q.value,
             Err(e) => {
                 ctx.push(e.primary);
-                self.support = vec![x.ncols() > 0];
+                this.support = vec![x.ncols() > 0];
                 if x.ncols() > 1 {
-                    self.support.resize(x.ncols(), false);
+                    this.support.resize(x.ncols(), false);
                 }
-                self.fitted = true;
-                return ctx.finish(self.clone());
+                this.fitted = true;
+                return ctx.finish(this.clone());
             }
         };
         let p = scores.pvalues.len().max(1);
         let thresh = alpha / p as f64;
-        self.support = apply_univariate_mask(&scores, |_, pv| pv <= thresh, &mut ctx);
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.support = apply_univariate_mask(&scores, |_, pv| pv <= thresh, &mut ctx);
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -942,7 +951,7 @@ impl Transform for SelectFwe {
 
 /// Univariate selector with a named strategy (sklearn `GenericUnivariateSelect`).
 #[derive(Clone, Debug)]
-pub struct GenericUnivariateSelect {
+pub(crate) struct GenericUnivariateSelect {
     /// One of `k_best`, `percentile`, `fpr`, `fwe`.
     pub mode: UnivariateMode,
     /// `k`, percentile, or `α` depending on `mode`.
@@ -953,7 +962,7 @@ pub struct GenericUnivariateSelect {
 
 /// Strategy for [`GenericUnivariateSelect`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UnivariateMode {
+pub(crate) enum UnivariateMode {
     /// Keep the `k` highest F scores.
     KBest,
     /// Keep the top percentile of F scores.
@@ -977,7 +986,7 @@ impl Default for GenericUnivariateSelect {
 
 impl GenericUnivariateSelect {
     /// Selector with the given mode and parameter.
-    pub fn new(mode: UnivariateMode, param: f64) -> Self {
+    pub(crate) fn new(mode: UnivariateMode, param: f64) -> Self {
         Self {
             mode,
             param,
@@ -986,35 +995,36 @@ impl GenericUnivariateSelect {
     }
 
     /// Mask of kept columns.
-    pub fn support(&self) -> &[bool] {
+    pub(crate) fn support(&self) -> &[bool] {
         &self.support
     }
 }
 
 impl Fit for GenericUnivariateSelect {
     type Fitted = Self;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
-        self.support = match self.mode {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
+        this.support = match this.mode {
             UnivariateMode::KBest => {
-                let mut s = SelectKBest::new(self.param.max(1.0) as usize);
+                let mut s = SelectKBest::new(this.param.max(1.0) as usize);
                 s.fit(x, y, session)?.value.support().to_vec()
             }
             UnivariateMode::Percentile => {
-                let mut s = SelectPercentile::new(self.param);
+                let mut s = SelectPercentile::new(this.param);
                 s.fit(x, y, session)?.value.support().to_vec()
             }
             UnivariateMode::Fpr => {
-                let mut s = SelectFpr::new(self.param);
+                let mut s = SelectFpr::new(this.param);
                 s.fit(x, y, session)?.value.support().to_vec()
             }
             UnivariateMode::Fwe => {
-                let mut s = SelectFwe::new(self.param);
+                let mut s = SelectFwe::new(this.param);
                 s.fit(x, y, session)?.value.support().to_vec()
             }
         };
-        self.fitted = true;
+        this.fitted = true;
         let mut ctx = FitCtx::with_session(session.child("finish"));
-        ctx.finish(self.clone())
+        ctx.finish(this.clone())
     }
 }
 
@@ -1031,7 +1041,7 @@ impl Transform for GenericUnivariateSelect {
 
 /// Random Fourier features for an RBF kernel (Rahimi & Recht).
 #[derive(Clone, Debug)]
-pub struct RbfSampler {
+pub(crate) struct RbfSampler {
     /// Number of Monte-Carlo frequencies.
     pub n_components: usize,
     /// RBF `γ` in `exp(-γ‖x−x'‖²)`.
@@ -1058,7 +1068,7 @@ impl Default for RbfSampler {
 
 impl RbfSampler {
     /// Sampler with `n_components` features and RBF `γ`.
-    pub fn new(n_components: usize, gamma: f64) -> Self {
+    pub(crate) fn new(n_components: usize, gamma: f64) -> Self {
         Self {
             n_components: n_components.max(1),
             gamma,
@@ -1069,18 +1079,19 @@ impl RbfSampler {
 
 impl FitUnsupervised for RbfSampler {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let p = x.ncols();
-        let m = self.n_components;
-        let mut rng = Rng::new(self.seed);
-        let sd = (2.0 * self.gamma).sqrt();
-        self.weights = Matrix::from_fn(p, m, |_, _| rng.standard_normal() * sd);
-        self.offset =
+        let m = this.n_components;
+        let mut rng = Rng::new(this.seed);
+        let sd = (2.0 * this.gamma).sqrt();
+        this.weights = Matrix::from_fn(p, m, |_, _| rng.standard_normal() * sd);
+        this.offset =
             Vector::from_iter((0..m).map(|_| rng.uniform_range(0.0, 2.0 * std::f64::consts::PI)));
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -1118,7 +1129,7 @@ impl Transform for RbfSampler {
 /// identification — a 20×2 table with 4 Fourier features is identified.
 /// Negative entries are a [`IssueCode::NonPositiveSeries`] warning.
 #[derive(Clone, Debug)]
-pub struct AdditiveChi2Sampler {
+pub(crate) struct AdditiveChi2Sampler {
     /// Frequencies per input column.
     pub n_components: usize,
     /// Spacing of `ω_k = (k+1) · sample_interval`.
@@ -1138,7 +1149,7 @@ impl Default for AdditiveChi2Sampler {
 
 impl AdditiveChi2Sampler {
     /// Sampler with `n_components` frequencies per column.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(1),
             ..Self::default()
@@ -1148,20 +1159,21 @@ impl AdditiveChi2Sampler {
 
 impl FitUnsupervised for AdditiveChi2Sampler {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        if self.sample_interval <= 0.0 || !self.sample_interval.is_finite() {
+        if this.sample_interval <= 0.0 || !this.sample_interval.is_finite() {
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
                     .severity(Severity::Warning)
                     .message(format!(
                         "AdditiveChi2Sampler interval={} is not positive; using 1",
-                        self.sample_interval
+                        this.sample_interval
                     ))
                     .build(),
             );
-            self.sample_interval = 1.0;
+            this.sample_interval = 1.0;
         }
         let mut neg = false;
         for i in 0..x.nrows() {
@@ -1179,8 +1191,8 @@ impl FitUnsupervised for AdditiveChi2Sampler {
                     .build(),
             );
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -1223,7 +1235,7 @@ impl Transform for AdditiveChi2Sampler {
 /// `x + c ≤ 0` are a [`IssueCode::NonPositiveSeries`] warning and are clipped.
 /// Do not pass the output dimension to identification.
 #[derive(Clone, Debug)]
-pub struct SkewedChi2Sampler {
+pub(crate) struct SkewedChi2Sampler {
     /// Frequencies.
     pub n_components: usize,
     /// Offset `c > 0`.
@@ -1250,7 +1262,7 @@ impl Default for SkewedChi2Sampler {
 
 impl SkewedChi2Sampler {
     /// Sampler with `n_components` frequencies.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(1),
             ..Self::default()
@@ -1260,25 +1272,26 @@ impl SkewedChi2Sampler {
 
 impl FitUnsupervised for SkewedChi2Sampler {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        if self.skewedness <= 0.0 || !self.skewedness.is_finite() {
+        if this.skewedness <= 0.0 || !this.skewedness.is_finite() {
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
                     .severity(Severity::Warning)
                     .message(format!(
                         "SkewedChi2Sampler c={} is not positive; using 1",
-                        self.skewedness
+                        this.skewedness
                     ))
                     .build(),
             );
-            self.skewedness = 1.0;
+            this.skewedness = 1.0;
         }
         let mut bad = false;
         for i in 0..x.nrows() {
             for j in 0..x.ncols() {
-                if x.get(i, j) + self.skewedness <= 0.0 {
+                if x.get(i, j) + this.skewedness <= 0.0 {
                     bad = true;
                 }
             }
@@ -1291,13 +1304,13 @@ impl FitUnsupervised for SkewedChi2Sampler {
                     .build(),
             );
         }
-        let m = self.n_components.max(1);
-        let mut rng = Rng::new(self.seed);
-        self.weights = Matrix::from_fn(x.ncols(), m, |_, _| rng.standard_normal());
-        self.offset =
+        let m = this.n_components.max(1);
+        let mut rng = Rng::new(this.seed);
+        this.weights = Matrix::from_fn(x.ncols(), m, |_, _| rng.standard_normal());
+        this.offset =
             Vector::from_iter((0..m).map(|_| rng.uniform_range(0.0, 2.0 * std::f64::consts::PI)));
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -1328,7 +1341,7 @@ impl Transform for SkewedChi2Sampler {
 /// Degree-2 features are hashed into `n_components` bins. Do not identify on
 /// the sketch width.
 #[derive(Clone, Debug)]
-pub struct PolynomialCountSketch {
+pub(crate) struct PolynomialCountSketch {
     /// Sketch width.
     pub n_components: usize,
     /// Polynomial degree (`2` = pairwise).
@@ -1355,7 +1368,7 @@ impl Default for PolynomialCountSketch {
 
 impl PolynomialCountSketch {
     /// Sketch of width `n_components`.
-    pub fn new(n_components: usize) -> Self {
+    pub(crate) fn new(n_components: usize) -> Self {
         Self {
             n_components: n_components.max(2),
             ..Self::default()
@@ -1365,18 +1378,19 @@ impl PolynomialCountSketch {
 
 impl FitUnsupervised for PolynomialCountSketch {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let p = x.ncols();
-        let m = self.n_components.max(2);
-        let mut rng = Rng::new(self.seed);
-        self.hash_idx = (0..p).map(|_| rng.below(m)).collect();
-        self.hash_sign = (0..p)
+        let m = this.n_components.max(2);
+        let mut rng = Rng::new(this.seed);
+        this.hash_idx = (0..p).map(|_| rng.below(m)).collect();
+        this.hash_sign = (0..p)
             .map(|_| if rng.uniform() < 0.5 { -1.0 } else { 1.0 })
             .collect();
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -1416,7 +1430,7 @@ impl Transform for PolynomialCountSketch {
 /// Column indices are hashed into `n_features` bins. Output width is not
 /// identification `p`.
 #[derive(Clone, Debug)]
-pub struct FeatureHasher {
+pub(crate) struct FeatureHasher {
     /// Hash-bin count.
     pub n_features: usize,
 }
@@ -1429,7 +1443,7 @@ impl Default for FeatureHasher {
 
 impl FeatureHasher {
     /// Hasher with `n_features` bins.
-    pub fn new(n_features: usize) -> Self {
+    pub(crate) fn new(n_features: usize) -> Self {
         Self {
             n_features: n_features.max(1),
         }
@@ -1460,7 +1474,7 @@ impl Transform for FeatureHasher {
 
 /// Nyström approximation to an RBF kernel map.
 #[derive(Clone, Debug)]
-pub struct Nystroem {
+pub(crate) struct Nystroem {
     /// Number of landmark rows.
     pub n_components: usize,
     /// RBF `γ`.
@@ -1487,7 +1501,7 @@ impl Default for Nystroem {
 
 impl Nystroem {
     /// Nyström map with `n_components` landmarks.
-    pub fn new(n_components: usize, gamma: f64) -> Self {
+    pub(crate) fn new(n_components: usize, gamma: f64) -> Self {
         Self {
             n_components: n_components.max(1),
             gamma,
@@ -1498,17 +1512,18 @@ impl Nystroem {
 
 impl FitUnsupervised for Nystroem {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        let m = self.n_components.min(x.nrows()).max(1);
-        let mut rng = Rng::new(self.seed);
+        let m = this.n_components.min(x.nrows()).max(1);
+        let mut rng = Rng::new(this.seed);
         let idx = rng.sample_indices(x.nrows(), m);
-        self.landmarks = Matrix::from_fn(m, x.ncols(), |r, c| x.get(idx[r], c));
+        this.landmarks = Matrix::from_fn(m, x.ncols(), |r, c| x.get(idx[r], c));
         let mut k = Mat::<f64>::zeros(m, m);
         for i in 0..m {
             for j in 0..=i {
-                let kij = rbf_entry(&self.landmarks, i, &self.landmarks, j, self.gamma);
+                let kij = rbf_entry(&this.landmarks, i, &this.landmarks, j, this.gamma);
                 k[(i, j)] = kij;
                 k[(j, i)] = kij;
             }
@@ -1520,9 +1535,9 @@ impl FitUnsupervised for Nystroem {
                     .message("Nyström landmark kernel eigendecomposition failed")
                     .build(),
             );
-            self.norm = Mat::<f64>::zeros(m, m);
-            self.fitted = true;
-            return ctx.finish(self.clone());
+            this.norm = Mat::<f64>::zeros(m, m);
+            this.fitted = true;
+            return ctx.finish(this.clone());
         };
         let mut kept = 0usize;
         for &λ in &vals {
@@ -1545,7 +1560,7 @@ impl FitUnsupervised for Nystroem {
         }
         // W^{+}½ ≈ U diag(λ⁺½) — columns of `norm` are the embedding directions.
         let r = vals.len().min(u.ncols());
-        self.norm = Mat::<f64>::zeros(m, r);
+        this.norm = Mat::<f64>::zeros(m, r);
         for c in 0..r {
             let s = if vals[c] > ctx.policy.rank_tol_relative {
                 1.0 / vals[c].sqrt()
@@ -1553,11 +1568,11 @@ impl FitUnsupervised for Nystroem {
                 0.0
             };
             for i in 0..m {
-                self.norm[(i, c)] = u[(i, c)] * s;
+                this.norm[(i, c)] = u[(i, c)] * s;
             }
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -1584,7 +1599,7 @@ impl Transform for Nystroem {
 
 /// Histogram mutual-information classifier feature scorer / selector.
 #[derive(Clone, Debug)]
-pub struct MutualInfoClassif {
+pub(crate) struct MutualInfoClassif {
     /// Histogram bins per feature.
     pub n_bins: usize,
     /// Keep the top `k` features (all if `k` exceeds `p`).
@@ -1608,7 +1623,7 @@ impl Default for MutualInfoClassif {
 
 impl MutualInfoClassif {
     /// Selector with `n_bins` and top-`k`.
-    pub fn new(n_bins: usize, k: usize) -> Self {
+    pub(crate) fn new(n_bins: usize, k: usize) -> Self {
         Self {
             n_bins: n_bins.max(2),
             k: k.max(1),
@@ -1617,19 +1632,20 @@ impl MutualInfoClassif {
     }
 
     /// Estimated I(X_j; Y) in nats.
-    pub fn scores(&self) -> &Vector {
+    pub(crate) fn scores(&self) -> &Vector {
         &self.scores
     }
 
     /// Mask of kept columns.
-    pub fn support(&self) -> &[bool] {
+    pub(crate) fn support(&self) -> &[bool] {
         &self.support
     }
 }
 
 impl Fit for MutualInfoClassif {
     type Fitted = Self;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         ctx.push(
@@ -1641,23 +1657,23 @@ impl Fit for MutualInfoClassif {
                 .build(),
         );
         let (n, p) = x.shape();
-        self.scores = Vector::zeros(p);
+        this.scores = Vector::zeros(p);
         for j in 0..p {
             let col: Vec<f64> = (0..n).map(|i| x.get(i, j)).collect();
-            self.scores[j] = histogram_mi(&col, y.as_slice(), self.n_bins);
+            this.scores[j] = histogram_mi(&col, y.as_slice(), this.n_bins);
         }
         let mut order: Vec<usize> = (0..p).collect();
         order.sort_by(|a, b| {
-            self.scores[*b]
-                .partial_cmp(&self.scores[*a])
+            this.scores[*b]
+                .partial_cmp(&this.scores[*a])
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        self.support = vec![false; p];
-        for &j in order.iter().take(self.k.min(p)) {
-            self.support[j] = true;
+        this.support = vec![false; p];
+        for &j in order.iter().take(this.k.min(p)) {
+            this.support[j] = true;
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -1673,7 +1689,7 @@ impl Transform for MutualInfoClassif {
 }
 
 /// Build a design whose column `j` is `y[t - lags[j]]` (leading rows are NaN).
-pub fn lag_features(y: &Vector, lags: &[usize]) -> Matrix {
+pub(crate) fn lag_features(y: &Vector, lags: &[usize]) -> Matrix {
     let n = y.len();
     let p = lags.len();
     Matrix::from_fn(n, p, |i, j| {
@@ -1687,7 +1703,7 @@ pub fn lag_features(y: &Vector, lags: &[usize]) -> Matrix {
 }
 
 /// Trailing rolling mean of window `window` (NaN until the window is full).
-pub fn rolling_mean(y: &Vector, window: usize) -> Vector {
+pub(crate) fn rolling_mean(y: &Vector, window: usize) -> Vector {
     let w = window.max(1);
     let mut out = Vector::zeros(y.len());
     let mut run = 0.0;
@@ -1840,7 +1856,7 @@ fn histogram_mi(x: &[f64], y: &[f64], n_bins: usize) -> f64 {
 
 /// Supervised feature scores plus p-values.
 #[derive(Clone, Debug)]
-pub struct FeatureScores {
+pub(crate) struct FeatureScores {
     /// Test statistic per column.
     pub scores: Vector,
     /// Upper-tail p-value per column.
@@ -1848,7 +1864,11 @@ pub struct FeatureScores {
 }
 
 /// One-way ANOVA F of each column against a class label (`f_classif`).
-pub fn f_classif(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FeatureScores>> {
+pub(crate) fn f_classif(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<FeatureScores>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
     let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -1913,7 +1933,11 @@ pub fn f_classif(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<
 }
 
 /// F-regression: \(F = r^2/(1-r^2)\,(n-2)\) of each column against `y`.
-pub fn f_regression(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FeatureScores>> {
+pub(crate) fn f_regression(
+    x: &Matrix,
+    y: &Vector,
+    session: &Session,
+) -> Result<Qualified<FeatureScores>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
     ctx.push(
@@ -1946,7 +1970,7 @@ pub fn f_regression(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualifi
 ///
 /// Kraskov I^(2) with Chebyshev neighbours. The scores use the full `y`
 /// ([`IssueCode::TargetLeakageSuspected`]).
-pub fn mutual_info_regression(
+pub(crate) fn mutual_info_regression(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -2023,7 +2047,7 @@ pub fn mutual_info_regression(
 /// For each row the k-th Chebyshev neighbour is taken **inside its class**;
 /// `m_i` counts every sample (any class) inside that radius. Scores use the
 /// full `y` ([`IssueCode::TargetLeakageSuspected`]).
-pub fn mutual_info_classif(
+pub(crate) fn mutual_info_classif(
     x: &Matrix,
     y: &Vector,
     session: &Session,
@@ -2100,7 +2124,7 @@ pub fn mutual_info_classif(
 }
 
 /// χ² scores of non-negative columns against a class label.
-pub fn chi2(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FeatureScores>> {
+pub(crate) fn chi2(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FeatureScores>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
     let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
@@ -2173,7 +2197,7 @@ pub fn chi2(x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Featu
 /// Agglomerative clustering on **columns**, then average members (sklearn
 /// `FeatureAgglomeration`).
 #[derive(Clone, Debug)]
-pub struct FeatureAgglomeration {
+pub(crate) struct FeatureAgglomeration {
     /// Number of output features (clusters of columns).
     pub n_clusters: usize,
     /// Linkage on column Euclidean distances.
@@ -2195,7 +2219,7 @@ impl Default for FeatureAgglomeration {
 
 impl FeatureAgglomeration {
     /// Keep `n_clusters` agglomerated features.
-    pub fn new(n_clusters: usize) -> Self {
+    pub(crate) fn new(n_clusters: usize) -> Self {
         Self {
             n_clusters: n_clusters.max(1),
             ..Self::default()
@@ -2203,18 +2227,19 @@ impl FeatureAgglomeration {
     }
 
     /// Cluster id per original column.
-    pub fn labels(&self) -> &Vector {
+    pub(crate) fn labels(&self) -> &Vector {
         &self.labels
     }
 }
 
 impl FitUnsupervised for FeatureAgglomeration {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let p = x.ncols();
-        let mut want = self.n_clusters.max(1);
+        let mut want = this.n_clusters.max(1);
         if want > p && p > 0 {
             ctx.push(
                 Issue::builder(IssueCode::Overparameterized)
@@ -2224,9 +2249,9 @@ impl FitUnsupervised for FeatureAgglomeration {
             want = p;
         }
         if p == 0 {
-            self.labels = Vector::zeros(0);
-            self.fitted = true;
-            return ctx.finish(self.clone());
+            this.labels = Vector::zeros(0);
+            this.fitted = true;
+            return ctx.finish(this.clone());
         }
         let dist = Matrix::from_fn(p, p, |i, j| {
             if i == j {
@@ -2247,7 +2272,7 @@ impl FitUnsupervised for FeatureAgglomeration {
             let mut best = f64::INFINITY;
             for i in 0..clusters.len() {
                 for j in (i + 1)..clusters.len() {
-                    let d = feature_link(&clusters[i], &clusters[j], &dist, self.linkage);
+                    let d = feature_link(&clusters[i], &clusters[j], &dist, this.linkage);
                     if d < best {
                         best = d;
                         bi = i;
@@ -2272,9 +2297,9 @@ impl FitUnsupervised for FeatureAgglomeration {
                 labels[j] = c as f64;
             }
         }
-        self.labels = labels;
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.labels = labels;
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -2378,7 +2403,7 @@ fn feature_link(a: &[usize], b: &[usize], dist: &Matrix, linkage: Linkage) -> f6
 /// Keep features whose ridge |coef| is at least `threshold` × max |coef|
 /// (sklearn `SelectFromModel` with a linear base).
 #[derive(Clone, Debug)]
-pub struct SelectFromModel {
+pub(crate) struct SelectFromModel {
     /// Fraction of the largest absolute coefficient.
     pub threshold: f64,
     /// Ridge penalty used to score features.
@@ -2402,7 +2427,7 @@ impl Default for SelectFromModel {
 
 impl SelectFromModel {
     /// Selector with the given relative threshold.
-    pub fn new(threshold: f64) -> Self {
+    pub(crate) fn new(threshold: f64) -> Self {
         Self {
             threshold,
             ..Self::default()
@@ -2410,45 +2435,46 @@ impl SelectFromModel {
     }
 
     /// Boolean mask of kept columns.
-    pub fn support(&self) -> &[bool] {
+    pub(crate) fn support(&self) -> &[bool] {
         &self.support
     }
 
     /// Ridge coefficients used for ranking.
-    pub fn coef(&self) -> &Vector {
+    pub(crate) fn coef(&self) -> &Vector {
         &self.coef
     }
 }
 
 impl Fit for SelectFromModel {
     type Fitted = Self;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let (xc, _) = x.centered();
         let ymean = y.mean();
         let yc = Vector::from_iter(y.as_slice().iter().map(|v| v - ymean));
-        let coef = ridge_solve(&mut ctx.report, &xc, &yc, self.alpha.max(0.0), &ctx.policy)
+        let coef = ridge_solve(&mut ctx.report, &xc, &yc, this.alpha.max(0.0), &ctx.policy)
             .unwrap_or_else(|| Vector::zeros(x.ncols()));
         let max_abs = coef.max_abs();
-        let cut = self.threshold.max(0.0) * max_abs;
-        self.support = (0..coef.len())
+        let cut = this.threshold.max(0.0) * max_abs;
+        this.support = (0..coef.len())
             .map(|j| coef[j].abs() >= cut && max_abs > 0.0)
             .collect();
-        if !self.support.iter().any(|s| *s) && x.ncols() > 0 {
+        if !this.support.iter().any(|s| *s) && x.ncols() > 0 {
             ctx.push(
                 Issue::builder(IssueCode::InterceptOnlyCollapse)
                     .message("SelectFromModel kept 0 columns")
                     .build(),
             );
-            if !self.support.is_empty() {
+            if !this.support.is_empty() {
                 let mut best = 0usize;
                 for j in 1..coef.len() {
                     if coef[j].abs() > coef[best].abs() {
                         best = j;
                     }
                 }
-                self.support[best] = true;
+                this.support[best] = true;
             }
         }
         ctx.push(
@@ -2456,9 +2482,9 @@ impl Fit for SelectFromModel {
                 .message("SelectFromModel scored features on the full y")
                 .build(),
         );
-        self.coef = coef;
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.coef = coef;
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -2500,7 +2526,7 @@ impl Transform for SelectFromModel {
 /// Features: mean, std, ACF(1), OLS slope on time, zero-crossing rate,
 /// 5-bin histogram mode, outlier fraction \(|z|>2\), mean |Δ|, longest run
 /// above the mean, 3-mean residual stderr, argmax of |ACF|, ACF(2).
-pub fn catch22(y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn catch22(y: &Vector, session: &Session) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(
         &mut ctx.report,

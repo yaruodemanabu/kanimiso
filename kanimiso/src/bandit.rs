@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 
 /// ε-greedy with incremental sample means.
 #[derive(Clone, Debug)]
-pub struct EpsilonGreedy {
+pub(crate) struct EpsilonGreedy {
     /// Explore probability.
     pub epsilon: f64,
     n_arms: usize,
@@ -32,7 +32,7 @@ pub struct EpsilonGreedy {
 
 impl EpsilonGreedy {
     /// `k` arms, explore with probability `epsilon`.
-    pub fn new(n_arms: usize, epsilon: f64) -> Self {
+    pub(crate) fn new(n_arms: usize, epsilon: f64) -> Self {
         let k = n_arms.max(1);
         Self {
             epsilon,
@@ -46,12 +46,15 @@ impl EpsilonGreedy {
     }
 
     /// Current sample means.
-    pub fn values(&self) -> &[f64] {
+    pub(crate) fn values(&self) -> &[f64] {
         &self.values
     }
 
     /// Choose an arm and explain the decision (no reward yet).
-    pub fn pull(&mut self, session: &Session) -> Result<Qualified<(usize, IncrementalExplain)>> {
+    pub(crate) fn pull(
+        &mut self,
+        session: &Session,
+    ) -> Result<Qualified<(usize, IncrementalExplain)>> {
         let mut ctx = FitCtx::with_session(session.child("pull"));
         let arm = self.choose_arm(&mut ctx);
         let expl = self.decision_explain(arm, "pull", "ε-greedy index");
@@ -179,7 +182,7 @@ impl PartialFit for EpsilonGreedy {
 
 /// UCB1 (Auer, Cesa-Bianchi, Fischer).
 #[derive(Clone, Debug)]
-pub struct Ucb1 {
+pub(crate) struct Ucb1 {
     n_arms: usize,
     counts: Vec<u64>,
     values: Vec<f64>,
@@ -189,7 +192,7 @@ pub struct Ucb1 {
 
 impl Ucb1 {
     /// `k` arms.
-    pub fn new(n_arms: usize) -> Self {
+    pub(crate) fn new(n_arms: usize) -> Self {
         let k = n_arms.max(1);
         Self {
             n_arms: k,
@@ -201,12 +204,15 @@ impl Ucb1 {
     }
 
     /// Current sample means.
-    pub fn values(&self) -> &[f64] {
+    pub(crate) fn values(&self) -> &[f64] {
         &self.values
     }
 
     /// Choose the arm with the largest UCB index.
-    pub fn pull(&mut self, session: &Session) -> Result<Qualified<(usize, IncrementalExplain)>> {
+    pub(crate) fn pull(
+        &mut self,
+        session: &Session,
+    ) -> Result<Qualified<(usize, IncrementalExplain)>> {
         let mut ctx = FitCtx::with_session(session.child("pull"));
         let mut arm = 0usize;
         let mut best = f64::NEG_INFINITY;
@@ -311,7 +317,7 @@ impl PartialFit for Ucb1 {
 ///
 /// Arm count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct UcbTuned {
+pub(crate) struct UcbTuned {
     n_arms: usize,
     counts: Vec<u64>,
     values: Vec<f64>,
@@ -322,7 +328,7 @@ pub struct UcbTuned {
 
 impl UcbTuned {
     /// `k` arms.
-    pub fn new(n_arms: usize) -> Self {
+    pub(crate) fn new(n_arms: usize) -> Self {
         let k = n_arms.max(1);
         Self {
             n_arms: k,
@@ -347,7 +353,10 @@ impl UcbTuned {
     }
 
     /// Choose the arm with the largest UCB-Tuned index.
-    pub fn pull(&mut self, session: &Session) -> Result<Qualified<(usize, IncrementalExplain)>> {
+    pub(crate) fn pull(
+        &mut self,
+        session: &Session,
+    ) -> Result<Qualified<(usize, IncrementalExplain)>> {
         let mut ctx = FitCtx::with_session(session.child("pull"));
         let mut arm = 0usize;
         let mut best = f64::NEG_INFINITY;
@@ -447,7 +456,7 @@ impl PartialFit for UcbTuned {
 
 /// Thompson sampling for Bernoulli arms (`Beta(α, β)` posteriors).
 #[derive(Clone, Debug)]
-pub struct ThompsonBernoulli {
+pub(crate) struct ThompsonBernoulli {
     n_arms: usize,
     alpha: Vec<f64>,
     beta: Vec<f64>,
@@ -458,7 +467,7 @@ pub struct ThompsonBernoulli {
 
 impl ThompsonBernoulli {
     /// `k` arms, uniform Beta(1, 1) priors.
-    pub fn new(n_arms: usize) -> Self {
+    pub(crate) fn new(n_arms: usize) -> Self {
         let k = n_arms.max(1);
         Self {
             n_arms: k,
@@ -471,7 +480,7 @@ impl ThompsonBernoulli {
     }
 
     /// Posterior means \(\alpha/(\alpha+\beta)\).
-    pub fn means(&self) -> Vector {
+    pub(crate) fn means(&self) -> Vector {
         Vector::from_iter(
             self.alpha
                 .iter()
@@ -481,7 +490,10 @@ impl ThompsonBernoulli {
     }
 
     /// Draw one Thompson sample per arm and pick the max.
-    pub fn pull(&mut self, session: &Session) -> Result<Qualified<(usize, IncrementalExplain)>> {
+    pub(crate) fn pull(
+        &mut self,
+        session: &Session,
+    ) -> Result<Qualified<(usize, IncrementalExplain)>> {
         let mut ctx = FitCtx::with_session(session.child("pull"));
         let mut samples = vec![0.0; self.n_arms];
         let mut arm = 0usize;
@@ -620,7 +632,7 @@ impl PartialFit for ThompsonBernoulli {
 /// Each row of `x` is a context; `y` is the observed reward. Arm count is not
 /// identification `p`. The context dimension is taken from `x.ncols()`.
 #[derive(Clone, Debug)]
-pub struct LinUcb {
+pub(crate) struct LinUcb {
     n_arms: usize,
     /// Exploration bonus \(\alpha\).
     pub alpha: f64,
@@ -634,7 +646,7 @@ pub struct LinUcb {
 
 impl LinUcb {
     /// `k` arms, unit ridge, \(\alpha = 1\).
-    pub fn new(n_arms: usize) -> Self {
+    pub(crate) fn new(n_arms: usize) -> Self {
         let k = n_arms.max(1);
         Self {
             n_arms: k,
@@ -832,7 +844,7 @@ impl PartialFit for LinUcb {
 ///
 /// Arm count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct LinTs {
+pub(crate) struct LinTs {
     n_arms: usize,
     /// Posterior scale on \(A^{-1}\).
     pub v: f64,
@@ -847,7 +859,7 @@ pub struct LinTs {
 
 impl LinTs {
     /// `k` arms, unit ridge.
-    pub fn new(n_arms: usize) -> Self {
+    pub(crate) fn new(n_arms: usize) -> Self {
         let k = n_arms.max(1);
         Self {
             n_arms: k,
@@ -1051,7 +1063,7 @@ impl PartialFit for LinTs {
 ///
 /// Arm count is not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Exp3 {
+pub(crate) struct Exp3 {
     /// Exploration mixture \(\gamma \in (0,1]\).
     pub gamma: f64,
     n_arms: usize,
@@ -1064,7 +1076,7 @@ pub struct Exp3 {
 
 impl Exp3 {
     /// `k` arms, default \(\gamma=0.1\).
-    pub fn new(n_arms: usize) -> Self {
+    pub(crate) fn new(n_arms: usize) -> Self {
         let k = n_arms.max(1);
         Self {
             gamma: 0.1,
@@ -1109,7 +1121,10 @@ impl Exp3 {
     }
 
     /// Draw an arm from the Exp3 mixture and explain the draw.
-    pub fn pull(&mut self, session: &Session) -> Result<Qualified<(usize, IncrementalExplain)>> {
+    pub(crate) fn pull(
+        &mut self,
+        session: &Session,
+    ) -> Result<Qualified<(usize, IncrementalExplain)>> {
         let mut ctx = FitCtx::with_session(session.child("pull"));
         let arm = self.choose(&mut ctx);
         let p = self.probs();
@@ -1223,7 +1238,7 @@ impl PartialFit for Exp3 {
 /// Column 0 is the played arm; extra columns are expert recommendations.
 /// Arm and expert counts are not identification `p`.
 #[derive(Clone, Debug)]
-pub struct Exp4 {
+pub(crate) struct Exp4 {
     /// Exploration mixture \(\gamma \in (0,1]\).
     pub gamma: f64,
     n_arms: usize,
@@ -1235,7 +1250,7 @@ pub struct Exp4 {
 
 impl Exp4 {
     /// `k` arms, default \(\gamma=0.1\).
-    pub fn new(n_arms: usize) -> Self {
+    pub(crate) fn new(n_arms: usize) -> Self {
         Self {
             gamma: 0.1,
             n_arms: n_arms.max(1),
@@ -1408,7 +1423,7 @@ impl PartialFit for Exp4 {
 /// approximation to the posterior quantile. Arm count is not identification
 /// `p`.
 #[derive(Clone, Debug)]
-pub struct BayesianUcb {
+pub(crate) struct BayesianUcb {
     n_arms: usize,
     alpha: Vec<f64>,
     beta: Vec<f64>,
@@ -1418,7 +1433,7 @@ pub struct BayesianUcb {
 
 impl BayesianUcb {
     /// `k` arms, uniform Beta(1, 1) priors.
-    pub fn new(n_arms: usize) -> Self {
+    pub(crate) fn new(n_arms: usize) -> Self {
         let k = n_arms.max(1);
         Self {
             n_arms: k,
@@ -1441,7 +1456,10 @@ impl BayesianUcb {
     }
 
     /// Choose the arm with the largest Bayesian UCB index.
-    pub fn pull(&mut self, session: &Session) -> Result<Qualified<(usize, IncrementalExplain)>> {
+    pub(crate) fn pull(
+        &mut self,
+        session: &Session,
+    ) -> Result<Qualified<(usize, IncrementalExplain)>> {
         let mut ctx = FitCtx::with_session(session.child("pull"));
         let mut arm = 0usize;
         let mut best = f64::NEG_INFINITY;

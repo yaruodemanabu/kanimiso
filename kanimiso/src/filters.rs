@@ -24,7 +24,7 @@ fn inspect_univariate(ctx: &mut FitCtx, y: &Vector) {
 ///
 /// `low` / `high` are periods in samples (e.g. 6 and 32 for quarterly
 /// business-cycle bounds). `k` is the lead/lag truncation.
-pub fn bk_filter(
+pub(crate) fn bk_filter(
     y: &Vector,
     low: f64,
     high: f64,
@@ -108,7 +108,12 @@ pub fn bk_filter(
 ///
 /// A linear drift is removed by OLS on \((1,t)\) before the filter. The
 /// remaining weights are shifted to sum to zero so a constant is annihilated.
-pub fn cf_filter(y: &Vector, low: f64, high: f64, session: &Session) -> Result<Qualified<Vector>> {
+pub(crate) fn cf_filter(
+    y: &Vector,
+    low: f64,
+    high: f64,
+    session: &Session,
+) -> Result<Qualified<Vector>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_univariate(&mut ctx, y);
     if !(low.is_finite() && high.is_finite()) || low <= 2.0 || high <= low {
@@ -185,7 +190,7 @@ pub fn cf_filter(y: &Vector, low: f64, high: f64, session: &Session) -> Result<Q
 
 /// Local linear trend (unobserved-components level + slope).
 #[derive(Clone, Debug)]
-pub struct LocalLinearTrend {
+pub(crate) struct LocalLinearTrend {
     /// Observation variance \(\sigma_\varepsilon^2\).
     pub obs_var: f64,
     /// Level innovation \(\sigma_\eta^2\).
@@ -206,14 +211,14 @@ impl Default for LocalLinearTrend {
 
 impl LocalLinearTrend {
     /// Default local linear trend.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Kalman-smoothed local linear trend.
 #[derive(Clone, Debug)]
-pub struct FittedLocalLinearTrend {
+pub(crate) struct FittedLocalLinearTrend {
     /// Filtered/smoothed level.
     pub level: Vector,
     /// Filtered/smoothed slope.
@@ -225,7 +230,7 @@ pub struct FittedLocalLinearTrend {
 impl FitSeries for LocalLinearTrend {
     type Fitted = FittedLocalLinearTrend;
     fn fit_series(
-        &mut self,
+        &self,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedLocalLinearTrend>> {
@@ -344,7 +349,7 @@ impl FitSeries for LocalLinearTrend {
 /// FIR convolution (statsmodels `tsa.filters.filtertools.convolution_filter`).
 ///
 /// Kernel length is not identification `p`.
-pub fn convolution_filter(
+pub(crate) fn convolution_filter(
     y: &Vector,
     kernel: &Vector,
     session: &Session,
@@ -382,7 +387,7 @@ pub fn convolution_filter(
 /// IIR recursion \(y_t = x_t + \sum_j a_j y_{t-j}\) (statsmodels `recursive_filter`).
 ///
 /// AR coefficient count is not identification `p`.
-pub fn recursive_filter(
+pub(crate) fn recursive_filter(
     x: &Vector,
     ar: &Vector,
     session: &Session,
@@ -414,7 +419,7 @@ pub fn recursive_filter(
 ///
 /// Each column of `x` is convolved with `kernel` and the channels are summed.
 /// Filter length is not identification `p`.
-pub fn miso_lfilter(
+pub(crate) fn miso_lfilter(
     x: &Matrix,
     kernel: &Vector,
     session: &Session,
@@ -455,7 +460,7 @@ pub fn miso_lfilter(
 ///
 /// \(a_0 y_t = \sum_i b_i x_{t-i} - \sum_{j\ge 1} a_j y_{t-j}\). Filter length
 /// is not identification `p`.
-pub fn lfilter(
+pub(crate) fn lfilter(
     b: &Vector,
     a: &Vector,
     x: &Vector,
@@ -548,13 +553,17 @@ mod tests {
             .expect("rec")
             .value;
         assert!(rec.as_slice().iter().all(|v| v.is_finite()));
-        let x2 = Matrix::from_fn(48, 2, |i, j| {
-            if j == 0 {
-                i as f64
-            } else {
-                (i as f64).sin()
-            }
-        });
+        let x2 = Matrix::from_fn(
+            48,
+            2,
+            |i, j| {
+                if j == 0 {
+                    i as f64
+                } else {
+                    (i as f64).sin()
+                }
+            },
+        );
         let miso = miso_lfilter(&x2, &ker, &Session::new("miso", "fit"))
             .expect("miso")
             .value;

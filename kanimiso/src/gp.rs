@@ -16,7 +16,7 @@ use signlred::{Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified
 
 /// Squared-exponential GP regressor.
 #[derive(Clone, Debug)]
-pub struct GaussianProcessRegressor {
+pub(crate) struct GaussianProcessRegressor {
     /// Length-scale \(\ell\).
     pub length_scale: f64,
     /// Signal variance \(\sigma_f^2\).
@@ -37,14 +37,14 @@ impl Default for GaussianProcessRegressor {
 
 impl GaussianProcessRegressor {
     /// Default RBF GP.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted GP regressor (representer coefficients).
 #[derive(Clone, Debug)]
-pub struct FittedGpr {
+pub(crate) struct FittedGpr {
     x_train: Matrix,
     alpha: Vector,
     /// Kernel hyperparameters used at fit.
@@ -57,7 +57,7 @@ pub struct FittedGpr {
 
 /// Binary Laplace GP classifier.
 #[derive(Clone, Debug)]
-pub struct GaussianProcessClassifier {
+pub(crate) struct GaussianProcessClassifier {
     /// Length-scale \(\ell\).
     pub length_scale: f64,
     /// Signal variance.
@@ -78,14 +78,14 @@ impl Default for GaussianProcessClassifier {
 
 impl GaussianProcessClassifier {
     /// Default Laplace GPC.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted Laplace GPC.
 #[derive(Clone, Debug)]
-pub struct FittedGpc {
+pub(crate) struct FittedGpc {
     x_train: Matrix,
     latent: Vector,
     /// Sorted classes.
@@ -158,7 +158,7 @@ fn jittered_solve(
 
 impl Fit for GaussianProcessRegressor {
     type Fitted = FittedGpr;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGpr>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGpr>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         if ctx.report.contains(IssueCode::ConstantTarget)
@@ -253,7 +253,7 @@ fn sigmoid(z: f64) -> f64 {
 
 impl Fit for GaussianProcessClassifier {
     type Fitted = FittedGpc;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGpc>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGpc>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);

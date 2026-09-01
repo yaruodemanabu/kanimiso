@@ -225,7 +225,7 @@ impl MlpCore {
 
 /// One-hidden-layer MLP regressor.
 #[derive(Clone, Debug)]
-pub struct MLPRegressor {
+pub(crate) struct MLPRegressor {
     /// Hidden width.
     pub hidden: usize,
     /// SGD step size.
@@ -251,14 +251,14 @@ impl Default for MLPRegressor {
 
 impl MLPRegressor {
     /// Default MLP regressor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted MLP regressor (owns the trained weights).
 #[derive(Clone, Debug)]
-pub struct FittedMlpRegressor {
+pub(crate) struct FittedMlpRegressor {
     core: MlpCore,
 }
 
@@ -296,19 +296,20 @@ fn target_reg(y: &Vector) -> Matrix {
 impl Fit for MLPRegressor {
     type Fitted = FittedMlpRegressor;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedMlpRegressor>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        let mut core = MlpCore::new(x.ncols(), self.hidden, 1, self.seed);
+        let mut core = MlpCore::new(x.ncols(), this.hidden, 1, this.seed);
         let t = target_reg(y);
         let mut last = f64::INFINITY;
         let mut converged = false;
-        for it in 0..self.max_iter.max(1) {
-            let (loss, g) = core.sgd_step(&mut ctx, x, &t, self.learning_rate, false);
+        for it in 0..this.max_iter.max(1) {
+            let (loss, g) = core.sgd_step(&mut ctx, x, &t, this.learning_rate, false);
             ctx.session.step(it as u64, loss, Some(g));
             if !loss.is_finite() {
                 break;
@@ -328,7 +329,7 @@ impl Fit for MLPRegressor {
             );
         }
         core.n_seen = x.nrows() as u64;
-        self.core = Some(core.clone());
+        this.core = Some(core.clone());
         ctx.finish(FittedMlpRegressor { core })
     }
 }
@@ -403,7 +404,7 @@ fn dummy_explain(update: u64, batch: usize, n_seen: u64) -> IncrementalExplain {
 
 /// One-hidden-layer MLP classifier (binary logistic or softmax).
 #[derive(Clone, Debug)]
-pub struct MLPClassifier {
+pub(crate) struct MLPClassifier {
     /// Hidden width.
     pub hidden: usize,
     /// SGD step size.
@@ -431,14 +432,14 @@ impl Default for MLPClassifier {
 
 impl MLPClassifier {
     /// Default MLP classifier.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 /// Fitted MLP classifier.
 #[derive(Clone, Debug)]
-pub struct FittedMlpClassifier {
+pub(crate) struct FittedMlpClassifier {
     core: MlpCore,
     /// Training classes.
     pub classes: Vec<i64>,
@@ -504,22 +505,23 @@ impl Predict for FittedMlpClassifier {
 impl Fit for MLPClassifier {
     type Fitted = FittedMlpClassifier;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedMlpClassifier>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
         let classes: Vec<i64> = counts.iter().map(|(c, _)| *c).collect();
         let n_out = if classes.len() <= 2 { 1 } else { classes.len() };
-        let mut core = MlpCore::new(x.ncols(), self.hidden, n_out.max(1), self.seed);
+        let mut core = MlpCore::new(x.ncols(), this.hidden, n_out.max(1), this.seed);
         let t = class_target(y, &classes);
         let mut last = f64::INFINITY;
         let mut converged = false;
-        for it in 0..self.max_iter.max(1) {
-            let (loss, g) = core.sgd_step(&mut ctx, x, &t, self.learning_rate, true);
+        for it in 0..this.max_iter.max(1) {
+            let (loss, g) = core.sgd_step(&mut ctx, x, &t, this.learning_rate, true);
             ctx.session.step(it as u64, loss, Some(g));
             if !loss.is_finite() {
                 break;
@@ -540,8 +542,8 @@ impl Fit for MLPClassifier {
             );
         }
         core.n_seen = x.nrows() as u64;
-        self.core = Some(core.clone());
-        self.classes = classes.clone();
+        this.core = Some(core.clone());
+        this.classes = classes.clone();
         ctx.finish(FittedMlpClassifier { core, classes })
     }
 }
@@ -606,7 +608,7 @@ impl PartialFit for MLPClassifier {
 
 /// Bernoulli restricted Boltzmann machine trained with CD-1.
 #[derive(Clone, Debug)]
-pub struct BernoulliRBM {
+pub(crate) struct BernoulliRBM {
     /// Hidden units.
     pub n_hidden: usize,
     /// Learning rate.
@@ -630,7 +632,7 @@ impl Default for BernoulliRBM {
 
 impl BernoulliRBM {
     /// RBM with `h` hidden units.
-    pub fn new(n_hidden: usize) -> Self {
+    pub(crate) fn new(n_hidden: usize) -> Self {
         Self {
             n_hidden,
             ..Self::default()
@@ -640,7 +642,7 @@ impl BernoulliRBM {
 
 /// Fitted Bernoulli RBM.
 #[derive(Clone, Debug)]
-pub struct FittedRbm {
+pub(crate) struct FittedRbm {
     /// Visible–hidden weights (`p × h`).
     pub w: Matrix,
     /// Visible biases.
@@ -690,7 +692,7 @@ fn row_as_vec(x: &Matrix, i: usize) -> Vector {
 
 impl FitUnsupervised for BernoulliRBM {
     type Fitted = FittedRbm;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedRbm>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<FittedRbm>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let p = x.ncols();
@@ -771,7 +773,7 @@ impl FitUnsupervised for BernoulliRBM {
 
 impl FittedRbm {
     /// Hidden activations for the rows of `x`.
-    pub fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let h = Matrix::from_fn(x.nrows(), self.hid_bias.len(), |i, k| {

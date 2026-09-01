@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 
 /// Column-wise mean / std scaler (sklearn `StandardScaler`).
 #[derive(Clone, Debug)]
-pub struct StandardScaler {
+pub(crate) struct StandardScaler {
     /// Subtract the column mean.
     pub with_mean: bool,
     /// Divide by the sample standard deviation.
@@ -48,17 +48,17 @@ impl Default for StandardScaler {
 
 impl StandardScaler {
     /// Mean-and-std scaler.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fitted column means (NaN where a column had no finite values).
-    pub fn mean(&self) -> &Vector {
+    pub(crate) fn mean(&self) -> &Vector {
         &self.mean
     }
 
     /// Fitted scales (1 when a column is constant so the transform stays finite).
-    pub fn scale(&self) -> &Vector {
+    pub(crate) fn scale(&self) -> &Vector {
         &self.scale
     }
 
@@ -105,17 +105,17 @@ impl StandardScaler {
 
 impl FitUnsupervised for StandardScaler {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_columns_for_preprocess(&mut ctx, x);
-        *self = Self {
+        let mut this = Self {
             with_mean: self.with_mean,
             with_std: self.with_std,
             ..Self::default()
         };
-        self.absorb_matrix(x);
+        this.absorb_matrix(x);
         warn_constant_fitted(&mut ctx, &col_stats(x));
-        ctx.finish(self.clone())
+        ctx.finish(this)
     }
 }
 
@@ -221,7 +221,7 @@ impl Transform for StandardScaler {
 
 /// Map each column onto `[0, 1]` from the fitted min/max.
 #[derive(Clone, Debug)]
-pub struct MinMaxScaler {
+pub(crate) struct MinMaxScaler {
     /// Target range lower bound.
     pub feature_min: f64,
     /// Target range upper bound.
@@ -245,22 +245,23 @@ impl Default for MinMaxScaler {
 
 impl MinMaxScaler {
     /// Unit-interval scaler.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl FitUnsupervised for MinMaxScaler {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_columns_for_preprocess(&mut ctx, x);
         let stats = col_stats(x);
-        self.data_min = Vector::from_iter(stats.iter().map(|s| s.min));
-        self.data_max = Vector::from_iter(stats.iter().map(|s| s.max));
-        self.fitted = true;
+        this.data_min = Vector::from_iter(stats.iter().map(|s| s.min));
+        this.data_max = Vector::from_iter(stats.iter().map(|s| s.max));
+        this.fitted = true;
         warn_constant_fitted(&mut ctx, &stats);
-        ctx.finish(self.clone())
+        ctx.finish(this.clone())
     }
 }
 
@@ -291,7 +292,7 @@ impl Transform for MinMaxScaler {
 
 /// Median / IQR scaler (sklearn `RobustScaler`).
 #[derive(Clone, Debug)]
-pub struct RobustScaler {
+pub(crate) struct RobustScaler {
     /// Subtract the column median.
     pub with_centering: bool,
     /// Divide by the interquartile range.
@@ -315,25 +316,26 @@ impl Default for RobustScaler {
 
 impl RobustScaler {
     /// Median / IQR scaler.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl FitUnsupervised for RobustScaler {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_columns_for_preprocess(&mut ctx, x);
         let (n, p) = x.shape();
-        self.center = Vector::zeros(p);
-        self.scale = Vector::filled(p, 1.0);
+        this.center = Vector::zeros(p);
+        this.scale = Vector::filled(p, 1.0);
         for j in 0..p {
             let col: Vec<f64> = (0..n).map(|i| x.get(i, j)).collect();
             let med = quantile(&col, 0.5);
             let iqr = quantile(&col, 0.75) - quantile(&col, 0.25);
-            self.center[j] = med;
-            self.scale[j] = if iqr.is_finite() && iqr > 0.0 {
+            this.center[j] = med;
+            this.scale[j] = if iqr.is_finite() && iqr > 0.0 {
                 iqr
             } else {
                 1.0
@@ -345,8 +347,8 @@ impl FitUnsupervised for RobustScaler {
                 }
             }
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -378,7 +380,7 @@ impl Transform for RobustScaler {
 
 /// Divide each column by its maximum absolute value.
 #[derive(Clone, Debug)]
-pub struct MaxAbsScaler {
+pub(crate) struct MaxAbsScaler {
     scale: Vector,
     fitted: bool,
 }
@@ -394,18 +396,19 @@ impl Default for MaxAbsScaler {
 
 impl MaxAbsScaler {
     /// Max-abs scaler.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl FitUnsupervised for MaxAbsScaler {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_columns_for_preprocess(&mut ctx, x);
         let stats = col_stats(x);
-        self.scale = Vector::from_iter(stats.iter().map(|s| {
+        this.scale = Vector::from_iter(stats.iter().map(|s| {
             let m = s.min.abs().max(s.max.abs());
             if m > 0.0 && m.is_finite() {
                 m
@@ -413,9 +416,9 @@ impl FitUnsupervised for MaxAbsScaler {
                 1.0
             }
         }));
-        self.fitted = true;
+        this.fitted = true;
         warn_constant_fitted(&mut ctx, &stats);
-        ctx.finish(self.clone())
+        ctx.finish(this.clone())
     }
 }
 
@@ -441,7 +444,7 @@ impl Transform for MaxAbsScaler {
 
 /// Row-wise vector normalization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NormKind {
+pub(crate) enum NormKind {
     /// ℓ₁.
     L1,
     /// ℓ₂.
@@ -452,7 +455,7 @@ pub enum NormKind {
 
 /// sklearn `Normalizer`.
 #[derive(Clone, Debug)]
-pub struct Normalizer {
+pub(crate) struct Normalizer {
     /// Row norm.
     pub norm: NormKind,
 }
@@ -465,14 +468,14 @@ impl Default for Normalizer {
 
 impl Normalizer {
     /// ℓ₂ row normalizer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl FitUnsupervised for Normalizer {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_columns_for_preprocess(&mut ctx, x);
         ctx.finish(self.clone())
@@ -517,7 +520,7 @@ impl Transform for Normalizer {
 
 /// One-hot dummy expansion.
 #[derive(Clone, Debug)]
-pub struct OneHotEncoder {
+pub(crate) struct OneHotEncoder {
     /// Drop the first level of each feature (needed for a full-rank design with intercept).
     pub drop_first: bool,
     levels: Vec<Vec<f64>>,
@@ -536,20 +539,21 @@ impl Default for OneHotEncoder {
 
 impl OneHotEncoder {
     /// Keep every level (will warn about the dummy trap).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl FitUnsupervised for OneHotEncoder {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_columns_for_preprocess(&mut ctx, x);
-        self.levels = (0..x.ncols())
+        this.levels = (0..x.ncols())
             .map(|j| unique_sorted(&(0..x.nrows()).map(|i| x.get(i, j)).collect::<Vec<_>>()))
             .collect();
-        if !self.drop_first {
+        if !this.drop_first {
             ctx.push(
                 Issue::builder(IssueCode::OneHotFullRankViolation)
                     .message(
@@ -558,8 +562,8 @@ impl FitUnsupervised for OneHotEncoder {
                     .build(),
             );
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -603,7 +607,7 @@ impl Transform for OneHotEncoder {
 
 /// Map each column's observed values onto `0..k`.
 #[derive(Clone, Debug)]
-pub struct OrdinalEncoder {
+pub(crate) struct OrdinalEncoder {
     levels: Vec<Vec<f64>>,
     fitted: bool,
 }
@@ -619,21 +623,22 @@ impl Default for OrdinalEncoder {
 
 impl OrdinalEncoder {
     /// Empty encoder.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl FitUnsupervised for OrdinalEncoder {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_columns_for_preprocess(&mut ctx, x);
-        self.levels = (0..x.ncols())
+        this.levels = (0..x.ncols())
             .map(|j| unique_sorted(&(0..x.nrows()).map(|i| x.get(i, j)).collect::<Vec<_>>()))
             .collect();
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -661,31 +666,32 @@ impl Transform for OrdinalEncoder {
 
 /// Encode a 1-d label vector as `0..k-1`.
 #[derive(Clone, Debug, Default)]
-pub struct LabelEncoder {
+pub(crate) struct LabelEncoder {
     classes: Vec<i64>,
     fitted: bool,
 }
 
 impl LabelEncoder {
     /// Empty encoder.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Sorted class ids.
-    pub fn classes(&self) -> &[i64] {
+    pub(crate) fn classes(&self) -> &[i64] {
         &self.classes
     }
 }
 
 impl FitSeries for LabelEncoder {
     type Fitted = Self;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
-        self.classes = counts.into_iter().map(|(k, _)| k).collect();
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.classes = counts.into_iter().map(|(k, _)| k).collect();
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -710,7 +716,7 @@ impl Transform for LabelEncoder {
 
 /// How [`SimpleImputer`] fills missing entries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ImputeStrategy {
+pub(crate) enum ImputeStrategy {
     /// Column mean of finite values.
     Mean,
     /// Column median of finite values.
@@ -721,7 +727,7 @@ pub enum ImputeStrategy {
 
 /// Univariate imputer.
 #[derive(Clone, Debug)]
-pub struct SimpleImputer {
+pub(crate) struct SimpleImputer {
     /// Fill strategy.
     pub strategy: ImputeStrategy,
     statistics: Vector,
@@ -740,34 +746,35 @@ impl Default for SimpleImputer {
 
 impl SimpleImputer {
     /// Mean imputer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl FitUnsupervised for SimpleImputer {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_columns_for_preprocess(&mut ctx, x);
         let (n, p) = x.shape();
-        self.statistics = Vector::zeros(p);
+        this.statistics = Vector::zeros(p);
         for j in 0..p {
             let col: Vec<f64> = (0..n).map(|i| x.get(i, j)).collect();
             let st = slice_stats(&col);
             if st.count == 0 {
                 ctx.push(imputation_undefined(j));
-                self.statistics[j] = f64::NAN;
+                this.statistics[j] = f64::NAN;
                 continue;
             }
-            self.statistics[j] = match self.strategy {
+            this.statistics[j] = match this.strategy {
                 ImputeStrategy::Mean => st.mean,
                 ImputeStrategy::Median => quantile(&col, 0.5),
                 ImputeStrategy::MostFrequent => mode_finite(&col),
             };
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -793,7 +800,7 @@ impl Transform for SimpleImputer {
 
 /// k-nearest-neighbour imputer (nan-Euclidean distance).
 #[derive(Clone, Debug)]
-pub struct KnnImputer {
+pub(crate) struct KnnImputer {
     /// Neighbours used to fill a missing coordinate.
     pub n_neighbors: usize,
     train: Matrix,
@@ -812,7 +819,7 @@ impl Default for KnnImputer {
 
 impl KnnImputer {
     /// Imputer with `k` neighbours.
-    pub fn new(n_neighbors: usize) -> Self {
+    pub(crate) fn new(n_neighbors: usize) -> Self {
         Self {
             n_neighbors: n_neighbors.max(1),
             ..Self::default()
@@ -822,12 +829,13 @@ impl KnnImputer {
 
 impl FitUnsupervised for KnnImputer {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_columns_for_preprocess(&mut ctx, x);
-        self.train = x.clone();
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.train = x.clone();
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -873,7 +881,7 @@ impl Transform for KnnImputer {
 }
 
 /// sklearn `KNNImputer` spelling of [`KnnImputer`].
-pub type KNNImputer = KnnImputer;
+pub(crate) type KNNImputer = KnnImputer;
 
 /// MICE-style iterative imputation (sklearn `IterativeImputer`).
 ///
@@ -882,7 +890,7 @@ pub type KNNImputer = KnnImputer;
 /// and the missing cells are overwritten. An all-missing column is
 /// [`IssueCode::ImputationUndefined`].
 #[derive(Clone, Debug)]
-pub struct IterativeImputer {
+pub(crate) struct IterativeImputer {
     /// Ridge penalty on each conditional model.
     pub alpha: f64,
     /// Outer cycles over columns.
@@ -904,14 +912,15 @@ impl Default for IterativeImputer {
 
 impl IterativeImputer {
     /// Default iterative imputer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl FitUnsupervised for IterativeImputer {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_columns_for_preprocess(&mut ctx, x);
         let (n, p) = x.shape();
@@ -927,7 +936,7 @@ impl FitUnsupervised for IterativeImputer {
                 }
             }
         }
-        for it in 0..self.max_iter.max(1) {
+        for it in 0..this.max_iter.max(1) {
             let mut moved: f64 = 0.0;
             for j in 0..p {
                 let miss: Vec<usize> = (0..n).filter(|&i| !x.get(i, j).is_finite()).collect();
@@ -942,7 +951,7 @@ impl FitUnsupervised for IterativeImputer {
                 let yj = filled.column(j);
                 let mut scratch = signlred::Report::new("iterimp", "ridge");
                 let Some(beta) =
-                    ridge_solve(&mut scratch, &z, &yj, self.alpha.max(0.0), &ctx.policy)
+                    ridge_solve(&mut scratch, &z, &yj, this.alpha.max(0.0), &ctx.policy)
                 else {
                     continue;
                 };
@@ -974,9 +983,9 @@ impl FitUnsupervised for IterativeImputer {
                 break;
             }
         }
-        self.train = filled;
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.train = filled;
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -998,7 +1007,7 @@ impl Transform for IterativeImputer {
 
 /// Polynomial / interaction expansion.
 #[derive(Clone, Debug)]
-pub struct PolynomialFeatures {
+pub(crate) struct PolynomialFeatures {
     /// Maximum total degree.
     pub degree: usize,
     /// If true, only products of distinct features (no powers).
@@ -1025,7 +1034,7 @@ impl Default for PolynomialFeatures {
 
 impl PolynomialFeatures {
     /// Degree-`d` expander.
-    pub fn new(degree: usize) -> Self {
+    pub(crate) fn new(degree: usize) -> Self {
         Self {
             degree: degree.max(1),
             ..Self::default()
@@ -1033,31 +1042,32 @@ impl PolynomialFeatures {
     }
 
     /// Number of output columns after `fit`.
-    pub fn n_output_features(&self) -> usize {
+    pub(crate) fn n_output_features(&self) -> usize {
         self.monomials.len()
     }
 }
 
 impl FitUnsupervised for PolynomialFeatures {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_columns_for_preprocess(&mut ctx, x);
-        self.n_features_in = x.ncols();
-        self.monomials = enumerate_monomials(
+        this.n_features_in = x.ncols();
+        this.monomials = enumerate_monomials(
             x.ncols(),
-            self.degree,
-            self.interaction_only,
-            self.include_bias,
+            this.degree,
+            this.interaction_only,
+            this.include_bias,
         );
-        let p_out = self.monomials.len();
+        let p_out = this.monomials.len();
         if p_out > x.nrows() && x.nrows() > 0 {
             ctx.push(
                 Issue::builder(IssueCode::PolynomialExplosion)
                     .message(format!(
                         "polynomial map sends n={} rows to p={p_out} columns (degree {})",
                         x.nrows(),
-                        self.degree
+                        this.degree
                     ))
                     .metric("n", x.nrows() as f64)
                     .metric("p_out", p_out as f64)
@@ -1069,8 +1079,8 @@ impl FitUnsupervised for PolynomialFeatures {
                     .build(),
             );
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -1103,7 +1113,7 @@ impl Transform for PolynomialFeatures {
 
 /// Power transform family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PowerMethod {
+pub(crate) enum PowerMethod {
     /// Yeo–Johnson (defined on ℝ).
     YeoJohnson,
     /// Box–Cox (requires strictly positive data).
@@ -1112,7 +1122,7 @@ pub enum PowerMethod {
 
 /// sklearn `PowerTransformer`.
 #[derive(Clone, Debug)]
-pub struct PowerTransformer {
+pub(crate) struct PowerTransformer {
     /// Yeo–Johnson or Box–Cox.
     pub method: PowerMethod,
     /// Standardize after the power map.
@@ -1138,28 +1148,29 @@ impl Default for PowerTransformer {
 
 impl PowerTransformer {
     /// Yeo–Johnson transformer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fitted λ per column.
-    pub fn lambdas(&self) -> &Vector {
+    pub(crate) fn lambdas(&self) -> &Vector {
         &self.lambdas
     }
 }
 
 impl FitUnsupervised for PowerTransformer {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_columns_for_preprocess(&mut ctx, x);
         let (n, p) = x.shape();
-        self.lambdas = Vector::zeros(p);
-        self.mean = Vector::zeros(p);
-        self.scale = Vector::filled(p, 1.0);
+        this.lambdas = Vector::zeros(p);
+        this.mean = Vector::zeros(p);
+        this.scale = Vector::filled(p, 1.0);
         for j in 0..p {
             let col: Vec<f64> = (0..n).map(|i| x.get(i, j)).collect();
-            if matches!(self.method, PowerMethod::BoxCox)
+            if matches!(this.method, PowerMethod::BoxCox)
                 && col.iter().any(|v| v.is_finite() && *v <= 0.0)
             {
                 ctx.push(
@@ -1177,23 +1188,23 @@ impl FitUnsupervised for PowerTransformer {
                 ctx.push(imputation_undefined(j));
                 continue;
             }
-            self.lambdas[j] = match self.method {
+            this.lambdas[j] = match this.method {
                 PowerMethod::YeoJohnson => best_yeo_johnson(&col),
                 PowerMethod::BoxCox => best_box_cox(&col),
             };
             let mapped: Vec<f64> = col
                 .iter()
-                .map(|&v| match self.method {
-                    PowerMethod::YeoJohnson => yeo_johnson(v, self.lambdas[j]),
-                    PowerMethod::BoxCox => box_cox(v, self.lambdas[j]),
+                .map(|&v| match this.method {
+                    PowerMethod::YeoJohnson => yeo_johnson(v, this.lambdas[j]),
+                    PowerMethod::BoxCox => box_cox(v, this.lambdas[j]),
                 })
                 .collect();
             let ms = slice_stats(&mapped);
-            self.mean[j] = ms.mean;
-            self.scale[j] = if ms.std() > 0.0 { ms.std() } else { 1.0 };
+            this.mean[j] = ms.mean;
+            this.scale[j] = if ms.std() > 0.0 { ms.std() } else { 1.0 };
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -1226,7 +1237,7 @@ impl Transform for PowerTransformer {
 
 /// Output law of [`QuantileTransformer`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OutputDistribution {
+pub(crate) enum OutputDistribution {
     /// Map through Φ⁻¹.
     Normal,
     /// Leave as the empirical CDF (uniform on (0, 1)).
@@ -1235,7 +1246,7 @@ pub enum OutputDistribution {
 
 /// Empirical-CDF transformer.
 #[derive(Clone, Debug)]
-pub struct QuantileTransformer {
+pub(crate) struct QuantileTransformer {
     /// Number of interpolation knots stored per column.
     pub n_quantiles: usize,
     /// Target distribution.
@@ -1257,25 +1268,26 @@ impl Default for QuantileTransformer {
 
 impl QuantileTransformer {
     /// Uniform empirical-CDF map.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl FitUnsupervised for QuantileTransformer {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_columns_for_preprocess(&mut ctx, x);
         let (n, p) = x.shape();
-        self.references.clear();
-        let nq = self.n_quantiles.max(2).min(n.max(2));
+        this.references.clear();
+        let nq = this.n_quantiles.max(2).min(n.max(2));
         for j in 0..p {
             let col: Vec<f64> = (0..n).map(|i| x.get(i, j)).collect();
             let st = slice_stats(&col);
             if st.count == 0 {
                 ctx.push(imputation_undefined(j));
-                self.references.push(Vec::new());
+                this.references.push(Vec::new());
                 continue;
             }
             let knots: Vec<f64> = (0..nq)
@@ -1284,10 +1296,10 @@ impl FitUnsupervised for QuantileTransformer {
                     quantile(&col, q)
                 })
                 .collect();
-            self.references.push(knots);
+            this.references.push(knots);
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -1315,7 +1327,7 @@ impl Transform for QuantileTransformer {
 
 /// Binning strategy for [`KBinsDiscretizer`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KBinsStrategy {
+pub(crate) enum KBinsStrategy {
     /// Equal-width bins on `[min, max]`.
     Uniform,
     /// Equal-count (quantile) bins.
@@ -1326,7 +1338,7 @@ pub enum KBinsStrategy {
 
 /// sklearn `KBinsDiscretizer` (ordinal encoding of bins).
 #[derive(Clone, Debug)]
-pub struct KBinsDiscretizer {
+pub(crate) struct KBinsDiscretizer {
     /// Number of bins per column.
     pub n_bins: usize,
     /// Edge construction.
@@ -1348,7 +1360,7 @@ impl Default for KBinsDiscretizer {
 
 impl KBinsDiscretizer {
     /// Quantile discretizer with `n_bins` bins.
-    pub fn new(n_bins: usize) -> Self {
+    pub(crate) fn new(n_bins: usize) -> Self {
         Self {
             n_bins: n_bins.max(2),
             ..Self::default()
@@ -1358,24 +1370,25 @@ impl KBinsDiscretizer {
 
 impl FitUnsupervised for KBinsDiscretizer {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_columns_for_preprocess(&mut ctx, x);
         let (n, p) = x.shape();
-        self.edges.clear();
+        this.edges.clear();
         for j in 0..p {
             let col: Vec<f64> = (0..n).map(|i| x.get(i, j)).collect();
             let st = slice_stats(&col);
             if st.count == 0 {
                 ctx.push(imputation_undefined(j));
-                self.edges.push(Vec::new());
+                this.edges.push(Vec::new());
                 continue;
             }
             if st.is_constant(ctx.policy.near_zero_variance) {
                 ctx.push(constant_col_issue(j, st));
             }
-            let nb = self.n_bins.max(2);
-            let e = match self.strategy {
+            let nb = this.n_bins.max(2);
+            let e = match this.strategy {
                 KBinsStrategy::Uniform => (0..=nb)
                     .map(|k| st.min + (st.max - st.min) * k as f64 / nb as f64)
                     .collect(),
@@ -1384,10 +1397,10 @@ impl FitUnsupervised for KBinsDiscretizer {
                     .collect(),
                 KBinsStrategy::KMeans => kmeans_1d_edges(&col, nb),
             };
-            self.edges.push(e);
+            this.edges.push(e);
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -1411,7 +1424,7 @@ impl Transform for KBinsDiscretizer {
 
 /// Threshold map `1[x > t]`.
 #[derive(Clone, Debug)]
-pub struct Binarizer {
+pub(crate) struct Binarizer {
     /// Values strictly greater than this become 1.
     pub threshold: f64,
 }
@@ -1424,14 +1437,14 @@ impl Default for Binarizer {
 
 impl Binarizer {
     /// Binarizer at `threshold`.
-    pub fn new(threshold: f64) -> Self {
+    pub(crate) fn new(threshold: f64) -> Self {
         Self { threshold }
     }
 }
 
 impl FitUnsupervised for Binarizer {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_columns_for_preprocess(&mut ctx, x);
         ctx.finish(self.clone())
@@ -1460,7 +1473,7 @@ impl Transform for Binarizer {
 /// The encoding uses the full `y`. That is [`IssueCode::TargetLeakageSuspected`]
 /// unless the caller refits inside each training fold.
 #[derive(Clone, Debug)]
-pub struct TargetEncoder {
+pub(crate) struct TargetEncoder {
     /// Additive smoothing toward the global mean.
     pub smooth: f64,
     tables: Vec<BTreeMap<i64, f64>>,
@@ -1481,19 +1494,20 @@ impl Default for TargetEncoder {
 
 impl TargetEncoder {
     /// Encoder with unit smoothing.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl Fit for TargetEncoder {
     type Fitted = Self;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        self.global = y.mean();
-        self.tables = vec![BTreeMap::new(); x.ncols()];
-        let smooth = self.smooth.max(0.0);
+        this.global = y.mean();
+        this.tables = vec![BTreeMap::new(); x.ncols()];
+        let smooth = this.smooth.max(0.0);
         for j in 0..x.ncols() {
             let mut acc: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
             for i in 0..x.nrows().min(y.len()) {
@@ -1502,9 +1516,9 @@ impl Fit for TargetEncoder {
                 e.0 += y[i];
                 e.1 += 1.0;
             }
-            self.tables[j] = acc
+            this.tables[j] = acc
                 .into_iter()
-                .map(|(k, (s, c))| (k, (s + smooth * self.global) / (c + smooth)))
+                .map(|(k, (s, c))| (k, (s + smooth * this.global) / (c + smooth)))
                 .collect();
         }
         ctx.push(
@@ -1512,8 +1526,8 @@ impl Fit for TargetEncoder {
                 .message("TargetEncoder used the full y; refit inside each training fold")
                 .build(),
         );
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -1545,7 +1559,7 @@ impl Transform for TargetEncoder {
 
 /// B-spline basis expansion (sklearn `SplineTransformer`).
 #[derive(Clone, Debug)]
-pub struct SplineTransformer {
+pub(crate) struct SplineTransformer {
     /// Number of knots including the endpoints.
     pub n_knots: usize,
     /// Spline degree.
@@ -1569,7 +1583,7 @@ impl Default for SplineTransformer {
 
 impl SplineTransformer {
     /// Cubic B-splines with `n_knots` knots per feature.
-    pub fn new(n_knots: usize) -> Self {
+    pub(crate) fn new(n_knots: usize) -> Self {
         Self {
             n_knots: n_knots.max(2),
             ..Self::default()
@@ -1627,11 +1641,12 @@ fn cox_de_boor(x: f64, knots: &[f64], degree: usize, i: usize) -> f64 {
 
 impl FitUnsupervised for SplineTransformer {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_columns_for_preprocess(&mut ctx, x);
-        self.n_features_in = x.ncols();
-        self.knots.clear();
+        this.n_features_in = x.ncols();
+        this.knots.clear();
         for j in 0..x.ncols() {
             let col = x.column(j);
             let mut lo = f64::INFINITY;
@@ -1654,10 +1669,10 @@ impl FitUnsupervised for SplineTransformer {
                 lo = 0.0;
                 hi = 1.0;
             }
-            self.knots
-                .push(padded_knots(lo, hi, self.n_knots.max(2), self.degree));
+            this.knots
+                .push(padded_knots(lo, hi, this.n_knots.max(2), this.degree));
         }
-        let p_out = self.n_basis().saturating_mul(x.ncols());
+        let p_out = this.n_basis().saturating_mul(x.ncols());
         if p_out > x.nrows() && x.nrows() > 0 {
             ctx.push(
                 Issue::builder(IssueCode::PolynomialExplosion)
@@ -1665,8 +1680,8 @@ impl FitUnsupervised for SplineTransformer {
                     .build(),
             );
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -1700,7 +1715,7 @@ impl Transform for SplineTransformer {
 
 /// Named elementwise map (sklearn `FunctionTransformer`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ElementwiseFn {
+pub(crate) enum ElementwiseFn {
     /// Identity.
     Identity,
     /// `ln(1+x)` (requires `x > -1`).
@@ -1713,7 +1728,7 @@ pub enum ElementwiseFn {
 
 /// Stateless elementwise transformer.
 #[derive(Clone, Debug)]
-pub struct FunctionTransformer {
+pub(crate) struct FunctionTransformer {
     /// Map applied independently to every entry.
     pub func: ElementwiseFn,
 }
@@ -1728,14 +1743,14 @@ impl Default for FunctionTransformer {
 
 impl FunctionTransformer {
     /// Transformer for the given map.
-    pub fn new(func: ElementwiseFn) -> Self {
+    pub(crate) fn new(func: ElementwiseFn) -> Self {
         Self { func }
     }
 }
 
 impl FitUnsupervised for FunctionTransformer {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_columns_for_preprocess(&mut ctx, x);
         ctx.finish(self.clone())
@@ -2201,31 +2216,32 @@ fn finish_explain(ctx: FitCtx, expl: IncrementalExplain) -> Result<Qualified<Inc
 
 /// One-hot / label-indicator map (sklearn `LabelBinarizer`).
 #[derive(Clone, Debug, Default)]
-pub struct LabelBinarizer {
+pub(crate) struct LabelBinarizer {
     classes: Vec<i64>,
     fitted: bool,
 }
 
 impl LabelBinarizer {
     /// Empty binarizer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Sorted class ids.
-    pub fn classes(&self) -> &[i64] {
+    pub(crate) fn classes(&self) -> &[i64] {
         &self.classes
     }
 }
 
 impl FitSeries for LabelBinarizer {
     type Fitted = Self;
-    fn fit_series(&mut self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_series(&self, y: &Vector, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         let counts = inspect_classes(&mut ctx.report, y, &ctx.policy);
-        self.classes = counts.into_iter().map(|(k, _)| k).collect();
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.classes = counts.into_iter().map(|(k, _)| k).collect();
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -2258,26 +2274,27 @@ impl Transform for LabelBinarizer {
 /// Negative / NaN entries are padding. A matrix with no usable labels is
 /// vacuous.
 #[derive(Clone, Debug, Default)]
-pub struct MultiLabelBinarizer {
+pub(crate) struct MultiLabelBinarizer {
     classes: Vec<i64>,
     fitted: bool,
 }
 
 impl MultiLabelBinarizer {
     /// Empty binarizer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Sorted class ids.
-    pub fn classes(&self) -> &[i64] {
+    pub(crate) fn classes(&self) -> &[i64] {
         &self.classes
     }
 }
 
 impl FitUnsupervised for MultiLabelBinarizer {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let mut set = BTreeMap::<i64, u64>::new();
@@ -2289,8 +2306,8 @@ impl FitUnsupervised for MultiLabelBinarizer {
                 }
             }
         }
-        self.classes = set.keys().copied().collect();
-        if self.classes.is_empty() {
+        this.classes = set.keys().copied().collect();
+        if this.classes.is_empty() {
             ctx.push(
                 Issue::builder(IssueCode::MeaninglessFit)
                     .message("MultiLabelBinarizer saw no non-negative finite labels")
@@ -2302,8 +2319,8 @@ impl FitUnsupervised for MultiLabelBinarizer {
                     .build(),
             );
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -2333,7 +2350,7 @@ impl Transform for MultiLabelBinarizer {
 ///
 /// `K ← (I − 11ᵀ/n) K (I − 11ᵀ/n)`. Do not treat `n` as a parameter count.
 #[derive(Clone, Debug)]
-pub struct KernelCenterer {
+pub(crate) struct KernelCenterer {
     row_mean: Vector,
     all_mean: f64,
     fitted: bool,
@@ -2351,21 +2368,22 @@ impl Default for KernelCenterer {
 
 impl KernelCenterer {
     /// Empty centerer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl FitUnsupervised for KernelCenterer {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, k: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, k: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, k, None, &ctx.policy);
         if k.nrows() == 0 || k.ncols() == 0 {
-            self.fitted = true;
-            self.row_mean = Vector::zeros(0);
-            self.all_mean = 0.0;
-            return ctx.finish(self.clone());
+            this.fitted = true;
+            this.row_mean = Vector::zeros(0);
+            this.all_mean = 0.0;
+            return ctx.finish(this.clone());
         }
         let n = k.nrows();
         let mut row_mean = Vector::zeros(n);
@@ -2385,10 +2403,10 @@ impl FitUnsupervised for KernelCenterer {
             }
             row_mean[i] = if c > 0.0 { s / c } else { 0.0 };
         }
-        self.row_mean = row_mean;
-        self.all_mean = if cnt > 0.0 { tot / cnt } else { 0.0 };
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.row_mean = row_mean;
+        this.all_mean = if cnt > 0.0 { tot / cnt } else { 0.0 };
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -2421,21 +2439,22 @@ impl Transform for KernelCenterer {
 /// Non-finite entries become 1. All-missing columns are valid indicators
 /// (every row is 1) and must not raise [`IssueCode::ImputationUndefined`].
 #[derive(Clone, Debug, Default)]
-pub struct MissingIndicator {
+pub(crate) struct MissingIndicator {
     fitted: bool,
     n_features: usize,
 }
 
 impl MissingIndicator {
     /// Empty indicator.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
 impl FitUnsupervised for MissingIndicator {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         let (n, p) = x.shape();
         ctx.report.set_sample_shape(n, p);
@@ -2446,9 +2465,9 @@ impl FitUnsupervised for MissingIndicator {
                     .build(),
             );
         }
-        self.n_features = p;
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.n_features = p;
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -2598,10 +2617,7 @@ mod tests {
         let mut knn: KNNImputer = KnnImputer::new(3);
         knn.fit_unsupervised(&xm, &Session::new("knn", "fit"))
             .unwrap();
-        let kn = knn
-            .transform(&xm, &Session::new("knn", "t"))
-            .unwrap()
-            .value;
+        let kn = knn.transform(&xm, &Session::new("knn", "t")).unwrap().value;
         assert!(kn.get(3, 1).is_finite());
         assert!(kn.get(7, 0).is_finite());
     }

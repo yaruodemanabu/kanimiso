@@ -12,7 +12,7 @@ use crate::validate::inspect_xy;
 use ojizou_san::Session;
 use signlred::{Issue, IssueCode, NumericalCompromise, Qualified, Result, Severity};
 
-pub use crate::ensemble::{
+pub(crate) use crate::ensemble::{
     BaggingClassifier, BaggingRegressor, FittedBaggingClassifier, FittedBaggingRegressor,
     FittedStackingClassifier, FittedStackingRegressor, FittedVotingClassifier,
     FittedVotingRegressor, StackingClassifier, StackingRegressor, VotingClassifier,
@@ -21,7 +21,7 @@ pub use crate::ensemble::{
 
 /// Local column standardizer (mean / sample std). Not [`crate::preprocess::StandardScaler`].
 #[derive(Clone, Debug)]
-pub struct Standardize {
+pub(crate) struct Standardize {
     /// Column means (empty before fit).
     pub mean: Vector,
     /// Column scales; 1 when a column is constant.
@@ -41,7 +41,7 @@ impl Default for Standardize {
 
 impl Standardize {
     /// Unfitted standardizer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -74,7 +74,7 @@ impl Standardize {
 
 /// Pipeline preprocessing step.
 #[derive(Clone, Debug)]
-pub enum PreprocessStep {
+pub(crate) enum PreprocessStep {
     /// Subtract column mean and divide by sample std.
     Standardize(Standardize),
     /// Leave columns unchanged.
@@ -83,7 +83,7 @@ pub enum PreprocessStep {
 
 impl PreprocessStep {
     /// Column standardizer step.
-    pub fn standardize() -> Self {
+    pub(crate) fn standardize() -> Self {
         Self::Standardize(Standardize::new())
     }
 
@@ -107,7 +107,7 @@ impl PreprocessStep {
 
 /// [`PreprocessStep`] sequence followed by [`LinearRegression`].
 #[derive(Clone, Debug)]
-pub struct Pipeline {
+pub(crate) struct Pipeline {
     /// Ordered preprocessing steps.
     pub steps: Vec<PreprocessStep>,
     /// Final OLS (intercept on).
@@ -125,12 +125,12 @@ impl Default for Pipeline {
 
 impl Pipeline {
     /// Standardize-then-OLS pipeline.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Pipeline with explicit steps.
-    pub fn with_steps(steps: Vec<PreprocessStep>) -> Self {
+    pub(crate) fn with_steps(steps: Vec<PreprocessStep>) -> Self {
         Self {
             steps,
             regressor: LinearRegression::new(),
@@ -140,7 +140,7 @@ impl Pipeline {
 
 /// Fitted pipeline: frozen preprocess + fitted OLS.
 #[derive(Clone, Debug)]
-pub struct FittedPipeline {
+pub(crate) struct FittedPipeline {
     /// Fitted preprocess steps.
     pub steps: Vec<PreprocessStep>,
     /// Final linear model.
@@ -165,19 +165,15 @@ impl Predict for FittedPipeline {
 
 impl Fit for Pipeline {
     type Fitted = FittedPipeline;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedPipeline>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedPipeline>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let mut z = x.clone();
-        for step in &mut self.steps {
+        for step in &mut this.steps {
             z = step.fit_transform(&z, &mut ctx);
         }
-        let model = match self.regressor.fit(&z, y, &session.child("final")) {
+        let model = match this.regressor.fit(&z, y, &session.child("final")) {
             Ok(q) => q.value,
             Err(_) => {
                 // OLS may quality-abort (R²=1 or a large residual). The child
@@ -187,7 +183,7 @@ impl Fit for Pipeline {
             }
         };
         ctx.finish(FittedPipeline {
-            steps: self.steps.clone(),
+            steps: this.steps.clone(),
             model,
         })
     }
@@ -243,7 +239,7 @@ fn hstack(parts: &[Matrix]) -> Matrix {
 
 /// Independently transform `X` with each step and concatenate columns.
 #[derive(Clone, Debug)]
-pub struct FeatureUnion {
+pub(crate) struct FeatureUnion {
     /// Parallel preprocess steps.
     pub steps: Vec<PreprocessStep>,
 }
@@ -258,14 +254,14 @@ impl Default for FeatureUnion {
 
 impl FeatureUnion {
     /// Union of the given steps.
-    pub fn new(steps: Vec<PreprocessStep>) -> Self {
+    pub(crate) fn new(steps: Vec<PreprocessStep>) -> Self {
         Self { steps }
     }
 }
 
 /// Fitted feature union.
 #[derive(Clone, Debug)]
-pub struct FittedFeatureUnion {
+pub(crate) struct FittedFeatureUnion {
     /// Fitted parallel steps.
     pub steps: Vec<PreprocessStep>,
 }
@@ -282,25 +278,26 @@ impl Transform for FittedFeatureUnion {
 impl Fit for FeatureUnion {
     type Fitted = FittedFeatureUnion;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         _y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedFeatureUnion>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        for step in &mut self.steps {
+        for step in &mut this.steps {
             let _ = step.fit_transform(x, &mut ctx);
         }
         ctx.finish(FittedFeatureUnion {
-            steps: self.steps.clone(),
+            steps: this.steps.clone(),
         })
     }
 }
 
 /// One column-index group and the step applied to it.
 #[derive(Clone, Debug)]
-pub struct ColumnGroup {
+pub(crate) struct ColumnGroup {
     /// Column indices (into the original design).
     pub columns: Vec<usize>,
     /// Transform applied to those columns.
@@ -309,19 +306,19 @@ pub struct ColumnGroup {
 
 /// Column-wise transformer (sklearn `ColumnTransformer` by index groups).
 #[derive(Clone, Debug)]
-pub struct ColumnTransformer {
+pub(crate) struct ColumnTransformer {
     /// Ordered groups; outputs are concatenated in this order.
     pub groups: Vec<ColumnGroup>,
 }
 
 impl ColumnTransformer {
     /// Empty transformer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { groups: Vec::new() }
     }
 
     /// Append a group.
-    pub fn add_group(&mut self, columns: Vec<usize>, step: PreprocessStep) {
+    pub(crate) fn add_group(&mut self, columns: Vec<usize>, step: PreprocessStep) {
         self.groups.push(ColumnGroup { columns, step });
     }
 }
@@ -348,7 +345,7 @@ fn select_columns(x: &Matrix, cols: &[usize]) -> Matrix {
 
 /// Fitted column transformer.
 #[derive(Clone, Debug)]
-pub struct FittedColumnTransformer {
+pub(crate) struct FittedColumnTransformer {
     /// Fitted groups.
     pub groups: Vec<ColumnGroup>,
 }
@@ -369,14 +366,15 @@ impl Transform for FittedColumnTransformer {
 impl Fit for ColumnTransformer {
     type Fitted = FittedColumnTransformer;
     fn fit(
-        &mut self,
+        &self,
         x: &Matrix,
         _y: &Vector,
         session: &Session,
     ) -> Result<Qualified<FittedColumnTransformer>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        for g in &mut self.groups {
+        for g in &mut this.groups {
             for &c in &g.columns {
                 if c >= x.ncols() {
                     ctx.push(
@@ -390,7 +388,7 @@ impl Fit for ColumnTransformer {
             let _ = g.step.fit_transform(&sl, &mut ctx);
         }
         ctx.finish(FittedColumnTransformer {
-            groups: self.groups.clone(),
+            groups: this.groups.clone(),
         })
     }
 }
@@ -400,26 +398,21 @@ impl Fit for ColumnTransformer {
 /// Coefficients are never re-estimated. A call that looks like a refit is
 /// recorded so nobody treats the returned model as having seen the new `(X,y)`.
 #[derive(Clone, Debug)]
-pub struct FrozenEstimator {
+pub(crate) struct FrozenEstimator {
     /// Already-fitted linear model that will be returned unchanged.
     pub inner: FittedLinear,
 }
 
 impl FrozenEstimator {
     /// Freeze an already-fitted linear model.
-    pub fn new(inner: FittedLinear) -> Self {
+    pub(crate) fn new(inner: FittedLinear) -> Self {
         Self { inner }
     }
 }
 
 impl Fit for FrozenEstimator {
     type Fitted = FittedLinear;
-    fn fit(
-        &mut self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedLinear>> {
+    fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedLinear>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         ctx.push(

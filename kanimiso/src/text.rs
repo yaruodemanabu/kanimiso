@@ -30,7 +30,7 @@ fn tokenize(doc: &str) -> Vec<String> {
 
 /// Count-vectorizer: documents → term-count matrix.
 #[derive(Clone, Debug, Default)]
-pub struct CountVectorizer {
+pub(crate) struct CountVectorizer {
     /// Ignore tokens that appear in fewer than this many documents.
     pub min_df: usize,
     vocab: Vec<String>,
@@ -39,7 +39,7 @@ pub struct CountVectorizer {
 
 impl CountVectorizer {
     /// Default tokenizer (`min_df = 1`).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             min_df: 1,
             vocab: Vec::new(),
@@ -48,12 +48,12 @@ impl CountVectorizer {
     }
 
     /// Sorted vocabulary after `fit_docs`.
-    pub fn vocabulary(&self) -> &[String] {
+    pub(crate) fn vocabulary(&self) -> &[String] {
         &self.vocab
     }
 
     /// Learn the vocabulary from `docs`.
-    pub fn fit_docs(&mut self, docs: &[&str], session: &Session) -> Result<Qualified<Self>> {
+    pub(crate) fn fit_docs(&mut self, docs: &[&str], session: &Session) -> Result<Qualified<Self>> {
         let mut ctx = FitCtx::with_session(session.clone());
         if docs.is_empty() {
             ctx.push(
@@ -105,7 +105,11 @@ impl CountVectorizer {
     }
 
     /// Transform `docs` with the fitted vocabulary.
-    pub fn transform_docs(&self, docs: &[&str], session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn transform_docs(
+        &self,
+        docs: &[&str],
+        session: &Session,
+    ) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         if !self.fitted {
             ctx.push(Issue::builder(IssueCode::PartialFitBeforeInit).build());
@@ -133,7 +137,7 @@ impl CountVectorizer {
 
 /// TF–IDF transformer on a nonnegative count matrix (sklearn `TfidfTransformer`).
 #[derive(Clone, Debug)]
-pub struct TfidfTransformer {
+pub(crate) struct TfidfTransformer {
     /// Smooth IDF by adding 1 to document and document-frequency counts.
     pub smooth_idf: bool,
     idf: Vector,
@@ -152,19 +156,20 @@ impl Default for TfidfTransformer {
 
 impl TfidfTransformer {
     /// Default smoothed IDF.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Fitted IDF vector.
-    pub fn idf(&self) -> &Vector {
+    pub(crate) fn idf(&self) -> &Vector {
         &self.idf
     }
 }
 
 impl FitUnsupervised for TfidfTransformer {
     type Fitted = Self;
-    fn fit_unsupervised(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+    fn fit_unsupervised(&self, x: &Matrix, session: &Session) -> Result<Qualified<Self>> {
+        let mut this = self.clone();
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let (n, p) = x.shape();
@@ -191,8 +196,8 @@ impl FitUnsupervised for TfidfTransformer {
             );
         }
         let nf = n as f64;
-        self.idf = Vector::from_iter((0..p).map(|j| {
-            let (num, den) = if self.smooth_idf {
+        this.idf = Vector::from_iter((0..p).map(|j| {
+            let (num, den) = if this.smooth_idf {
                 (nf + 1.0, df[j] + 1.0)
             } else {
                 (nf.max(1.0), df[j].max(1.0))
@@ -211,8 +216,8 @@ impl FitUnsupervised for TfidfTransformer {
                     .build(),
             );
         }
-        self.fitted = true;
-        ctx.finish(self.clone())
+        this.fitted = true;
+        ctx.finish(this.clone())
     }
 }
 
@@ -258,7 +263,7 @@ impl Transform for TfidfTransformer {
 
 /// Count + TF–IDF in one step (sklearn `TfidfVectorizer`).
 #[derive(Clone, Debug, Default)]
-pub struct TfidfVectorizer {
+pub(crate) struct TfidfVectorizer {
     /// Document-frequency floor forwarded to [`CountVectorizer`].
     pub min_df: usize,
     counts: CountVectorizer,
@@ -267,17 +272,17 @@ pub struct TfidfVectorizer {
 
 impl TfidfVectorizer {
     /// Default vectorizer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Vocabulary after `fit_docs`.
-    pub fn vocabulary(&self) -> &[String] {
+    pub(crate) fn vocabulary(&self) -> &[String] {
         self.counts.vocabulary()
     }
 
     /// Fit vocabulary and IDF on `docs`.
-    pub fn fit_docs(&mut self, docs: &[&str], session: &Session) -> Result<Qualified<Self>> {
+    pub(crate) fn fit_docs(&mut self, docs: &[&str], session: &Session) -> Result<Qualified<Self>> {
         self.counts.min_df = self.min_df.max(1);
         let q = self.counts.fit_docs(docs, &session.child("count"))?;
         self.counts = q.value;
@@ -298,7 +303,11 @@ impl TfidfVectorizer {
     }
 
     /// Transform `docs` to row-normalized TF–IDF.
-    pub fn transform_docs(&self, docs: &[&str], session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn transform_docs(
+        &self,
+        docs: &[&str],
+        session: &Session,
+    ) -> Result<Qualified<Matrix>> {
         let x = self
             .counts
             .transform_docs(docs, &session.child("count-t"))?
@@ -318,7 +327,7 @@ fn fnv1a(tok: &str) -> u64 {
 
 /// Signed hashing trick (sklearn `HashingVectorizer`). No vocabulary is stored.
 #[derive(Clone, Debug)]
-pub struct HashingVectorizer {
+pub(crate) struct HashingVectorizer {
     /// Number of hash bins.
     pub n_features: usize,
 }
@@ -331,14 +340,18 @@ impl Default for HashingVectorizer {
 
 impl HashingVectorizer {
     /// Hasher with `n_features` bins.
-    pub fn new(n_features: usize) -> Self {
+    pub(crate) fn new(n_features: usize) -> Self {
         Self {
             n_features: n_features.max(1),
         }
     }
 
     /// Transform `docs` (stateless).
-    pub fn transform_docs(&self, docs: &[&str], session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn transform_docs(
+        &self,
+        docs: &[&str],
+        session: &Session,
+    ) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.clone());
         if docs.is_empty() {
             ctx.push(
@@ -379,19 +392,19 @@ impl HashingVectorizer {
 /// Each document is a whitespace-separated `key=value` record. Keys become
 /// columns; missing keys are 0. An empty key alphabet is vacuous.
 #[derive(Clone, Debug, Default)]
-pub struct DictVectorizer {
+pub(crate) struct DictVectorizer {
     vocab: Vec<String>,
     fitted: bool,
 }
 
 impl DictVectorizer {
     /// Empty vectorizer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Sorted feature keys.
-    pub fn vocabulary(&self) -> &[String] {
+    pub(crate) fn vocabulary(&self) -> &[String] {
         &self.vocab
     }
 
@@ -412,7 +425,7 @@ impl DictVectorizer {
     }
 
     /// Learn keys from `key=value` records.
-    pub fn fit_docs(&mut self, docs: &[&str], session: &Session) -> Result<Qualified<Self>> {
+    pub(crate) fn fit_docs(&mut self, docs: &[&str], session: &Session) -> Result<Qualified<Self>> {
         let mut ctx = FitCtx::with_session(session.clone());
         if docs.is_empty() {
             ctx.push(
@@ -448,7 +461,11 @@ impl DictVectorizer {
     }
 
     /// Map records to a dense `n × |vocab|` matrix.
-    pub fn transform_docs(&self, docs: &[&str], session: &Session) -> Result<Qualified<Matrix>> {
+    pub(crate) fn transform_docs(
+        &self,
+        docs: &[&str],
+        session: &Session,
+    ) -> Result<Qualified<Matrix>> {
         let mut ctx = FitCtx::with_session(session.child("transform"));
         if !self.fitted {
             ctx.push(Issue::builder(IssueCode::StaleState).build());
