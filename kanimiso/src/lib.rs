@@ -21,6 +21,7 @@
 pub mod anomaly;
 pub mod bandit;
 pub mod bayes;
+mod bridge;
 pub mod classification;
 pub mod cluster;
 pub mod compose;

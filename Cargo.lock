@@ -76,6 +76,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "coronel"
+version = "0.1.0"
+source = "git+https://github.com/yaruodemanabu/wormhole?rev=7c338c01aecc447511ea76132b35e86b024d33f4#7c338c01aecc447511ea76132b35e86b024d33f4"
+dependencies = [
+ "faer",
+]
+
+[[package]]
 name = "crossbeam"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -476,6 +484,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jelly-wave"
+version = "0.1.0"
+source = "git+https://github.com/yaruodemanabu/wormhole?rev=7c338c01aecc447511ea76132b35e86b024d33f4#7c338c01aecc447511ea76132b35e86b024d33f4"
+dependencies = [
+ "faer",
+]
+
+[[package]]
 name = "kanimiso"
 version = "0.1.0"
 dependencies = [
@@ -483,6 +499,7 @@ dependencies = [
  "ojizou-san",
  "serde_json",
  "signlred",
+ "wormhole",
 ]
 
 [[package]]
@@ -1317,6 +1334,16 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "wormhole"
+version = "0.1.0"
+source = "git+https://github.com/yaruodemanabu/wormhole?rev=7c338c01aecc447511ea76132b35e86b024d33f4#7c338c01aecc447511ea76132b35e86b024d33f4"
+dependencies = [
+ "coronel",
+ "faer",
+ "jelly-wave",
+]
 
 [[package]]
 name = "zerocopy"

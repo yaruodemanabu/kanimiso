@@ -18730,6 +18730,7 @@ mod tests {
     #[test]
     fn verified_surface_is_special_functions() {
         let names: Vec<&str> = verified().map(|a| a.name).collect();
+        assert_eq!(CoverageStatus::Verified.as_str(), "verified");
         assert!(names.contains(&"special.betainc_reg"));
         assert!(names.contains(&"special.digamma"));
         assert!(

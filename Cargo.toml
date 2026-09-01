@@ -15,3 +15,7 @@ repository = "https://github.com/yaruodemanabu/kanimiso"
 faer = { version = "0.24.4", default-features = true }
 signlred = { path = "signlred", version = "0.1.0" }
 ojizou-san = { path = "ojizou-san", version = "0.1.0" }
+# Rev-pinned (AGENTS.md §3.2). Do not use branch = "main".
+wormhole = { git = "https://github.com/yaruodemanabu/wormhole", rev = "7c338c01aecc447511ea76132b35e86b024d33f4" }
+coronel = { git = "https://github.com/yaruodemanabu/wormhole", rev = "7c338c01aecc447511ea76132b35e86b024d33f4" }
+jelly-wave = { git = "https://github.com/yaruodemanabu/wormhole", rev = "7c338c01aecc447511ea76132b35e86b024d33f4" }
