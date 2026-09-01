@@ -57,6 +57,10 @@ pub struct Policy {
     pub cf_tol: f64,
     /// Continued-fraction iteration cap for `betainc_reg` / `gamma_p`.
     pub cf_max_iter: usize,
+    /// Floor applied to HMM emission variances in the M-step (not in `log_prob`).
+    pub emission_var_floor: f64,
+    /// Additive floor when renormalising HMM start / transition rows.
+    pub transition_floor: f64,
 }
 
 impl Default for Policy {
@@ -83,6 +87,8 @@ impl Default for Policy {
             max_difference_order: 8,
             cf_tol: 1e-15,
             cf_max_iter: 300,
+            emission_var_floor: 1e-6,
+            transition_floor: 1e-8,
         }
     }
 }
@@ -149,5 +155,7 @@ mod tests {
         assert_eq!(p.max_difference_order, 8);
         assert_eq!(p.cf_tol, 1e-15);
         assert_eq!(p.cf_max_iter, 300);
+        assert_eq!(p.emission_var_floor, 1e-6);
+        assert_eq!(p.transition_floor, 1e-8);
     }
 }

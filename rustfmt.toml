@@ -1,0 +1,2 @@
+# Generated v0.1 files are not rustfmt-safe (OOM / tens-of-kLOC diffs).
+ignore = ["kanimiso/src/hmm/legacy.rs"]

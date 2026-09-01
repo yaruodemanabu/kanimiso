@@ -1019,6 +1019,10 @@ const INVENTORY: &[Algorithm] = &[
         "river.anomaly.HalfSpaceTrees",
         "online",
     ),
+    a("hmm.HiddenMarkovModel", "hmmlearn.hmm.BaseHMM", "hmm"),
+    a("hmm.Gaussian", "hmmlearn.hmm.GaussianHMM", "hmm"),
+    a("hmm.Poisson", "hmmlearn.hmm.PoissonHMM", "hmm"),
+    a("hmm.Categorical", "hmmlearn.hmm.CategoricalHMM", "hmm"),
     // manifold
     a("manifold.MDS", "sklearn.manifold.MDS", "manifold"),
     a("manifold.Isomap", "sklearn.manifold.Isomap", "manifold"),
@@ -13031,6 +13035,10 @@ mod tests {
             "covariance.LedoitWolf",
             "anomaly.IsolationForest",
             "anomaly.KnnDistanceAnomaly",
+            "hmm.HiddenMarkovModel",
+            "hmm.Gaussian",
+            "hmm.Poisson",
+            "hmm.Categorical",
             "manifold.TSNE",
             "discriminant.LinearDiscriminantAnalysis",
             "ensemble.BaggingRegressor",
@@ -17206,6 +17214,7 @@ mod tests {
             .collect();
         assert!(inventory().iter().any(|a| a.name == "online.WindowLag"));
         assert!(inventory().iter().any(|a| a.name == "anomaly.KnnDistanceAnomaly"));
+        assert!(inventory().iter().any(|a| a.name == "hmm.HiddenMarkovModel"));
         assert!(gen.iter().all(|n| !n.contains("LogMinkowski")));
         assert!(gen.iter().any(|n| n.contains("Cosine173")));
         assert!(gen.iter().any(|n| n.contains("minkowski430")));
