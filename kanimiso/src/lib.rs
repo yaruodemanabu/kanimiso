@@ -1,7 +1,10 @@
 //! `kanimiso` — Pure Rust machine learning and statistics.
 //!
-//! Scope: the computational surface of **scikit-learn**, **statsmodels**,
-//! **sktime**, **tslearn**, **hmmlearn**, and **river**.
+//! v0.2 is being reconstituted from a small verified core (see the repo
+//! `AGENTS.md`). Claims of coverage track [`coverage::verified`], not the raw
+//! [`coverage::inventory`]. Until `0.2.0-alpha.1` this crate does **not**
+//! claim equivalence to scikit-learn, statsmodels, sktime, tslearn, hmmlearn,
+//! or river.
 //!
 //! Constraints honoured by this crate:
 //! - linear algebra goes through [`faer`]
@@ -69,7 +72,7 @@ pub mod validate;
 pub mod vecm;
 
 pub use context::FitCtx;
-pub use coverage::{inventory, Algorithm};
+pub use coverage::{inventory, verified, Algorithm, CoverageStatus};
 pub use data::{Matrix, Vector};
 pub use ojizou_san as log;
 pub use signlred;

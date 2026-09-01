@@ -1,5 +1,10 @@
 # Debug test threads keep every compact-support HMM `Qualified` local live
 # in `gaussian_hmm_learns_two_means`. The default 2–8 MiB stack overflows
 # once those folds grow; raise the runtime minimum for lib tests.
+# ALLOW_RUST_MIN_STACK=1 until v0.2 PR 8 (AGENTS.md D1 / §8).
 [env]
 RUST_MIN_STACK = "33554432"
+
+# Same resolver setting as wormhole (AGENTS.md §3.2).
+[resolver]
+incompatible-rust-versions = "fallback"

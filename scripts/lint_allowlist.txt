@@ -1,0 +1,19 @@
+Exp3
+Ucb1
+Catch22
+X13
+HiveCoteV1
+HiveCoteV2
+Pooled2Sls
+Between2Sls
+Absorbing2Sls
+Chi2
+OnlineF1
+RollingF1
+PrecisionRecallF1
+f1_score
+precision_recall_f1
+OnlineR2
+RollingR2
+r2_score
+pub fn r2(

@@ -19,6 +19,9 @@
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+// Failure embeds the full Report so callers can see every preceding warning.
+// Boxing it would shrink the Err variant but hide that the ledger is the value.
+#![allow(clippy::result_large_err)]
 
 mod codes;
 mod compromise;
@@ -35,7 +38,7 @@ mod report;
 mod severity;
 
 pub use codes::IssueCode;
-pub use compromise::NumericalCompromise;
+pub use compromise::{CompromiseKind, NumericalCompromise};
 pub use domain::Domain;
 pub use failure::Failure;
 pub use guards::{
@@ -100,6 +103,7 @@ mod tests {
                     assumptions_violated: vec!["well-conditioned Gram matrix".into()],
                     interpretability_impact:
                         "coefficient signs and magnitudes can flip under tiny perturbations".into(),
+                    kind: CompromiseKind::Unspecified,
                 })
                 .metric("condition_number", 1e12)
                 .build(),

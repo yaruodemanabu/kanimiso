@@ -7,7 +7,7 @@ default-members = ["signlred", "ojizou-san", "kanimiso"]
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-rust-version = "1.84"
+rust-version = "1.85"
 authors = ["kanimiso contributors"]
 repository = "https://github.com/yaruodemanabu/kanimiso"
 

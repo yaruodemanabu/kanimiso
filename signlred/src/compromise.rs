@@ -2,6 +2,28 @@
 
 use core::fmt;
 
+/// Class of numerical substitution (AGENTS.md D8).
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompromiseKind {
+    /// Free-form compromise; read the string fields.
+    Unspecified,
+    /// A log-probability was replaced by `floor` (only when `Policy::log_prob_floor` is `Some`).
+    ProbabilityClamped {
+        /// Value before the floor.
+        original: f64,
+        /// Floor that was applied.
+        floor: f64,
+    },
+    /// Linear-domain evaluation underflowed; the computation continued in log space.
+    LogDomainFallback,
+}
+
+impl Default for CompromiseKind {
+    fn default() -> Self {
+        Self::Unspecified
+    }
+}
+
 /// What was asked for, what was actually computed, and why that substitution
 /// changes the meaning of the result.
 ///
@@ -21,6 +43,8 @@ pub struct NumericalCompromise {
     pub assumptions_violated: Vec<String>,
     /// How a human should change their interpretation of coefficients / p-values.
     pub interpretability_impact: String,
+    /// Structured kind; [`CompromiseKind::Unspecified`] for legacy free-form records.
+    pub kind: CompromiseKind,
 }
 
 impl NumericalCompromise {
@@ -38,6 +62,37 @@ impl NumericalCompromise {
             expected_error_bound: None,
             assumptions_violated: Vec::new(),
             interpretability_impact: interpretability_impact.into(),
+            kind: CompromiseKind::Unspecified,
+        }
+    }
+
+    /// A log-probability was clamped to `Policy::log_prob_floor`.
+    pub fn probability_clamped(original: f64, floor: f64) -> Self {
+        Self {
+            original_intent: "retain the computed log-probability".into(),
+            actual_computation: format!("clamp log-probability {original} to {floor}"),
+            why_necessary: "Policy::log_prob_floor is Some; the caller opted into a floor".into(),
+            expected_error_bound: Some((original - floor).abs()),
+            assumptions_violated: vec!["untruncated support of the density".into()],
+            interpretability_impact:
+                "tails are heavier than the model; EM and model selection are biased toward this floor"
+                    .into(),
+            kind: CompromiseKind::ProbabilityClamped { original, floor },
+        }
+    }
+
+    /// Linear-domain evaluation underflowed; work continued in the log domain.
+    pub fn log_domain_fallback(why: impl Into<String>) -> Self {
+        Self {
+            original_intent: "evaluate a density or scale factor in linear space".into(),
+            actual_computation: "log-domain evaluation (logsumexp / shifted exp)".into(),
+            why_necessary: why.into(),
+            expected_error_bound: None,
+            assumptions_violated: Vec::new(),
+            interpretability_impact:
+                "the numeric path changed; the estimand is the same if the log-space identity holds"
+                    .into(),
+            kind: CompromiseKind::LogDomainFallback,
         }
     }
 
