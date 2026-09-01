@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [".", "crates/coronel", "crates/jelly-wave"]
+default-members = [".", "crates/coronel", "crates/jelly-wave"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+license = "Apache-2.0"
+authors = ["wormhole contributors"]
+repository = "https://github.com/yaruodemanabu/wormhole"
+
+[workspace.dependencies]
+faer = { version = "0.24.4", default-features = true }
+coronel = { path = "crates/coronel", version = "0.1.0" }
+jelly-wave = { path = "crates/jelly-wave", version = "0.1.0" }
+
+[package]
+name = "wormhole"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Pure-Rust distances and optimal transport powered by faer"
+readme = "README.md"
+keywords = ["optimal-transport", "wasserstein", "distance", "machine-learning"]
+categories = ["science", "algorithms", "mathematics"]
+
+[dependencies]
+faer = { workspace = true }
+coronel = { workspace = true }
+jelly-wave = { workspace = true }
+
+[dev-dependencies]
+kanimiso = { git = "https://github.com/yaruodemanabu/kanimiso", rev = "ab1649e3b1e0da3228f6021482c7a8b19c1593ed" }

@@ -1,0 +1,14 @@
+[package]
+name = "coronel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Pure-Rust kernel quantities backed by faer"
+keywords = ["kernel", "machine-learning", "faer"]
+categories = ["science", "algorithms", "mathematics"]
+
+[dependencies]
+faer = { workspace = true }

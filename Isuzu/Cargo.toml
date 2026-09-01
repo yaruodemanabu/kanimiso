@@ -1,0 +1,53 @@
+[workspace]
+members = ["amatsuki"]
+resolver = "2"
+
+[package]
+name = "isuzu"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Pure-Rust simulation and inference for stochastic differential equations, in the spirit of R's YUIMA"
+repository = "https://github.com/yaruodemanabu/Isuzu"
+readme = "README.md"
+keywords = ["sde", "stochastic", "diffusion", "levy", "inference"]
+categories = ["science", "mathematics", "simulation"]
+exclude = ["target"]
+
+[dependencies]
+amatsuki = { path = "amatsuki", version = "0.1.0" }
+faer = { version = "0.24", default-features = false, features = ["std"] }
+rustfft = "6"
+thiserror = "2"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[[example]]
+name = "gbm_paths"
+
+[[example]]
+name = "ou_qmle"
+
+[[example]]
+name = "async_cov"
+
+[[example]]
+name = "hawkes"
+
+[[example]]
+name = "sklearn_ou"
+
+[[example]]
+name = "carma_hawkes"
+
+[[example]]
+name = "malliavin_greeks"
+
+[[example]]
+name = "npbayes"
+
+[[example]]
+name = "benchmark"

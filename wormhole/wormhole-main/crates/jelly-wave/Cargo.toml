@@ -1,0 +1,14 @@
+[package]
+name = "jelly-wave"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Pure-Rust waveform distances and alignments backed by faer"
+keywords = ["dtw", "time-series", "distance", "faer"]
+categories = ["science", "algorithms", "mathematics"]
+
+[dependencies]
+faer = { workspace = true }
