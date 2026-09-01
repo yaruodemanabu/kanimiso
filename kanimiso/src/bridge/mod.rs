@@ -3,6 +3,8 @@
 //! Other kanimiso modules must see [`signlred`] types only. Wormhole `Error`
 //! values are mapped here and never re-exported.
 
+use crate::context::FitCtx;
+use crate::data::Matrix;
 use signlred::{Failure, Issue, IssueCode, NumericalCompromise};
 
 /// Map a wormhole error into a kanimiso [`Failure`].
@@ -22,7 +24,7 @@ pub(crate) fn failure_from_wormhole(
     Failure::from_issue(algorithm, operation, issue)
 }
 
-fn issue_from_wormhole(err: &wormhole::Error) -> Issue {
+pub(crate) fn issue_from_wormhole(err: &wormhole::Error) -> Issue {
     match err {
         wormhole::Error::EmptyInput { name } => Issue::builder(IssueCode::EmptyMatrix)
             .message(format!("{name} must be non-empty"))
@@ -105,6 +107,174 @@ fn issue_from_wormhole(err: &wormhole::Error) -> Issue {
     }
 }
 
+/// Map a coronel error into a kanimiso [`Failure`].
+pub(crate) fn failure_from_coronel(
+    algorithm: impl Into<String>,
+    operation: impl Into<String>,
+    err: coronel::Error,
+) -> Failure {
+    Failure::from_issue(algorithm, operation, issue_from_coronel(&err))
+}
+
+pub(crate) fn issue_from_coronel(err: &coronel::Error) -> Issue {
+    match err {
+        coronel::Error::EmptyInput => Issue::builder(IssueCode::EmptyMatrix)
+            .message("kernel input must be non-empty")
+            .build(),
+        coronel::Error::DimensionMismatch { left, right } => {
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!("feature dimensions differ: {left} != {right}"))
+                .build()
+        }
+        coronel::Error::NonFiniteInput { row, column } => Issue::builder(IssueCode::NonFiniteInput)
+            .message(format!("kernel input at ({row}, {column}) is not finite"))
+            .metric("row", *row as f64)
+            .metric("column", *column as f64)
+            .build(),
+        coronel::Error::InvalidParameter(name) => Issue::builder(IssueCode::MeaninglessFit)
+            .message(format!("invalid kernel parameter: {name}"))
+            .build(),
+        coronel::Error::TooFewSamples => Issue::builder(IssueCode::EmptyMatrix)
+            .message("an unbiased kernel statistic needs at least two samples")
+            .build(),
+    }
+}
+
+/// Map a jelly-wave error into a kanimiso [`Failure`].
+pub(crate) fn failure_from_jelly_wave(
+    algorithm: impl Into<String>,
+    operation: impl Into<String>,
+    err: jelly_wave::Error,
+) -> Failure {
+    Failure::from_issue(algorithm, operation, issue_from_jelly_wave(&err))
+}
+
+pub(crate) fn issue_from_jelly_wave(err: &jelly_wave::Error) -> Issue {
+    match err {
+        jelly_wave::Error::EmptyInput => Issue::builder(IssueCode::EmptyMatrix)
+            .message("waveforms must be non-empty")
+            .build(),
+        jelly_wave::Error::NonFiniteInput { index } => Issue::builder(IssueCode::NonFiniteInput)
+            .message(format!("waveform sample {index} is not finite"))
+            .metric("index", *index as f64)
+            .build(),
+        jelly_wave::Error::InvalidParameter(parameter) => Issue::builder(IssueCode::MeaninglessFit)
+            .message(format!("invalid waveform parameter: {parameter}"))
+            .build(),
+        jelly_wave::Error::ShapeMismatch { left, right } => {
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "waveform matrix shapes differ: {left:?} != {right:?}"
+                ))
+                .build()
+        }
+    }
+}
+
+/// Pairwise row distances via wormhole. Shape / domain errors become issues
+/// and a zero matrix so existing score APIs stay `Qualified`.
+pub(crate) fn pairwise_metric(
+    ctx: &mut FitCtx,
+    left: &Matrix,
+    right: &Matrix,
+    metric: wormhole::metrics::Metric,
+) -> Matrix {
+    match wormhole::metrics::pairwise(left.inner(), right.inner(), metric) {
+        Ok(mat) => Matrix::from_faer(mat),
+        Err(err) => {
+            ctx.push(issue_from_wormhole(&err));
+            Matrix::zeros(left.nrows(), right.nrows())
+        }
+    }
+}
+
+/// Pairwise kernel matrix via coronel.
+pub(crate) fn pairwise_kernel(
+    ctx: &mut FitCtx,
+    left: &Matrix,
+    right: &Matrix,
+    kernel: coronel::Kernel,
+) -> Matrix {
+    match coronel::pairwise(kernel, left.inner(), right.inner()) {
+        Ok(mat) => Matrix::from_faer(mat),
+        Err(err) => {
+            ctx.push(issue_from_coronel(&err));
+            Matrix::zeros(left.nrows(), right.nrows())
+        }
+    }
+}
+
+/// One paired (row-aligned) distance via wormhole.
+pub(crate) fn paired_metric(
+    ctx: &mut FitCtx,
+    left: &Matrix,
+    right: &Matrix,
+    metric: wormhole::metrics::Metric,
+) -> crate::data::Vector {
+    use crate::data::Vector;
+    if left.nrows() != right.nrows() || left.ncols() != right.ncols() {
+        ctx.push(
+            Issue::builder(IssueCode::DimensionMismatch)
+                .message(format!(
+                    "paired distances shapes {:?} vs {:?}",
+                    left.shape(),
+                    right.shape()
+                ))
+                .build(),
+        );
+        return Vector::zeros(left.nrows().min(right.nrows()));
+    }
+    let mut out = Vector::zeros(left.nrows());
+    for i in 0..left.nrows() {
+        let a: Vec<f64> = (0..left.ncols()).map(|j| left.get(i, j)).collect();
+        let b: Vec<f64> = (0..right.ncols()).map(|j| right.get(i, j)).collect();
+        match wormhole::metrics::distance(&a, &b, metric) {
+            Ok(v) => out[i] = v,
+            Err(err) => {
+                ctx.push(issue_from_wormhole(&err));
+                out[i] = f64::NAN;
+            }
+        }
+    }
+    out
+}
+
+/// DTW / ERP / Fréchet / Soft-DTW via jelly-wave. Empty or invalid input is
+/// `NaN` plus an issue (the public tslearn wrappers stay `Qualified`).
+pub(crate) fn wave_dtw(left: &[f64], right: &[f64]) -> std::result::Result<f64, jelly_wave::Error> {
+    jelly_wave::dtw(left, right)
+}
+
+pub(crate) fn wave_dtw_path(
+    left: &[f64],
+    right: &[f64],
+) -> std::result::Result<jelly_wave::DtwAlignment, jelly_wave::Error> {
+    jelly_wave::dtw_with_options(left, right, jelly_wave::DtwOptions::default())
+}
+
+pub(crate) fn wave_erp(
+    left: &[f64],
+    right: &[f64],
+    gap: f64,
+) -> std::result::Result<f64, jelly_wave::Error> {
+    jelly_wave::erp_distance(left, right, gap)
+}
+
+pub(crate) fn wave_frechet(
+    left: &[f64],
+    right: &[f64],
+) -> std::result::Result<f64, jelly_wave::Error> {
+    jelly_wave::discrete_frechet(left, right)
+}
+
+pub(crate) fn wave_soft_dtw(
+    left: &[f64],
+    right: &[f64],
+    gamma: f64,
+) -> std::result::Result<f64, jelly_wave::Error> {
+    jelly_wave::soft_dtw(left, right, gamma, jelly_wave::LocalCost::Absolute)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +300,18 @@ mod tests {
             },
         );
         assert_eq!(err.primary().code, IssueCode::NonFiniteInput);
+    }
+
+    #[test]
+    fn coronel_empty_maps_to_empty_matrix() {
+        let err = failure_from_coronel("bridge", "map", coronel::Error::EmptyInput);
+        assert_eq!(err.primary().code, IssueCode::EmptyMatrix);
+    }
+
+    #[test]
+    fn jelly_wave_empty_maps_to_empty_matrix() {
+        let err = failure_from_jelly_wave("bridge", "map", jelly_wave::Error::EmptyInput);
+        assert_eq!(err.primary().code, IssueCode::EmptyMatrix);
     }
 
     #[test]

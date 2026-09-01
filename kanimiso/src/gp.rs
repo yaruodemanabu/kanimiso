@@ -98,19 +98,20 @@ pub struct FittedGpc {
 
 fn rbf_gram(a: &Matrix, b: &Matrix, ell: f64, sf2: f64, noise: f64, square: bool) -> Mat<f64> {
     let ell2 = (2.0 * ell * ell).max(1e-18);
-    let mut k = Mat::<f64>::zeros(a.nrows(), b.nrows());
-    for i in 0..a.nrows() {
-        for j in 0..b.nrows() {
-            let mut d2 = 0.0;
-            for c in 0..a.ncols().min(b.ncols()) {
-                let d = a.get(i, c) - b.get(j, c);
-                d2 += d * d;
-            }
-            let mut v = sf2 * (-d2 / ell2).exp();
+    let gamma = 1.0 / ell2;
+    let kernel = coronel::Kernel::Rbf { gamma };
+    let mut k = if square && a.nrows() == b.nrows() && a.ncols() == b.ncols() {
+        coronel::gram(kernel, a.inner()).unwrap_or_else(|_| Mat::<f64>::zeros(a.nrows(), a.nrows()))
+    } else {
+        coronel::pairwise(kernel, a.inner(), b.inner())
+            .unwrap_or_else(|_| Mat::<f64>::zeros(a.nrows(), b.nrows()))
+    };
+    for i in 0..k.nrows() {
+        for j in 0..k.ncols() {
+            k[(i, j)] *= sf2;
             if square && i == j {
-                v += noise;
+                k[(i, j)] += noise;
             }
-            k[(i, j)] = v;
         }
     }
     k

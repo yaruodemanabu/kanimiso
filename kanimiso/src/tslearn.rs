@@ -3,6 +3,9 @@
 //! Distances and estimators open a [`crate::context::FitCtx`]. DTW is the
 //! classic dynamic program; soft-DTW uses the `γ`-softmin of Cuturi & Blondel.
 
+use crate::bridge::{
+    issue_from_jelly_wave, wave_dtw, wave_dtw_path, wave_erp, wave_frechet, wave_soft_dtw,
+};
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linalg::{ridge_solve, thin_svd};
@@ -385,27 +388,7 @@ pub fn frechet(a: &Vector, b: &Vector, session: &Session) -> Result<Qualified<f6
 }
 
 fn frechet_raw(a: &[f64], b: &[f64]) -> f64 {
-    if a.is_empty() || b.is_empty() {
-        return f64::NAN;
-    }
-    let n = a.len();
-    let m = b.len();
-    let mut dp = vec![0.0; n * m];
-    let at = |i: usize, j: usize| i * m + j;
-    dp[0] = (a[0] - b[0]).abs();
-    for i in 1..n {
-        dp[at(i, 0)] = dp[at(i - 1, 0)].max((a[i] - b[0]).abs());
-    }
-    for j in 1..m {
-        dp[at(0, j)] = dp[at(0, j - 1)].max((a[0] - b[j]).abs());
-    }
-    for i in 1..n {
-        for j in 1..m {
-            let prev = dp[at(i - 1, j)].min(dp[at(i, j - 1)]).min(dp[at(i - 1, j - 1)]);
-            dp[at(i, j)] = prev.max((a[i] - b[j]).abs());
-        }
-    }
-    dp[at(n - 1, m - 1)]
+    wave_frechet(a, b).unwrap_or(f64::NAN)
 }
 
 /// Pairwise discrete Fréchet (tslearn `cdist` with Fréchet).
@@ -1019,40 +1002,10 @@ fn coarsen_series(s: &[f64]) -> Vec<f64> {
 }
 
 fn dtw_path_cells(a: &[f64], b: &[f64]) -> (f64, Vec<(usize, usize)>) {
-    let n = a.len();
-    let m = b.len();
-    if n == 0 || m == 0 {
-        return (f64::NAN, Vec::new());
+    match wave_dtw_path(a, b) {
+        Ok(alignment) => (alignment.distance, alignment.path),
+        Err(_) => (f64::NAN, Vec::new()),
     }
-    let inf = 1e300_f64;
-    let mut dp = vec![inf; (n + 1) * (m + 1)];
-    let at = |i: usize, j: usize| i * (m + 1) + j;
-    dp[at(0, 0)] = 0.0;
-    for i in 1..=n {
-        for j in 1..=m {
-            let cost = (a[i - 1] - b[j - 1]).abs();
-            dp[at(i, j)] = cost + dp[at(i - 1, j)].min(dp[at(i, j - 1)]).min(dp[at(i - 1, j - 1)]);
-        }
-    }
-    let mut path = Vec::new();
-    let mut i = n;
-    let mut j = m;
-    while i > 0 && j > 0 {
-        path.push((i - 1, j - 1));
-        let up = dp[at(i - 1, j)];
-        let left = dp[at(i, j - 1)];
-        let diag = dp[at(i - 1, j - 1)];
-        if diag <= up && diag <= left {
-            i -= 1;
-            j -= 1;
-        } else if up <= left {
-            i -= 1;
-        } else {
-            j -= 1;
-        }
-    }
-    path.reverse();
-    (dp[at(n, m)], path)
 }
 
 fn expand_fastdtw_window(
@@ -32038,21 +31991,7 @@ fn lcss_raw(a: &[f64], b: &[f64], eps: f64, band: Option<usize>) -> f64 {
 }
 
 fn dtw_raw(a: &[f64], b: &[f64]) -> f64 {
-    let n = a.len();
-    let m = b.len();
-    let inf: f64 = 1e300;
-    let mut prev = vec![inf; m + 1];
-    let mut cur = vec![inf; m + 1];
-    prev[0] = 0.0;
-    for i in 1..=n {
-        cur[0] = inf;
-        for j in 1..=m {
-            let cost: f64 = (a[i - 1] - b[j - 1]).abs();
-            cur[j] = cost + prev[j].min(cur[j - 1]).min(prev[j - 1]);
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    prev[m]
+    wave_dtw(a, b).unwrap_or(f64::NAN)
 }
 
 /// Pairwise DTW between rows of `a` and rows of `b` (each row is a series).
@@ -32060,12 +31999,13 @@ pub fn cdist_dtw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
-    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
-        let ai = a.row(i);
-        let bj = b.row(j);
-        dtw_raw(ai.as_slice(), bj.as_slice())
-    });
-    ctx.finish(out)
+    match jelly_wave::pairwise_dtw(a.inner(), b.inner(), jelly_wave::DtwOptions::default()) {
+        Ok(mat) => ctx.finish(Matrix::from_faer(mat)),
+        Err(err) => {
+            ctx.push(issue_from_jelly_wave(&err));
+            ctx.finish(Matrix::zeros(a.nrows(), b.nrows()))
+        }
+    }
 }
 
 fn softmin(xs: &[f64], gamma: f64) -> f64 {
@@ -32148,27 +32088,7 @@ pub fn softdtw_alignment(
 }
 
 fn softdtw_raw(a: &[f64], b: &[f64], gamma: f64) -> f64 {
-    let n = a.len();
-    let m = b.len();
-    if n == 0 || m == 0 {
-        return f64::NAN;
-    }
-    let inf = 1e300;
-    let mut r = vec![inf; (n + 2) * (m + 2)];
-    let idx = |i: usize, j: usize| i * (m + 2) + j;
-    r[idx(0, 0)] = 0.0;
-    let g = gamma.max(1e-12);
-    for i in 1..=n {
-        for j in 1..=m {
-            let cost = (a[i - 1] - b[j - 1]).abs();
-            let v = softmin(
-                &[r[idx(i - 1, j)], r[idx(i, j - 1)], r[idx(i - 1, j - 1)]],
-                g,
-            );
-            r[idx(i, j)] = cost + v;
-        }
-    }
-    r[idx(n, m)]
+    wave_soft_dtw(a, b, gamma).unwrap_or(f64::NAN)
 }
 
 fn softdtw_path(a: &[f64], b: &[f64], gamma: f64) -> Vec<(usize, usize)> {
@@ -32237,40 +32157,9 @@ pub fn cdist_softdtw(
 }
 
 fn dtw_path(a: &[f64], b: &[f64]) -> Vec<(usize, usize)> {
-    let n = a.len();
-    let m = b.len();
-    let inf: f64 = 1e300;
-    let mut dp = vec![inf; (n + 1) * (m + 1)];
-    let at = |i: usize, j: usize| i * (m + 1) + j;
-    dp[at(0, 0)] = 0.0;
-    for i in 1..=n {
-        for j in 1..=m {
-            let cost = (a[i - 1] - b[j - 1]).abs();
-            dp[at(i, j)] = cost
-                + dp[at(i - 1, j)]
-                    .min(dp[at(i, j - 1)])
-                    .min(dp[at(i - 1, j - 1)]);
-        }
-    }
-    let mut path = Vec::new();
-    let mut i = n;
-    let mut j = m;
-    while i > 0 && j > 0 {
-        path.push((i - 1, j - 1));
-        let a1 = dp[at(i - 1, j)];
-        let a2 = dp[at(i, j - 1)];
-        let a3 = dp[at(i - 1, j - 1)];
-        if a3 <= a1 && a3 <= a2 {
-            i -= 1;
-            j -= 1;
-        } else if a1 <= a2 {
-            i -= 1;
-        } else {
-            j -= 1;
-        }
-    }
-    path.reverse();
-    path
+    wave_dtw_path(a, b)
+        .map(|alignment| alignment.path)
+        .unwrap_or_default()
 }
 
 /// DTW alignment path as an `n_path × 2` index matrix (tslearn `dtw_path`).
@@ -32310,34 +32199,18 @@ pub fn dtw_barycenter(x: &Matrix, max_iter: usize, session: &Session) -> Result<
     if x.nrows() == 0 || x.ncols() == 0 {
         return ctx.finish(Vector::zeros(0));
     }
-    let t = x.ncols();
-    let mut c = Vector::from_iter((0..t).map(|j| x.column(j).mean()));
-    for it in 0..max_iter.max(1) {
-        let mut acc = vec![0.0; t];
-        let mut cnt = vec![0.0; t];
-        for i in 0..x.nrows() {
-            let s = x.row(i);
-            let path = dtw_path(c.as_slice(), s.as_slice());
-            for (ci, si) in path {
-                acc[ci] += s[si];
-                cnt[ci] += 1.0;
-            }
-        }
-        let mut delta = 0.0;
-        for j in 0..t {
-            if cnt[j] > 0.0 {
-                let v = acc[j] / cnt[j];
-                delta += (v - c[j]).abs();
-                c[j] = v;
-            }
-        }
-        ctx.session.step(it as u64, delta, None);
-        if delta < 1e-8 {
-            ctx.session.converged("DBA", it as u64);
-            break;
+    match jelly_wave::dtw_barycenter_averaging(
+        x.inner(),
+        max_iter.max(1),
+        1e-8,
+        jelly_wave::DtwOptions::default(),
+    ) {
+        Ok(center) => ctx.finish(Vector::from_iter(center)),
+        Err(err) => {
+            ctx.push(issue_from_jelly_wave(&err));
+            ctx.finish(Vector::zeros(x.ncols()))
         }
     }
-    ctx.finish(c)
 }
 
 /// k-means with DTW distance and DBA centroids.
@@ -35016,25 +34889,13 @@ pub fn erp(a: &Vector, b: &Vector, g: f64, session: &Session) -> Result<Qualifie
         ctx.push(Issue::builder(IssueCode::EmptyMatrix).build());
         return ctx.finish(f64::NAN);
     }
-    let n = a.len();
-    let m = b.len();
-    let mut dp = vec![0.0; (n + 1) * (m + 1)];
-    let at = |i: usize, j: usize| i * (m + 1) + j;
-    for i in 1..=n {
-        dp[at(i, 0)] = dp[at(i - 1, 0)] + (a[i - 1] - g).abs();
-    }
-    for j in 1..=m {
-        dp[at(0, j)] = dp[at(0, j - 1)] + (b[j - 1] - g).abs();
-    }
-    for i in 1..=n {
-        for j in 1..=m {
-            let match_c = dp[at(i - 1, j - 1)] + (a[i - 1] - b[j - 1]).abs();
-            let del = dp[at(i - 1, j)] + (a[i - 1] - g).abs();
-            let ins = dp[at(i, j - 1)] + (b[j - 1] - g).abs();
-            dp[at(i, j)] = match_c.min(del).min(ins);
+    match wave_erp(a.as_slice(), b.as_slice(), g) {
+        Ok(v) => ctx.finish(v),
+        Err(err) => {
+            ctx.push(issue_from_jelly_wave(&err));
+            ctx.finish(f64::NAN)
         }
     }
-    ctx.finish(dp[at(n, m)])
 }
 
 fn msm_cost(new_p: f64, x: f64, y: f64, c: f64) -> f64 {
@@ -39913,28 +39774,7 @@ pub fn cdist_ctw(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<
 }
 
 fn erp_raw(a: &[f64], b: &[f64], g: f64) -> f64 {
-    if a.is_empty() || b.is_empty() {
-        return f64::NAN;
-    }
-    let n = a.len();
-    let m = b.len();
-    let mut dp = vec![0.0; (n + 1) * (m + 1)];
-    let at = |i: usize, j: usize| i * (m + 1) + j;
-    for i in 1..=n {
-        dp[at(i, 0)] = dp[at(i - 1, 0)] + (a[i - 1] - g).abs();
-    }
-    for j in 1..=m {
-        dp[at(0, j)] = dp[at(0, j - 1)] + (b[j - 1] - g).abs();
-    }
-    for i in 1..=n {
-        for j in 1..=m {
-            let match_c = dp[at(i - 1, j - 1)] + (a[i - 1] - b[j - 1]).abs();
-            let del = dp[at(i - 1, j)] + (a[i - 1] - g).abs();
-            let ins = dp[at(i, j - 1)] + (b[j - 1] - g).abs();
-            dp[at(i, j)] = match_c.min(del).min(ins);
-        }
-    }
-    dp[at(n, m)]
+    wave_erp(a, b, g).unwrap_or(f64::NAN)
 }
 
 /// Pairwise ERP (tslearn `cdist_erp`).

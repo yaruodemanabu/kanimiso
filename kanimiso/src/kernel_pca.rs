@@ -62,12 +62,14 @@ pub struct FittedKernelPca {
 }
 
 fn rbf(a: &Matrix, i: usize, b: &Matrix, j: usize, gamma: f64) -> f64 {
-    let mut d2 = 0.0;
-    for c in 0..a.ncols().min(b.ncols()) {
-        let d = a.get(i, c) - b.get(j, c);
-        d2 += d * d;
-    }
-    (-gamma.max(1e-12) * d2).exp()
+    let g = if gamma.is_finite() && gamma > 0.0 {
+        gamma
+    } else {
+        1.0
+    };
+    let ai: Vec<f64> = (0..a.ncols()).map(|c| a.get(i, c)).collect();
+    let bj: Vec<f64> = (0..b.ncols()).map(|c| b.get(j, c)).collect();
+    coronel::value(coronel::Kernel::Rbf { gamma: g }, &ai, &bj).unwrap_or(0.0)
 }
 
 fn center_gram(k: &Mat<f64>) -> (Mat<f64>, Vector, f64) {
@@ -118,14 +120,18 @@ impl FitUnsupervised for KernelPca {
                 grand_mean: 0.0,
             });
         }
-        let mut k = Mat::<f64>::zeros(n, n);
-        for i in 0..n {
-            for j in 0..=i {
-                let v = rbf(x, i, x, j, self.gamma);
-                k[(i, j)] = v;
-                k[(j, i)] = v;
+        let g = if self.gamma.is_finite() && self.gamma > 0.0 {
+            self.gamma
+        } else {
+            1.0
+        };
+        let k = match coronel::gram(coronel::Kernel::Rbf { gamma: g }, x.inner()) {
+            Ok(mat) => mat,
+            Err(err) => {
+                ctx.push(crate::bridge::issue_from_coronel(&err));
+                Mat::<f64>::zeros(n, n)
             }
-        }
+        };
         let (kc, row_mean, grand) = center_gram(&k);
         let Some((vals, vecs)) = symmetric_eigen(&mut ctx.report, &kc, &ctx.policy) else {
             ctx.push(

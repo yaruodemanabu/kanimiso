@@ -19,6 +19,10 @@ use signlred::{
     Severity,
 };
 
+/// Coronel kernel enum (AGENTS.md §3.4). Estimators still use the two-way
+/// [`Kernel`] below and map it onto this type at call time.
+pub use coronel::Kernel as CoronelKernel;
+
 /// Kernel used by dual SVM / SVR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kernel {
@@ -42,37 +46,36 @@ fn y_pm(y: &[i64], classes: &[i64]) -> Vec<f64> {
         .collect()
 }
 
-fn kernel_val(kind: Kernel, gamma: f64, x: &Matrix, i: usize, z: &Matrix, t: usize) -> f64 {
+fn coronel_kernel(kind: Kernel, gamma: f64) -> coronel::Kernel {
     match kind {
-        Kernel::Linear => {
-            let mut s = 0.0;
-            for j in 0..x.ncols().min(z.ncols()) {
-                s += x.get(i, j) * z.get(t, j);
-            }
-            s
-        }
-        Kernel::Rbf => {
-            let mut d2 = 0.0;
-            for j in 0..x.ncols().min(z.ncols()) {
-                let d = x.get(i, j) - z.get(t, j);
-                d2 += d * d;
-            }
-            (-gamma * d2).exp()
-        }
+        Kernel::Linear => coronel::Kernel::Linear,
+        Kernel::Rbf => coronel::Kernel::Rbf {
+            gamma: if gamma.is_finite() && gamma > 0.0 {
+                gamma
+            } else {
+                1.0
+            },
+        },
     }
+}
+
+fn kernel_val(kind: Kernel, gamma: f64, x: &Matrix, i: usize, z: &Matrix, t: usize) -> f64 {
+    let xi: Vec<f64> = (0..x.ncols()).map(|j| x.get(i, j)).collect();
+    let zt: Vec<f64> = (0..z.ncols()).map(|j| z.get(t, j)).collect();
+    coronel::value(coronel_kernel(kind, gamma), &xi, &zt).unwrap_or(0.0)
 }
 
 fn gram(kind: Kernel, gamma: f64, x: &Matrix) -> Vec<Vec<f64>> {
     let n = x.nrows();
-    let mut k = vec![vec![0.0; n]; n];
-    for i in 0..n {
-        for j in 0..=i {
-            let kij = kernel_val(kind, gamma, x, i, x, j);
-            k[i][j] = kij;
-            k[j][i] = kij;
-        }
+    if n == 0 || x.ncols() == 0 {
+        return vec![vec![0.0; n]; n];
     }
-    k
+    match coronel::gram(coronel_kernel(kind, gamma), x.inner()) {
+        Ok(mat) => (0..n)
+            .map(|i| (0..n).map(|j| mat[(i, j)]).collect())
+            .collect(),
+        Err(_) => vec![vec![0.0; n]; n],
+    }
 }
 
 fn inspect_kernel_pd(ctx: &mut FitCtx, k: &[Vec<f64>]) {

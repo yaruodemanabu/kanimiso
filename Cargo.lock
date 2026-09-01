@@ -495,7 +495,9 @@ dependencies = [
 name = "kanimiso"
 version = "0.1.0"
 dependencies = [
+ "coronel",
  "faer",
+ "jelly-wave",
  "ojizou-san",
  "serde_json",
  "signlred",

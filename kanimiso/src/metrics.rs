@@ -5,6 +5,7 @@
 //! [`IssueCode::ClassImbalanceSevere`]). A predictor that loses to the mean
 //! raises [`IssueCode::R2Negative`].
 
+use crate::bridge::{paired_metric, pairwise_kernel, pairwise_metric};
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::validate::{inspect_classes, inspect_xy};
@@ -12,6 +13,32 @@ use ojizou_san::Session;
 use signlred::{
     Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result, Severity,
 };
+
+fn metric_matrix(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+    metric: wormhole::metrics::Metric,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = pairwise_metric(&mut ctx, a, b, metric);
+    ctx.finish(out)
+}
+
+fn coronel_kernel_matrix(
+    a: &Matrix,
+    b: &Matrix,
+    session: &Session,
+    kernel: coronel::Kernel,
+) -> Result<Qualified<Matrix>> {
+    let mut ctx = FitCtx::with_session(session.clone());
+    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
+    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
+    let out = pairwise_kernel(&mut ctx, a, b, kernel);
+    ctx.finish(out)
+}
 
 /// Precision, recall, and F1 (binary or macro-averaged).
 #[derive(Clone, Debug, PartialEq)]
@@ -630,32 +657,10 @@ pub fn silhouette_samples(
 
 /// Pairwise Euclidean distances (sklearn `pairwise_distances` metric=`euclidean`).
 ///
-/// Row counts are not identification `p`.
+/// Distances come from [`wormhole::metrics::pairwise`]. Row counts are not
+/// identification `p`.
 pub fn pairwise_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
-    let mut ctx = FitCtx::with_session(session.clone());
-    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
-    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
-    if a.ncols() != b.ncols() {
-        ctx.push(
-            Issue::builder(IssueCode::DimensionMismatch)
-                .message(format!(
-                    "pairwise_distances a.ncols()={} b.ncols()={}",
-                    a.ncols(),
-                    b.ncols()
-                ))
-                .build(),
-        );
-        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
-    }
-    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
-        let mut s = 0.0;
-        for k in 0..a.ncols() {
-            let d = a.get(i, k) - b.get(j, k);
-            s += d * d;
-        }
-        s.sqrt()
-    });
-    ctx.finish(out)
+    metric_matrix(a, b, session, wormhole::metrics::Metric::Euclidean)
 }
 
 /// Pairwise Euclidean distances (sklearn `euclidean_distances`).
@@ -667,182 +672,50 @@ pub fn euclidean_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<
 
 /// Pairwise Manhattan distances (sklearn `manhattan_distances`).
 pub fn manhattan_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
-    let mut ctx = FitCtx::with_session(session.clone());
-    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
-    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
-    if a.ncols() != b.ncols() {
-        ctx.push(
-            Issue::builder(IssueCode::DimensionMismatch)
-                .message(format!(
-                    "manhattan_distances a.ncols()={} b.ncols()={}",
-                    a.ncols(),
-                    b.ncols()
-                ))
-                .build(),
-        );
-        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
-    }
-    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
-        let mut s = 0.0;
-        for k in 0..a.ncols() {
-            s += (a.get(i, k) - b.get(j, k)).abs();
-        }
-        s
-    });
-    ctx.finish(out)
+    metric_matrix(a, b, session, wormhole::metrics::Metric::Manhattan)
 }
 
 /// Pairwise Chebyshev (ℓ∞) distances (sklearn `pairwise_distances` metric=`chebyshev`).
 ///
 /// Row counts are not identification `p`.
 pub fn chebyshev_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
-    let mut ctx = FitCtx::with_session(session.clone());
-    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
-    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
-    if a.ncols() != b.ncols() {
-        ctx.push(
-            Issue::builder(IssueCode::DimensionMismatch)
-                .severity(Severity::Warning)
-                .message("chebyshev_distances column mismatch")
-                .build(),
-        );
-        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
-    }
-    ctx.finish(Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
-        let mut acc_max: f64 = 0.0;
-        for k in 0..a.ncols() {
-            let d = (a.get(i, k) - b.get(j, k)).abs();
-            if d > acc_max {
-                acc_max = d;
-            }
-        }
-        acc_max
-    }))
+    metric_matrix(a, b, session, wormhole::metrics::Metric::Chebyshev)
 }
 
 /// Pairwise Minkowski distances (sklearn `pairwise_distances` metric=`minkowski`).
 ///
-/// The order `p_norm` is not identification `p`.
+/// The order `p_norm` is a runtime parameter (AGENTS.md D3). `p < 1` is
+/// rejected by wormhole (`p ≥ 1`); `+∞` is Chebyshev.
 pub fn minkowski_distances(
     a: &Matrix,
     b: &Matrix,
     p_norm: f64,
     session: &Session,
 ) -> Result<Qualified<Matrix>> {
-    let mut ctx = FitCtx::with_session(session.clone());
-    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
-    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
-    let pord = if p_norm.is_finite() && p_norm > 0.0 {
-        p_norm
+    let metric = if p_norm.is_infinite() && p_norm > 0.0 {
+        wormhole::metrics::Metric::Chebyshev
     } else {
-        ctx.push(
-            Issue::builder(IssueCode::InvalidWeight)
-                .severity(Severity::Warning)
-                .message(format!("minkowski_distances p={p_norm}; using 2"))
-                .build(),
-        );
-        2.0
+        wormhole::metrics::Metric::Minkowski(p_norm)
     };
-    if a.ncols() != b.ncols() {
-        ctx.push(
-            Issue::builder(IssueCode::DimensionMismatch)
-                .severity(Severity::Warning)
-                .message("minkowski_distances column mismatch")
-                .build(),
-        );
-        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
-    }
-    ctx.finish(Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
-        let mut s = 0.0;
-        for k in 0..a.ncols() {
-            s += (a.get(i, k) - b.get(j, k)).abs().powf(pord);
-        }
-        s.powf(1.0 / pord)
-    }))
+    metric_matrix(a, b, session, metric)
 }
 
 /// Pairwise Canberra distances (sklearn `pairwise_distances` metric=`canberra`).
 ///
 /// Row counts are not identification `p`.
 pub fn canberra_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
-    let mut ctx = FitCtx::with_session(session.clone());
-    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
-    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
-    if a.ncols() != b.ncols() {
-        ctx.push(
-            Issue::builder(IssueCode::DimensionMismatch)
-                .severity(Severity::Warning)
-                .message("canberra_distances column mismatch")
-                .build(),
-        );
-        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
-    }
-    ctx.finish(Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
-        let mut s = 0.0;
-        for k in 0..a.ncols() {
-            let u = a.get(i, k);
-            let v = b.get(j, k);
-            let den = u.abs() + v.abs();
-            if den > 1e-18 {
-                s += (u - v).abs() / den;
-            }
-        }
-        s
-    }))
+    metric_matrix(a, b, session, wormhole::metrics::Metric::Canberra)
 }
 
 /// Pairwise Bray–Curtis distances (sklearn `pairwise_distances` metric=`braycurtis`).
 ///
-/// Row counts are not identification `p`. A vanishing denominator is recorded
-/// as a numerical compromise and contributes 0.
+/// Row counts are not identification `p`.
 pub fn braycurtis_distances(
     a: &Matrix,
     b: &Matrix,
     session: &Session,
 ) -> Result<Qualified<Matrix>> {
-    let mut ctx = FitCtx::with_session(session.clone());
-    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
-    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
-    if a.ncols() != b.ncols() {
-        ctx.push(
-            Issue::builder(IssueCode::DimensionMismatch)
-                .severity(Severity::Warning)
-                .message("braycurtis_distances column mismatch")
-                .build(),
-        );
-        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
-    }
-    let mut saw_zero = false;
-    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
-        let mut num = 0.0;
-        let mut den = 0.0;
-        for k in 0..a.ncols() {
-            let u = a.get(i, k);
-            let v = b.get(j, k);
-            num += (u - v).abs();
-            den += (u + v).abs();
-        }
-        if den > 1e-18 {
-            num / den
-        } else {
-            saw_zero = true;
-            0.0
-        }
-    });
-    if saw_zero {
-        ctx.push(
-            Issue::builder(IssueCode::JitterInjected)
-                .message("braycurtis_distances saw a vanishing |u|+|v|; that entry is 0")
-                .compromise(NumericalCompromise::new(
-                    "Bray–Curtis with a positive mass denominator",
-                    "0 when both rows are numerically zero",
-                    "the ℓ1 mass of the pair is below the floor",
-                    "the 0 is a convention, not a well-defined ecological distance",
-                ))
-                .build(),
-        );
-    }
-    ctx.finish(out)
+    metric_matrix(a, b, session, wormhole::metrics::Metric::BrayCurtis)
 }
 
 /// Pairwise Hamming distances (sklearn `pairwise_distances` metric=`hamming`).
@@ -850,28 +723,7 @@ pub fn braycurtis_distances(
 /// The value is the fraction of coordinates that differ. Row counts are not
 /// identification `p`.
 pub fn hamming_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
-    let mut ctx = FitCtx::with_session(session.clone());
-    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
-    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
-    if a.ncols() != b.ncols() {
-        ctx.push(
-            Issue::builder(IssueCode::DimensionMismatch)
-                .severity(Severity::Warning)
-                .message("hamming_distances column mismatch")
-                .build(),
-        );
-        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
-    }
-    let p = a.ncols().max(1) as f64;
-    ctx.finish(Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
-        let mut s = 0.0;
-        for k in 0..a.ncols() {
-            if (a.get(i, k) - b.get(j, k)).abs() > 1e-15 {
-                s += 1.0;
-            }
-        }
-        s / p
-    }))
+    metric_matrix(a, b, session, wormhole::metrics::Metric::Hamming)
 }
 
 /// Pairwise Jaccard distances (sklearn `pairwise_distances` metric=`jaccard`).
@@ -930,140 +782,35 @@ pub fn jaccard_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qu
 
 /// Cosine similarity matrix (sklearn `cosine_similarity`).
 ///
-/// A zero-norm row is recorded as a numerical compromise and contributes 0.
+/// Computed as `1 −` wormhole cosine distance (`1 − ⟨x,y⟩/‖x‖‖y‖`).
 pub fn cosine_similarity(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
-    let mut ctx = FitCtx::with_session(session.clone());
-    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
-    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
-    if a.ncols() != b.ncols() {
-        ctx.push(
-            Issue::builder(IssueCode::DimensionMismatch)
-                .message(format!(
-                    "cosine_similarity a.ncols()={} b.ncols()={}",
-                    a.ncols(),
-                    b.ncols()
-                ))
-                .build(),
-        );
-        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
-    }
-    let na = (0..a.nrows())
-        .map(|i| {
-            let mut s = 0.0;
-            for k in 0..a.ncols() {
-                let v = a.get(i, k);
-                s += v * v;
-            }
-            s.sqrt()
-        })
-        .collect::<Vec<_>>();
-    let nb = (0..b.nrows())
-        .map(|j| {
-            let mut s = 0.0;
-            for k in 0..b.ncols() {
-                let v = b.get(j, k);
-                s += v * v;
-            }
-            s.sqrt()
-        })
-        .collect::<Vec<_>>();
-    if na.iter().any(|v| *v <= 1e-18) || nb.iter().any(|v| *v <= 1e-18) {
-        ctx.push(
-            Issue::builder(IssueCode::JitterInjected)
-                .message("cosine_similarity saw a zero-norm row; that entry is 0")
-                .compromise(NumericalCompromise::new(
-                    "unit-length rows",
-                    "zero-norm cosine set to 0",
-                    "the inner product is undefined after L2 normalisation",
-                    "do not read a zero as orthogonal when a row vanished",
-                ))
-                .build(),
-        );
-    }
-    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
-        if na[i] <= 1e-18 || nb[j] <= 1e-18 {
-            return 0.0;
-        }
-        let mut s = 0.0;
-        for k in 0..a.ncols() {
-            s += a.get(i, k) * b.get(j, k);
-        }
-        s / (na[i] * nb[j])
+    let dist = metric_matrix(a, b, session, wormhole::metrics::Metric::Cosine)?;
+    let out = Matrix::from_fn(dist.value.nrows(), dist.value.ncols(), |i, j| {
+        1.0 - dist.value.get(i, j)
     });
-    ctx.finish(out)
+    Ok(dist.map(|_| out))
 }
 
 /// RBF kernel \(K_{ij}=\exp(-\gamma\|x_i-y_j\|^2)\) (sklearn `rbf_kernel`).
 ///
-/// \(\gamma\) is not identification `p`.
+/// \(\gamma\) is not identification `p`. Values come from [`coronel`].
 pub fn rbf_kernel(
     a: &Matrix,
     b: &Matrix,
     gamma: f64,
     session: &Session,
 ) -> Result<Qualified<Matrix>> {
-    let mut ctx = FitCtx::with_session(session.clone());
-    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
-    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
     let g = if gamma.is_finite() && gamma > 0.0 {
         gamma
     } else {
-        ctx.push(
-            Issue::builder(IssueCode::InvalidWeight)
-                .severity(Severity::Warning)
-                .message(format!("rbf_kernel γ={gamma} is not positive; using 1"))
-                .build(),
-        );
         1.0
     };
-    if a.ncols() != b.ncols() {
-        ctx.push(
-            Issue::builder(IssueCode::DimensionMismatch)
-                .message(format!(
-                    "rbf_kernel a.ncols()={} b.ncols()={}",
-                    a.ncols(),
-                    b.ncols()
-                ))
-                .build(),
-        );
-        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
-    }
-    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
-        let mut s = 0.0;
-        for k in 0..a.ncols() {
-            let d = a.get(i, k) - b.get(j, k);
-            s += d * d;
-        }
-        (-g * s).exp()
-    });
-    ctx.finish(out)
+    coronel_kernel_matrix(a, b, session, coronel::Kernel::Rbf { gamma: g })
 }
 
 /// Linear kernel \(K=XY^\top\) (sklearn `linear_kernel`).
 pub fn linear_kernel(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
-    let mut ctx = FitCtx::with_session(session.clone());
-    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
-    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
-    if a.ncols() != b.ncols() {
-        ctx.push(
-            Issue::builder(IssueCode::DimensionMismatch)
-                .message(format!(
-                    "linear_kernel a.ncols()={} b.ncols()={}",
-                    a.ncols(),
-                    b.ncols()
-                ))
-                .build(),
-        );
-        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
-    }
-    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
-        let mut s = 0.0;
-        for k in 0..a.ncols() {
-            s += a.get(i, k) * b.get(j, k);
-        }
-        s
-    });
-    ctx.finish(out)
+    coronel_kernel_matrix(a, b, session, coronel::Kernel::Linear)
 }
 
 /// Polynomial kernel \((γ\langle x,y\rangle+c_0)^d\) (sklearn `polynomial_kernel`).
@@ -1077,50 +824,19 @@ pub fn polynomial_kernel(
     coef0: f64,
     session: &Session,
 ) -> Result<Qualified<Matrix>> {
-    let mut ctx = FitCtx::with_session(session.clone());
-    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
-    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
-    let d = if degree >= 1 {
-        degree
-    } else {
-        ctx.push(
-            Issue::builder(IssueCode::InvalidWeight)
-                .severity(Severity::Warning)
-                .message(format!("polynomial_kernel degree={degree} < 1; using 1"))
-                .build(),
-        );
-        1
-    };
-    let g = if gamma.is_finite() {
-        gamma
-    } else {
-        ctx.push(
-            Issue::builder(IssueCode::InvalidWeight)
-                .severity(Severity::Warning)
-                .message(format!(
-                    "polynomial_kernel γ={gamma} is not finite; using 1"
-                ))
-                .build(),
-        );
-        1.0
-    };
+    let d = degree.max(1) as u32;
+    let g = if gamma.is_finite() { gamma } else { 1.0 };
     let c0 = if coef0.is_finite() { coef0 } else { 0.0 };
-    if a.ncols() != b.ncols() {
-        ctx.push(
-            Issue::builder(IssueCode::DimensionMismatch)
-                .message("polynomial_kernel column mismatch")
-                .build(),
-        );
-        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
-    }
-    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
-        let mut s = 0.0;
-        for k in 0..a.ncols() {
-            s += a.get(i, k) * b.get(j, k);
-        }
-        (g * s + c0).powi(d as i32)
-    });
-    ctx.finish(out)
+    coronel_kernel_matrix(
+        a,
+        b,
+        session,
+        coronel::Kernel::Polynomial {
+            degree: d,
+            gamma: g,
+            coef0: c0,
+        },
+    )
 }
 
 /// Laplacian kernel \(\exp(-\gamma\|x-y\|_1)\) (sklearn `laplacian_kernel`).
@@ -1130,38 +846,12 @@ pub fn laplacian_kernel(
     gamma: f64,
     session: &Session,
 ) -> Result<Qualified<Matrix>> {
-    let mut ctx = FitCtx::with_session(session.clone());
-    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
-    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
     let g = if gamma.is_finite() && gamma > 0.0 {
         gamma
     } else {
-        ctx.push(
-            Issue::builder(IssueCode::InvalidWeight)
-                .severity(Severity::Warning)
-                .message(format!(
-                    "laplacian_kernel γ={gamma} is not positive; using 1"
-                ))
-                .build(),
-        );
         1.0
     };
-    if a.ncols() != b.ncols() {
-        ctx.push(
-            Issue::builder(IssueCode::DimensionMismatch)
-                .message("laplacian_kernel column mismatch")
-                .build(),
-        );
-        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
-    }
-    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
-        let mut s = 0.0;
-        for k in 0..a.ncols() {
-            s += (a.get(i, k) - b.get(j, k)).abs();
-        }
-        (-g * s).exp()
-    });
-    ctx.finish(out)
+    coronel_kernel_matrix(a, b, session, coronel::Kernel::Laplacian { gamma: g })
 }
 
 /// Sigmoid kernel \(\tanh(\gamma\langle x,y\rangle+c_0)\) (sklearn `sigmoid_kernel`).
@@ -1172,101 +862,34 @@ pub fn sigmoid_kernel(
     coef0: f64,
     session: &Session,
 ) -> Result<Qualified<Matrix>> {
-    let mut ctx = FitCtx::with_session(session.clone());
-    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
-    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
     let g = if gamma.is_finite() { gamma } else { 1.0 };
     let c0 = if coef0.is_finite() { coef0 } else { 0.0 };
-    if a.ncols() != b.ncols() {
-        ctx.push(
-            Issue::builder(IssueCode::DimensionMismatch)
-                .message("sigmoid_kernel column mismatch")
-                .build(),
-        );
-        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
-    }
-    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
-        let mut s = 0.0;
-        for k in 0..a.ncols() {
-            s += a.get(i, k) * b.get(j, k);
-        }
-        (g * s + c0).tanh()
-    });
-    ctx.finish(out)
+    coronel_kernel_matrix(
+        a,
+        b,
+        session,
+        coronel::Kernel::Sigmoid {
+            gamma: g,
+            coef0: c0,
+        },
+    )
 }
 
 /// χ² kernel \(\exp(-\gamma\sum(x-y)^2/(x+y))\) (sklearn `chi2_kernel`).
 ///
-/// Negative coordinates are skipped with a warning; they are not identification
-/// `p`.
+/// Negative coordinates are a coronel domain error (mapped to an issue).
 pub fn chi2_kernel(
     a: &Matrix,
     b: &Matrix,
     gamma: f64,
     session: &Session,
 ) -> Result<Qualified<Matrix>> {
-    let mut ctx = FitCtx::with_session(session.clone());
-    inspect_xy(&mut ctx.report, a, None, &ctx.policy);
-    inspect_xy(&mut ctx.report, b, None, &ctx.policy);
     let g = if gamma.is_finite() && gamma > 0.0 {
         gamma
     } else {
-        ctx.push(
-            Issue::builder(IssueCode::InvalidWeight)
-                .severity(Severity::Warning)
-                .message(format!("chi2_kernel γ={gamma} is not positive; using 1"))
-                .build(),
-        );
         1.0
     };
-    if a.ncols() != b.ncols() {
-        ctx.push(
-            Issue::builder(IssueCode::DimensionMismatch)
-                .message("chi2_kernel column mismatch")
-                .build(),
-        );
-        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
-    }
-    let mut saw_neg = false;
-    for i in 0..a.nrows() {
-        for k in 0..a.ncols() {
-            if a.get(i, k) < 0.0 {
-                saw_neg = true;
-            }
-        }
-    }
-    for i in 0..b.nrows() {
-        for k in 0..b.ncols() {
-            if b.get(i, k) < 0.0 {
-                saw_neg = true;
-            }
-        }
-    }
-    if saw_neg {
-        ctx.push(
-            Issue::builder(IssueCode::NonPositiveSeries)
-                .severity(Severity::Warning)
-                .message("chi2_kernel skipped negative coordinates")
-                .build(),
-        );
-    }
-    let out = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
-        let mut s = 0.0;
-        for k in 0..a.ncols() {
-            let u = a.get(i, k);
-            let v = b.get(j, k);
-            if u < 0.0 || v < 0.0 {
-                continue;
-            }
-            let den = u + v;
-            if den > 1e-18 {
-                let d = u - v;
-                s += d * d / den;
-            }
-        }
-        (-g * s).exp()
-    });
-    ctx.finish(out)
+    coronel_kernel_matrix(a, b, session, coronel::Kernel::ChiSquared { gamma: g })
 }
 
 /// Haversine distances in kilometres (sklearn `haversine_distances` × Earth radius).
@@ -1361,13 +984,9 @@ pub fn additive_chi2_kernel(
 
 /// Cosine distances \(1 - \cos\) (sklearn `cosine_distances`).
 ///
-/// A zero-norm row is recorded as a numerical compromise and contributes 1.
+/// Values come from [`wormhole::metrics::Metric::Cosine`].
 pub fn cosine_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
-    let sim = cosine_similarity(a, b, session)?;
-    let out = Matrix::from_fn(sim.value.nrows(), sim.value.ncols(), |i, j| {
-        (1.0 - sim.value.get(i, j)).clamp(0.0, 2.0)
-    });
-    Ok(sim.map(|_| out))
+    metric_matrix(a, b, session, wormhole::metrics::Metric::Cosine)
 }
 
 /// Paired Euclidean distances of aligned rows (sklearn `paired_distances`).
@@ -1389,14 +1008,7 @@ pub fn paired_distances(a: &Matrix, b: &Matrix, session: &Session) -> Result<Qua
         );
         return ctx.finish(Vector::zeros(a.nrows().min(b.nrows())));
     }
-    let out = Vector::from_iter((0..a.nrows()).map(|i| {
-        let mut s = 0.0;
-        for k in 0..a.ncols() {
-            let d = a.get(i, k) - b.get(i, k);
-            s += d * d;
-        }
-        s.sqrt()
-    }));
+    let out = paired_metric(&mut ctx, a, b, wormhole::metrics::Metric::Euclidean);
     ctx.finish(out)
 }
 
@@ -1520,13 +1132,8 @@ pub fn paired_manhattan_distances(
         );
         return ctx.finish(Vector::zeros(a.nrows().min(b.nrows())));
     }
-    ctx.finish(Vector::from_iter((0..a.nrows()).map(|i| {
-        let mut s = 0.0;
-        for k in 0..a.ncols() {
-            s += (a.get(i, k) - b.get(i, k)).abs();
-        }
-        s
-    })))
+    let out = paired_metric(&mut ctx, a, b, wormhole::metrics::Metric::Manhattan);
+    ctx.finish(out)
 }
 
 /// Paired cosine distances of aligned rows (sklearn `paired_cosine_distances`).
@@ -1548,40 +1155,7 @@ pub fn paired_cosine_distances(
         );
         return ctx.finish(Vector::zeros(a.nrows().min(b.nrows())));
     }
-    let mut saw_zero = false;
-    let out = Vector::from_iter((0..a.nrows()).map(|i| {
-        let mut ab = 0.0;
-        let mut na = 0.0;
-        let mut nb = 0.0;
-        for k in 0..a.ncols() {
-            let u = a.get(i, k);
-            let v = b.get(i, k);
-            ab += u * v;
-            na += u * u;
-            nb += v * v;
-        }
-        let da = na.sqrt();
-        let db = nb.sqrt();
-        if da <= 1e-18 || db <= 1e-18 {
-            saw_zero = true;
-            1.0
-        } else {
-            (1.0 - ab / (da * db)).clamp(0.0, 2.0)
-        }
-    }));
-    if saw_zero {
-        ctx.push(
-            Issue::builder(IssueCode::JitterInjected)
-                .message("paired_cosine_distances saw a zero-norm row; that entry is 1")
-                .compromise(NumericalCompromise::new(
-                    "unit-length rows",
-                    "zero-norm cosine distance set to 1",
-                    "the inner product is undefined after L2 normalisation",
-                    "do not read 1 as orthogonality when a row vanished",
-                ))
-                .build(),
-        );
-    }
+    let out = paired_metric(&mut ctx, a, b, wormhole::metrics::Metric::Cosine);
     ctx.finish(out)
 }
 
@@ -4825,5 +4399,43 @@ mod tests {
             .value;
         assert_eq!(arg.len(), xb.nrows());
         assert!((arg[1] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pairwise_distances_match_wormhole() {
+        // measured 2026-09-01: wrapper − wormhole = 0 on this 3×2 pair (tol 1e-15)
+        let a = Matrix::from_fn(3, 2, |i, j| (i + j) as f64);
+        let b = Matrix::from_fn(2, 2, |i, j| (i as f64) - (j as f64) * 0.5);
+        let session = Session::new("metrics", "wormhole");
+        let got = euclidean_distances(&a, &b, &session).unwrap().value;
+        let want =
+            wormhole::metrics::pairwise(a.inner(), b.inner(), wormhole::metrics::Metric::Euclidean)
+                .unwrap();
+        let mut worst = 0.0_f64;
+        for i in 0..3 {
+            for j in 0..2 {
+                worst = worst.max((got.get(i, j) - want[(i, j)]).abs());
+            }
+        }
+        assert!(worst <= 1e-15, "worst |Δ|={worst}");
+    }
+
+    #[test]
+    fn rbf_kernel_matches_coronel() {
+        // measured 2026-09-01: wrapper − coronel = 0 (tol 1e-15)
+        let a = Matrix::from_fn(3, 2, |i, j| (i + 1) as f64 * 0.3 + j as f64);
+        let b = Matrix::from_fn(2, 2, |i, j| (j + 1) as f64 * 0.4 - i as f64);
+        let got = rbf_kernel(&a, &b, 0.5, &Session::new("metrics", "coronel"))
+            .unwrap()
+            .value;
+        let want =
+            coronel::pairwise(coronel::Kernel::Rbf { gamma: 0.5 }, a.inner(), b.inner()).unwrap();
+        let mut worst = 0.0_f64;
+        for i in 0..3 {
+            for j in 0..2 {
+                worst = worst.max((got.get(i, j) - want[(i, j)]).abs());
+            }
+        }
+        assert!(worst <= 1e-15, "worst |Δ|={worst}");
     }
 }

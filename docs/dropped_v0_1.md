@@ -27,3 +27,15 @@ Every other `kanimiso::hmm::*` type that existed at `generated-v0.1-archive`
 
 Re-adding a dropped family requires an issue that names the oracle and a
 single `Emission` implementation — not a new numbered type.
+
+## Waveform variants still needing a jelly-wave PR (W2)
+
+These kanimiso wrappers still contain a local DP because the pinned
+jelly-wave rev (`7c338c0`) has no API for them. Do not grow the bodies;
+upstream the algorithm and delete the copy:
+
+- `wdtw` / `wddtw` (Jeong logistic weights)
+- `kdtw`
+- `fast_dtw` / `dtw_in_window` / subsequence DTW
+- `lcss` / `gak` / `edr` / `adtw` / `msm` and other edit distances
+- Soft-DTW path and gradient (`softdtw_path`, `softdtw_grad`)
