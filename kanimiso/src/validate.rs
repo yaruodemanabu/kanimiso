@@ -8,6 +8,29 @@ use signlred::{
 
 /// Scan `X` (and optional `y`) and push data-quality issues into `report`.
 pub fn inspect_xy(report: &mut Report, x: &Matrix, y: Option<&Vector>, policy: &Policy) {
+    inspect_xy_internal(report, x, y, policy, true);
+}
+
+/// Inspect `X, y` while allowing a constant response.
+///
+/// This is needed for no-intercept least squares, whose null model is the
+/// zero response rather than the sample mean.
+pub(crate) fn inspect_xy_allow_constant_target(
+    report: &mut Report,
+    x: &Matrix,
+    y: &Vector,
+    policy: &Policy,
+) {
+    inspect_xy_internal(report, x, Some(y), policy, false);
+}
+
+fn inspect_xy_internal(
+    report: &mut Report,
+    x: &Matrix,
+    y: Option<&Vector>,
+    policy: &Policy,
+    reject_constant_target: bool,
+) {
     let (n, p) = x.shape();
     report.set_sample_shape(n, p);
 
@@ -74,7 +97,7 @@ pub fn inspect_xy(report: &mut Report, x: &Matrix, y: Option<&Vector>, policy: &
             report.push_with_policy(policy.clone(), issue);
         }
         let st = slice_stats(y.as_slice());
-        if st.count >= 1 && st.is_constant(policy.near_zero_variance) {
+        if reject_constant_target && st.count >= 1 && st.is_constant(policy.near_zero_variance) {
             report.push_with_policy(policy.clone(), constant_target_issue(st));
         }
     }

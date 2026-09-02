@@ -4,13 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Pure-Rust machine learning and statistics on faer. v0.2 is reconstituted from a verified core; quality is enforced by signlred and ojizou-san. See AGENTS.md."
+description = "Pure-Rust machine learning and statistics on ndarray and faer. v0.2 is reconstituted from a verified core; quality is enforced by signlred and ojizou-san. See AGENTS.md."
 readme = "../README.md"
 keywords = ["machine-learning", "statistics", "time-series", "online-learning", "linear-algebra"]
 categories = ["science", "algorithms", "mathematics"]
 
 [dependencies]
 faer = { workspace = true }
+ndarray = { workspace = true }
 signlred = { workspace = true }
 ojizou-san = { workspace = true }
 

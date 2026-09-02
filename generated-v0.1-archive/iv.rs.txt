@@ -81,9 +81,6 @@ impl TwoSls {
             let mut scratch = signlred::Report::new("2sls", "stage1");
             let g_opt = least_squares(&mut scratch, &zdes, &xj, &ctx.policy);
             for issue in scratch.issues() {
-                if issue.code == IssueCode::ResidualTooLarge {
-                    continue;
-                }
                 ctx.push(issue.clone());
             }
             let Some(g) = g_opt else {
@@ -198,8 +195,8 @@ fn empty_2sls(x: &Matrix) -> FittedTwoSls {
 /// One-step IV-GMM with Hansen *J* / Sargan overidentification.
 ///
 /// The weighting matrix is `(Z′Z)⁻¹`, so the point equals 2SLS. `J = n R²`
-/// from the residual regression on `Z`. Residual-kind inner failures are not
-/// promoted.
+/// from the residual regression on `Z`. Solver stationarity failures from
+/// inner regressions are propagated.
 #[derive(Clone, Debug, Default)]
 pub struct IvGmm {
     /// Include an intercept in both stages.
@@ -446,10 +443,7 @@ impl TwoStepGmm {
             Err(e) => {
                 if !matches!(
                     e.primary.code,
-                    IssueCode::ResidualTooLarge
-                        | IssueCode::NearSingular
-                        | IssueCode::RankZero
-                        | IssueCode::R2IsOne
+                    IssueCode::NearSingular | IssueCode::RankZero | IssueCode::R2IsOne
                 ) {
                     ctx.push(e.primary);
                 }
@@ -467,8 +461,7 @@ impl TwoStepGmm {
         for issue in first.report.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::RankZero
                     | IssueCode::R2IsOne
                     | IssueCode::PValueUnreliable
@@ -748,10 +741,7 @@ impl WindmeijerGmm {
             Err(e) => {
                 if !matches!(
                     e.primary.code,
-                    IssueCode::ResidualTooLarge
-                        | IssueCode::NearSingular
-                        | IssueCode::RankZero
-                        | IssueCode::R2IsOne
+                    IssueCode::NearSingular | IssueCode::RankZero | IssueCode::R2IsOne
                 ) {
                     ctx.push(e.primary);
                 }
@@ -770,8 +760,7 @@ impl WindmeijerGmm {
         for issue in inner.report.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::RankZero
                     | IssueCode::R2IsOne
                     | IssueCode::PValueUnreliable
@@ -1162,9 +1151,6 @@ fn stage1_xhat(ctx: &mut FitCtx, x: &Matrix, zdes: &Matrix, fit_intercept: bool)
         let mut scratch = signlred::Report::new("3sls", "stage1");
         let g_opt = least_squares(&mut scratch, zdes, &xj, &ctx.policy);
         for issue in scratch.issues() {
-            if issue.code == IssueCode::ResidualTooLarge {
-                continue;
-            }
             ctx.push(issue.clone());
         }
         let Some(g) = g_opt else {
@@ -1351,10 +1337,7 @@ impl ThreeSls {
             Vector::zeros(p)
         });
         for issue in scratch2.issues() {
-            if matches!(
-                issue.code,
-                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
-            ) {
+            if matches!(issue.code, IssueCode::NearSingular | IssueCode::R2IsOne) {
                 continue;
             }
             ctx.push(issue.clone());
@@ -1444,10 +1427,7 @@ impl Sur {
             b
         });
         for issue in scratch.issues() {
-            if matches!(
-                issue.code,
-                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::RankZero
-            ) {
+            if matches!(issue.code, IssueCode::NearSingular | IssueCode::RankZero) {
                 continue;
             }
             ctx.push(issue.clone());
@@ -1564,7 +1544,11 @@ pub fn newey_west(scores: &Matrix, lags: usize, session: &Session) -> Result<Qua
 ///
 /// With one cross-section this is Newey–West on the score rows. Lag count is
 /// not identification `p`.
-pub fn driscoll_kraay(scores: &Matrix, lags: usize, session: &Session) -> Result<Qualified<Matrix>> {
+pub fn driscoll_kraay(
+    scores: &Matrix,
+    lags: usize,
+    session: &Session,
+) -> Result<Qualified<Matrix>> {
     newey_west(scores, lags, session)
 }
 
@@ -2227,8 +2211,7 @@ pub fn get_robustcov_results(
     for issue in scratch.issues() {
         if matches!(
             issue.code,
-            IssueCode::ResidualTooLarge
-                | IssueCode::NearSingular
+            IssueCode::NearSingular
                 | IssueCode::R2IsOne
                 | IssueCode::RankZero
                 | IssueCode::CholeskyFailed
@@ -2283,7 +2266,11 @@ pub fn get_robustcov_results(
         let e2 = resid[i] * resid[i];
         for a in 0..p {
             for b in 0..p {
-                meat.set(a, b, meat.get(a, b) + e2 * design.get(i, a) * design.get(i, b));
+                meat.set(
+                    a,
+                    b,
+                    meat.get(a, b) + e2 * design.get(i, a) * design.get(i, b),
+                );
             }
         }
     }
@@ -2575,7 +2562,9 @@ pub fn cragg_donald(
         ctx.push(
             Issue::builder(IssueCode::CausalClaimUnidentified)
                 .severity(Severity::Advisory)
-                .message("cragg_donald reports the first-column first-stage F, not min-eigenvalue CD")
+                .message(
+                    "cragg_donald reports the first-column first-stage F, not min-eigenvalue CD",
+                )
                 .compromise(NumericalCompromise::new(
                     "Cragg–Donald min eigenvalue of X'P_Z X / σ²",
                     "first-stage F of column 0 on Z",
@@ -2633,7 +2622,8 @@ pub fn wu_hausman(
         return ctx.finish(nan());
     }
     let fit1 = zdes.matvec(&g);
-    let resid = Vector::from_iter((0..n).map(|i| xj[i] - if i < fit1.len() { fit1[i] } else { 0.0 }));
+    let resid =
+        Vector::from_iter((0..n).map(|i| xj[i] - if i < fit1.len() { fit1[i] } else { 0.0 }));
     if resid.as_slice().iter().all(|e| e.abs() <= 1e-12) {
         ctx.push(
             Issue::builder(IssueCode::DegenerateDistribution)

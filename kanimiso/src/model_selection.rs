@@ -819,10 +819,7 @@ pub fn learning_curve(
                 Err(e) => {
                     if !matches!(
                         e.primary.code,
-                        IssueCode::ResidualTooLarge
-                            | IssueCode::NearSingular
-                            | IssueCode::RankZero
-                            | IssueCode::R2IsOne
+                        IssueCode::NearSingular | IssueCode::RankZero | IssueCode::R2IsOne
                     ) {
                         ctx.push(e.primary);
                     }
@@ -917,10 +914,7 @@ pub fn validation_curve_ridge(
                 Err(e) => {
                     if !matches!(
                         e.primary.code,
-                        IssueCode::ResidualTooLarge
-                            | IssueCode::NearSingular
-                            | IssueCode::RankZero
-                            | IssueCode::R2IsOne
+                        IssueCode::NearSingular | IssueCode::RankZero | IssueCode::R2IsOne
                     ) {
                         ctx.push(e.primary);
                     }
@@ -1107,8 +1101,8 @@ pub fn partial_dependence(
 
 /// Individual conditional expectation (sklearn `partial_dependence` kind=`individual`).
 ///
-/// Grid length is not identification `p`. Inner Ridge residual issues are not
-/// promoted.
+/// Grid length is not identification `p`. Ridge stationarity failures are
+/// propagated.
 #[derive(Clone, Debug)]
 pub struct IceResult {
     /// Grid of the chosen column.
@@ -1153,8 +1147,7 @@ pub fn individual_conditional_expectation(
         Err(e) => {
             if !matches!(
                 e.primary.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::RankZero
                     | IssueCode::R2IsOne
                     | IssueCode::MeaninglessFit
@@ -1417,7 +1410,8 @@ impl Fit for RandomizedSearchCV {
 /// Successive-halving grid search over Ridge `alpha`.
 ///
 /// Resource is a growing training prefix. Candidate count is not identification
-/// `p`. Inner Ridge residual issues are not promoted.
+/// `p`. Failed candidate fits are omitted from rung scoring; refit failures are
+/// reported.
 #[derive(Clone, Debug)]
 pub struct HalvingGridSearchCV {
     /// Candidate penalties.
@@ -3558,8 +3552,8 @@ pub struct PermutationTestScore {
 
 /// Permutation test of a Ridge \(R^2\) against shuffled labels.
 ///
-/// Inner residual / rank failures are not promoted. The Monte Carlo *p* is
-/// recorded as unreliable (it is not an exact permutation tail).
+/// Failed fold fits are omitted from each score. The Monte Carlo *p* is recorded
+/// as unreliable (it is not an exact permutation tail).
 pub fn permutation_test_score(
     x: &Matrix,
     y: &Vector,
@@ -3592,10 +3586,7 @@ pub fn permutation_test_score(
         Err(e) => {
             if !matches!(
                 e.primary.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
-                    | IssueCode::RankZero
-                    | IssueCode::R2IsOne
+                IssueCode::NearSingular | IssueCode::RankZero | IssueCode::R2IsOne
             ) {
                 ctx.push(e.primary);
             }
@@ -3917,7 +3908,6 @@ impl Fit for KernelRidgeCV {
                         if matches!(
                             issue.code,
                             IssueCode::CholeskyFailed
-                                | IssueCode::ResidualTooLarge
                                 | IssueCode::NearSingular
                                 | IssueCode::R2IsOne
                                 | IssueCode::RankZero

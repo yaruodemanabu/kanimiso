@@ -4,12 +4,13 @@
 //! Every estimator talks to [`FitCtx`], inspects the design with
 //! [`inspect_xy`] / [`inspect_identification`], and records empty-cluster,
 //! degeneracy, rank, NaN, and meaningless-fit issues. Linear algebra goes
-//! through [`crate::linalg`] or [`Matrix::inner`].
+//! through the shared internal linear-algebra module or [`Matrix::inner`].
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
 use crate::linalg::{symmetric_eigen, thin_svd};
 use crate::rng::Rng;
+use crate::special::logsumexp;
 use crate::traits::{FitUnsupervised, PartialFit, Predict};
 use crate::validate::{inspect_identification, inspect_xy};
 use faer::Mat;
@@ -363,18 +364,6 @@ fn dummy_explain(update: u64, batch: usize, n_seen: u64) -> IncrementalExplain {
         "invalid",
         "invalid",
     )
-}
-
-fn logsumexp(xs: &[f64]) -> f64 {
-    let m = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if !m.is_finite() {
-        return m;
-    }
-    let mut s = 0.0;
-    for &v in xs {
-        s += (v - m).exp();
-    }
-    m + s.ln()
 }
 
 /// Batch k-means with k-means++ initialization and Lloyd updates.
@@ -3350,11 +3339,7 @@ impl FitUnsupervised for SpectralBiclustering {
 /// Quantile of pairwise Euclidean distances (sklearn `estimate_bandwidth`).
 ///
 /// `quantile` is not identification `p`. Neighbor count is not `p`.
-pub fn estimate_bandwidth(
-    x: &Matrix,
-    quantile: f64,
-    session: &Session,
-) -> Result<Qualified<f64>> {
+pub fn estimate_bandwidth(x: &Matrix, quantile: f64, session: &Session) -> Result<Qualified<f64>> {
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, x, None, &ctx.policy);
     let q = if quantile.is_finite() && quantile > 0.0 && quantile < 1.0 {
@@ -3363,7 +3348,9 @@ pub fn estimate_bandwidth(
         ctx.push(
             Issue::builder(IssueCode::InvalidWeight)
                 .severity(Severity::Warning)
-                .message(format!("estimate_bandwidth quantile={quantile} not in (0,1); using 0.3"))
+                .message(format!(
+                    "estimate_bandwidth quantile={quantile} not in (0,1); using 0.3"
+                ))
                 .build(),
         );
         0.3

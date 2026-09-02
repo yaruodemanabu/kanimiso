@@ -732,17 +732,17 @@ pub fn minkowski_distances(
     let mut ctx = FitCtx::with_session(session.clone());
     inspect_xy(&mut ctx.report, a, None, &ctx.policy);
     inspect_xy(&mut ctx.report, b, None, &ctx.policy);
-    let pord = if p_norm.is_finite() && p_norm > 0.0 {
-        p_norm
-    } else {
+    if !valid_minkowski_order(p_norm) {
         ctx.push(
-            Issue::builder(IssueCode::InvalidWeight)
-                .severity(Severity::Warning)
-                .message(format!("minkowski_distances p={p_norm}; using 2"))
+            Issue::builder(IssueCode::InvalidParameter)
+                .message(format!(
+                    "Minkowski order p={p_norm}; expected finite p >= 1 or positive infinity"
+                ))
+                .metric("p", p_norm)
                 .build(),
         );
-        2.0
-    };
+        return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
+    }
     if a.ncols() != b.ncols() {
         ctx.push(
             Issue::builder(IssueCode::DimensionMismatch)
@@ -752,13 +752,65 @@ pub fn minkowski_distances(
         );
         return ctx.finish(Matrix::zeros(a.nrows(), b.nrows()));
     }
-    ctx.finish(Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
-        let mut s = 0.0;
-        for k in 0..a.ncols() {
-            s += (a.get(i, k) - b.get(j, k)).abs().powf(pord);
+    let mut non_finite = false;
+    let distances = Matrix::from_fn(a.nrows(), b.nrows(), |i, j| {
+        minkowski_distance_by(a.ncols(), p_norm, |k| (a.get(i, k), b.get(j, k))).unwrap_or_else(
+            || {
+                non_finite = true;
+                0.0
+            },
+        )
+    });
+    if non_finite {
+        ctx.push(
+            Issue::builder(IssueCode::NonFiniteOutput)
+                .message("Minkowski subtraction or norm exceeded binary64 range")
+                .build(),
+        );
+    }
+    ctx.finish(distances)
+}
+
+/// Whether `p` defines a Minkowski norm in binary64.
+pub(crate) fn valid_minkowski_order(p: f64) -> bool {
+    (p.is_finite() && p >= 1.0) || (p.is_infinite() && p.is_sign_positive())
+}
+
+/// Stable Minkowski distance used by public pairwise metrics and online k-NN.
+pub(crate) fn minkowski_distance(left: &[f64], right: &[f64], p: f64) -> Option<f64> {
+    if left.len() != right.len() {
+        return None;
+    }
+    minkowski_distance_by(left.len(), p, |index| (left[index], right[index]))
+}
+
+fn minkowski_distance_by(
+    dimensions: usize,
+    p: f64,
+    mut coordinate: impl FnMut(usize) -> (f64, f64),
+) -> Option<f64> {
+    if !valid_minkowski_order(p) {
+        return None;
+    }
+    let mut scale = 0.0_f64;
+    for index in 0..dimensions {
+        let (left, right) = coordinate(index);
+        let difference = (left - right).abs();
+        if !difference.is_finite() {
+            return None;
         }
-        s.powf(1.0 / pord)
-    }))
+        scale = scale.max(difference);
+    }
+    if p.is_infinite() || scale == 0.0 {
+        return Some(scale);
+    }
+    let mut scaled_power_sum = 0.0;
+    for index in 0..dimensions {
+        let (left, right) = coordinate(index);
+        scaled_power_sum += ((left - right).abs() / scale).powf(p);
+    }
+    let distance = scale * scaled_power_sum.powf(p.recip());
+    distance.is_finite().then_some(distance)
 }
 
 /// Pairwise Canberra distances (sklearn `pairwise_distances` metric=`canberra`).
@@ -4825,5 +4877,57 @@ mod tests {
             .value;
         assert_eq!(arg.len(), xb.nrows());
         assert!((arg[1] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn minkowski_kernel_matches_closed_forms_and_homogeneity() {
+        let origin = [0.0, 0.0];
+        let point = [3.0, 4.0];
+        let cases = [
+            (1.0, 7.0),
+            (2.0, 5.0),
+            (5.0, 1267.0_f64.powf(0.2)),
+            (f64::INFINITY, 4.0),
+        ];
+        // Measured max absolute error was 0.0 on 2026-09-02; 2e-14 allows
+        // cross-platform libm rounding while remaining far below data scale.
+        for (p, expected) in cases {
+            let forward = minkowski_distance(&origin, &point, p).unwrap();
+            let reverse = minkowski_distance(&point, &origin, p).unwrap();
+            assert!((forward - expected).abs() <= 2.0e-14);
+            assert_eq!(forward, reverse);
+        }
+
+        let left = [0.0, -2.0, 3.0];
+        let right = [1.0, 4.0, -5.0];
+        let scaled_left = left.map(|value| value * 1.0e100);
+        let scaled_right = right.map(|value| value * 1.0e100);
+        // Measured max relative error was 0.0 on 2026-09-02; tol = 2e-15.
+        for p in [1.0, 2.0, 5.0, 360.0, f64::INFINITY] {
+            let base = minkowski_distance(&left, &right, p).unwrap();
+            let scaled = minkowski_distance(&scaled_left, &scaled_right, p).unwrap();
+            let relative = (scaled / 1.0e100 - base).abs() / base;
+            assert!(relative <= 2.0e-15, "p={p}, relative error={relative:.3e}");
+        }
+    }
+
+    #[test]
+    fn pairwise_minkowski_rejects_invalid_orders_and_accepts_infinity() {
+        let origin = Matrix::zeros(1, 2);
+        let point = Matrix::from_row_major(1, 2, &[3.0, 4.0]);
+        for p in [0.5, f64::NAN, f64::NEG_INFINITY] {
+            let failure =
+                minkowski_distances(&origin, &point, p, &Session::new("m", "invalid")).unwrap_err();
+            assert_eq!(failure.primary.code, IssueCode::InvalidParameter);
+        }
+        let distance = minkowski_distances(
+            &origin,
+            &point,
+            f64::INFINITY,
+            &Session::new("m", "chebyshev"),
+        )
+        .unwrap()
+        .value;
+        assert_eq!(distance.get(0, 0), 4.0);
     }
 }

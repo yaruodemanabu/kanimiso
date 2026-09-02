@@ -7,7 +7,7 @@
 //! or river.
 //!
 //! Constraints honoured by this crate:
-//! - linear algebra goes through [`faer`]
+//! - N-dimensional arrays use [`ndarray`]; linear algebra goes through [`faer`]
 //! - no `unsafe`, no non-Rust native libraries
 //! - every fit/predict/partial_fit talks to [`signlred`] (quality errors) and
 //!   [`ojizou_san`] (quality logging)
@@ -37,9 +37,8 @@ pub mod glm;
 pub mod gp;
 pub mod histgb;
 pub mod hmm;
-pub mod iv;
 pub mod kernel_pca;
-pub mod linalg;
+pub(crate) mod linalg;
 pub mod linear_model;
 pub mod manifold;
 pub mod metrics;
@@ -52,7 +51,7 @@ pub mod naive_bayes;
 pub mod neighbors;
 pub mod neural;
 pub mod online;
-pub mod panel;
+pub mod optimize;
 pub mod preprocess;
 pub mod random_projection;
 pub mod reducer;
@@ -60,6 +59,7 @@ pub mod rng;
 pub mod robust;
 pub mod semi;
 pub mod special;
+pub mod state_space;
 pub mod stats;
 pub mod svm;
 pub mod text;
@@ -67,13 +67,13 @@ pub mod topic;
 pub mod traits;
 pub mod tree;
 pub mod tsa;
-pub mod tslearn;
 pub mod validate;
 pub mod vecm;
 
 pub use context::FitCtx;
 pub use coverage::{inventory, verified, Algorithm, CoverageStatus};
 pub use data::{Matrix, Vector};
+pub use ndarray;
 pub use ojizou_san as log;
 pub use signlred;
 pub use traits::{Fit, FitSeries, FitUnsupervised, PartialFit, Predict, Transform};

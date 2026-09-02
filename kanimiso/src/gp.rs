@@ -1,6 +1,6 @@
 //! Gaussian-process regression and Laplace binary classification (sklearn `gaussian_process`).
 //!
-//! The RBF Gram is factored through [`crate::linalg::chol_solve`]. A non-PD
+//! The RBF Gram is factored through the shared internal Cholesky solver. A non-PD
 //! kernel receives diagonal jitter and a [`NumericalCompromise`]. \(n\) much
 //! larger than a few hundred is overparameterized for a dense GP.
 

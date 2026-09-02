@@ -423,22 +423,7 @@ impl Gls {
             }
             .fit(x, y, session);
         }
-        // Build L^{-1} X and L^{-1} y via n unit solves (dense, n is expected modest).
-        let n = y.len();
         let p = design.ncols();
-        let mut xt = Matrix::zeros(n, p);
-        let mut yt = Vector::zeros(n);
-        for i in 0..n {
-            let mut e = Vector::zeros(n);
-            e[i] = 1.0;
-            let Some(col) = chol_solve(&mut ctx.report, omega, &e, &ctx.policy) else {
-                break;
-            };
-            // This gives Ω^{-1} e_i = i-th column of Ω^{-1}, not L^{-1}.
-            // Use Ω^{-1/2} ≈ via solving Ω z = v for each column after Cholesky of Ω
-            // on the whitened system: solve Ω β-system as X' Ω^{-1} X.
-            let _ = col;
-        }
         // Direct GLS normal equations: (X' Ω^{-1} X) β = X' Ω^{-1} y
         let mut xty = Vector::zeros(p);
         let mut xtx = faer::Mat::<f64>::zeros(p, p);
@@ -489,7 +474,6 @@ impl Gls {
             fitted.intercept = 0.0;
         }
         fitted.beta = beta;
-        let _ = (xt, yt);
         ctx.finish(fitted)
     }
 }
@@ -896,8 +880,7 @@ impl Predict for FittedOmp {
 
 /// Huber M-estimator (statsmodels `RLM`) via IRLS on a scratch report.
 ///
-/// Inner weighted OLS issues that would abort a valid M-step
-/// (`NearSingular`, `ResidualTooLarge`) are not promoted.
+/// Inner weighted OLS diagnostics stay on each M-step's scratch report.
 #[derive(Clone, Debug)]
 pub struct Rlm {
     /// Huber cutoff in residual MAD units.
@@ -955,7 +938,7 @@ impl Fit for Rlm {
 impl Predict for FittedRlm {
     type Output = Vector;
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
-        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let ctx = FitCtx::with_session(session.child("predict"));
         let mut y = if x.ncols() == self.coef.len() {
             x.matvec(&self.coef)
         } else {
@@ -1367,22 +1350,42 @@ mod tests {
         let ht = HuberT::new()
             .fit(&x, &y, &Session::new("ht", "fit"))
             .expect("hubert");
-        assert!((ht.value.coef[0] - 2.0).abs() < 0.3, "ht={}", ht.value.coef[0]);
+        assert!(
+            (ht.value.coef[0] - 2.0).abs() < 0.3,
+            "ht={}",
+            ht.value.coef[0]
+        );
         let tb = TukeyBiweight::new()
             .fit(&x, &y, &Session::new("tb", "fit"))
             .expect("tukeybw");
-        assert!((tb.value.coef[0] - 2.0).abs() < 0.35, "tb={}", tb.value.coef[0]);
+        assert!(
+            (tb.value.coef[0] - 2.0).abs() < 0.35,
+            "tb={}",
+            tb.value.coef[0]
+        );
         let hp = Hampel::new()
             .fit(&x, &y, &Session::new("hp", "fit"))
             .expect("hampel");
-        assert!((hp.value.coef[0] - 2.0).abs() < 0.35, "hp={}", hp.value.coef[0]);
+        assert!(
+            (hp.value.coef[0] - 2.0).abs() < 0.35,
+            "hp={}",
+            hp.value.coef[0]
+        );
         let aw = AndrewWave::new()
             .fit(&x, &y, &Session::new("aw", "fit"))
             .expect("andrew");
-        assert!((aw.value.coef[0] - 2.0).abs() < 0.4, "aw={}", aw.value.coef[0]);
+        assert!(
+            (aw.value.coef[0] - 2.0).abs() < 0.4,
+            "aw={}",
+            aw.value.coef[0]
+        );
         let re = RamsayE::new()
             .fit(&x, &y, &Session::new("re", "fit"))
             .expect("ramsaye");
-        assert!((re.value.coef[0] - 2.0).abs() < 0.4, "re={}", re.value.coef[0]);
+        assert!(
+            (re.value.coef[0] - 2.0).abs() < 0.4,
+            "re={}",
+            re.value.coef[0]
+        );
     }
 }

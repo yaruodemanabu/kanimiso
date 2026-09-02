@@ -177,9 +177,6 @@ impl Fit for ProbitRegression {
                 break;
             };
             for issue in scratch.issues() {
-                if issue.code == IssueCode::ResidualTooLarge {
-                    continue;
-                }
                 ctx.push(issue.clone());
             }
             let d = next.sub(&beta).norm();
@@ -225,8 +222,8 @@ impl Fit for ProbitRegression {
 
 /// Binary complementary log-log GLM (statsmodels `Binomial(link=cloglog)`).
 ///
-/// \(\mu = 1-\exp(-\exp(\eta))\). IRLS uses a scratch report so a large
-/// working residual cannot abort a well-separated binary fit.
+/// \(\mu = 1-\exp(-\exp(\eta))\). IRLS solver diagnostics are propagated from
+/// each scratch solve.
 #[derive(Clone, Debug)]
 pub struct Cloglog {
     /// Max IRLS iterations.
@@ -328,9 +325,6 @@ impl Fit for Cloglog {
                 break;
             };
             for issue in scratch.issues() {
-                if issue.code == IssueCode::ResidualTooLarge {
-                    continue;
-                }
                 ctx.push(issue.clone());
             }
             let d = next.sub(&beta).norm();
@@ -470,9 +464,6 @@ impl Fit for NegativeBinomialRegressor {
                 break;
             };
             for issue in scratch.issues() {
-                if issue.code == IssueCode::ResidualTooLarge {
-                    continue;
-                }
                 ctx.push(issue.clone());
             }
             let d = next.sub(&beta).norm();
@@ -1600,8 +1591,7 @@ impl PhiGee {
         for issue in q.report.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::R2IsOne
                     | IssueCode::RankZero
                     | IssueCode::CholeskyFailed
@@ -1707,8 +1697,7 @@ impl NominalGee {
         for issue in q.report.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::R2IsOne
                     | IssueCode::RankZero
                     | IssueCode::CholeskyFailed
@@ -1788,8 +1777,7 @@ impl OrdinalGee {
         for issue in q.report.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::R2IsOne
                     | IssueCode::RankZero
                     | IssueCode::CholeskyFailed
@@ -1969,10 +1957,7 @@ impl Fit for ZeroInflatedPoisson {
                 break;
             };
             for issue in scratch.issues() {
-                if matches!(
-                    issue.code,
-                    IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
-                ) {
+                if matches!(issue.code, IssueCode::NearSingular | IssueCode::R2IsOne) {
                     continue;
                 }
                 ctx.push(issue.clone());
@@ -2160,10 +2145,7 @@ impl Fit for ZeroInflatedNegativeBinomial {
                 break;
             };
             for issue in scratch.issues() {
-                if matches!(
-                    issue.code,
-                    IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
-                ) {
+                if matches!(issue.code, IssueCode::NearSingular | IssueCode::R2IsOne) {
                     continue;
                 }
                 ctx.push(issue.clone());
@@ -2385,10 +2367,7 @@ impl Fit for ExponentialAft {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
-                    | IssueCode::RankZero
-                    | IssueCode::R2IsOne
+                IssueCode::NearSingular | IssueCode::RankZero | IssueCode::R2IsOne
             ) {
                 continue;
             }
@@ -2462,10 +2441,7 @@ impl Fit for LogLogisticAft {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
-                    | IssueCode::RankZero
-                    | IssueCode::R2IsOne
+                IssueCode::NearSingular | IssueCode::RankZero | IssueCode::R2IsOne
             ) {
                 continue;
             }
@@ -2548,10 +2524,7 @@ impl Fit for LogNormalAft {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
-                    | IssueCode::RankZero
-                    | IssueCode::R2IsOne
+                IssueCode::NearSingular | IssueCode::RankZero | IssueCode::R2IsOne
             ) {
                 continue;
             }
@@ -2631,10 +2604,7 @@ impl Fit for GompertzAft {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
-                    | IssueCode::RankZero
-                    | IssueCode::R2IsOne
+                IssueCode::NearSingular | IssueCode::RankZero | IssueCode::R2IsOne
             ) {
                 continue;
             }
@@ -2750,10 +2720,7 @@ impl Fit for Hurdle {
                 Err(e) => {
                     if !matches!(
                         e.primary.code,
-                        IssueCode::ResidualTooLarge
-                            | IssueCode::NearSingular
-                            | IssueCode::RankZero
-                            | IssueCode::R2IsOne
+                        IssueCode::NearSingular | IssueCode::RankZero | IssueCode::R2IsOne
                     ) {
                         ctx.push(e.primary);
                     }
@@ -2774,10 +2741,7 @@ impl Fit for Hurdle {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
-                    | IssueCode::RankZero
-                    | IssueCode::R2IsOne
+                IssueCode::NearSingular | IssueCode::RankZero | IssueCode::R2IsOne
             ) {
                 continue;
             }
@@ -2794,7 +2758,7 @@ impl Fit for Hurdle {
 
 /// Type-I Tobit (left-censored at 0) via a two-step mills correction.
 ///
-/// Inner probit / OLS failures of the usual residual kind are not promoted.
+/// Probit and OLS solver stationarity failures are propagated.
 #[derive(Clone, Debug, Default)]
 pub struct TobitRegressor;
 
@@ -2858,10 +2822,7 @@ impl Fit for TobitRegressor {
                 Err(e) => {
                     if !matches!(
                         e.primary.code,
-                        IssueCode::ResidualTooLarge
-                            | IssueCode::NearSingular
-                            | IssueCode::RankZero
-                            | IssueCode::R2IsOne
+                        IssueCode::NearSingular | IssueCode::RankZero | IssueCode::R2IsOne
                     ) {
                         ctx.push(e.primary);
                     }
@@ -2894,10 +2855,7 @@ impl Fit for TobitRegressor {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
-                    | IssueCode::RankZero
-                    | IssueCode::R2IsOne
+                IssueCode::NearSingular | IssueCode::RankZero | IssueCode::R2IsOne
             ) {
                 continue;
             }
@@ -3001,10 +2959,7 @@ impl HeckmanSelection {
                 Err(e) => {
                     if !matches!(
                         e.primary.code,
-                        IssueCode::ResidualTooLarge
-                            | IssueCode::NearSingular
-                            | IssueCode::RankZero
-                            | IssueCode::R2IsOne
+                        IssueCode::NearSingular | IssueCode::RankZero | IssueCode::R2IsOne
                     ) {
                         ctx.push(e.primary);
                     }
@@ -3037,10 +2992,7 @@ impl HeckmanSelection {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
-                    | IssueCode::RankZero
-                    | IssueCode::R2IsOne
+                IssueCode::NearSingular | IssueCode::RankZero | IssueCode::R2IsOne
             ) {
                 continue;
             }
@@ -3307,9 +3259,6 @@ impl Fit for BetaRegression {
                 break;
             };
             for issue in scratch.issues() {
-                if issue.code == IssueCode::ResidualTooLarge {
-                    continue;
-                }
                 ctx.push(issue.clone());
             }
             let d = next.sub(&beta).norm();
@@ -3424,7 +3373,7 @@ fn gee_moments(
 
 /// Famoye / Consul generalized Poisson (log mean, moment-updated α).
 ///
-/// Variance is `μ(1+αμ)²`. Inner IRLS residual issues are not promoted.
+/// Variance is `μ(1+αμ)²`. Each IRLS step uses a local scratch report.
 #[derive(Clone, Debug)]
 pub struct GeneralizedPoisson {
     /// Max IRLS iterations.
@@ -3637,9 +3586,6 @@ impl Fit for TruncatedPoisson {
                 break;
             };
             for issue in scratch.issues() {
-                if issue.code == IssueCode::ResidualTooLarge {
-                    continue;
-                }
                 ctx.push(issue.clone());
             }
             let d = next.sub(&beta).norm();
@@ -3787,9 +3733,6 @@ impl Fit for TruncatedNegativeBinomial {
                 break;
             };
             for issue in scratch.issues() {
-                if issue.code == IssueCode::ResidualTooLarge {
-                    continue;
-                }
                 ctx.push(issue.clone());
             }
             let d = next.sub(&beta).norm();
@@ -3823,7 +3766,7 @@ impl Fit for TruncatedNegativeBinomial {
 
 /// Negative-binomial-P GLM: \(\mathrm{Var}=\mu+\alpha\mu^{P}\) with a log link.
 ///
-/// \(P=1\) is NB1, \(P=2\) is NB2. Inner IRLS residual issues are not promoted.
+/// \(P=1\) is NB1, \(P=2\) is NB2. IRLS solver stationarity failures are propagated.
 #[derive(Clone, Debug)]
 pub struct NegativeBinomialP {
     /// Power \(P\) on the mean in the variance function.
@@ -3938,9 +3881,6 @@ impl Fit for NegativeBinomialP {
                 break;
             };
             for issue in scratch.issues() {
-                if issue.code == IssueCode::ResidualTooLarge {
-                    continue;
-                }
                 ctx.push(issue.clone());
             }
             let d = next.sub(&beta).norm();
@@ -3986,12 +3926,7 @@ impl Fit for NegativeBinomialP {
     }
 }
 
-fn binary_irls(
-    design: &Matrix,
-    y: &Vector,
-    policy: &signlred::Policy,
-    max_iter: usize,
-) -> Vector {
+fn binary_irls(design: &Matrix, y: &Vector, policy: &signlred::Policy, max_iter: usize) -> Vector {
     let mut beta = Vector::zeros(design.ncols());
     if !beta.is_empty() {
         let p = y.as_slice().iter().filter(|v| **v > 0.5).count() as f64 / y.len().max(1) as f64;
@@ -4165,9 +4100,13 @@ impl Fit for NestedLogit {
             });
         }
         let split = classes.len() / 2;
-        let nest = Vector::from_iter((0..classes.len()).map(|k| if k >= split { 1.0 } else { 0.0 }));
+        let nest =
+            Vector::from_iter((0..classes.len()).map(|k| if k >= split { 1.0 } else { 0.0 }));
         let y_nest = Vector::from_iter(y.as_slice().iter().map(|yi| {
-            let k = classes.iter().position(|c| (c - *yi).abs() < 1e-12).unwrap_or(0);
+            let k = classes
+                .iter()
+                .position(|c| (c - *yi).abs() < 1e-12)
+                .unwrap_or(0);
             nest[k]
         }));
         let nest_beta = binary_irls(&design, &y_nest, &ctx.policy, self.max_iter);
@@ -4198,7 +4137,13 @@ impl Fit for NestedLogit {
                 return Vector::zeros(0);
             }
             let xd = Matrix::from_fn(rows.len(), design.ncols(), |r, j| design.get(rows[r], j));
-            let yd = Vector::from_iter(rows.iter().map(|&i| if (y[i] - last).abs() < 1e-12 { 1.0 } else { 0.0 }));
+            let yd = Vector::from_iter(rows.iter().map(|&i| {
+                if (y[i] - last).abs() < 1e-12 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }));
             binary_irls(&xd, &yd, &ctx.policy, self.max_iter)
         };
         let within0 = within(0.0);
@@ -4283,7 +4228,11 @@ impl Fit for MixedLogit {
         inspect_classes(&mut ctx.report, y, &ctx.policy);
         let design = x.with_intercept();
         inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
-        let y01 = Vector::from_iter(y.as_slice().iter().map(|v| if *v > 0.5 { 1.0 } else { 0.0 }));
+        let y01 = Vector::from_iter(
+            y.as_slice()
+                .iter()
+                .map(|v| if *v > 0.5 { 1.0 } else { 0.0 }),
+        );
         let beta0 = binary_irls(&design, &y01, &ctx.policy, self.max_iter);
         let mut rng = crate::rng::Rng::new(3);
         let nd = self.n_draws.max(4);
@@ -4491,10 +4440,7 @@ impl Fit for ZeroInflatedGamma {
                     break;
                 };
                 for issue in scratch.issues() {
-                    if matches!(
-                        issue.code,
-                        IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
-                    ) {
+                    if matches!(issue.code, IssueCode::NearSingular | IssueCode::R2IsOne) {
                         continue;
                     }
                     ctx.push(issue.clone());
@@ -4695,10 +4641,7 @@ impl Fit for ZeroInflatedGeneralizedPoisson {
                 break;
             };
             for issue in scratch.issues() {
-                if matches!(
-                    issue.code,
-                    IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
-                ) {
+                if matches!(issue.code, IssueCode::NearSingular | IssueCode::R2IsOne) {
                     continue;
                 }
                 ctx.push(issue.clone());
@@ -5168,7 +5111,10 @@ fn gam_knots(x: &Matrix, n_knots: usize) -> Vec<f64> {
     if n == 0 {
         return Vec::new();
     }
-    let mut col: Vec<f64> = (0..n).map(|i| x.get(i, 0)).filter(|v| v.is_finite()).collect();
+    let mut col: Vec<f64> = (0..n)
+        .map(|i| x.get(i, 0))
+        .filter(|v| v.is_finite())
+        .collect();
     if col.is_empty() {
         return Vec::new();
     }
@@ -5201,7 +5147,12 @@ fn gam_design(x: &Matrix, knots: &[f64]) -> Matrix {
 
 impl Fit for GlmGam {
     type Fitted = FittedGlmGam;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedGlmGam>> {
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedGlmGam>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let knots = gam_knots(x, self.n_knots);
@@ -5213,10 +5164,7 @@ impl Fit for GlmGam {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
-                    | IssueCode::R2IsOne
-                    | IssueCode::RankZero
+                IssueCode::NearSingular | IssueCode::R2IsOne | IssueCode::RankZero
             ) {
                 continue;
             }
@@ -5225,7 +5173,9 @@ impl Fit for GlmGam {
         ctx.push(
             Issue::builder(IssueCode::CausalClaimUnidentified)
                 .severity(Severity::Advisory)
-                .message("GlmGam uses a truncated-power cubic basis + OLS, not IRLS penalized splines")
+                .message(
+                    "GlmGam uses a truncated-power cubic basis + OLS, not IRLS penalized splines",
+                )
                 .compromise(NumericalCompromise::new(
                     "P-spline / cyclic cubic GAM",
                     "unpenalized truncated-power OLS on column 0",
@@ -5365,8 +5315,7 @@ impl Fit for TLinear {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::R2IsOne
                     | IssueCode::RankZero
                     | IssueCode::CholeskyFailed
@@ -5628,13 +5577,22 @@ impl Predict for FittedScobit {
 
 impl Fit for Scobit {
     type Fitted = FittedScobit;
-    fn fit(&mut self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedScobit>> {
+    fn fit(
+        &mut self,
+        x: &Matrix,
+        y: &Vector,
+        session: &Session,
+    ) -> Result<Qualified<FittedScobit>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         inspect_classes(&mut ctx.report, y, &ctx.policy);
         let design = x.with_intercept();
         inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
-        let y01 = Vector::from_iter(y.as_slice().iter().map(|v| if *v > 0.5 { 1.0 } else { 0.0 }));
+        let y01 = Vector::from_iter(
+            y.as_slice()
+                .iter()
+                .map(|v| if *v > 0.5 { 1.0 } else { 0.0 }),
+        );
         let mut best_ll = f64::NEG_INFINITY;
         let mut best_beta = binary_irls(&design, &y01, &ctx.policy, self.max_iter);
         let mut best_a = 1.0_f64;
@@ -5680,7 +5638,11 @@ impl Fit for Scobit {
                 }
                 let s = sigmoid(eta).clamp(1e-12, 1.0 - 1e-12);
                 let mu = s.powf(alpha).clamp(1e-12, 1.0 - 1e-12);
-                ll += if y01[i] > 0.5 { mu.ln() } else { (1.0 - mu).ln() };
+                ll += if y01[i] > 0.5 {
+                    mu.ln()
+                } else {
+                    (1.0 - mu).ln()
+                };
             }
             if ll > best_ll {
                 best_ll = ll;
@@ -5936,12 +5898,14 @@ mod tests {
         let yb = Vector::from_iter((0..20).map(|i| if i < 10 { 0.0 } else { 1.0 }));
         let y = Vector::from_iter((0..20).map(|i| 0.5 * i as f64));
         let mut clf = SgdClassifier::new();
-        clf.partial_fit(&x, Some(&yb), &Session::new("sgd", "pf"))
+        let _classifier_update = clf
+            .partial_fit(&x, Some(&yb), &Session::new("sgd", "pf"))
             .expect("sgd");
         let pred = clf.predict(&x, &Session::new("sgd", "p")).unwrap().value;
         assert_eq!(pred.len(), 20);
         let mut pa = PassiveAggressiveRegressor::new(1.0);
-        pa.partial_fit(&x, Some(&y), &Session::new("pa", "pf"))
+        let _regressor_update = pa
+            .partial_fit(&x, Some(&y), &Session::new("pa", "pf"))
             .expect("pa");
         let hat = pa.predict(&x, &Session::new("pa", "p")).unwrap().value;
         assert!(hat.as_slice().iter().all(|v| v.is_finite()));

@@ -7,6 +7,7 @@ use core::fmt;
 ///
 /// Dropping `report` is allowed by the type system and forbidden by the crate
 /// contract. Downstream crates should persist it via `ojizou-san`.
+#[must_use = "the attached quality report must be inspected or persisted"]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Qualified<T> {
     /// The numeric or structured result.

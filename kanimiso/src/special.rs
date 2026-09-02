@@ -14,6 +14,23 @@ fn cf_policy() -> Policy {
     Policy::default()
 }
 
+/// Computes `ln(sum(exp(xs)))` after shifting by the largest input.
+///
+/// This retains the existing callers' non-finite behavior: empty and
+/// all-negative-infinity inputs return negative infinity, while a
+/// positive-infinity maximum returns positive infinity.
+pub(crate) fn logsumexp(xs: &[f64]) -> f64 {
+    let m = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if !m.is_finite() {
+        return m;
+    }
+    let mut s = 0.0;
+    for &v in xs {
+        s += (v - m).exp();
+    }
+    m + s.ln()
+}
+
 /// Error function.
 pub fn erf(x: f64) -> f64 {
     // Abramowitz & Stegun 7.1.26
@@ -250,6 +267,62 @@ pub fn digamma(mut x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logsumexp_empty_and_all_impossible_are_negative_infinity() {
+        assert_eq!(logsumexp(&[]), f64::NEG_INFINITY);
+        assert_eq!(
+            logsumexp(&[f64::NEG_INFINITY, f64::NEG_INFINITY]),
+            f64::NEG_INFINITY
+        );
+    }
+
+    #[test]
+    fn logsumexp_singleton_is_identity() {
+        assert_eq!(logsumexp(&[3.25]), 3.25);
+    }
+
+    #[test]
+    fn logsumexp_equal_terms_is_ln_two() {
+        let got = logsumexp(&[0.0, 0.0]);
+        // Closed form is ln(2); allow two ulps for platform `ln` rounding.
+        let tolerance = 2.0 * f64::EPSILON;
+        assert!((got - std::f64::consts::LN_2).abs() <= tolerance);
+    }
+
+    #[test]
+    fn logsumexp_extreme_finite_inputs_remain_finite() {
+        let got = logsumexp(&[-1000.0, -1001.0]);
+        let expected = -1000.0 + (-1.0_f64).exp().ln_1p();
+        // The closed form and shifted sum differ only by rounding; allow four
+        // ulp-scale errors at the magnitude of the result.
+        let tolerance = 4.0 * f64::EPSILON * expected.abs();
+        assert!(got.is_finite());
+        assert!(
+            (got - expected).abs() <= tolerance,
+            "got={got}, expected={expected}"
+        );
+    }
+
+    #[test]
+    fn logsumexp_is_shift_and_permutation_invariant() {
+        let xs = [-3.0, -0.5, 2.0, 0.25];
+        let permuted = [0.25, 2.0, -3.0, -0.5];
+        let shift = 128.0;
+        let shifted = xs.map(|x| x + shift);
+        let base = logsumexp(&xs);
+        let tolerance = 8.0 * f64::EPSILON * (base.abs() + shift);
+        assert!((logsumexp(&permuted) - base).abs() <= tolerance);
+        assert!((logsumexp(&shifted) - (base + shift)).abs() <= tolerance);
+    }
+
+    #[test]
+    fn logsumexp_positive_infinity_dominates() {
+        assert_eq!(
+            logsumexp(&[1.0, f64::INFINITY, f64::NEG_INFINITY]),
+            f64::INFINITY
+        );
+    }
 
     #[test]
     fn norm_cdf_half() {

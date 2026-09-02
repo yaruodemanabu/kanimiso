@@ -3,9 +3,10 @@
 use core::fmt;
 
 /// Class of numerical substitution (AGENTS.md D8).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum CompromiseKind {
     /// Free-form compromise; read the string fields.
+    #[default]
     Unspecified,
     /// A log-probability was replaced by `floor` (only when `Policy::log_prob_floor` is `Some`).
     ProbabilityClamped {
@@ -16,12 +17,6 @@ pub enum CompromiseKind {
     },
     /// Linear-domain evaluation underflowed; the computation continued in log space.
     LogDomainFallback,
-}
-
-impl Default for CompromiseKind {
-    fn default() -> Self {
-        Self::Unspecified
-    }
 }
 
 /// What was asked for, what was actually computed, and why that substitution

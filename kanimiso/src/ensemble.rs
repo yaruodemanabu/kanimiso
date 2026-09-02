@@ -778,10 +778,7 @@ impl Fit for RotationForest {
                     for issue in err.report.issues() {
                         if !matches!(
                             issue.code,
-                            IssueCode::ResidualTooLarge
-                                | IssueCode::NearSingular
-                                | IssueCode::RankZero
-                                | IssueCode::R2IsOne
+                            IssueCode::NearSingular | IssueCode::RankZero | IssueCode::R2IsOne
                         ) {
                             ctx.push(issue.clone());
                         }
@@ -807,7 +804,7 @@ impl Fit for RotationForest {
 impl Predict for FittedRotationForest {
     type Output = Vector;
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
-        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let ctx = FitCtx::with_session(session.child("predict"));
         let mut votes = vec![std::collections::BTreeMap::<i64, usize>::new(); x.nrows()];
         for (tree, rot) in self.trees.iter().zip(&self.rots) {
             let zr = apply_feature_rotation(x, rot);
@@ -915,8 +912,7 @@ impl Fit for RotationForestRegressor {
                     for issue in q.report.issues() {
                         if matches!(
                             issue.code,
-                            IssueCode::ResidualTooLarge
-                                | IssueCode::NearSingular
+                            IssueCode::NearSingular
                                 | IssueCode::RankZero
                                 | IssueCode::R2IsOne
                                 | IssueCode::MeaninglessFit
@@ -933,8 +929,7 @@ impl Fit for RotationForestRegressor {
                     for issue in err.report.issues() {
                         if matches!(
                             issue.code,
-                            IssueCode::ResidualTooLarge
-                                | IssueCode::NearSingular
+                            IssueCode::NearSingular
                                 | IssueCode::RankZero
                                 | IssueCode::R2IsOne
                                 | IssueCode::MeaninglessFit

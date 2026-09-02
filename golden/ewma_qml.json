@@ -1,0 +1,664 @@
+{
+  "case_count": 5,
+  "cases": [
+    {
+      "binary64_replay": {
+        "lambda": "0.6149487685119784",
+        "measured_lambda_abs_error": "4.378530e-17",
+        "measured_max_sigma2_abs_error": "1.544473e-14",
+        "measured_nll_abs_error": "2.921409e-15",
+        "nll": "18.65076845211454",
+        "normalized_log_variances": [
+          "-1.7111159805211282",
+          "-0.7008762243406681",
+          "-0.3708342973800819",
+          "-0.8429742455356424",
+          "-1.306715080093684",
+          "-1.7839367506974497",
+          "-2.2556969859403413",
+          "-2.7360955885182587",
+          "-3.212923097681228",
+          "-3.684057542095562",
+          "-4.146223994185632",
+          "-3.387392545331016"
+        ],
+        "sigma2": [
+          "11.562499999999996",
+          "31.753623951153127",
+          "44.17013075978745",
+          "27.54741874723237",
+          "17.325302465782347",
+          "10.750436223302406",
+          "6.707230324358385",
+          "4.1486687300583895",
+          "2.575284428481562",
+          "1.6077336898308126",
+          "1.0127395546246791",
+          "2.162987867891902"
+        ]
+      },
+      "expected": {
+        "derivative_at_selected_lambda": "8.285549e-64",
+        "lambda": "0.614948768511978482374287743813932169805408356053",
+        "nll_without_gaussian_constant": "18.650768452114543628906965371419179183191630767354",
+        "normalized_variances": [
+          "0.1806640625",
+          "0.49615037423676763016403572552745206009107655202298",
+          "0.69015829312167902772854086755079890103782799797698",
+          "0.43042841792550592391647185925560423758805304866837",
+          "0.27070785102784940808230405218631118068838705006638",
+          "0.16797556598910020597901066846261496785691126674846",
+          "0.1048004738180998324996258305436181575014785863183",
+          "0.064822948907162356647454653842576817279463365717397",
+          "0.040238819195024413614150186919274827896278090607094",
+          "0.025120838903606445479252402523514658171951714957005",
+          "0.015824055541010604395469188515884654431875693889402",
+          "0.03379668543581096544042922630215830979414623213888"
+        ],
+        "objective_at_lower_bound": "21.040994750626563678814548877156452732379987781319",
+        "objective_at_upper_bound": "20.698819319645065396819369060917401936907268892038",
+        "outcome": "success",
+        "selection": "interior",
+        "sigma2": [
+          "11.5625",
+          "31.753623951153128330498286433756931845828899329471",
+          "44.170130759787457774626615523251129666420991870526",
+          "27.547418747232379130654198992358671205635395114775",
+          "17.325302465782362117267459339923915564056771204248",
+          "10.750436223302413182656682781607357942842321071901",
+          "6.7072303243583892799760531547915620800946295243713",
+          "4.1486687300583908254370978459249163058856554059134",
+          "2.575284428481562471305611962833588985361797798854",
+          "1.6077336898308125106721537615049381230049097572483",
+          "1.0127395546246786813100280650166178836400444089217",
+          "2.1629878678919017881874704833381318268253588568883"
+        ]
+      },
+      "input": {
+        "observations": [
+          "8",
+          "-8",
+          "1",
+          "-1",
+          "0.5",
+          "-0.5",
+          "0.25",
+          "-0.25",
+          "0.25",
+          "-0.25",
+          "-2",
+          "2"
+        ],
+        "search_bounds": [
+          "0.5",
+          "0.999"
+        ]
+      },
+      "name": "default_bounds_interior",
+      "preprocessing": {
+        "initial_normalized_variance": "0.1806640625",
+        "mean": "0",
+        "normalized_residuals": [
+          "1",
+          "-1",
+          "0.125",
+          "-0.125",
+          "0.0625",
+          "-0.0625",
+          "0.03125",
+          "-0.03125",
+          "0.03125",
+          "-0.03125",
+          "-0.25",
+          "0.25"
+        ],
+        "residuals": [
+          "8",
+          "-8",
+          "1",
+          "-1",
+          "0.5",
+          "-0.5",
+          "0.25",
+          "-0.25",
+          "0.25",
+          "-0.25",
+          "-2",
+          "2"
+        ],
+        "scale": "8"
+      },
+      "purpose": "Interior optimum used by the existing independent-oracle regression.",
+      "stationary_point_scan": {
+        "maximum_root_bracket_width": "9.476577e-66",
+        "stationary_point_count": 2,
+        "stationary_points": [
+          "0.614948768511978482374287743813932169805408356053",
+          "0.94304008514397681437259408888836596587350352859466"
+        ]
+      }
+    },
+    {
+      "binary64_replay": {
+        "lambda": "0.5",
+        "measured_lambda_abs_error": "0",
+        "measured_max_sigma2_abs_error": "1.065814e-14",
+        "measured_nll_abs_error": "5.951270e-16",
+        "nll": "15.064887636096909",
+        "normalized_log_variances": [
+          "-1.1025261879892458",
+          "-0.40644214775599097",
+          "-0.18271225810777392",
+          "-0.6134049988090312",
+          "-0.9269676449836675",
+          "-1.4734833106927798",
+          "-1.9254303805134245",
+          "-2.5167813641067793"
+        ],
+        "sigma2": [
+          "21.25",
+          "42.62499999999999",
+          "53.31249999999999",
+          "34.65625",
+          "25.32812499999999",
+          "14.6640625",
+          "9.332031249999996",
+          "5.166015625000001"
+        ]
+      },
+      "expected": {
+        "derivative_at_selected_lambda": "4.477322e+0",
+        "lambda": "0.5",
+        "nll_without_gaussian_constant": "15.064887636096909657771048921998958327228403392287",
+        "normalized_variances": [
+          "0.33203125",
+          "0.666015625",
+          "0.8330078125",
+          "0.54150390625",
+          "0.395751953125",
+          "0.2291259765625",
+          "0.14581298828125",
+          "0.080718994140625"
+        ],
+        "objective_at_lower_bound": "15.064887636096909657771048921998958327228403392287",
+        "objective_at_upper_bound": "16.228243492234337869317607398714435621055189393656",
+        "outcome": "success",
+        "selection": "lower_bound",
+        "sigma2": [
+          "21.25",
+          "42.625",
+          "53.3125",
+          "34.65625",
+          "25.328125",
+          "14.6640625",
+          "9.33203125",
+          "5.166015625"
+        ]
+      },
+      "input": {
+        "observations": [
+          "8",
+          "-8",
+          "4",
+          "-4",
+          "2",
+          "-2",
+          "1",
+          "-1"
+        ],
+        "search_bounds": [
+          "0.5",
+          "0.999"
+        ]
+      },
+      "name": "default_lower_bound",
+      "preprocessing": {
+        "initial_normalized_variance": "0.33203125",
+        "mean": "0",
+        "normalized_residuals": [
+          "1",
+          "-1",
+          "0.5",
+          "-0.5",
+          "0.25",
+          "-0.25",
+          "0.125",
+          "-0.125"
+        ],
+        "residuals": [
+          "8",
+          "-8",
+          "4",
+          "-4",
+          "2",
+          "-2",
+          "1",
+          "-1"
+        ],
+        "scale": "8"
+      },
+      "purpose": "Monotonically preferred lower endpoint of the default interval.",
+      "stationary_point_scan": {
+        "maximum_root_bracket_width": "9.476577e-66",
+        "stationary_point_count": 1,
+        "stationary_points": [
+          "0.9147294961428125931832599109805189728812297481474"
+        ]
+      }
+    },
+    {
+      "binary64_replay": {
+        "lambda": "0.999",
+        "measured_lambda_abs_error": "8.881784e-19",
+        "measured_max_sigma2_abs_error": "3.105492e-14",
+        "measured_nll_abs_error": "2.905639e-15",
+        "nll": "26.89025745292844",
+        "normalized_log_variances": [
+          "-0.6776429940239801",
+          "-0.6766742326556108",
+          "-0.6776439632552191",
+          "-0.676675199980057",
+          "-0.6776449305499014",
+          "-0.6766761653717545",
+          "-0.6776458959118945",
+          "-0.6766771288345632",
+          "-0.6776468593450583",
+          "-0.6766780903723353",
+          "-0.6776478208532443",
+          "-0.676679049988915"
+        ],
+        "sigma2": [
+          "32.499999999999986",
+          "32.53149999999999",
+          "32.49996849999997",
+          "32.53146853149998",
+          "32.499937062968485",
+          "32.53143712590551",
+          "32.499905688779606",
+          "32.531405783090825",
+          "32.49987437730773",
+          "32.531374502930426",
+          "32.49984312842749",
+          "32.53134328529906"
+        ]
+      },
+      "expected": {
+        "derivative_at_selected_lambda": "-2.815623e+0",
+        "lambda": "0.999",
+        "nll_without_gaussian_constant": "26.890257452928444400671703938004745967589695182848",
+        "normalized_variances": [
+          "0.5078125",
+          "0.5083046875",
+          "0.5078120078125",
+          "0.5083041958046875",
+          "0.5078115166088828125",
+          "0.5083037050922739296875",
+          "0.5078110263871816557578125",
+          "0.5083032153607944741020546875",
+          "0.5078105371454336796279526328125",
+          "0.5083027266082882459483246801796875",
+          "0.5078100488816799577023763554995078125",
+          "0.5083022388327982777446739791440083046875"
+        ],
+        "objective_at_lower_bound": "29.01949272461653182072348025809714758950896284688",
+        "objective_at_upper_bound": "26.890257452928444400671703938004745967589695182848",
+        "outcome": "success",
+        "selection": "upper_bound",
+        "sigma2": [
+          "32.5",
+          "32.5315",
+          "32.4999685",
+          "32.5314685315",
+          "32.4999370629685",
+          "32.5314371259055315",
+          "32.4999056887796259685",
+          "32.5314057830908463425315",
+          "32.4998743773077554961889685",
+          "32.5313745029304477406927795315",
+          "32.4998431284275172929520867519685",
+          "32.5313432852990897756591346652165315"
+        ]
+      },
+      "input": {
+        "observations": [
+          "8",
+          "-1",
+          "-8",
+          "1",
+          "8",
+          "-1",
+          "-8",
+          "1",
+          "8",
+          "-1",
+          "-8",
+          "1"
+        ],
+        "search_bounds": [
+          "0.5",
+          "0.999"
+        ]
+      },
+      "name": "default_upper_bound",
+      "preprocessing": {
+        "initial_normalized_variance": "0.5078125",
+        "mean": "0",
+        "normalized_residuals": [
+          "1",
+          "-0.125",
+          "-1",
+          "0.125",
+          "1",
+          "-0.125",
+          "-1",
+          "0.125",
+          "1",
+          "-0.125",
+          "-1",
+          "0.125"
+        ],
+        "residuals": [
+          "8",
+          "-1",
+          "-8",
+          "1",
+          "8",
+          "-1",
+          "-8",
+          "1",
+          "8",
+          "-1",
+          "-8",
+          "1"
+        ],
+        "scale": "8"
+      },
+      "purpose": "Alternating shock scales select the upper endpoint of the default interval.",
+      "stationary_point_scan": {
+        "maximum_root_bracket_width": "0",
+        "stationary_point_count": 0,
+        "stationary_points": []
+      }
+    },
+    {
+      "expected": {
+        "issue_code": "UnidentifiedModel",
+        "outcome": "failure",
+        "reason": "Demeaning produces only zero residuals; every lambda has the same zero-variance recurrence."
+      },
+      "input": {
+        "observations": [
+          "7",
+          "7",
+          "7",
+          "7"
+        ],
+        "search_bounds": [
+          "0.5",
+          "0.999"
+        ]
+      },
+      "name": "constant_unidentified",
+      "preprocessing": {
+        "mean": "7",
+        "residuals": [
+          "0",
+          "0",
+          "0",
+          "0"
+        ],
+        "scale": "0"
+      },
+      "purpose": "Demeaning leaves zero residuals, so lambda is unidentified."
+    },
+    {
+      "binary64_replay": {
+        "lambda": "0.6",
+        "measured_lambda_abs_error": "2.220446e-17",
+        "measured_max_sigma2_abs_error": "1.989520e-14",
+        "measured_nll_abs_error": "2.497062e-15",
+        "nll": "18.67415984448039",
+        "normalized_log_variances": [
+          "-1.7111159805211282",
+          "-0.676489813038988",
+          "-0.3495020699034054",
+          "-0.845661179646795",
+          "-1.3325107326898422",
+          "-1.8335135386201662",
+          "-2.3281792212025345",
+          "-2.832347856198907",
+          "-3.3321760405804666",
+          "-3.824937166627532",
+          "-4.306362070638146",
+          "-3.4085391060875203"
+        ],
+        "sigma2": [
+          "11.562499999999996",
+          "32.53749999999998",
+          "45.12249999999998",
+          "27.47349999999999",
+          "16.884099999999993",
+          "10.230459999999995",
+          "6.238275999999999",
+          "3.7679655999999984",
+          "2.2857793599999994",
+          "1.396467616",
+          "0.8628805695999997",
+          "2.1177283417600004"
+        ]
+      },
+      "expected": {
+        "derivative_at_selected_lambda": "-3.258565e+0",
+        "lambda": "0.6",
+        "nll_without_gaussian_constant": "18.674159844480391622527381894137826314509622769979",
+        "normalized_variances": [
+          "0.1806640625",
+          "0.5083984375",
+          "0.7050390625",
+          "0.4292734375",
+          "0.2638140625",
+          "0.1598509375",
+          "0.0974730625",
+          "0.0588744625",
+          "0.0357153025",
+          "0.0218198065",
+          "0.0134825089",
+          "0.03308950534"
+        ],
+        "objective_at_lower_bound": "19.234711666292033338216580721828417061203693054561",
+        "objective_at_upper_bound": "18.674159844480391622527381894137826314509622769979",
+        "outcome": "success",
+        "selection": "upper_bound",
+        "sigma2": [
+          "11.5625",
+          "32.5375",
+          "45.1225",
+          "27.4735",
+          "16.8841",
+          "10.23046",
+          "6.238276",
+          "3.7679656",
+          "2.28577936",
+          "1.396467616",
+          "0.8628805696",
+          "2.11772834176"
+        ]
+      },
+      "input": {
+        "observations": [
+          "8",
+          "-8",
+          "1",
+          "-1",
+          "0.5",
+          "-0.5",
+          "0.25",
+          "-0.25",
+          "0.25",
+          "-0.25",
+          "-2",
+          "2"
+        ],
+        "search_bounds": [
+          "0.55",
+          "0.60"
+        ]
+      },
+      "name": "custom_bounds_truncate_interior_optimum",
+      "preprocessing": {
+        "initial_normalized_variance": "0.1806640625",
+        "mean": "0",
+        "normalized_residuals": [
+          "1",
+          "-1",
+          "0.125",
+          "-0.125",
+          "0.0625",
+          "-0.0625",
+          "0.03125",
+          "-0.03125",
+          "0.03125",
+          "-0.03125",
+          "-0.25",
+          "0.25"
+        ],
+        "residuals": [
+          "8",
+          "-8",
+          "1",
+          "-1",
+          "0.5",
+          "-0.5",
+          "0.25",
+          "-0.25",
+          "0.25",
+          "-0.25",
+          "-2",
+          "2"
+        ],
+        "scale": "8"
+      },
+      "purpose": "A custom interval below the unconstrained fixture optimum selects its upper endpoint.",
+      "stationary_point_scan": {
+        "maximum_root_bracket_width": "0",
+        "stationary_point_count": 0,
+        "stationary_points": []
+      }
+    }
+  ],
+  "extended_real_case": {
+    "binary64_endpoint_statuses": {
+      "lower_bound": {
+        "lambda": "0.5",
+        "nll_status": "positive_infinity",
+        "nll_without_gaussian_constant": "+inf",
+        "nonfinite_sigma2_count": 0,
+        "sigma2_status": "finite",
+        "zero_sigma2_count": 124
+      },
+      "upper_bound": {
+        "lambda": "0.999",
+        "nll_status": "finite",
+        "nll_without_gaussian_constant": "-2737.4147310902486",
+        "nonfinite_sigma2_count": 0,
+        "sigma2_status": "finite",
+        "zero_sigma2_count": 0
+      }
+    },
+    "decimal_evidence": {
+      "arithmetic": "decimal.Decimal with ROUND_HALF_EVEN",
+      "conclusion": "The 64-interval Decimal grid selects lambda=0.999 uniquely, and the negative endpoint derivative satisfies the one-sided KKT condition for an active upper bound.",
+      "derivative_at_upper_bound": "-119279.42875908841794871709541932245088246967605052",
+      "endpoint_nlls": {
+        "lower_bound": "2.8665668014647745488804692507832780957428074160705e+360",
+        "upper_bound": "-2737.4147310902880845708257859294731424464404910917"
+      },
+      "grid_evidence": {
+        "intervals": 64,
+        "minimum_lambda": "0.999",
+        "minimum_nll": "-2737.4147310902880845708257859294731424464404910917",
+        "nll_gap_to_second_best": "948815.5326839403034735351495",
+        "second_best_lambda": "0.991203125",
+        "unique_minimum": true
+      },
+      "objective": "full NLL without the lambda-invariant Gaussian constant; scale=1 makes it equal to the normalized profile",
+      "one_sided_kkt": {
+        "condition": "At an upper bound in a scalar minimization problem, d(NLL)/d(lambda) <= 0.",
+        "satisfied": true
+      },
+      "precision_digits": 80,
+      "precision_error_measurement": {
+        "grid_minimum_lambda_abs_drift": "0",
+        "lower_nll_relative_drift": "6.308996e-79",
+        "upper_derivative_abs_drift": "6.859726e-74",
+        "upper_nll_abs_drift": "7.876687e-77"
+      },
+      "scope_limit": "Grid evidence plus the endpoint KKT condition documents this fixture; it is not a general proof that an arbitrary objective has no unsampled narrow basin."
+    },
+    "input_recipe": {
+      "expanded_length": 1202,
+      "expression": "[1, -1] + [0] * 1198 + [1, -1]",
+      "prefix": [
+        "1",
+        "-1"
+      ],
+      "search_bounds": [
+        "0.5",
+        "0.999"
+      ],
+      "suffix": [
+        "1",
+        "-1"
+      ],
+      "zero_count": 1198
+    },
+    "name": "late_shock_extended_real_barrier",
+    "preprocessing": {
+      "initial_normalized_variance": "0.0033277870216306156405990016638935108153078202995008",
+      "mean": "0",
+      "scale": "1"
+    },
+    "purpose": "A long zero run makes the lower-end binary64 objective overflow while the Decimal objective remains finite and the constrained optimum is the active upper endpoint."
+  },
+  "generator": "scripts/ewma_qml_oracle.py emit",
+  "oracle": {
+    "arithmetic": "decimal.Decimal with ROUND_HALF_EVEN",
+    "dependencies": "Python standard library only",
+    "derivative_scan_intervals": 16384,
+    "output_significant_digits": 50,
+    "precision_digits": 80,
+    "precision_error_measurement": {
+      "max_lambda_abs_drift": "3.600867e-80",
+      "max_nll_abs_drift": "1.147818e-78",
+      "max_sigma2_abs_drift": "2.718934e-78"
+    },
+    "precision_error_method": "Regenerate independently at 120 digits and compare unrounded lambda, NLL, and sigma2 values from the 80-digit run.",
+    "root_bracket_target_width": "1E-65",
+    "scan_limitation": "This dense deterministic scan is a fixture-selection heuristic, not a general global-optimality certificate: a finite sign scan cannot prove the absence of paired narrow roots or roots where the derivative does not change sign.",
+    "selection_method": "Scan the analytic first derivative on the full closed interval, bisect every detected sign-changing bracket, then compare those stationary-point candidates and both endpoints.",
+    "verification_precision_digits": 120
+  },
+  "schema_version": 1,
+  "source_contract": {
+    "compatibility_scope": "Kanimiso recurrence, full-sample mean-square initialization, and configured bounds; not output parity with arch EWMAVariance backcast initialization or bounds.",
+    "gaussian_constant": "omitted to match the production objective",
+    "implementation": "kanimiso/src/tsa.rs",
+    "inspected_on": "2026-09-02",
+    "production_functions": [
+      "ewma_normalized_log_variance",
+      "ewma_profile_from_log_variance",
+      "ewma_qml_objective",
+      "ewma_sigma2"
+    ],
+    "production_log_recurrence": "log_x2[t]=2*(log(abs(residual[t]))-log(scale)); log_h[0]=logsumexp(log_x2)-log(n); log_h[t]=logsumexp(log(lambda)+log_h[t-1], log(1-lambda)+log_x2[t-1]); a zero shock contributes negative infinity",
+    "production_selection_objective": "0.5*sum(ln(h[t])+x[t]^2/h[t])",
+    "recurrence": "h[0]=mean(x^2); h[t]=lambda*h[t-1]+(1-lambda)*x[t-1]^2",
+    "reported_full_nll": "production_selection_objective+n*ln(max_abs_demeaned_residual)",
+    "selection_equivalence": "The added scale term is constant in lambda, so profile and full NLL select the same lambda.",
+    "test_replay_function": "ewma_nll (test-only full-NLL helper)"
+  },
+  "tolerance_policy": {
+    "binary64_measurements": "Each successful case records direct recurrence replay error; optimizer lambda error must be measured by the Rust consumer because this oracle intentionally does not reproduce Nelder-Mead.",
+    "rule": "For each Rust assertion, measure binary64/optimizer error against this Decimal oracle, use 3-4 times that error, and retain the measurement in the test comment (AGENTS.md R9)."
+  }
+}

@@ -29,6 +29,8 @@ pub enum IssueCode {
     DuplicateIndex,
     /// Negative weights or frequencies.
     InvalidWeight,
+    /// A constructor or algorithm parameter is outside its documented domain.
+    InvalidParameter,
 
     // --- linear algebra ---
     /// Exact singularity (rank 0 or a zero pivot at working precision).
@@ -167,6 +169,8 @@ pub enum IssueCode {
     SaddlePointSuspected,
     /// Solution is sensitive to initialization.
     LocalMinimumUnstable,
+    /// A constrained optimum lies on an active parameter bound.
+    ParameterAtBoundary,
     /// Step size / learning rate is too large for the curvature.
     LearningRateTooLarge,
     /// Progress is numerically zero because the rate is tiny.
@@ -225,6 +229,8 @@ pub enum IssueCode {
     ShortSeriesForArima,
     /// Spectral leakage / aliasing undermines a periodogram claim.
     SpectralLeakage,
+    /// An infinite time-series filter was replaced by an explicitly finite lag expansion.
+    InfiniteFilterTruncated,
 
     // --- clustering / DR ---
     /// A cluster contains no points after assignment.
@@ -275,7 +281,7 @@ impl IssueCode {
         use IssueCode::*;
         match self {
             EmptyMatrix | DimensionMismatch | NonFiniteInput | NonFiniteOutput | MissingTarget
-            | MissingFeatures | AllMissing | DuplicateIndex | InvalidWeight => {
+            | MissingFeatures | AllMissing | DuplicateIndex | InvalidWeight | InvalidParameter => {
                 Domain::DataIntegrity
             }
             SingularMatrix
@@ -338,7 +344,9 @@ impl IssueCode {
             | CausalClaimUnidentified => Domain::StatisticalInference,
             DidNotConverge | MaxIterReached | LineSearchFailed | StepSizeCollapsed
             | GradientExploded | LossIsNan | SaddlePointSuspected | LocalMinimumUnstable
-            | LearningRateTooLarge | LearningRateTooSmall => Domain::Optimization,
+            | ParameterAtBoundary | LearningRateTooLarge | LearningRateTooSmall => {
+                Domain::Optimization
+            }
             StaleState
             | InsufficientEffectiveSample
             | ConceptDriftDetected
@@ -363,7 +371,8 @@ impl IssueCode {
             | InvertibilityViolated
             | CausalityViolated
             | ShortSeriesForArima
-            | SpectralLeakage => Domain::TimeSeries,
+            | SpectralLeakage
+            | InfiniteFilterTruncated => Domain::TimeSeries,
             EmptyCluster | DegenerateClusters | SinglePointCluster => Domain::Clustering,
             ComponentsExceedRank | NegativeEigenvalueDropped | EmbeddingUnstable | KernelNotPd => {
                 Domain::DimensionalityReduction
@@ -387,7 +396,7 @@ impl IssueCode {
         use IssueCode::*;
         match self {
             EmptyMatrix | DimensionMismatch | NonFiniteInput | MissingTarget | MissingFeatures
-            | InvalidWeight | RankZero | CholeskyFailed | SvdDidNotConverge
+            | InvalidWeight | InvalidParameter | RankZero | CholeskyFailed | SvdDidNotConverge
             | EigenDidNotConverge | LossIsNan | PartialFitBeforeInit | ScaleFactorZero => {
                 Severity::Fatal
             }
@@ -461,6 +470,7 @@ impl IssueCode {
             | StepSizeCollapsed
             | SaddlePointSuspected
             | LocalMinimumUnstable
+            | ParameterAtBoundary
             | LearningRateTooLarge
             | InsufficientEffectiveSample
             | ConceptDriftDetected
@@ -481,6 +491,7 @@ impl IssueCode {
             | InvertibilityViolated
             | CausalityViolated
             | SpectralLeakage
+            | InfiniteFilterTruncated
             | EmptyCluster
             | SinglePointCluster
             | ComponentsExceedRank
@@ -513,6 +524,7 @@ impl IssueCode {
             AllMissing => "do not impute a column that has zero observed values",
             DuplicateIndex => "deduplicate timestamps / row ids or aggregate them explicitly",
             InvalidWeight => "weights must be finite and non-negative",
+            InvalidParameter => "choose a value inside the parameter's documented domain",
             SingularMatrix => "remove dependent columns, add identified regularization, or use a reduced-rank model",
             NearSingular => "treat the solve as unidentified; regularize or drop columns",
             IllConditioned => "center/scale features, drop collinear columns, or use a regularized estimator",
@@ -579,6 +591,7 @@ impl IssueCode {
             LossIsNan => "abort; subsequent iterates are garbage",
             SaddlePointSuspected => "perturb and retry; do not claim a minimum",
             LocalMinimumUnstable => "report multiple random restarts",
+            ParameterAtBoundary => "report the active bound and use one-sided uncertainty diagnostics",
             LearningRateTooLarge => "decrease the rate; the discrete gradient step is unstable",
             LearningRateTooSmall => "increase the rate or you will stop on a plateau",
             StaleState => "re-initialize the online estimator; the sufficient statistics are invalid",
@@ -606,6 +619,9 @@ impl IssueCode {
             CausalityViolated => "the AR polynomial has roots inside the unit circle; the process is not causal",
             ShortSeriesForArima => "reduce (p,d,q) or collect a longer series",
             SpectralLeakage => "taper / change window length before claiming a peak",
+            InfiniteFilterTruncated => {
+                "increase the configured lag expansion or report the finite-filter approximation"
+            }
             EmptyCluster => "re-seed or reduce k; empty clusters make centroids undefined",
             DegenerateClusters => "k is not identified; the partition is a single blob",
             SinglePointCluster => "within-cluster covariance / silhouette for that cluster is undefined",
@@ -640,6 +656,7 @@ impl IssueCode {
             AllMissing => "all_missing",
             DuplicateIndex => "duplicate_index",
             InvalidWeight => "invalid_weight",
+            InvalidParameter => "invalid_parameter",
             SingularMatrix => "singular_matrix",
             NearSingular => "near_singular",
             IllConditioned => "ill_conditioned",
@@ -706,6 +723,7 @@ impl IssueCode {
             LossIsNan => "loss_is_nan",
             SaddlePointSuspected => "saddle_point_suspected",
             LocalMinimumUnstable => "local_minimum_unstable",
+            ParameterAtBoundary => "parameter_at_boundary",
             LearningRateTooLarge => "learning_rate_too_large",
             LearningRateTooSmall => "learning_rate_too_small",
             StaleState => "stale_state",
@@ -733,6 +751,7 @@ impl IssueCode {
             CausalityViolated => "causality_violated",
             ShortSeriesForArima => "short_series_for_arima",
             SpectralLeakage => "spectral_leakage",
+            InfiniteFilterTruncated => "infinite_filter_truncated",
             EmptyCluster => "empty_cluster",
             DegenerateClusters => "degenerate_clusters",
             SinglePointCluster => "single_point_cluster",
@@ -765,6 +784,7 @@ impl IssueCode {
         Self::AllMissing,
         Self::DuplicateIndex,
         Self::InvalidWeight,
+        Self::InvalidParameter,
         Self::SingularMatrix,
         Self::NearSingular,
         Self::IllConditioned,
@@ -831,6 +851,7 @@ impl IssueCode {
         Self::LossIsNan,
         Self::SaddlePointSuspected,
         Self::LocalMinimumUnstable,
+        Self::ParameterAtBoundary,
         Self::LearningRateTooLarge,
         Self::LearningRateTooSmall,
         Self::StaleState,
@@ -858,6 +879,7 @@ impl IssueCode {
         Self::CausalityViolated,
         Self::ShortSeriesForArima,
         Self::SpectralLeakage,
+        Self::InfiniteFilterTruncated,
         Self::EmptyCluster,
         Self::DegenerateClusters,
         Self::SinglePointCluster,

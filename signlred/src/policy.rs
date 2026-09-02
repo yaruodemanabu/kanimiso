@@ -24,7 +24,9 @@ pub struct Policy {
     pub condition_number_error: f64,
     /// Relative singular-value cutoff for numerical rank (`σ_i > cutoff · σ_max`).
     pub rank_tol_relative: f64,
-    /// Residual ‖Ax−b‖ / (‖A‖‖x‖+‖b‖) above this is [`IssueCode::ResidualTooLarge`].
+    /// Normal-equation stationarity residual
+    /// `‖Aᵀ(Ax−b)‖ / (‖A‖(‖Ax‖+‖b‖))` above this is
+    /// [`IssueCode::ResidualTooLarge`].
     pub residual_tol: f64,
     /// Minimum observations per estimated parameter (unregularized models).
     pub min_samples_per_parameter: f64,
@@ -51,12 +53,29 @@ pub struct Policy {
     pub log_prob_floor: Option<f64>,
     /// Scale factor below this emits [`crate::IssueCode::ForwardUnderflow`].
     pub underflow_guard: f64,
+    /// Absolute tolerance for probability-vector and transition-row sums to equal one.
+    pub probability_sum_tol: f64,
     /// Maximum backward-difference order (`WindowLag`). Above this is a `Failure`.
     pub max_difference_order: usize,
+    /// Maximum retained terms in an explicitly truncated infinite filter.
+    pub max_infinite_filter_terms: usize,
+    /// Mean absolute history at or below this cannot normalize a difference score.
+    pub difference_scale_guard: f64,
     /// Continued-fraction relative stop for `betainc_reg` / `gamma_p`.
     pub cf_tol: f64,
     /// Continued-fraction iteration cap for `betainc_reg` / `gamma_p`.
     pub cf_max_iter: usize,
+    /// Relative tolerance for the sample standard deviation of optimizer objectives.
+    pub optimizer_objective_tol: f64,
+    /// Relative tolerance for the maximum pairwise optimizer-simplex distance.
+    pub optimizer_parameter_tol: f64,
+    /// Physical-parameter distance used to classify an estimate as lying on a
+    /// model boundary or being numerically indistinguishable from zero.
+    /// This is deliberately independent of optimizer-simplex convergence.
+    pub model_parameter_tol: f64,
+    /// Maximum representational ULP distance for treating two optimized
+    /// objective values as tied when choosing between nested parameter faces.
+    pub optimizer_objective_tie_ulps: usize,
 }
 
 impl Default for Policy {
@@ -80,9 +99,16 @@ impl Default for Policy {
             r2_zero_tol: 1e-12,
             log_prob_floor: None,
             underflow_guard: 1e-300,
+            probability_sum_tol: 1e-12,
             max_difference_order: 8,
+            max_infinite_filter_terms: 100_000,
+            difference_scale_guard: 1e-15,
             cf_tol: 1e-15,
             cf_max_iter: 300,
+            optimizer_objective_tol: f64::EPSILON.sqrt(),
+            optimizer_parameter_tol: f64::EPSILON.sqrt(),
+            model_parameter_tol: f64::EPSILON.sqrt(),
+            optimizer_objective_tie_ulps: 16,
         }
     }
 }
@@ -146,8 +172,15 @@ mod tests {
         let p = Policy::default();
         assert!(p.log_prob_floor.is_none());
         assert_eq!(p.underflow_guard, 1e-300);
+        assert_eq!(p.probability_sum_tol, 1e-12);
         assert_eq!(p.max_difference_order, 8);
+        assert_eq!(p.max_infinite_filter_terms, 100_000);
+        assert_eq!(p.difference_scale_guard, 1e-15);
         assert_eq!(p.cf_tol, 1e-15);
         assert_eq!(p.cf_max_iter, 300);
+        assert_eq!(p.optimizer_objective_tol, f64::EPSILON.sqrt());
+        assert_eq!(p.optimizer_parameter_tol, f64::EPSILON.sqrt());
+        assert_eq!(p.model_parameter_tol, f64::EPSILON.sqrt());
+        assert_eq!(p.optimizer_objective_tie_ulps, 16);
     }
 }
