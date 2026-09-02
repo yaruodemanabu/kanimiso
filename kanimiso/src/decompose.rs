@@ -1,6 +1,6 @@
 //! Matrix decompositions and latent-factor models.
 //!
-//! PCA / truncated SVD go through [`thin_svd`] of (centered) `X`. Incremental
+//! PCA / truncated SVD go through `thin_svd` of (centered) `X`. Incremental
 //! PCA maintains a running mean and a sequential Karhunen–Loève basis and
 //! **must** emit [`IncrementalExplain`] on every `partial_fit`. NMF, FastICA,
 //! factor analysis, CCA, sparse PCA, and dictionary learning are pure-Rust
@@ -3596,7 +3596,7 @@ impl StructuralEquation {
         Self
     }
 
-    /// CFA scores of \(X\), then OLS of \(y\) on \([1,X,f]\).
+    /// CFA scores of \(X\), then OLS of \(y\) on an intercept, \(X\), and \(f\).
     pub fn fit(
         &self,
         x: &Matrix,

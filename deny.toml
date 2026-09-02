@@ -7,6 +7,15 @@ all-features = true
 [advisories]
 version = 2
 yanked = "warn"
+ignore = [
+    # `paste` is an unmaintained proc-macro dependency pulled in exclusively by
+    # the workspace-pinned faer 0.24.4 graph (faer -> gemm/pulp -> paste).
+    # There is no direct feature switch or compatible maintained replacement
+    # available to this workspace; remove this exception when pinned faer no
+    # longer depends on paste. This advisory reports maintenance status, not a
+    # known vulnerability in the generated code.
+    { id = "RUSTSEC-2024-0436", reason = "paste is an unavoidable transitive proc-macro of workspace-pinned faer 0.24.4; remove when faer drops it" },
+]
 
 [licenses]
 version = 2
@@ -14,6 +23,7 @@ confidence-threshold = 0.8
 allow = [
     "Apache-2.0",
     "MIT",
+    "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
     "Unicode-3.0",

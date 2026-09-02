@@ -2096,7 +2096,7 @@ pub fn trustworthiness(
                 ))
                 .build(),
         );
-        1.min(n.saturating_sub(1)).max(1)
+        1
     };
     if n < 3 {
         ctx.push(
@@ -2783,7 +2783,7 @@ pub struct CalibrationCurve {
     pub counts: Vector,
 }
 
-/// Equal-width calibration curve on \([0,1]\) predicted probabilities.
+/// Equal-width calibration curve for predicted probabilities \(0 \le p \le 1\).
 ///
 /// Bin count is not identification `p`. A constant score or a single occupied
 /// bin cannot show miscalibration across the score range.

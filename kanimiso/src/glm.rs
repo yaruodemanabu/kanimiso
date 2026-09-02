@@ -4832,7 +4832,7 @@ pub struct FittedConditionalPoisson {
 
 /// Truncated / fractional logit (statsmodels `Logit` on a truncated unit interval).
 ///
-/// Outcomes outside \([0,1]\) are dropped with a warning. Remaining \(y\) may
+/// Outcomes outside \(0 \le y \le 1\) are dropped with a warning. Remaining \(y\) may
 /// be fractional; IRLS is the Papke–Wooldridge quasi-likelihood. Do not treat
 /// dropped rows as a `MeaninglessFit`.
 #[derive(Clone, Debug)]

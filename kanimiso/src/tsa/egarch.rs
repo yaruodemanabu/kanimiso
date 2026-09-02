@@ -232,9 +232,9 @@ fn select_egarch_candidate(
 /// Fixed-order asymmetric EGARCH with `p = o = q = 1`.
 ///
 /// The recurrence is
-/// `log(h[t]) = omega + alpha * (|z[t-1]| - sqrt(2/pi)) + gamma * z[t-1]
-/// + beta * log(h[t-1])`. Residuals are max-absolute normalized before
-/// optimization, `log(h[0])` is the parameter-independent log mean square,
+/// `log(h_t) = omega + alpha * (|z_(t-1)| - sqrt(2/pi)) + gamma * z_(t-1)
+/// + beta * log(h_(t-1))`. Residuals are max-absolute normalized before
+/// optimization, `log(h_0)` is the parameter-independent log mean square,
 /// and Gaussian QML is evaluated wholly in the log domain. The domain
 /// `0 <= beta < 1` matches `arch.univariate.EGARCH`; the exact `beta = 0`
 /// face is searched separately from the open interior.
