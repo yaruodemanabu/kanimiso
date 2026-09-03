@@ -301,5 +301,5 @@ jobs:
         with:
           tool: cargo-llvm-cov
           fallback: none
-      - name: Line-coverage ratchet (75.0% provisional; Windows measured 76.30%)
-        run: cargo llvm-cov --workspace --locked --summary-only --fail-under-lines 75.0
+      - name: Line-coverage ratchet (Linux and Windows measured 76.30%)
+        run: cargo llvm-cov --workspace --locked --summary-only --fail-under-lines 76.0
