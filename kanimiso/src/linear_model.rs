@@ -4391,6 +4391,19 @@ mod tests {
         }
     }
 
+    fn observe_nonzero_relative_error(
+        label: String,
+        actual: f64,
+        expected: f64,
+        maximum: &mut (f64, String),
+    ) {
+        assert!(expected != 0.0, "{label}: tail oracle must be nonzero");
+        let relative = (actual - expected).abs() / expected.abs();
+        if relative > maximum.0 {
+            *maximum = (relative, label);
+        }
+    }
+
     #[test]
     fn ols_matches_independent_decimal_oracle() {
         let fixture: serde_json::Value =
@@ -4402,6 +4415,7 @@ mod tests {
         );
         let mut maximum_absolute = (0.0, String::new());
         let mut maximum_relative = (0.0, String::new());
+        let mut maximum_pvalue_relative = (0.0, String::new());
         for case in cases {
             let name = case["name"].as_str().expect("case name");
             let input = &case["input"];
@@ -4448,6 +4462,12 @@ mod tests {
                     &mut maximum_relative,
                 );
             }
+            observe_nonzero_relative_error(
+                format!("{name}.f_pvalue"),
+                q.value.f_pvalue,
+                golden_decimal(&expected["f_pvalue"]),
+                &mut maximum_pvalue_relative,
+            );
             for (field, actual) in [
                 ("beta", &q.value.beta),
                 ("coef", &q.value.coef),
@@ -4468,13 +4488,35 @@ mod tests {
                     &mut maximum_relative,
                 );
             }
+            for (index, (actual, expected)) in q
+                .value
+                .p_values
+                .as_slice()
+                .iter()
+                .zip(expected["p_values"].as_array().expect("golden p-values"))
+                .enumerate()
+            {
+                observe_nonzero_relative_error(
+                    format!("{name}.p_values[{index}]"),
+                    *actual,
+                    golden_decimal(expected),
+                    &mut maximum_pvalue_relative,
+                );
+            }
         }
+        eprintln!("OLS p-value max relative error: {maximum_pvalue_relative:?}");
         // Measured max abs 2.183e-11 (high_leverage F) on 2026-09-03;
         // tolerance is approximately 4x.
         assert!(maximum_absolute.0 <= 8.7e-11, "{maximum_absolute:?}");
         // Measured max relative 1.318e-13 (high_leverage Cook[14]);
         // tolerance is approximately 4x.
         assert!(maximum_relative.0 <= 5.2e-13, "{maximum_relative:?}");
+        // Measured max relative 4.709e-14 (intercept_noisy F p-value)
+        // on 2026-09-03; tolerance is approximately 4x.
+        assert!(
+            maximum_pvalue_relative.0 <= 2.0e-13,
+            "{maximum_pvalue_relative:?}"
+        );
     }
 
     #[test]

@@ -24,7 +24,10 @@ pub enum CoverageStatus {
 pub struct Algorithm {
     /// Rust path (`"linear_model.LinearRegression"`).
     pub name: &'static str,
-    /// Independent implementation or specification used as a reference.
+    /// Python ecosystem analogue or published specification for navigation.
+    ///
+    /// This field does not assert that the named package generated the golden
+    /// fixture. Actual oracle provenance is documented in `docs/validation.md`.
     pub python_equiv: &'static str,
     /// Broad algorithm category.
     pub kind: &'static str,
@@ -92,7 +95,7 @@ const INVENTORY: &[Algorithm] = &[
     ),
     v("special.betainc_reg", "scipy.special.betainc", "function"),
     v("special.chi2_cdf", "scipy.stats.chi2.cdf", "function"),
-    v("special.chi2_pvalue", "scipy.stats.chi2.sf", "function"),
+    a("special.chi2_pvalue", "scipy.stats.chi2.sf", "function"),
     v("special.digamma", "scipy.special.digamma", "function"),
     v("special.erf", "scipy.special.erf", "function"),
     v("special.f_cdf", "scipy.stats.f.cdf", "function"),
@@ -100,7 +103,7 @@ const INVENTORY: &[Algorithm] = &[
     v("special.gamma_p", "scipy.special.gammainc", "function"),
     v("special.ln_gamma", "scipy.special.gammaln", "function"),
     v("special.norm_cdf", "scipy.stats.norm.cdf", "function"),
-    v(
+    a(
         "special.norm_pvalue_two_sided",
         "scipy.stats.norm.sf",
         "function",
@@ -242,7 +245,6 @@ mod tests {
         "online.OnlineWeightedMean",
         "special.betainc_reg",
         "special.chi2_cdf",
-        "special.chi2_pvalue",
         "special.digamma",
         "special.erf",
         "special.f_cdf",
@@ -250,7 +252,6 @@ mod tests {
         "special.gamma_p",
         "special.ln_gamma",
         "special.norm_cdf",
-        "special.norm_pvalue_two_sided",
         "special.student_t_cdf",
         "special.student_t_pvalue",
         "state_space.LinearGaussianStateSpace",

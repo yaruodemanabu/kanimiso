@@ -224,12 +224,14 @@ pub fn student_t_cdf(t: f64, df: f64) -> f64 {
     }
 }
 
-/// Two-sided Student-t p-value.
+/// Two-sided Student-t p-value, evaluated as a regularized-beta tail without
+/// subtracting a CDF from one.
 pub fn student_t_pvalue(t: f64, df: f64) -> f64 {
     if !t.is_finite() || df <= 0.0 {
         return f64::NAN;
     }
-    2.0 * (1.0 - student_t_cdf(t.abs(), df))
+    let x = df / (df + t * t);
+    betainc_reg(0.5 * df, 0.5, x)
 }
 
 /// F CDF.
@@ -241,9 +243,13 @@ pub fn f_cdf(x: f64, d1: f64, d2: f64) -> f64 {
     betainc_reg(d1 / 2.0, d2 / 2.0, z)
 }
 
-/// F upper-tail p-value.
+/// F upper-tail p-value, evaluated through the complementary beta identity.
 pub fn f_pvalue(x: f64, d1: f64, d2: f64) -> f64 {
-    1.0 - f_cdf(x, d1, d2)
+    if x <= 0.0 {
+        return 1.0;
+    }
+    let z = d2 / (d2 + d1 * x);
+    betainc_reg(d2 / 2.0, d1 / 2.0, z)
 }
 
 /// Digamma \(\psi(x)=\Gamma'(x)/\Gamma(x)\) for \(x>0\).
@@ -388,6 +394,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn special_functions_preserve_distribution_identities_and_ordering() {
+        let symmetric_points = [0.0, 0.25, 1.0, 2.0, 5.0];
+        for x in symmetric_points {
+            assert!((erf(x) + erf(-x)).abs() <= 2.0 * tolerance("erf"));
+            assert!((norm_cdf(x) + norm_cdf(-x) - 1.0).abs() <= 2.0 * tolerance("norm_cdf"));
+            assert!(
+                (student_t_cdf(x, 7.0) + student_t_cdf(-x, 7.0) - 1.0).abs()
+                    <= 2.0 * tolerance("student_t_cdf")
+            );
+        }
+
+        for &(a, b) in &[(0.5, 0.75), (2.0, 3.0), (10.0, 0.5)] {
+            let mut previous = 0.0;
+            for x in [0.01, 0.1, 0.4, 0.8, 0.99] {
+                let value = betainc_reg(a, b, x);
+                assert!((0.0..=1.0).contains(&value) && value >= previous);
+                assert!(
+                    (value + betainc_reg(b, a, 1.0 - x) - 1.0).abs()
+                        <= 2.0 * tolerance("betainc_reg")
+                );
+                previous = value;
+            }
+        }
+
+        for x in [0.25, 1.0, 3.5, 10.0] {
+            assert!(
+                (ln_gamma(x + 1.0) - ln_gamma(x) - x.ln()).abs() <= 2.0 * tolerance("ln_gamma")
+            );
+            assert!((digamma(x + 1.0) - digamma(x) - 1.0 / x).abs() <= 2.0 * tolerance("digamma"));
+        }
+
+        let mut previous_gamma = 0.0;
+        let mut previous_chi2 = 0.0;
+        for x in [0.01, 0.2, 1.0, 5.0, 20.0] {
+            let gamma = gamma_p(1.75, x);
+            let chi2 = chi2_cdf(x, 3.5);
+            assert!((0.0..=1.0).contains(&gamma) && gamma >= previous_gamma);
+            assert!((0.0..=1.0).contains(&chi2) && chi2 >= previous_chi2);
+            assert!((gamma_p(1.75, x / 2.0) - chi2).abs() <= tolerance("chi2_cdf"));
+            previous_gamma = gamma;
+            previous_chi2 = chi2;
+        }
+
+        let mut previous_cdf = 0.0;
+        let mut previous_tail = 1.0;
+        for x in [0.01, 0.1, 1.0, 10.0, 100.0] {
+            let cdf = f_cdf(x, 5.0, 20.0);
+            let tail = f_pvalue(x, 5.0, 20.0);
+            assert!((0.0..=1.0).contains(&cdf) && cdf >= previous_cdf);
+            assert!((0.0..=1.0).contains(&tail) && tail <= previous_tail);
+            assert!((cdf + tail - 1.0).abs() <= 2.0 * tolerance("f_cdf"));
+            previous_cdf = cdf;
+            previous_tail = tail;
+        }
+    }
+
     fn dispatch(fn_name: &str, args: &[f64]) -> f64 {
         match (fn_name, args) {
             ("erf", [z]) => erf(*z),
@@ -410,16 +473,32 @@ mod tests {
     fn tolerance(fn_name: &str) -> f64 {
         match fn_name {
             // measured erf 1.38e-7, norm_cdf 6.92e-8 (A&S 7.1.26)
-            "erf" | "norm_cdf" => 6e-7,
+            "erf" => 6e-7,
+            "norm_cdf" => 3e-7,
             // measured 1.33e-10 at z=170 (7-term Lanczos)
             "ln_gamma" => 6e-10,
             // measured 6.97e-10 at z=0.1 (Stirling tail + recurrence)
             "digamma" => 3e-9,
             // measured gamma_p 4.75e-14, chi2_cdf 4.71e-14
-            "gamma_p" | "chi2_cdf" => 8e-12,
-            // measured betainc_reg 6.14e-12, f_* 8.59e-12, student_t_* ≤ 4.05e-13
-            "betainc_reg" | "student_t_cdf" | "student_t_pvalue" | "f_cdf" | "f_pvalue" => 8e-11,
+            "gamma_p" | "chi2_cdf" => 2e-13,
+            // measured betainc_reg 6.14e-12, f_* 8.59e-12,
+            // student_t_* ≤ 4.05e-13
+            "betainc_reg" => 2.5e-11,
+            "f_cdf" | "f_pvalue" => 3.5e-11,
+            "student_t_cdf" | "student_t_pvalue" => 1.7e-12,
             other => panic!("missing tolerance for {other}"),
+        }
+    }
+
+    /// Relative tolerances protect small survival probabilities from
+    /// cancellation regressions that are invisible to an absolute threshold.
+    fn tail_relative_tolerance(fn_name: &str) -> Option<f64> {
+        match fn_name {
+            // measured 1.79e-11 on 2026-09-03; tolerance is approximately 4x.
+            "f_pvalue" => Some(7.2e-11),
+            // measured 2.81e-12 on 2026-09-03; tolerance is approximately 4x.
+            "student_t_pvalue" => Some(1.2e-11),
+            _ => None,
         }
     }
 
@@ -431,6 +510,8 @@ mod tests {
         let cases = payload["cases"].as_array().expect("cases");
         assert_eq!(cases.len(), 1099, "oracle script documents 1,099 cases");
         let mut worst: std::collections::BTreeMap<&str, f64> = std::collections::BTreeMap::new();
+        let mut worst_relative: std::collections::BTreeMap<&str, f64> =
+            std::collections::BTreeMap::new();
         let mut failures = Vec::new();
         for case in cases {
             let fn_name = case["fn"].as_str().expect("fn");
@@ -447,6 +528,20 @@ mod tests {
             if err > *e {
                 *e = err;
             }
+            if expected != 0.0 {
+                let relative = err / expected.abs();
+                let e = worst_relative.entry(fn_name).or_insert(0.0);
+                if relative > *e {
+                    *e = relative;
+                }
+                if let Some(tol) = tail_relative_tolerance(fn_name) {
+                    if relative > tol {
+                        failures.push(format!(
+                            "{fn_name}{args:?}: got {got} expected {expected} relative={relative} tol={tol}"
+                        ));
+                    }
+                }
+            }
             let tol = tolerance(fn_name);
             if err > tol {
                 failures.push(format!(
@@ -455,6 +550,7 @@ mod tests {
             }
         }
         eprintln!("scipy golden max |err| by fn: {worst:?}");
+        eprintln!("scipy golden max relative error by fn: {worst_relative:?}");
         assert!(
             failures.is_empty(),
             "{} golden cases over tol:\n{}",

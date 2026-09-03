@@ -1,112 +1,179 @@
 # kanimiso
 
-Pure Rust の機械学習・統計クレート。外部の科学技術計算クレートは
-`ndarray = 0.17.2` と `faer = 0.24.4` のみ。`unsafe` なし。
+[![CI](https://github.com/yaruodemanabu/kanimiso/actions/workflows/ci.yml/badge.svg)](https://github.com/yaruodemanabu/kanimiso/actions/workflows/ci.yml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-555.svg)](https://github.com/yaruodemanabu/kanimiso/blob/main/Cargo.toml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/yaruodemanabu/kanimiso/blob/main/LICENSE)
 
-責務は分ける。N 次元配列・軸・view は `ndarray`、行列分解・固有値・線形方程式・
-最小二乗は `faer` が担当する。`ndarray-linalg`、`ndarray-stats`、BLAS/LAPACK の
-native backend は採用しない。
+**数値品質を結果に同伴させる、Pure Rust の時系列計量・オンライン推定コア。**
 
-v0.2 は小さい検証済み核から再構成中である（`AGENTS.md`）。README の機能主張は
-`kanimiso::coverage::verified()` に連動する。`0.2.0-alpha.1` までは
-scikit-learn / statsmodels / sktime / tslearn / hmmlearn / river 相当という表記はしない。
+`kanimiso` は、OLS、オンライン統計量、線形 Gaussian 状態空間、ARMA、
+ボラティリティモデルなどを、一つの品質契約で扱うワークスペースです。各領域には
+`fit` / `partial_fit`、`filter` / `smooth`、時系列関数など適した API を残しています。
+計算に成功しても、ランク落ち、境界解、数値的な代替処理などがあれば、値だけでなく
+機械可読な品質報告を返します。
 
-## ワークスペース
+現在は `0.2.0-alpha.1` に向けた再構成中です。scikit-learn の代替を広く名乗る段階
+ではなく、**検証済みの狭い核を必要とする利用者**が対象です。API の破壊的変更もあり得ます。
 
-| クレート | 役割 |
-|---|---|
-| **kanimiso** | 推定・変換・予測・予測子。計算そのもの。 |
-| **signlred** | 機械学習・線形計算の**結果と推測の品質**に責任を持つエラー処理。特異・ランク落ち・分離・定数ターゲット・識別不能・意味のないフィットをコード化して abort / 警告する。 |
-| **ojizou-san** | 同上の品質に責任を持つログ。数値計算上の妥協（意図した計算 vs 実際に走った計算）、意味のないフィット、追加学習の説明（何が動いたか・なぜ・識別は残っているか）を台帳に残す。 |
+## どんな用途に向くか
 
-普通の `thiserror` / `log` ではない。計算結果を捨ててよい数字として返すことを拒否する。
+- 線形回帰、時系列フィルタ、状態空間モデル、逐次推定を Pure Rust で組み込みたい
+- 推定値だけでなく、警告・数値的妥協・識別不能の理由も保存したい
+- native BLAS / LAPACK、C、C++、Fortran に依存しないビルドが必要
+- Python 実装や高精度計算との照合根拠を、リポジトリ内で再実行したい
 
-## 品質契約
+次の用途には、まだ向きません。
 
-1. `fit` / `predict` / `partial_fit` は必ず `signlred::Qualified<T>`（値 + `Report`）または `Failure` を返す。
-2. 数値的妥協（擬似逆、リッジフォールバック、ジッタ、打ち切り SVD）は `NumericalCompromise` として記録される。
-3. 統計的に空の計算（定数ターゲット、ランク 0、単一クラス分類器、補間だけの \(R^2=1\)）は `Meaninglessness` を付け、Vacuous / False なら abort する。
-4. 追加学習は `ojizou_san::IncrementalExplain` なしでは完了しない。`n_eff`、`‖Δθ‖`、情報利得、識別の可否、warmup、文章による説明が必須。
+- scikit-learn / statsmodels の全面的な drop-in replacement
+- API 安定性が必須の本番システム
+- GPU 学習、大規模疎行列、深層学習、幅広い分類器を一つの crate に求める用途
 
-## 検証済み表面（`verified()`）
+## 5分で試す
 
-現在 `CoverageStatus::Verified` なのは `linear_model::LinearRegression`、`online::LinearRegression` / `OnlineWeightedMean` / `OnlineEwMean` / `OnlineEwVar` / `OnlineMean` / `OnlineVar` / `OnlineCovariance` / `OnlineSum` / `OnlineCount` / `OnlineAutoCorr` / `OnlineVarianceThreshold`、`special.rs` の特殊関数、`state_space::LinearGaussianStateSpace`、`filters::LocalLinearTrend` / `lfilter` / `convolution_filter` / `recursive_filter` / `miso_lfilter` / `bk_filter` / `cf_filter`、`tsa::arma_acf` / `arma_acovf` / `arma2ma` / `arma2ar` / `arma_impulse_response`、`tsa::Garch11`、固定次数 `tsa::Figarch` / `tsa::Fiegarch`、`stats::process_mle` である。OLS は標準ライブラリのみの80桁 Decimal オラクル（`golden/ols.json`）で、切片あり・切片なし・2説明変数の高レバレッジケースを検査する。係数だけでなく、数値ランクに基づく自由度、SVD 共分散、中心化／非中心化 (R^2)、MLE 対数尤度、AIC/BIC、t/F 検定、hat 対角、((1-h)^2) を用いる Cook 距離まで再生し、120/180桁照合と射影恒等式を CI で固定する。特殊関数は scipy 1.18.1 ゴールデン（`golden/special_functions.json`、1,099 ケース）を `cargo test -p kanimiso --lib special::` でリプレイする。GARCH(1,1) は独立した80桁 Decimal オラクル（`golden/garch_qml.json`、内部解・α=0・β=0・高持続・識別不能・extended-real overflow の6ケース）に加え、120桁での再生成照合、解析勾配、スケール同変性、再帰式、境界KKTを検査する。FIGARCH(1,d,1) は Baillie--Bollerslev--Mikkelsen の係数再帰と有限 `K` 打切りを、標準ライブラリのみの80桁 Decimal オラクル（`golden/figarch_qml.json`、9固定・10不正・4 QMLE ケース、全16境界面）で検査し、120桁再生成、独立した係数経路、予測、解析勾配、反射・尺度・打切り不変量も照合する。FIEGARCH は Bollerslev--Mikkelsen (1996) Eq. 11 の one-AR/no-news-MA 特殊化として、有限 `K` を明示した標準ライブラリのみの80桁 Decimal オラクル（`golden/fiegarch_qml.json`、7ケース）を固定パラメータとQMLEの両方で再生する。120桁再生成、非停留点での全5勾配、厳密な `d=0` 面、負の `beta`、`d` の 1/2 近傍、extended-real overflow、反射・尺度・打切り不変量も検査対象である。
+必要な Rust は 1.85 以上です。まだ crates.io リリース前なので、まずリポジトリから
+例を実行してください。
 
-状態空間核は `golden/state_space.json` の80桁 Decimal・同時正規分布のブロック条件付けを独立オラクルとし、スカラー閉形式、局所線形トレンド、相関した多変量観測、部分／全欠測、非ゼロ offset を検査する。`t=0` prior、Joseph 共分散更新、正確な Gaussian innovation 尤度、RTS 平滑化を120/180桁で再照合し、Rust replay の実測最大絶対誤差 `3.553e-15` に対して許容差 `1.5e-14` を用いる。末尾欠測と交差共分散ゼロでは不要な RTS 逆行列を作らず、共分散の対称化は `f64::MAX` と最小サブノーマルでも中間 overflow/underflow を起こさない。
+```console
+git clone https://github.com/yaruodemanabu/kanimiso.git
+cd kanimiso
+cargo run -p kanimiso --example ols_quickstart --locked
+```
 
-`stats::process_mle` は指数共分散を持つ Gaussian process の GLS profile likelihood を、5個の決定論的な median-gap 倍率で探索する。標準ライブラリのみの80桁 Decimal dense-GLS オラクル（`golden/process_mle.json`）を120/180桁で再生成し、パラメータ、profile likelihood、並べ替え不変性、応答の affine 変換を照合する。120/180桁差は `4.63e-117`、Rust replay の最大パラメータ誤差は `1.78e-15`、最大 profile 誤差は `1.43e-14` である。非収束を成功に偽装せず、`DidNotConverge` と数値的妥協を report に残す。
-
-オンラインRLSは `golden/online_rls.json` の80桁 Decimal による幾何重み付き一括正規方程式を、逐次Kalman-gain更新とは独立なオラクルとする。切片なし、2変数と切片、`λ` が1に極めて近い場合を120/180桁で再照合し、係数、逆Gram、予測、有効標本数を検査する。Rust replay の実測最大絶対誤差 `6.218e-15` と最大相対誤差 `2.616e-14` に対し、それぞれ約4倍の許容差を用いる。無効入力、特徴空間変更、途中overflowは推定器を一切変更しない。
-
-`OnlineWeightedMean` は正の有限重みを必須とし、最大重みで正規化した逐次式で巨大重みの総和overflowを避ける。手計算した加重平均と Kish 有効標本数、重み尺度不変性、bitwise な分割不変性、失敗時の状態不変性を検査する。`OnlineEwMean` / `OnlineEwVar` は有限系列の正規化指数重みと Kish 有効標本数をそのまま逐次更新し、閉形式との最大絶対誤差 `1.78e-15`、bitwise な分割不変性、微小 `alpha` の underflow、`alpha=1` の極値置換、全失敗経路の状態不変性を検査する。ARMA ACF/ACOVF は固定長 MA(∞) 打切りを使わず、有限 Yule–Walker 系と後続漸化式で計算する。別実装の80桁 Decimal 状態空間 Lyapunov オラクル（`golden/arma_acov.json`、6ケース）を120/180桁で再生成し、近単位根を含む全点で照合する。
-
-`OnlineMean` / `OnlineVar` / `OnlineCovariance` / `OnlineSum` / `OnlineCount` は共通 preflight と候補状態の一括 commit を使い、空・非有限・shape 不整合・カウンタまたは算術の overflow/underflow で状態を変えない。平均は両符号の `f64::MAX` に耐える凸結合、和・M2・交差モーメントは共通の補償加算で更新する。整数スケールの厳密有理数オラクルに対する最大誤差は平均 `4.44e-16`、標本分散 `3.55e-15`、和と標本共分散は 0 で、bitwise なバッチ分割不変性も固定している。
-
-`OnlineAutoCorr` は同じ transactional preflight と補償付き Welford pair moment を使い、バッチ境界の `(previous_last, current_first)` を一度だけ数える。3観測未満または定数系列は `NaN` とし、floor/clamp や非有限値の黙示スキップは行わない。整数の厳密有理数オラクルに対する誤差は `6.94e-18`、極端スケール同変性の誤差は 0 で、内部状態の bitwise なバッチ分割不変性も固定している。
-
-`OnlineVarianceThreshold` は列ごとの標本分散を同じ補償付き Welford 核で更新し、`variance > threshold` の列だけを保持する。空バッチ、非有限入力、列数変更、無効な閾値、カウンタや算術の overflow/underflow は全列の候補状態を commit する前に失敗する。3列の厳密有理数オラクル、bitwise なバッチ分割不変性、定数列、`f64::MAX` を含む極端スケールで実測誤差 0 を固定している。
-
-`filters::lfilter` は定義どおりの SISO 差分方程式を評価し、ゼロの先頭分母係数や非有限入力、係数正規化・積・累積の underflow/overflow を値へ置換せず失敗として返す。一次 IIR の閉形式インパルス応答、全時点の再帰残差、極小値を含む係数の共通尺度不変性で検証する。FIR の `convolution_filter` と IIR の `recursive_filter` は独自ループを持たず、この核へ委譲する。`miso_lfilter` も各入力チャネルを同じ核で処理し、チャネル和の overflow を失敗として報告する。
-
-`filters::bk_filter` は statsmodels と同じゼロ和の対称係数を共通 `lfilter` で valid 畳み込みし、`K=0`、`2K+1` の整数 overflow、短系列を値へ置換せず失敗にする。`filters::cf_filter` は endpoint-to-endpoint drift と Christiano–Fitzgerald の非対称 A/B endpoint 係数を実装し、以前の OLS fallback を除去した。statsmodels 0.15.1 source oracle に対する最大絶対誤差は BK `8.88e-16`、CF `1.78e-15` である。
-
-内部乱数核は Pure Rust の xorshift64* を用い、非ゼロ seed を潰さない。整数範囲抽選は周期 `2^64-1` に合わせた棄却法、実数区間抽選は幅 `hi-lo` が overflow する有限端点でも凸結合で半開区間を保ち、Poisson は小率の反転法と大率の Hörmann PTRS を使う。剰余クラスの全数列挙、隣接 `f64` 端点と `[-MAX, MAX)`、Poisson の平均・分散・第3中心モーメントを CI で検査する。既存の infallible API では入力エラーを返せないため、無効な区間、および負・非有限・`2^32` 超の Poisson 率は乱数状態を消費せず panic する。
-
-`tsa::arma2ma` / `arma2ar` は単一の補償和による比多項式展開を共有し、既存の Schur 判定で AR 因果性または MA 可逆性を検査する。閉形式との最大誤差 `6.94e-18` と、順変換・逆変換の畳み込みが単位系列になる性質（最大誤差 `1.39e-17`）を固定している。生成は同じ有限性・因果性検査を使うが、正規乱数分布そのものの独立オラクルが未整備なので `arma_generate_sample` は Experimental のままである。
-
-生成型（Cosine/Tsp 冪族など）は削除対象であり、active な検証台帳には `Generated` / `Stub` を1件も残さない。旧台帳5,389件のうち、HMM・tslearn・online の archive 化で実装から消えた4,241名を hash 付きの [`generated-v0.1-archive/coverage.rs.txt`](generated-v0.1-archive/coverage.rs.txt) に保存し、active 台帳は実在する51項目（Verified 42、Experimental 9）だけに縮めた。テスト4件しかなく Verified 項目も workspace 内利用もなかった旧 `tslearn.rs`（60,208行・公開宣言1,581件）は、hash 付きの [`generated-v0.1-archive/tslearn.rs.txt`](generated-v0.1-archive/tslearn.rs.txt) へ退避し、コンパイル対象から外した。旧 `online.rs`（78,273行・直接 `pub` 1,241件）も [`generated-v0.1-archive/online.rs.txt`](generated-v0.1-archive/online.rs.txt) に byte-identical で保存し、公開構造体11個の小さい実装（テストを除き3,183行）へ切り替えた。旧 `LogMinkowski*Anomaly` 群と、固定距離別の `KnnAnomaly` / `ManhattanAnomaly` / `MinkowskiAnomaly` / `LinfAnomaly` / `Log*Anomaly` alias は、距離指数を実行時パラメータに持つ単一の experimental `anomaly::KnnDistanceAnomaly` に統合済みであり、verified ではない。移行時は `KnnDistanceAnomaly::new(k, p, log_transform, window)` を使う。`log_transform = true` は旧実装の `ln(max(|x|, ε))` ではなく、ゼロで有限かつ符号を保つ `sign(x) * ln(1 + |x|)` である。
-
-HMM の公開面は、単一の experimental `hmm::HiddenMarkovModel<E>` と `GaussianEmission` / `CategoricalEmission` / `PoissonEmission` に統合した。旧 569,177 行・直接 `pub` 宣言 12,401 件の生成モノリスはコンパイル対象から外し、SHA-256 を固定した [`generated-v0.1-archive/hmm.rs.txt`](generated-v0.1-archive/hmm.rs.txt) として保存している。新しい `hmm/` は 3,008 行・直接 `pub` 宣言 25 件で、追加スタック環境変数を必要としない。`HiddenMarkovModel::new(initial, transition, emissions, max_iter, left_right, policy)` は初期分布、遷移行列、状態ごとの初期 emission を明示的に受け取り、黙って正規化しない。左–右制約は別型ではなく実行時の `left_right` で指定する。Categorical / Poisson 観測は1列の有限な非負整数だけを受理し、範囲外 support は `-∞` とする。密度・確率への floor は適用しない。
-
-全モデルが共有する forward–backward 核は正規化 log-space の1実装、Viterbi は動的計画法の1実装である。filtering 確率は各 prefix を再計算せず、正規化済み forward 行から1度だけ生成するため `O(T·K²)` である。有限な極端対数放射を確率 0 と誤認せず、K=2・T=3 の全経路列挙、posterior marginal、時刻別シフト不変性、到達不能状態、真のゼロ尤度を直接テストする。さらに標準ライブラリだけの 80/120/180 桁 Decimal 全経路オラクル（`golden/hmm.json`）で Gaussian / Categorical / Poisson の尤度と Viterbi、および Gaussian Baum–Welch 2反復後の全パラメータを再生する。120/180桁差は `6.53e-119`、Rust の最大誤差は Poisson 尤度の `1.60e-14` である。HMM 33テストは通常スタックで通る。ただしこれは hmmlearn 由来ではないため、generic HMM 全体はまだ experimental とし、出自の異なる相互運用ゴールデンを追加するまでは型ごとの旧 smoke test を検証済みの根拠にしない。
-
-微分不要最適化は単一の experimental `optimize::NelderMead` に集約を開始した。argmin 0.11 を参照実装として、反射・拡大・外側収縮・内側収縮・shrink の分岐を決定論的トレースで照合するが、argmin 自体には依存しない。収束には目的値のばらつきと全単体直径の両方を要求し、反復上限・単体崩壊・非有限目的値を品質報告から隠さない。最初の利用箇所である `tsa::EwmaVol` は旧コピー座標探索を廃止し、実行時設定の bounded grid で basin を選んでから共通 solver で精密化する。QML は残差を最大絶対値で正規化してλ推定をスケール不変に保ち、分散 floor は用いない。80桁 Decimal と解析的導関数で `golden/ewma_qml.json` を生成・照合し、定数系列は `UnidentifiedModel`、端点解は `ParameterAtBoundary` として表面化する。
-
-破壊的変更の移行先は次のとおり。
-
-| 削除した公開型 | 移行先 |
-|---|---|
-| `GaussianHmm` / `GaussianHmmLeftRight` | `HiddenMarkovModel<GaussianEmission>`。左–右制約は `left_right = true` |
-| `MultinomialHmm` / `CategoricalHmm` / `MultinomialHmmLeftRight` | `HiddenMarkovModel<CategoricalEmission>` |
-| `PoissonHmm` / `PoissonHmmLeftRight` | `HiddenMarkovModel<PoissonEmission>` |
-| `HmmAnnotator` | `HiddenMarkovModel<GaussianEmission>::fit` 後に `decode` |
-
-## 使う
+最小の OLS は次の形です。
 
 ```rust
 use kanimiso::data::{Matrix, Vector};
 use kanimiso::linear_model::LinearRegression;
-use kanimiso::traits::Fit;
 use kanimiso::log::Session;
+use kanimiso::traits::Fit;
 
-let x = Matrix::from_fn(20, 1, |i, _| i as f64);
-let y = Vector::from_iter((0..20).map(|i| 1.0 + 2.0 * i as f64));
-let session = Session::new("ols", "fit");
-let fitted = LinearRegression::new().fit(&x, &y, &session)?;
-// fitted.value.coef / intercept / r2 / se / p_values
-// fitted.report を読まずに係数を論文に書かないこと
-// session.ledger() に妥協と警告が残る
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let noise = [
+        0.14, 0.31, -0.07, 0.22, -0.29, -0.11, 0.05, -0.35, 0.28, 0.09,
+        -0.18, 0.34, -0.03, -0.24, 0.12, -0.32, 0.26, -0.08, 0.19, -0.15,
+    ];
+    let x = Matrix::from_fn(noise.len(), 1, |i, _| i as f64);
+    let y = Vector::from_iter(
+        noise.iter().enumerate().map(|(i, e)| 1.0 + 2.0 * i as f64 + e),
+    );
+
+    let session = Session::new("linear_regression", "fit");
+    let mut estimator = LinearRegression::new();
+    let fitted = estimator.fit(&x, &y, &session)?;
+
+    println!("intercept = {:.6}", fitted.value.intercept);
+    println!("slope     = {:.6}", fitted.value.coef[0]);
+    println!("R²        = {:.6}", fitted.value.r2);
+
+    // 成功値と切り離さず、必ず検査または保存する。
+    for issue in fitted.report.issues() {
+        eprintln!("quality: {issue}");
+    }
+
+    Ok(())
+}
 ```
 
-オンライン:
+Git 依存として組み込む場合は、再現可能性のため実際に採用した commit SHA を
+`rev` に固定してください。
 
-```rust
-use kanimiso::online::LinearRegression as Rls;
-use kanimiso::traits::PartialFit;
-
-let mut rls = Rls::new(1.0); // forgetting λ
-let q = rls.partial_fit(&x, Some(&y), &session)?;
-// q.value.narrative / trust / quality.effective_sample_size
+```toml
+[dependencies]
+kanimiso = { git = "https://github.com/yaruodemanabu/kanimiso", rev = "<commit-sha>" }
 ```
 
-実装一覧は `kanimiso::coverage::inventory()`。検証済みだけを見るなら `verified()`。
+## 現在の機能範囲
 
-## 制約
+検証状態の正本は [`kanimiso::coverage::verified()`](https://github.com/yaruodemanabu/kanimiso/blob/main/kanimiso/src/coverage.rs) です。
+公開モジュールが存在しても、この台帳にないものを検証済みとは扱いません。
 
-- **a.** 外部の科学技術計算依存は `ndarray = 0.17.2` と `faer = 0.24.4` のみ（版・feature・native BLAS 不在を `scripts/lint_dependencies.py` で固定）
-- **b.** Pure Rust
-- **c.** エラーは `signlred`、ログは `ojizou-san`。どちらも計算品質の責任を持つ
-- **d.** 追加学習アルゴリズムは説明力を落とさない（`IncrementalExplain` 必須）
+| 領域 | 主な API | 状態 |
+|---|---|---|
+| 線形回帰 | `linear_model::LinearRegression` | Verified |
+| オンライン推定 | RLS、平均・分散・共分散、指数重み、自己相関、分散選択 | Verified |
+| 状態空間 | `state_space::LinearGaussianStateSpace` の filter / RTS smoother | Verified |
+| 時系列 | ARMA の ACF・ACOVF・比多項式展開、BK / CF / 線形フィルタ | Verified |
+| ボラティリティ | GARCH(1,1)、power-2 FIGARCH(1,d,1)、Eq. 11 の one-AR / news-MA なし FIEGARCH | Verified |
+| 確率過程 | median-gap 倍率 5 点を探索する `stats::process_mle` lite | Verified |
+| 特殊関数 | beta / gamma、正規・χ² の CDF、t / F の CDF・p-value | Verified |
+| HMM | Gaussian / categorical / Poisson emission の汎用 HMM | Experimental |
+| その他 | 正規・χ²の上側 p-value、k-NN 異常検知、Nelder–Mead、EWMA / EGARCH、ARMA 生成 | Experimental |
+
+Verified は「正しそう」という意味ではありません。決定的 golden、閉形式または
+brute-force、性質テストを CI で再生し、許容差の根拠を記録した項目です。検証方式、
+オラクルの独立性と限界、実測誤差は [検証ガイド](https://github.com/yaruodemanabu/kanimiso/blob/main/docs/validation.md) にまとめています。
+
+## 品質契約
+
+通常の estimator と最も違うのは戻り値です。
+
+```text
+fit / predict / partial_fit
+          │
+          ├─ Failure              値を返してはいけない問題
+          └─ Qualified<T>
+                 ├─ value         計算結果
+                 └─ report        警告・妥協・意味のなさ・診断
+```
+
+- `Failure` は、非有限入力、識別不能、意味のない fit など、既定ポリシーで中止すべき
+  問題を完全な `Report` とともに返します。
+- `Qualified<T>` は `#[must_use]` です。値が返っても `report` の検査または永続化が
+  契約の一部です。
+- 擬似逆、ridge fallback、jitter、確率 clamp など、依頼と異なる計算を採用した場合は
+  `NumericalCompromise` に残します。
+- `Session` は開始、反復、品質 issue、成功・失敗を同じ ledger に記録します。
+- `partial_fit` はパラメータを更新するだけでなく、`IncrementalExplain` として有効標本数、
+  パラメータ変化、情報利得、識別状態を返します。
+
+このため「とりあえず一つの数値だけ欲しい」API より少し重くなります。その代わり、
+失敗や近似を成功値に見せかけないことを優先しています。
+
+## ワークスペース
+
+| crate | 責務 |
+|---|---|
+| `kanimiso` | 推定、変換、予測と共有数値核 |
+| `signlred` | `Qualified<T>`、`Failure`、`Policy`、数値・統計品質の診断 |
+| `ojizou-san` | `Session`、品質 ledger、妥協 journal、オンライン学習の説明 |
+
+直接の科学技術計算依存は、ワークスペース全体で次の二つだけです。
+
+- `ndarray = 0.17.2`: N 次元配列、軸、slice、view
+- `faer = 0.24.4`: 行列所有、分解、固有値、線形方程式、最小二乗
+
+両方とも完全固定し、`ndarray-linalg`、`ndarray-stats`、native BLAS / LAPACK は
+依存ポリシー lint で拒否します。first-party code は `#![forbid(unsafe_code)]` です。
+Python は fixture の生成・監査と CI lint にだけ使い、Rust ライブラリの実行時依存では
+ありません。
+
+## 開発と検証
+
+ローカルで主要な CI 相当を実行するには次を使います。Python 3.12、Bash、
+`cargo-deny`、`cargo-llvm-cov` が必要です。以下の `RUSTDOCFLAGS` の書式は POSIX shell
+向けです。
+
+```console
+cargo fmt --all --check
+cargo +1.85 test --workspace --all-features --locked
+cargo test --workspace --all-features --locked
+cargo test --workspace --doc --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo package -p kanimiso --list --locked
+python scripts/lint_dependencies.py
+python scripts/lint_clippy.py
+bash scripts/lint_redundancy.sh
+cargo deny check
+cargo llvm-cov --workspace --locked --summary-only --fail-under-lines 76.0
+```
+
+CI は全ワークスペースを MSRV 1.85 と固定 toolchain 1.98.0 で検査し、stable では
+`signlred` / `ojizou-san` の lint・test・docs を先行監視します。オラクル群も領域別
+ジョブで再生します。設計判断と冗長性予算は
+[AGENTS.md](https://github.com/yaruodemanabu/kanimiso/blob/main/AGENTS.md)、v0.1 の削除 API
+と移行先は [移行メモ](https://github.com/yaruodemanabu/kanimiso/blob/main/docs/dropped_v0_1.md)
+を参照してください。利用者に影響する変更は
+[CHANGELOG](https://github.com/yaruodemanabu/kanimiso/blob/main/CHANGELOG.md) に記録します。
 
 ## ライセンス
 

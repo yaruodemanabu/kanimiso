@@ -1,16 +1,17 @@
-//! `kanimiso` — Pure Rust machine learning and statistics.
+//! `kanimiso` — a verification-first Pure Rust core for time-series
+//! econometrics, online estimation, state-space models, and statistical
+//! learning.
 //!
 //! v0.2 is being reconstituted from a small verified core (see the repo
 //! `AGENTS.md`). Claims of coverage track [`coverage::verified`], not the raw
-//! [`coverage::inventory`]. Until `0.2.0-alpha.1` this crate does **not**
-//! claim equivalence to scikit-learn, statsmodels, sktime, tslearn, hmmlearn,
-//! or river.
+//! [`coverage::inventory`]. This crate does **not** claim drop-in equivalence
+//! to scikit-learn, statsmodels, sktime, tslearn, hmmlearn, or river.
 //!
 //! Constraints honoured by this crate:
 //! - N-dimensional arrays use [`ndarray`]; linear algebra goes through [`faer`]
 //! - no `unsafe`, no non-Rust native libraries
-//! - every fit/predict/partial_fit talks to [`signlred`] (quality errors) and
-//!   [`ojizou_san`] (quality logging)
+//! - estimator APIs report quality through [`signlred`] and log fit sessions
+//!   through [`ojizou_san`]
 //! - incremental algorithms emit [`ojizou_san::IncrementalExplain`]
 //!
 //! A silent successful fit is a bug.
