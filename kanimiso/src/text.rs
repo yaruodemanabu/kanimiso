@@ -472,7 +472,7 @@ mod tests {
     fn counts_and_tfidf_on_two_docs() {
         let docs = ["red fox red", "blue fox"];
         let mut cv = CountVectorizer::new();
-        cv.fit_docs(&docs, &Session::new("cv", "fit")).unwrap();
+        let _count_fit = cv.fit_docs(&docs, &Session::new("cv", "fit")).unwrap();
         assert!(cv.vocabulary().contains(&"fox".to_string()));
         let x = cv
             .transform_docs(&docs, &Session::new("cv", "t"))
@@ -481,13 +481,13 @@ mod tests {
         assert_eq!(x.nrows(), 2);
         assert!(x.ncols() >= 3);
         let mut tf = TfidfTransformer::new();
-        tf.fit_unsupervised(&x, &Session::new("tf", "fit")).unwrap();
+        let _tfidf_fit = tf.fit_unsupervised(&x, &Session::new("tf", "fit")).unwrap();
         let z = tf.transform(&x, &Session::new("tf", "t")).unwrap().value;
         assert_eq!(z.shape(), x.shape());
         let n0: f64 = (0..z.ncols()).map(|j| z.get(0, j) * z.get(0, j)).sum();
         assert!((n0.sqrt() - 1.0).abs() < 1e-10, "n0={n0}");
         let mut tv = TfidfVectorizer::new();
-        tv.fit_docs(&docs, &Session::new("tv", "fit")).unwrap();
+        let _vectorizer_fit = tv.fit_docs(&docs, &Session::new("tv", "fit")).unwrap();
         let z2 = tv
             .transform_docs(&docs, &Session::new("tv", "t"))
             .unwrap()
@@ -500,7 +500,7 @@ mod tests {
         assert_eq!(h.shape(), (2, 8));
         let recs = ["color=1 year=2012", "color=0 year=2013 extra=1"];
         let mut dv = DictVectorizer::new();
-        dv.fit_docs(&recs, &Session::new("dv", "fit")).unwrap();
+        let _dict_fit = dv.fit_docs(&recs, &Session::new("dv", "fit")).unwrap();
         assert!(dv.vocabulary().contains(&"color".to_string()));
         let xd = dv
             .transform_docs(&recs, &Session::new("dv", "t"))

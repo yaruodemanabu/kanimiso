@@ -712,15 +712,9 @@ impl Predict for FittedEllipticEnvelope {
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let d = self.cov.mahalanobis(x);
         let y =
-            Vector::from_iter((0..x.nrows()).map(
-                |i| {
-                    if d[i] > self.threshold {
-                        -1.0
-                    } else {
-                        1.0
-                    }
-                },
-            ));
+            Vector::from_iter(
+                (0..x.nrows()).map(|i| if d[i] > self.threshold { -1.0 } else { 1.0 }),
+            );
         ctx.finish(y)
     }
 }

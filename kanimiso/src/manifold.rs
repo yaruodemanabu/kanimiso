@@ -645,12 +645,7 @@ fn orthonormalize_columns(a: &mut Matrix) {
     }
 }
 
-fn embed_smallest_eigs(
-    ctx: &mut FitCtx,
-    m: &Mat<f64>,
-    n: usize,
-    n_components: usize,
-) -> Matrix {
+fn embed_smallest_eigs(ctx: &mut FitCtx, m: &Mat<f64>, n: usize, n_components: usize) -> Matrix {
     let k = n_components.max(1);
     let Some((vals, vecs)) = symmetric_eigen(&mut ctx.report, m, &ctx.policy) else {
         return Matrix::zeros(n, k);
@@ -787,7 +782,9 @@ impl FitUnsupervised for HessianLle {
         ctx.push(
             Issue::builder(IssueCode::CausalClaimUnidentified)
                 .severity(Severity::Advisory)
-                .message("HessianLle is a Gram–Schmidt Hessian sketch, not sklearn's exact eigenmaps")
+                .message(
+                    "HessianLle is a Gram–Schmidt Hessian sketch, not sklearn's exact eigenmaps",
+                )
                 .compromise(NumericalCompromise::new(
                     "Donoho–Grimes Hessian eigenmaps",
                     "local PCA plus orthonormalized quadratic monomials",
@@ -877,7 +874,8 @@ impl FitUnsupervised for ModifiedLle {
                         .enumerate()
                         .map(|(i, v)| (v, i))
                         .collect();
-                    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                    pairs
+                        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
                     let sdim = k.saturating_sub(d).max(1).min(pairs.len());
                     let mut raw = vec![0.0; k];
                     for &(_, idx) in pairs.iter().take(sdim) {
@@ -987,13 +985,18 @@ impl FitUnsupervised for Ltsa {
             };
             let dd = u.ncols();
             let kf = (k as f64).sqrt();
-            let mut gi = Matrix::from_fn(k, 1 + dd, |a, c| {
-                if c == 0 {
-                    1.0 / kf
-                } else {
-                    u.get(a, c - 1)
-                }
-            });
+            let mut gi =
+                Matrix::from_fn(
+                    k,
+                    1 + dd,
+                    |a, c| {
+                        if c == 0 {
+                            1.0 / kf
+                        } else {
+                            u.get(a, c - 1)
+                        }
+                    },
+                );
             orthonormalize_columns(&mut gi);
             let q = gi.ncols();
             for a in 0..k {

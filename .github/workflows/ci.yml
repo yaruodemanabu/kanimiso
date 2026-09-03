@@ -1,6 +1,6 @@
-# AGENTS.md §7. Workspace clippy/fmt on the generated v0.1 surface
-# (hmm.rs / online.rs) is expected to stay noisy until PR 8 deletes it.
-# Required today: redundancy lint, small-crate quality, special oracle, deny.
+# AGENTS.md §7. The HMM, tslearn, online, coverage, and TSA monoliths are archived.
+# Remaining v0.1 modules are still being reduced under the redundancy ratchet.
+# Required today: redundancy lint, small-crate quality, numerical oracles, deny.
 
 name: CI
 
@@ -25,18 +25,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.0
-      - name: Redundancy ratchet (R1 / R4 / R5 / R7 / R10, faer, stack)
+      - name: Dependency policy + redundancy ratchet
         run: bash scripts/lint_redundancy.sh
 
   quality-small:
-    name: signlred + ojizou-san (${{ matrix.rust }})
+    name: MSRV + support crates (${{ matrix.rust }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # signlred / ojizou-san have no faer graph. 1.84.1 still builds them.
-        # kanimiso cannot: generativity 1.2.1 needs edition2024 (B3).
-        rust: ["1.84.1", "1.98.0", "stable"]
+        # The 1.85 row validates the whole workspace at its declared MSRV.
+        # Newer rows keep the support crates warning-free as compilers evolve.
+        rust: ["1.85", "1.98.0", "stable"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -48,6 +48,9 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy -p signlred -p ojizou-san --all-targets --all-features -- -D warnings
       - run: cargo test -p signlred -p ojizou-san --all-features
+      - name: Test full workspace at MSRV
+        if: matrix.rust == '1.85'
+        run: cargo test --workspace --all-features --locked
       - run: cargo test -p signlred -p ojizou-san --doc
       - run: cargo doc -p signlred -p ojizou-san --no-deps
         env:
@@ -63,7 +66,172 @@ jobs:
         with:
           toolchain: 1.98.0
       - name: Replay golden/special_functions.json
-        run: cargo test -p kanimiso --lib special:: -- --nocapture
+        run: 'cargo test -p kanimiso --lib special:: -- --nocapture'
+
+  hmm-core:
+    name: generic HMM brute-force and log-space kernels
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify independent Decimal HMM fixture
+        run: |
+          python scripts/hmm_oracle.py check golden/hmm.json
+          python scripts/hmm_oracle.py deep golden/hmm.json
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - name: Verify the generic HMM
+        run: |
+          cargo test -p kanimiso --lib hmm:: -- --nocapture
+
+  ols-oracle:
+    name: OLS Decimal golden
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify OLS fixture provenance
+        run: python scripts/ols_oracle.py check golden/ols.json
+      - name: Verify OLS oracle precision and identities
+        run: python scripts/ols_oracle.py deep
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - name: Replay OLS fixture in Rust
+        run: 'cargo test -p kanimiso --lib linear_model::tests::ols_matches_independent_decimal_oracle -- --exact --nocapture'
+
+  state-space-oracle:
+    name: state-space Decimal golden
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify state-space fixture provenance
+        run: python scripts/state_space_oracle.py check golden/state_space.json
+      - name: Verify joint-conditioning oracle precision and identities
+        run: python scripts/state_space_oracle.py deep golden/state_space.json
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - name: Replay state-space fixture in Rust
+        run: |
+          cargo test -p kanimiso --lib state_space::tests::joint_gaussian_decimal_golden_replays_filter_and_smoother -- --exact --nocapture
+          cargo test -p kanimiso --lib state_space::smoother::tests::zero_cross_covariance_needs_no_inverse_even_with_future_observations -- --exact --nocapture
+          cargo test -p kanimiso --lib state_space::smoother::tests::trailing_missing_measurements_do_not_require_an_rts_inverse -- --exact --nocapture
+          cargo test -p kanimiso --lib state_space::smoother::tests::all_missing_smoothing_is_exact_prior_propagation -- --exact --nocapture
+          cargo test -p kanimiso --lib linalg::tests::symmetrization_preserves_finite_extremes_without_intermediate_overflow -- --exact --nocapture
+
+  online-rls-oracle:
+    name: online RLS Decimal golden + exact EW moments
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify online RLS fixture provenance
+        run: python scripts/online_rls_oracle.py check golden/online_rls.json
+      - name: Verify batch-oracle precision
+        run: python scripts/online_rls_oracle.py deep golden/online_rls.json
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - name: Replay online RLS fixture in Rust
+        run: 'cargo test -p kanimiso --lib online::tests::rls_matches_independent_decimal_batch_oracle -- --exact --nocapture'
+      - name: Verify online moments and transactionality
+        run: |
+          cargo test -p kanimiso --lib online::tests::ew_moments_match_finite_weight_closed_form -- --exact --nocapture
+          cargo test -p kanimiso --lib online::tests::ew_moments_are_partition_invariant -- --exact --nocapture
+          cargo test -p kanimiso --lib online::tests::ew_moments_handle_constant_and_extreme_finite_values -- --exact --nocapture
+          cargo test -p kanimiso --lib online::tests::ew_moments_reject_invalid_batches_transactionally -- --exact --nocapture
+          cargo test -p kanimiso --lib online::tests::unweighted_online_moments_match_integer_scaled_decimal_oracle -- --exact --nocapture
+          cargo test -p kanimiso --lib online::tests::unweighted_online_moments_are_bitwise_partition_invariant -- --exact --nocapture
+          cargo test -p kanimiso --lib online::tests::unweighted_online_moments_handle_representable_extremes -- --exact --nocapture
+          cargo test -p kanimiso --lib online::tests::unweighted_online_moment_failures_are_transactional -- --exact --nocapture
+          cargo test -p kanimiso --lib online::tests::online_autocorrelation -- --nocapture
+          cargo test -p kanimiso --lib online::tests::online_variance_threshold -- --nocapture
+
+  time-series-oracles:
+    name: process MLE + ARMA Decimal goldens + exact lfilter
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify process-MLE fixture and Decimal precision
+        run: |
+          python scripts/process_mle_oracle.py check golden/process_mle.json
+          python scripts/process_mle_oracle.py deep golden/process_mle.json
+      - name: Verify ARMA covariance fixture and Decimal precision
+        run: |
+          python scripts/arma_acov_oracle.py check golden/arma_acov.json
+          python scripts/arma_acov_oracle.py deep golden/arma_acov.json
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - name: Replay independent time-series fixtures in Rust
+        run: |
+          cargo test -p kanimiso --lib stats::process::tests::process_mle_matches_independent_decimal_dense_gls_oracle -- --exact --nocapture
+          cargo test -p kanimiso --lib tsa::arma::tests::arma_autocovariance_matches_independent_decimal_lyapunov_oracle -- --exact --nocapture
+          cargo test -p kanimiso --lib tsa::arma::tests::arma_ratio_expansions_match_closed_forms_and_convolution_identity -- --exact --nocapture
+          cargo test -p kanimiso --lib tsa::arma::tests::arma_ratio_expansions_propagate_domain_and_arithmetic_failures -- --exact --nocapture
+          cargo test -p kanimiso --lib tsa::arma::tests::arma_sample_is_exact_length_deterministic_and_failure_atomic -- --exact --nocapture
+          cargo test -p kanimiso --lib filters::tests::lfilter_matches_closed_form_impulse_and_recurrence_identity -- --exact --nocapture
+          cargo test -p kanimiso --lib filters::tests::lfilter_rejects_invalid_inputs_and_overflow_without_substitution -- --exact --nocapture
+          cargo test -p kanimiso --lib filters::tests::fir_and_recursive_adapters_share_the_lfilter_kernel -- --exact --nocapture
+          cargo test -p kanimiso --lib filters::tests::multi_input_filter_is_the_sum_of_shared_lfilter_channels -- --exact --nocapture
+          cargo test -p kanimiso --lib filters::tests::bandpass_filters_match_statsmodels_source_oracles -- --exact --nocapture
+          cargo test -p kanimiso --lib filters::tests::bandpass_filters_are_equivariant_to_scale_and_affine_trend -- --exact --nocapture
+          cargo test -p kanimiso --lib filters::tests::bandpass_filters_reject_invalid_domains_without_substitution -- --exact --nocapture
+          cargo test -p kanimiso --lib rng::tests:: -- --nocapture
+
+  garch-oracle:
+    name: volatility Decimal goldens
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify GARCH fixture schema and provenance
+        run: python scripts/garch_qml_oracle.py check golden/garch_qml.json
+      - name: Regenerate GARCH oracle at 80 and 120 digits
+        run: python scripts/garch_qml_oracle.py deep golden/garch_qml.json
+      - name: Verify the retained volatility fixtures
+        run: |
+          python scripts/ewma_qml_oracle.py check golden/ewma_qml.json
+          python scripts/egarch_qml_oracle.py deep-check golden/egarch_qml.json
+          python scripts/figarch_qml_oracle.py deep-check golden/figarch_qml.json
+          python scripts/fiegarch_qml_oracle.py deep-check golden/fiegarch_qml.json
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - name: Replay volatility fixtures in Rust
+        run: |
+          cargo test -p kanimiso --lib tsa::garch::tests::garch_decimal_golden_replay -- --exact --nocapture
+          cargo test -p kanimiso --lib tsa::ewma::tests::ewma_decimal_golden_replay -- --exact --nocapture
+          cargo test -p kanimiso --lib tsa::egarch::tests::egarch_decimal_golden_replays_the_numerical_kernel -- --exact --nocapture
+          cargo test -p kanimiso --lib tsa::egarch::tests::egarch_qmle_matches_decimal_golden_faces_and_paths -- --exact --nocapture
+          cargo test -p kanimiso --lib tsa::figarch::tests::figarch_decimal_golden_replays_fixed_kernels_and_invalid_domains -- --exact --nocapture
+          cargo test -p kanimiso --lib tsa::figarch::tests::figarch_decimal_golden_replays_selected_qml_kernels -- --exact --nocapture
+          cargo test -p kanimiso --lib tsa::figarch::tests::figarch_public_qmle_matches_decimal_face_oracle -- --exact --nocapture
+          cargo test -p kanimiso --lib tsa::fiegarch::tests::fiegarch_decimal_golden_replays_the_fixed_parameter_kernel -- --exact --nocapture
+          cargo test -p kanimiso --lib tsa::fiegarch::tests::fiegarch_analytic_gradient_matches_decimal_nonstationary_probes -- --exact --nocapture
+          cargo test -p kanimiso --lib tsa::fiegarch::tests::fiegarch_qmle_matches_decimal_faces_and_paths -- --exact --nocapture
 
   cargo-deny:
     name: cargo deny check
@@ -72,28 +240,28 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.84.1
+          toolchain: 1.85
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
           rust-version: "1.98.0"
 
   workspace-policy:
-    name: AGENTS.md §7 workspace suite
+    name: AGENTS.md §7 workspace suite (Clippy ratchet)
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    # Generated v0.1 files (568k-line hmm.rs) are not clippy-clean.
-    # This job becomes a required green check after PR 8.
-    continue-on-error: true
+    # Remaining v0.1 modules are not yet clippy-clean. The warning budget can
+    # only decrease and reaches the final `-D warnings` policy at zero.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: stable
+          toolchain: 1.98.0
           components: rustfmt, clippy, llvm-tools-preview
-      - run: rustup override set stable
+      - run: rustup override set 1.98.0
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Full-workspace Clippy warning ratchet
+        run: python3 scripts/lint_clippy.py
       - run: cargo test --workspace --all-features
       - run: cargo test --workspace --doc
       - run: cargo doc --workspace --no-deps

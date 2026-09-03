@@ -137,11 +137,10 @@ impl Session {
     /// Mark a failed fit.
     pub fn finish_err(&self, failure: &Failure) -> Event {
         self.ingest(&failure.report);
-        self.emit(
-            Event::new(EventKind::FitFailed, &self.algorithm, &self.operation)
-                .with_issue(failure.primary.clone())
-                .message(failure.to_string()),
-        )
+        let mut event = Event::new(EventKind::FitFailed, &self.algorithm, &self.operation)
+            .message(failure.to_string());
+        event.issue = Some(failure.primary.clone());
+        self.emit(event)
     }
 
     /// Optimization breadcrumb.
@@ -171,5 +170,33 @@ impl Session {
     /// Divergence claim.
     pub fn diverged(&self, why: impl Into<String>) -> Event {
         self.emit(Event::new(EventKind::Divergence, &self.algorithm, &self.operation).message(why))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use signlred::{IssueCode, Policy};
+
+    #[test]
+    fn failed_terminal_event_keeps_its_kind_and_primary_issue() {
+        let session = Session::new("session", "fit");
+        let mut report = Report::new("session", "fit");
+        report.push(
+            Issue::builder(IssueCode::InvalidParameter)
+                .message("invalid test parameter")
+                .build(),
+        );
+        let failure = report
+            .into_failure(&Policy::default())
+            .expect("invalid parameter is fatal");
+        let terminal = session.finish_err(&failure);
+        assert_eq!(terminal.kind, EventKind::FitFailed);
+        assert_eq!(
+            terminal.issue.as_ref().map(|issue| issue.code),
+            Some(IssueCode::InvalidParameter)
+        );
+        assert_eq!(session.ledger().of_kind(EventKind::QualityFatal).len(), 1);
+        assert_eq!(session.ledger().of_kind(EventKind::FitFailed).len(), 1);
     }
 }

@@ -6,6 +6,7 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
+use crate::special::logsumexp;
 use crate::traits::{Fit, FitUnsupervised, Predict, Transform};
 use crate::validate::{inspect_classes, inspect_identification, inspect_xy};
 use ojizou_san::Session;
@@ -60,18 +61,6 @@ fn knn_order(train: &Matrix, query: &Matrix, i: usize) -> Vec<(f64, usize)> {
         .collect();
     d.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     d
-}
-
-fn logsumexp(xs: &[f64]) -> f64 {
-    let m = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if !m.is_finite() {
-        return m;
-    }
-    let mut s = 0.0;
-    for &v in xs {
-        s += (v - m).exp();
-    }
-    m + s.ln()
 }
 
 fn diagnose_constant_predictions(ctx: &mut FitCtx, pred: &Vector, y: &Vector) {
@@ -304,7 +293,9 @@ impl FitUnsupervised for RadiusNeighborsTransformer {
             ctx.push(
                 Issue::builder(IssueCode::InvalidWeight)
                     .severity(Severity::Warning)
-                    .message(format!("radius={radius} is not a non-negative finite; using 1"))
+                    .message(format!(
+                        "radius={radius} is not a non-negative finite; using 1"
+                    ))
                     .build(),
             );
             radius = 1.0;
@@ -1507,7 +1498,7 @@ mod tests {
         });
         let y = Vector::from_iter((0..40).map(|i| if i < 20 { 0.0 } else { 1.0 }));
         let mut nca = NeighborhoodComponentsAnalysis::new(2);
-        nca.fit(&x, &y, &Session::new("nca", "fit")).expect("nca");
+        let _fit = nca.fit(&x, &y, &Session::new("nca", "fit")).expect("nca");
         let z = nca
             .transform(&x, &Session::new("nca", "t"))
             .expect("ncat")

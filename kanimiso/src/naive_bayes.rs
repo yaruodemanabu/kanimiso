@@ -23,17 +23,8 @@ fn class_index(lab: i64, classes: &[i64]) -> Option<usize> {
     classes.iter().position(|&c| c == lab)
 }
 
-#[allow(dead_code)]
-fn logsumexp(xs: &[f64]) -> f64 {
-    let m = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if !m.is_finite() {
-        return m;
-    }
-    let mut s = 0.0;
-    for &v in xs {
-        s += (v - m).exp();
-    }
-    m + s.ln()
+fn empirical_log_prior(class_count: f64, total_count: f64) -> f64 {
+    class_count.ln() - total_count.ln()
 }
 
 fn argmax_label(classes: &[i64], scores: &[f64]) -> i64 {
@@ -194,13 +185,13 @@ impl GaussianNB {
 
     fn log_scores(&self, x: &Matrix, i: usize) -> Vec<f64> {
         let p = self.n_features.unwrap_or(0);
-        let ntot: f64 = self.class_n.iter().sum::<f64>().max(1e-15);
+        let ntot: f64 = self.class_n.iter().sum();
         let smooth = self.smoothing();
         self.classes
             .iter()
             .enumerate()
             .map(|(c, _)| {
-                let prior = (self.class_n[c] / ntot).max(1e-15).ln();
+                let prior = empirical_log_prior(self.class_n[c], ntot);
                 let mut s = prior;
                 for j in 0..p.min(x.ncols()) {
                     s += log_normal(x.get(i, j), self.mean[c][j], self.raw_var(c, j) + smooth);
@@ -224,7 +215,7 @@ impl GaussianNB {
     fn to_fitted(&self) -> FittedGaussianNB {
         let p = self.n_features.unwrap_or(0);
         let k = self.classes.len();
-        let ntot: f64 = self.class_n.iter().sum::<f64>().max(1e-15);
+        let ntot: f64 = self.class_n.iter().sum();
         let prior = Vector::from_iter(self.class_n.iter().map(|n| n / ntot));
         let smooth = self.smoothing();
         let theta = Matrix::from_fn(k.max(1), p, |c, j| {
@@ -271,7 +262,7 @@ impl FittedGaussianNB {
         Vector::from_iter((0..x.nrows()).map(|i| {
             let mut scores = Vec::with_capacity(self.classes.len());
             for c in 0..self.classes.len() {
-                let mut s = self.class_prior[c].max(1e-15).ln();
+                let mut s = self.class_prior[c].ln();
                 for j in 0..x.ncols().min(self.theta.ncols()) {
                     s += log_normal(x.get(i, j), self.theta.get(c, j), self.var.get(c, j));
                 }
@@ -638,13 +629,13 @@ fn fit_count_nb(
                 .build(),
         );
     }
-    let ntot: f64 = class_n.iter().sum::<f64>().max(1e-15);
+    let ntot: f64 = class_n.iter().sum();
     let mut log_prior = Vector::zeros(k.max(1));
     for c in 0..k {
         log_prior[c] = if complement {
             0.0
         } else {
-            (class_n[c] / ntot).max(1e-15).ln()
+            empirical_log_prior(class_n[c], ntot)
         };
     }
     let a = alpha.max(0.0);
@@ -822,12 +813,12 @@ impl Fit for BernoulliNB {
                 }
             }
         }
-        let ntot: f64 = class_n.iter().sum::<f64>().max(1e-15);
+        let ntot: f64 = class_n.iter().sum();
         let mut log_prior = Vector::zeros(k.max(1));
         let mut flp = Matrix::zeros(k.max(1), p);
         let mut fln = Matrix::zeros(k.max(1), p);
         for c in 0..k {
-            log_prior[c] = (class_n[c] / ntot).max(1e-15).ln();
+            log_prior[c] = empirical_log_prior(class_n[c], ntot);
             let den = class_n[c] + 2.0 * a;
             for j in 0..p {
                 let th = ((ones.get(c, j) + a) / den.max(1e-15)).clamp(1e-15, 1.0 - 1e-15);
@@ -1025,10 +1016,10 @@ impl Fit for CategoricalNB {
                 }
             }
         }
-        let ntot: f64 = class_n.iter().sum::<f64>().max(1e-15);
+        let ntot: f64 = class_n.iter().sum();
         let mut log_prior = Vector::zeros(k.max(1));
         for c in 0..k {
-            log_prior[c] = (class_n[c] / ntot).max(1e-15).ln();
+            log_prior[c] = empirical_log_prior(class_n[c], ntot);
         }
         let mut log_prob = Vec::with_capacity(k.max(1));
         for c in 0..k.max(1) {
@@ -1060,19 +1051,22 @@ impl Fit for CategoricalNB {
     }
 }
 
-// silence unused helper in non-test builds that still document log-sum-exp
-#[allow(dead_code)]
-fn _log_prob_norm(scores: &[f64]) -> Vec<f64> {
-    let z = logsumexp(scores);
-    scores.iter().map(|s| s - z).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::rng::Rng;
     use ojizou_san::Session;
     use signlred::IssueCode;
+
+    #[test]
+    fn empirical_log_prior_preserves_tiny_positive_probability() {
+        let got = empirical_log_prior(1.0, 1e20);
+        let expected = (1e-20_f64).ln();
+        let tolerance = expected.abs() * f64::EPSILON;
+        // Measured absolute error was 0.0 on 2026-09-02; allow one ulp-scale margin.
+        assert!((got - expected).abs() <= tolerance);
+        assert!(got < (1e-15_f64).ln(), "tiny prior was floored: {got}");
+    }
 
     fn accuracy(pred: &Vector, y: &Vector) -> f64 {
         let mut ok = 0usize;

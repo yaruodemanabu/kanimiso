@@ -6,10 +6,14 @@
 
 use crate::context::FitCtx;
 use crate::data::{Matrix, Vector};
-use crate::linalg::{least_squares, ridge_solve, thin_svd};
+use crate::linalg::{
+    least_squares, least_squares_with_diagnostics, ridge_solve, thin_svd, ThinSvd,
+};
 use crate::special::{f_pvalue, student_t_pvalue};
 use crate::traits::{Fit, PartialFit, Predict, Transform};
-use crate::validate::{inspect_collinearity, inspect_identification, inspect_xy};
+use crate::validate::{
+    inspect_collinearity, inspect_identification, inspect_xy, inspect_xy_allow_constant_target,
+};
 use ojizou_san::{IncrementalExplain, Session};
 use signlred::{
     IncrementalQuality, Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result,
@@ -130,8 +134,12 @@ impl Fit for LinearRegression {
         session: &Session,
     ) -> Result<Qualified<FittedLinear>> {
         let mut ctx = FitCtx::with_session(session.clone());
-        inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
-        if ctx.report.contains(IssueCode::ConstantTarget)
+        if self.fit_intercept {
+            inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
+        } else {
+            inspect_xy_allow_constant_target(&mut ctx.report, x, y, &ctx.policy);
+        }
+        if (self.fit_intercept && ctx.report.contains(IssueCode::ConstantTarget))
             || ctx.report.contains(IssueCode::EmptyMatrix)
             || ctx.report.contains(IssueCode::NonFiniteInput)
             || ctx.report.contains(IssueCode::DimensionMismatch)
@@ -145,7 +153,9 @@ impl Fit for LinearRegression {
         };
         inspect_identification(&mut ctx.report, design.nrows(), design.ncols(), &ctx.policy);
         inspect_collinearity(&mut ctx.report, &design, &ctx.policy);
-        let Some(beta) = least_squares(&mut ctx.report, &design, y, &ctx.policy) else {
+        let Some(solution) =
+            least_squares_with_diagnostics(&mut ctx.report, &design, y, &ctx.policy)
+        else {
             ctx.push(
                 Issue::builder(IssueCode::UnidentifiedModel)
                     .message("OLS factorization produced no coefficient vector")
@@ -153,7 +163,15 @@ impl Fit for LinearRegression {
             );
             return ctx.finish(empty_fitted(x, y, self.fit_intercept));
         };
-        let fitted = infer_ols(&mut ctx, &design, y, beta, self.fit_intercept);
+        let fitted = infer_ols(
+            &mut ctx,
+            &design,
+            y,
+            solution.coefficients,
+            &solution.decomposition,
+            solution.rank,
+            self.fit_intercept,
+        );
         ctx.finish(fitted)
     }
 }
@@ -170,9 +188,9 @@ fn empty_fitted(x: &Matrix, y: &Vector, used_intercept: bool) -> FittedLinear {
         r2: f64::NAN,
         adj_r2: f64::NAN,
         sigma2: f64::NAN,
-        se: Vector::zeros(p),
-        t_values: Vector::zeros(p),
-        p_values: Vector::zeros(p),
+        se: Vector::filled(p, f64::NAN),
+        t_values: Vector::filled(p, f64::NAN),
+        p_values: Vector::filled(p, f64::NAN),
         aic: f64::NAN,
         bic: f64::NAN,
         f_stat: f64::NAN,
@@ -181,8 +199,8 @@ fn empty_fitted(x: &Matrix, y: &Vector, used_intercept: bool) -> FittedLinear {
         loglik: f64::NAN,
         fitted: Vector::zeros(y.len()),
         resid: Vector::zeros(y.len()),
-        leverage: Vector::zeros(y.len()),
-        cooks: Vector::zeros(y.len()),
+        leverage: Vector::filled(y.len(), f64::NAN),
+        cooks: Vector::filled(y.len(), f64::NAN),
         used_intercept,
     }
 }
@@ -192,27 +210,68 @@ fn infer_ols(
     design: &Matrix,
     y: &Vector,
     beta: Vector,
+    decomposition: &ThinSvd,
+    rank: usize,
+    used_intercept: bool,
+) -> FittedLinear {
+    infer_linear(
+        ctx,
+        design,
+        y,
+        beta,
+        Some((decomposition, rank)),
+        used_intercept,
+    )
+}
+
+fn infer_point_fit(
+    ctx: &mut FitCtx,
+    design: &Matrix,
+    y: &Vector,
+    beta: Vector,
+    used_intercept: bool,
+) -> FittedLinear {
+    infer_linear(ctx, design, y, beta, None, used_intercept)
+}
+
+fn infer_linear(
+    ctx: &mut FitCtx,
+    design: &Matrix,
+    y: &Vector,
+    beta: Vector,
+    ols: Option<(&ThinSvd, usize)>,
     used_intercept: bool,
 ) -> FittedLinear {
     let n = design.nrows();
     let p = design.ncols();
+    let rank = ols.map_or(p, |(_, rank)| rank);
+    if ols.is_some() {
+        ctx.report.set_n_parameters(rank);
+    }
     let fittedv = design.matvec(&beta);
     let resid = y.sub(&fittedv);
     let sse = resid.dot(&resid);
-    let y_mean = y.mean();
-    let sst: f64 = y
-        .as_slice()
-        .iter()
-        .map(|yi| {
-            let d = yi - y_mean;
-            d * d
-        })
-        .sum();
-    let df = n as f64 - p as f64;
-    if df <= 0.0 {
+    let sst = if used_intercept {
+        let y_mean = y.mean();
+        y.as_slice()
+            .iter()
+            .map(|yi| {
+                let difference = yi - y_mean;
+                difference * difference
+            })
+            .sum::<f64>()
+    } else {
+        y.dot(y)
+    };
+    let df = if ols.is_some() {
+        n as f64 - rank as f64
+    } else {
+        f64::NAN
+    };
+    if ols.is_some() && df <= 0.0 {
         ctx.push(
             Issue::builder(IssueCode::DegreesOfFreedomNonPositive)
-                .message(format!("n={n} p={p} ⇒ df_resid={df}"))
+                .message(format!("n={n} numerical_rank={rank} ⇒ df_resid={df}"))
                 .metric("df_resid", df)
                 .meaninglessness(Meaninglessness::vacuous(
                     "σ², SEs, t, p, AIC",
@@ -222,7 +281,11 @@ fn infer_ols(
                 .build(),
         );
     }
-    let sigma2 = if df > 0.0 { sse / df } else { f64::NAN };
+    let sigma2 = if ols.is_some() && df > 0.0 {
+        sse / df
+    } else {
+        f64::NAN
+    };
     let r2 = if sst <= ctx.policy.r2_zero_tol {
         ctx.push(
             Issue::builder(IssueCode::ConstantTarget)
@@ -237,23 +300,26 @@ fn infer_ols(
         let mut b = Issue::builder(IssueCode::R2IsOne)
             .message("R² is 1 at working precision")
             .metric("r2", r2);
-        if df <= 0.0 {
+        if ols.is_some() && df <= 0.0 {
             b = b.meaninglessness(Meaninglessness::vacuous(
                 "OLS R² and coefficient t-tests",
                 "the model interpolated (df_resid ≤ 0); in-sample R²=1 is tautological",
                 "reduce p or collect data; do not publish in-sample skill",
             ));
         } else {
-            b = b.message(
-                "R² is 1: the data lie on the fitted hyperplane. Coefficients may be the true generating line, but in-sample skill is not confirmatory.",
-            );
+            b = b.message("R² is 1: fitted values interpolate the response; in-sample skill is not confirmatory.");
         }
         ctx.push(b.build());
     }
     if r2.is_finite() && r2.abs() <= ctx.policy.r2_zero_tol {
+        let reference = if used_intercept {
+            "the mean-only model"
+        } else {
+            "the zero-response model"
+        };
         ctx.push(
             Issue::builder(IssueCode::R2IsZero)
-                .message("R² is 0; the model is the null (mean) model")
+                .message(format!("R² is 0; the fitted model matches {reference}"))
                 .metric("r2", r2)
                 .build(),
         );
@@ -266,16 +332,47 @@ fn infer_ols(
                 .build(),
         );
     }
-    let adj_r2 = if df > 0.0 && sst > 0.0 {
-        1.0 - (1.0 - r2) * (n as f64 - 1.0) / df
+    let adj_r2 = if ols.is_some() && df > 0.0 && sst > 0.0 {
+        let total_degrees = n as f64 - if used_intercept { 1.0 } else { 0.0 };
+        1.0 - (1.0 - r2) * total_degrees / df
     } else {
         f64::NAN
     };
-    let (se, t_values, p_values) = ols_se(ctx, design, &beta, sigma2, df);
-    let ssr = (sst - sse).max(0.0);
-    let df_model = (p as f64 - if used_intercept { 1.0 } else { 0.0 }).max(0.0);
-    let f_stat = if df > 0.0 && df_model > 0.0 && sigma2 > 0.0 {
-        (ssr / df_model) / sigma2
+    let classical_inference_available =
+        ols.is_some() && rank == p && df > 0.0 && sigma2.is_finite() && sigma2 > 0.0;
+    if !classical_inference_available && !ctx.report.contains(IssueCode::PValueUnreliable) {
+        let reason = if ols.is_none() {
+            "this estimator is not Gaussian OLS"
+        } else if rank < p {
+            "the design is not full column rank"
+        } else if df <= 0.0 {
+            "residual degrees of freedom are not positive"
+        } else {
+            "the residual mean square is not positive and finite"
+        };
+        ctx.push(
+            Issue::builder(IssueCode::PValueUnreliable)
+                .message(format!(
+                    "classical OLS SEs, tests, and Cook's distances withheld: {reason}"
+                ))
+                .build(),
+        );
+    }
+    let (se, t_values, p_values) = match ols {
+        Some((decomposition, _)) if classical_inference_available => {
+            ols_se(ctx, decomposition, &beta, sigma2, df)
+        }
+        _ => (
+            Vector::filled(p, f64::NAN),
+            Vector::filled(p, f64::NAN),
+            Vector::filled(p, f64::NAN),
+        ),
+    };
+    let explained_sum_squares = sst - sse;
+    let df_model = rank as f64 - if used_intercept { 1.0 } else { 0.0 };
+    let f_stat = if classical_inference_available && df_model > 0.0 && explained_sum_squares >= 0.0
+    {
+        (explained_sum_squares / df_model) / sigma2
     } else {
         f64::NAN
     };
@@ -284,18 +381,25 @@ fn infer_ols(
     } else {
         f64::NAN
     };
-    let loglik = if sigma2.is_finite() && sigma2 > 0.0 {
-        -0.5 * n as f64 * ((2.0 * std::f64::consts::PI * sigma2).ln() + 1.0)
+    let maximum_likelihood_variance = if ols.is_some() && n > 0 {
+        sse / n as f64
     } else {
         f64::NAN
     };
-    let aic = if loglik.is_finite() {
-        -2.0 * loglik + 2.0 * p as f64
+    let loglik = if maximum_likelihood_variance.is_finite() && maximum_likelihood_variance > 0.0 {
+        -0.5 * n as f64 * ((2.0 * std::f64::consts::PI * maximum_likelihood_variance).ln() + 1.0)
+    } else if maximum_likelihood_variance == 0.0 {
+        f64::INFINITY
     } else {
         f64::NAN
     };
-    let bic = if loglik.is_finite() {
-        -2.0 * loglik + (p as f64) * (n as f64).ln()
+    let aic = if !loglik.is_nan() {
+        -2.0 * loglik + 2.0 * rank as f64
+    } else {
+        f64::NAN
+    };
+    let bic = if !loglik.is_nan() {
+        -2.0 * loglik + (rank as f64) * (n as f64).ln()
     } else {
         f64::NAN
     };
@@ -309,23 +413,32 @@ fn infer_ols(
         ctx.push(
             Issue::builder(IssueCode::AutocorrelatedResiduals)
                 .message(format!(
-                    "Durbin–Watson={dw:.3}; i.i.d. SEs are not credible"
+                    "Durbin–Watson={dw:.3}; independence-based inference is not credible"
                 ))
                 .metric("durbin_watson", dw)
                 .build(),
         );
     }
-    let (leverage, cooks) = hat_and_cook(design, &resid, sigma2, p);
+    let (leverage, cooks) = match ols {
+        Some((decomposition, _)) => hat_and_cook(
+            decomposition,
+            rank,
+            &resid,
+            sigma2,
+            classical_inference_available,
+        ),
+        None => (Vector::filled(n, f64::NAN), Vector::filled(n, f64::NAN)),
+    };
     let max_h = leverage
         .as_slice()
         .iter()
         .copied()
         .fold(0.0f64, |a, b| a.max(b));
-    let h_cut = 2.0 * p as f64 / n as f64;
-    if max_h > h_cut && n > p {
+    let h_cut = 2.0 * rank as f64 / n as f64;
+    if ols.is_some() && max_h > h_cut && n > rank {
         ctx.push(
             Issue::builder(IssueCode::LeveragePoint)
-                .message(format!("max leverage {max_h:.4} > 2p/n={h_cut:.4}"))
+                .message(format!("max leverage {max_h:.4} > 2·rank/n={h_cut:.4}"))
                 .metric("max_leverage", max_h)
                 .build(),
         );
@@ -349,7 +462,7 @@ fn infer_ols(
             Issue::builder(IssueCode::PredictionsAreConstant)
                 .message("fitted values are constant while y is not")
                 .meaninglessness(Meaninglessness::vacuous(
-                    "OLS predictor",
+                    "linear predictor",
                     "the model collapsed to a constant",
                     "inspect collinearity / regularization / target mapping",
                 ))
@@ -397,54 +510,43 @@ fn split_beta(beta: &Vector, used_intercept: bool) -> (f64, Vector) {
 
 fn ols_se(
     ctx: &mut FitCtx,
-    design: &Matrix,
+    decomposition: &ThinSvd,
     beta: &Vector,
     sigma2: f64,
     df: f64,
 ) -> (Vector, Vector, Vector) {
-    let p = design.ncols();
-    let mut se = Vector::zeros(p);
-    let mut t = Vector::zeros(p);
-    let mut pv = Vector::zeros(p);
-    if !sigma2.is_finite() || sigma2 <= 0.0 || df <= 0.0 {
-        ctx.push(
-            Issue::builder(IssueCode::PValueUnreliable)
-                .message("SEs/p-values withheld: σ² or df is not a valid variance")
-                .build(),
-        );
-        return (se, t, pv);
-    }
-    let gram = design.gram();
-    // Invert Gram via p unit solves.
-    let mut diag = vec![f64::NAN; p];
-    let mut failed = false;
+    let p = beta.len();
+    let mut se = Vector::filled(p, f64::NAN);
+    let mut t = Vector::filled(p, f64::NAN);
+    let mut pv = Vector::filled(p, f64::NAN);
+    let mut diag = vec![0.0; p];
     for j in 0..p {
-        let mut e = Vector::zeros(p);
-        e[j] = 1.0;
-        match crate::linalg::chol_solve(&mut ctx.report, &gram, &e, &ctx.policy) {
-            Some(col) => diag[j] = col[j],
-            None => {
-                failed = true;
-                break;
-            }
+        for k in 0..p {
+            let scaled_loading = decomposition.v[(j, k)] / decomposition.singular_values[k];
+            diag[j] += scaled_loading * scaled_loading;
         }
     }
-    if failed {
+    if diag.iter().any(|value| !value.is_finite() || *value < 0.0) {
         ctx.push(
             Issue::builder(IssueCode::InformationMatrixSingular)
-                .message("XᵀX is not SPD; Wald SEs are not formed from a Cholesky inverse")
+                .message("SVD covariance diagonal is non-finite")
                 .compromise(NumericalCompromise::new(
                     "diag((XᵀX)⁻¹)",
                     "SEs left as NaN",
-                    "Gram Cholesky failed",
-                    "do not publish stars; the information matrix is singular",
+                    "inverse singular-value scaling overflowed",
+                    "do not publish coefficient tests",
                 ))
                 .build(),
         );
         return (se, t, pv);
     }
     for j in 0..p {
-        let v = (sigma2 * diag[j]).max(0.0).sqrt();
+        let coefficient_variance = sigma2 * diag[j];
+        let v = if coefficient_variance >= 0.0 {
+            coefficient_variance.sqrt()
+        } else {
+            f64::NAN
+        };
         se[j] = v;
         if v > 0.0 && v.is_finite() {
             t[j] = beta[j] / v;
@@ -462,26 +564,39 @@ fn ols_se(
     (se, t, pv)
 }
 
-fn hat_and_cook(design: &Matrix, resid: &Vector, sigma2: f64, p: usize) -> (Vector, Vector) {
-    let n = design.nrows();
-    let mut lev = Vector::zeros(n);
-    let mut cooks = Vector::zeros(n);
-    if n == 0 || p == 0 || !sigma2.is_finite() || sigma2 <= 0.0 {
+fn hat_and_cook(
+    decomposition: &ThinSvd,
+    rank: usize,
+    resid: &Vector,
+    sigma2: f64,
+    cook_available: bool,
+) -> (Vector, Vector) {
+    let n = resid.len();
+    let mut lev = Vector::filled(n, f64::NAN);
+    let mut cooks = Vector::filled(n, f64::NAN);
+    if n == 0 || rank == 0 {
         return (lev, cooks);
     }
-    // h_ii = x_i (X'X)⁺ x_iᵀ  via faer QR of X: Q Qᵀ diagonal.
-    let qr = design.inner().qr();
-    let q = qr.compute_thin_Q();
-    let rnk = q.ncols();
+    // h_ii = sum_j U_ij² over the retained numerical column space.
     for i in 0..n {
         let mut h = 0.0;
-        for k in 0..rnk {
-            let v = q[(i, k)];
+        for k in 0..rank {
+            let v = decomposition.u[(i, k)];
             h += v * v;
         }
         lev[i] = h;
-        let den = sigma2 * p as f64 * (1.0 - h).max(1e-15);
-        cooks[i] = (resid[i] * resid[i] * h) / den;
+        if cook_available {
+            let numerator = resid[i] * resid[i] * h;
+            let one_minus_leverage = 1.0 - h;
+            let denominator = sigma2 * rank as f64 * one_minus_leverage * one_minus_leverage;
+            cooks[i] = if denominator > 0.0 {
+                numerator / denominator
+            } else if numerator == 0.0 {
+                f64::NAN
+            } else {
+                f64::INFINITY
+            };
+        }
     }
     (lev, cooks)
 }
@@ -552,7 +667,7 @@ impl Wls {
         ctx.push(
             Issue::builder(IssueCode::IllConditioned)
                 .severity(signlred::Severity::Info)
-                .message("WLS via √w row scaling; SEs are conditional on the supplied weights")
+                .message("WLS via √w row scaling; weighted covariance inference is withheld")
                 .build(),
         );
         // Info severity is advisory-like; IssueCode::IllConditioned default is Warning.
@@ -561,7 +676,7 @@ impl Wls {
         let Some(beta) = least_squares(&mut ctx.report, &xs, &ys, &ctx.policy) else {
             return ctx.finish(empty_fitted(x, y, self.fit_intercept));
         };
-        let fitted = infer_ols(&mut ctx, &design, y, beta, self.fit_intercept);
+        let fitted = infer_point_fit(&mut ctx, &design, y, beta, self.fit_intercept);
         ctx.finish(fitted)
     }
 }
@@ -1044,7 +1159,7 @@ impl Fit for LogisticRegression {
                 let var = (mu * (1.0 - mu)).max(1e-12);
                 wsqrt[i] = var.sqrt();
                 z[i] = eta + (y01[i] - mu) / var;
-                let gi = (mu - y01[i]);
+                let gi = mu - y01[i];
                 gnorm += gi * gi;
             }
             gnorm = gnorm.sqrt();
@@ -1128,7 +1243,7 @@ impl Predict for FittedLogistic {
         if let Some(sm) = &self.softmax {
             return sm.predict(x, session);
         }
-        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let ctx = FitCtx::with_session(session.child("predict"));
         let mut scores = x.matvec(&self.coef);
         for i in 0..scores.len() {
             let p = sigmoid(scores[i] + self.intercept);
@@ -1433,16 +1548,18 @@ impl Fit for HuberRegressor {
         ctx.push(
             Issue::builder(IssueCode::RidgeFallbackUsed)
                 .severity(signlred::Severity::Advisory)
-                .message("Huber IRLS SEs below are OLS-style on the last weighted design; they are not the M-estimator sandwich")
+                .message(
+                    "Huber sandwich inference is not implemented; classical inference is withheld",
+                )
                 .compromise(NumericalCompromise::new(
                     "Huber sandwich covariance",
-                    "OLS inference on the last IRLS weighted system",
+                    "coefficient point estimate without classical inference",
                     "a full sandwich is not formed in this path",
-                    "treat p-values as approximate",
+                    "SEs, tests, likelihood criteria, and influence measures are NaN",
                 ))
                 .build(),
         );
-        let fitted = infer_ols(&mut ctx, &design, y, beta, self.fit_intercept);
+        let fitted = infer_point_fit(&mut ctx, &design, y, beta, self.fit_intercept);
         ctx.finish(fitted)
     }
 }
@@ -1653,7 +1770,7 @@ impl Fit for KernelRidge {
 impl Predict for FittedKernelRidge {
     type Output = Vector;
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
-        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let ctx = FitCtx::with_session(session.child("predict"));
         let mut out = Vector::zeros(x.nrows());
         for i in 0..x.nrows() {
             let mut s = 0.0;
@@ -1772,7 +1889,7 @@ impl Fit for PlsRegression {
 impl Predict for FittedPls {
     type Output = Vector;
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
-        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let ctx = FitCtx::with_session(session.child("predict"));
         let mut out = Vector::zeros(x.nrows());
         for i in 0..x.nrows() {
             let mut s = self.y_mean;
@@ -1910,7 +2027,7 @@ pub struct FittedPlsCanonical {
 
 impl Transform for FittedPlsCanonical {
     fn transform(&self, x: &Matrix, session: &Session) -> Result<Qualified<Matrix>> {
-        let mut ctx = FitCtx::with_session(session.child("transform"));
+        let ctx = FitCtx::with_session(session.child("transform"));
         let k = self.x_weights.ncols();
         let z = Matrix::from_fn(x.nrows(), k, |i, c| {
             let mut s = 0.0;
@@ -2093,10 +2210,10 @@ impl Fit for QuantileRegressor {
         }
         ctx.push(
             Issue::builder(IssueCode::PValueUnreliable)
-                .message("quantile IRLS SEs below are not the Koenker sandwich; treat them as a weighted-LS approximation")
+                .message("quantile sandwich inference is not implemented; classical inference is withheld")
                 .build(),
         );
-        let fitted = infer_ols(&mut ctx, &design, y, beta, self.fit_intercept);
+        let fitted = infer_point_fit(&mut ctx, &design, y, beta, self.fit_intercept);
         ctx.finish(fitted)
     }
 }
@@ -2195,10 +2312,10 @@ impl Fit for ExpectileRegressor {
         }
         ctx.push(
             Issue::builder(IssueCode::PValueUnreliable)
-                .message("expectile IRLS SEs are a weighted-LS approximation, not the expectile sandwich")
+                .message("expectile sandwich inference is not implemented; classical inference is withheld")
                 .build(),
         );
-        let fitted = infer_ols(&mut ctx, &design, y, beta, self.fit_intercept);
+        let fitted = infer_point_fit(&mut ctx, &design, y, beta, self.fit_intercept);
         ctx.finish(fitted)
     }
 }
@@ -2291,10 +2408,12 @@ impl Fit for PoissonRegressor {
         }
         ctx.push(
             Issue::builder(IssueCode::PValueUnreliable)
-                .message("Poisson SEs below use the last weighted LS; they ignore the GLM variance function sandwich")
+                .message(
+                    "Poisson GLM inference is not implemented; Gaussian OLS inference is withheld",
+                )
                 .build(),
         );
-        let fitted = infer_ols(&mut ctx, &design, y, beta, self.fit_intercept);
+        let fitted = infer_point_fit(&mut ctx, &design, y, beta, self.fit_intercept);
         ctx.finish(fitted)
     }
 }
@@ -2935,9 +3054,6 @@ impl Fit for TweedieRegressor {
                 least_squares(&mut scratch, &xs, &z, &ctx.policy)
             };
             for issue in scratch.issues() {
-                if issue.code == IssueCode::ResidualTooLarge {
-                    continue;
-                }
                 ctx.push(issue.clone());
             }
             let Some(step) = step_opt else {
@@ -2962,11 +3078,11 @@ impl Fit for TweedieRegressor {
         ctx.push(
             Issue::builder(IssueCode::PValueUnreliable)
                 .message(
-                    "Tweedie SEs below are the IRLS Gaussian approximation, not the GLM sandwich",
+                    "Tweedie GLM inference is not implemented; Gaussian OLS inference is withheld",
                 )
                 .build(),
         );
-        let fitted = infer_ols(&mut ctx, &design, y, beta, self.fit_intercept);
+        let fitted = infer_point_fit(&mut ctx, &design, y, beta, self.fit_intercept);
         ctx.finish(fitted)
     }
 }
@@ -3420,7 +3536,7 @@ impl Fit for TransformedTargetRegressor {
         let inner = match ols.fit(x, &yt, &session.child("inner")) {
             Ok(q) => {
                 for issue in q.report.issues() {
-                    if matches!(issue.code, IssueCode::ResidualTooLarge | IssueCode::R2IsOne) {
+                    if issue.code == IssueCode::R2IsOne {
                         continue;
                     }
                     ctx.push(issue.clone());
@@ -3635,8 +3751,7 @@ impl RollingWls {
             for issue in scratch.issues() {
                 if matches!(
                     issue.code,
-                    IssueCode::ResidualTooLarge
-                        | IssueCode::NearSingular
+                    IssueCode::NearSingular
                         | IssueCode::PerfectCollinearity
                         | IssueCode::R2IsOne
                         | IssueCode::RankZero
@@ -3879,10 +3994,7 @@ fn rolling_path(
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
-                    | IssueCode::PerfectCollinearity
-                    | IssueCode::R2IsOne
+                IssueCode::NearSingular | IssueCode::PerfectCollinearity | IssueCode::R2IsOne
             ) {
                 continue;
             }
@@ -4012,9 +4124,6 @@ impl Fit for Glsar {
         let mut beta = least_squares(&mut scratch, &design, y, &ctx.policy)
             .unwrap_or_else(|| Vector::zeros(design.ncols()));
         for issue in scratch.issues() {
-            if issue.code == IssueCode::ResidualTooLarge {
-                continue;
-            }
             ctx.push(issue.clone());
         }
         let mut rho = 0.0;
@@ -4042,10 +4151,7 @@ impl Fit for Glsar {
                 break;
             };
             for issue in step.issues() {
-                if matches!(
-                    issue.code,
-                    IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
-                ) {
+                if matches!(issue.code, IssueCode::NearSingular | IssueCode::R2IsOne) {
                     continue;
                 }
                 ctx.push(issue.clone());
@@ -4184,7 +4290,9 @@ impl Fit for SparsePls {
             if wn <= ctx.policy.near_zero_variance {
                 ctx.push(
                     Issue::builder(IssueCode::UpdateWithZeroInformation)
-                        .message("sparse NIPALS weight vanished; remaining components are unidentified")
+                        .message(
+                            "sparse NIPALS weight vanished; remaining components are unidentified",
+                        )
                         .build(),
                 );
                 break;
@@ -4218,7 +4326,7 @@ impl Fit for SparsePls {
 impl Predict for FittedSparsePls {
     type Output = Vector;
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
-        let mut ctx = FitCtx::with_session(session.child("predict"));
+        let ctx = FitCtx::with_session(session.child("predict"));
         let mut out = Vector::zeros(x.nrows());
         for i in 0..x.nrows() {
             let mut s = self.y_mean;
@@ -4236,6 +4344,139 @@ mod tests {
     use super::*;
     use ojizou_san::Session;
 
+    fn golden_decimal(value: &serde_json::Value) -> f64 {
+        value
+            .as_str()
+            .map(|text| text.parse::<f64>().expect("Decimal string"))
+            .or_else(|| value.as_f64())
+            .expect("numeric golden value")
+    }
+
+    fn observe_golden_error(
+        label: String,
+        actual: f64,
+        expected: f64,
+        maximum_absolute: &mut (f64, String),
+        maximum_relative: &mut (f64, String),
+    ) {
+        let absolute = (actual - expected).abs();
+        let relative = absolute / expected.abs().max(1.0);
+        if absolute > maximum_absolute.0 {
+            *maximum_absolute = (absolute, label.clone());
+        }
+        if relative > maximum_relative.0 {
+            *maximum_relative = (relative, label);
+        }
+    }
+
+    fn observe_golden_vector(
+        case_name: &str,
+        field: &str,
+        actual: &Vector,
+        expected: &serde_json::Value,
+        maximum_absolute: &mut (f64, String),
+        maximum_relative: &mut (f64, String),
+    ) {
+        let expected = expected.as_array().expect("golden vector");
+        assert_eq!(actual.len(), expected.len(), "{case_name}.{field} length");
+        for (index, (actual, expected)) in actual.as_slice().iter().zip(expected.iter()).enumerate()
+        {
+            observe_golden_error(
+                format!("{case_name}.{field}[{index}]"),
+                *actual,
+                golden_decimal(expected),
+                maximum_absolute,
+                maximum_relative,
+            );
+        }
+    }
+
+    #[test]
+    fn ols_matches_independent_decimal_oracle() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../golden/ols.json")).expect("OLS golden JSON");
+        let cases = fixture["cases"].as_array().expect("OLS golden cases");
+        assert_eq!(
+            cases.len(),
+            fixture["case_count"].as_u64().unwrap() as usize
+        );
+        let mut maximum_absolute = (0.0, String::new());
+        let mut maximum_relative = (0.0, String::new());
+        for case in cases {
+            let name = case["name"].as_str().expect("case name");
+            let input = &case["input"];
+            let expected = &case["expected"];
+            let rows = input["x"].as_array().expect("X rows");
+            let n = rows.len();
+            let p = rows[0].as_array().expect("X row").len();
+            let x = Matrix::from_fn(n, p, |i, j| {
+                golden_decimal(&rows[i].as_array().expect("X row")[j])
+            });
+            let y = Vector::from_iter(input["y"].as_array().expect("y").iter().map(golden_decimal));
+            let fit_intercept = input["fit_intercept"].as_bool().expect("fit_intercept");
+            let mut model = LinearRegression { fit_intercept };
+            let q = model
+                .fit(&x, &y, &Session::new(format!("ols-oracle-{name}"), "fit"))
+                .unwrap_or_else(|failure| panic!("{name}: {failure:?}"));
+            assert_eq!(q.value.n, expected["n"].as_u64().unwrap() as usize);
+            assert_eq!(q.value.p, expected["p"].as_u64().unwrap() as usize);
+            assert_eq!(
+                q.report.n_parameters,
+                Some(expected["rank"].as_u64().unwrap() as usize)
+            );
+            assert!(!q.report.contains(IssueCode::ResidualTooLarge));
+            assert!(!q.report.contains(IssueCode::PValueUnreliable));
+
+            for (field, actual) in [
+                ("intercept", q.value.intercept),
+                ("df_resid", q.value.df_resid),
+                ("r2", q.value.r2),
+                ("adjusted_r2", q.value.adj_r2),
+                ("sigma2", q.value.sigma2),
+                ("aic", q.value.aic),
+                ("bic", q.value.bic),
+                ("f_statistic", q.value.f_stat),
+                ("f_pvalue", q.value.f_pvalue),
+                ("durbin_watson", q.value.durbin_watson),
+                ("loglik", q.value.loglik),
+            ] {
+                observe_golden_error(
+                    format!("{name}.{field}"),
+                    actual,
+                    golden_decimal(&expected[field]),
+                    &mut maximum_absolute,
+                    &mut maximum_relative,
+                );
+            }
+            for (field, actual) in [
+                ("beta", &q.value.beta),
+                ("coef", &q.value.coef),
+                ("standard_errors", &q.value.se),
+                ("t_values", &q.value.t_values),
+                ("p_values", &q.value.p_values),
+                ("fitted", &q.value.fitted),
+                ("residuals", &q.value.resid),
+                ("leverage", &q.value.leverage),
+                ("cooks_distance", &q.value.cooks),
+            ] {
+                observe_golden_vector(
+                    name,
+                    field,
+                    actual,
+                    &expected[field],
+                    &mut maximum_absolute,
+                    &mut maximum_relative,
+                );
+            }
+        }
+        // Measured max abs 2.183e-11 (high_leverage F) on 2026-09-03;
+        // tolerance is approximately 4x.
+        assert!(maximum_absolute.0 <= 8.7e-11, "{maximum_absolute:?}");
+        // Measured max relative 1.318e-13 (high_leverage Cook[14]);
+        // tolerance is approximately 4x.
+        assert!(maximum_relative.0 <= 5.2e-13, "{maximum_relative:?}");
+    }
+
     #[test]
     fn ols_line_and_inference() {
         let x = Matrix::from_fn(10, 1, |i, _| i as f64);
@@ -4246,6 +4487,133 @@ mod tests {
         assert!((q.value.coef[0] - 2.0).abs() < 1e-8);
         assert!(q.value.r2 > 0.999);
         assert!(session.ledger().len() > 0);
+    }
+
+    #[test]
+    fn no_intercept_ols_accepts_a_nonzero_constant_response() {
+        let x = Matrix::from_fn(10, 1, |i, _| (i + 1) as f64);
+        let y = Vector::filled(10, 3.0);
+        let mut model = LinearRegression {
+            fit_intercept: false,
+        };
+        let q = model
+            .fit(&x, &y, &Session::new("ols-no-intercept", "fit"))
+            .expect("a nonzero constant response is estimable against the zero null");
+        let coefficient_error = (q.value.coef[0] - 3.0 / 7.0).abs();
+        // Measured 1.111e-16 on 2026-09-03; tolerance is approximately 4x.
+        assert!(coefficient_error <= 4.5e-16);
+        assert_eq!(q.value.intercept, 0.0);
+        assert!(!q.report.contains(IssueCode::ConstantTarget));
+        let uncentered_r2 = 1.0 - q.value.resid.dot(&q.value.resid) / y.dot(&y);
+        assert_eq!(q.value.r2, uncentered_r2);
+    }
+
+    #[test]
+    fn ols_satisfies_projection_properties_on_noisy_data() {
+        let x = Matrix::from_fn(20, 2, |i, j| {
+            let z = i as f64 - 9.5;
+            if j == 0 {
+                z
+            } else {
+                z * z
+            }
+        });
+        let noise = [
+            0.3, -0.2, 0.1, 0.4, -0.5, 0.2, -0.1, 0.25, -0.35, 0.15, 0.05, -0.3, 0.18, -0.12, 0.22,
+            -0.28, 0.08, 0.31, -0.17, 0.04,
+        ];
+        let y = Vector::from_iter((0..20).map(|i| {
+            let z = i as f64 - 9.5;
+            1.25 - 0.7 * z + 0.08 * z * z + noise[i]
+        }));
+        let q = LinearRegression::new()
+            .fit(&x, &y, &Session::new("ols-properties", "fit"))
+            .expect("full-rank noisy OLS");
+        let residual_sum = q.value.resid.as_slice().iter().sum::<f64>().abs();
+        let mut maximum_normal_equation_residual = residual_sum;
+        for j in 0..x.ncols() {
+            let component = (0..x.nrows())
+                .map(|i| x.get(i, j) * q.value.resid[i])
+                .sum::<f64>()
+                .abs();
+            maximum_normal_equation_residual = maximum_normal_equation_residual.max(component);
+        }
+        let leverage_trace_error = (q.value.leverage.as_slice().iter().sum::<f64>() - 3.0).abs();
+        // Measured 5.574e-13 on 2026-09-03; tolerance is approximately 3.6x.
+        assert!(maximum_normal_equation_residual <= 2.0e-12);
+        // Measured 4.441e-16 on 2026-09-03; tolerance is approximately 4x.
+        assert!(leverage_trace_error <= 1.8e-15);
+        assert!(q.value.se.as_slice().iter().all(|value| value.is_finite()));
+        assert!(q
+            .value
+            .p_values
+            .as_slice()
+            .iter()
+            .all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn non_ols_point_fit_withholds_classical_inference() {
+        let x = Matrix::from_fn(10, 1, |i, _| i as f64 - 4.5);
+        let y = Vector::from_slice(&[1.2, 0.8, 1.7, 2.1, 2.0, 3.1, 2.7, 4.0, 3.8, 5.2]);
+        let weights = Vector::from_slice(&[1.0, 2.0, 1.0, 0.5, 1.5, 1.0, 2.0, 0.75, 1.25, 1.0]);
+        let q = Wls::new()
+            .fit_weighted(&x, &y, &weights, &Session::new("wls-point-only", "fit"))
+            .expect("WLS point estimate");
+        assert!(q.report.contains(IssueCode::PValueUnreliable));
+        assert!(q.value.se.as_slice().iter().all(|value| value.is_nan()));
+        assert!(q
+            .value
+            .t_values
+            .as_slice()
+            .iter()
+            .all(|value| value.is_nan()));
+        assert!(q
+            .value
+            .p_values
+            .as_slice()
+            .iter()
+            .all(|value| value.is_nan()));
+        assert!(q.value.f_stat.is_nan());
+        assert!(q.value.loglik.is_nan());
+        assert!(q.value.cooks.as_slice().iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
+    fn rank_deficient_ols_uses_numerical_rank_and_withholds_tests() {
+        let design = Matrix::from_fn(12, 3, |i, j| match j {
+            0 => 1.0,
+            1 => i as f64 - 5.5,
+            _ => 2.0 * (i as f64 - 5.5),
+        });
+        let y = Vector::from_iter((0..12).map(|i| {
+            let z = i as f64 - 5.5;
+            0.7 + 1.2 * z + if i % 2 == 0 { 0.1 } else { -0.1 }
+        }));
+        let mut solve_report = signlred::Report::new("rank-deficient-ols", "solve");
+        let policy = signlred::Policy::default();
+        let solution = least_squares_with_diagnostics(&mut solve_report, &design, &y, &policy)
+            .expect("rank-deficient pseudoinverse solve");
+        assert_eq!(solution.rank, 2);
+        let mut ctx = FitCtx::new("rank-deficient-ols", "infer");
+        let fitted = infer_ols(
+            &mut ctx,
+            &design,
+            &y,
+            solution.coefficients,
+            &solution.decomposition,
+            solution.rank,
+            true,
+        );
+        let leverage_trace_error =
+            (fitted.leverage.as_slice().iter().sum::<f64>() - solution.rank as f64).abs();
+        assert_eq!(fitted.df_resid, 10.0);
+        assert!(fitted.se.as_slice().iter().all(|value| value.is_nan()));
+        assert!(fitted.f_stat.is_nan());
+        assert!(fitted.cooks.as_slice().iter().all(|value| value.is_nan()));
+        assert!(ctx.report.contains(IssueCode::PValueUnreliable));
+        // Measured 4.441e-16 on 2026-09-03; tolerance is approximately 4x.
+        assert!(leverage_trace_error <= 1.8e-15);
     }
 
     #[test]

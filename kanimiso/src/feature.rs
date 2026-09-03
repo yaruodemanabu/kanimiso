@@ -1013,7 +1013,7 @@ impl Fit for GenericUnivariateSelect {
             }
         };
         self.fitted = true;
-        let mut ctx = FitCtx::with_session(session.child("finish"));
+        let ctx = FitCtx::with_session(session.child("finish"));
         ctx.finish(self.clone())
     }
 }
@@ -2655,7 +2655,7 @@ mod tests {
         let x = Matrix::from_fn(10, 2, |i, j| if j == 0 { 5.0 } else { i as f64 });
         let session = Session::new("vt", "fit");
         let mut vt = VarianceThreshold::new(0.0);
-        vt.fit_unsupervised(&x, &session).expect("fit");
+        let _fit = vt.fit_unsupervised(&x, &session).expect("fit");
         let z = vt.transform(&x, &session).expect("transform").value;
         assert_eq!(z.ncols(), 1);
         assert!((z.get(3, 0) - 3.0).abs() < 1e-12);
@@ -2673,7 +2673,7 @@ mod tests {
         let y = Vector::from_iter((0..20).map(|i| i as f64));
         let session = Session::new("skb", "fit");
         let mut sel = SelectKBest::new(1);
-        sel.fit(&x, &y, &session).expect("fit");
+        let _fit = sel.fit(&x, &y, &session).expect("fit");
         assert!(sel.support()[0], "scores={:?}", sel.scores().as_slice());
         assert_eq!(sel.support().iter().filter(|s| **s).count(), 1);
         let z = sel.transform(&x, &session).expect("transform").value;
@@ -2719,7 +2719,7 @@ mod tests {
         let ch = chi2(&xnn, &y, &Session::new("f", "chi")).unwrap();
         assert!(ch.value.scores[0] > 0.0);
         let mut fa = FeatureAgglomeration::new(2);
-        fa.fit_unsupervised(&x, &Session::new("fa", "fit")).unwrap();
+        let _fit = fa.fit_unsupervised(&x, &Session::new("fa", "fit")).unwrap();
         let z = fa.transform(&x, &Session::new("fa", "t")).unwrap().value;
         assert_eq!(z.ncols(), 2);
         assert_eq!(z.nrows(), 20);
@@ -2734,7 +2734,7 @@ mod tests {
         });
         let y = Vector::from_iter((0..24).map(|i| 2.0 * i as f64));
         let mut sel = SelectFromModel::new(0.2);
-        sel.fit(&x, &y, &Session::new("sfm", "fit")).unwrap();
+        let _fit = sel.fit(&x, &y, &Session::new("sfm", "fit")).unwrap();
         assert!(sel.support()[0]);
         let z = sel.transform(&x, &Session::new("sfm", "t")).unwrap().value;
         assert!(z.ncols() >= 1);
@@ -2743,23 +2743,24 @@ mod tests {
         assert_eq!(c.len(), 12);
         assert!(c.as_slice().iter().all(|v| v.is_finite()));
         let mut sp = SelectPercentile::new(40.0);
-        sp.fit(&x, &y, &Session::new("sp", "fit")).unwrap();
+        let _fit = sp.fit(&x, &y, &Session::new("sp", "fit")).unwrap();
         assert!(sp.support()[0]);
         let mut sfs = SequentialFeatureSelector::new(1);
-        sfs.fit(&x, &y, &Session::new("sfs", "fit")).unwrap();
+        let _fit = sfs.fit(&x, &y, &Session::new("sfs", "fit")).unwrap();
         assert!(sfs.support()[0]);
         let mut rfecv = RfeCv::new(3);
-        rfecv.fit(&x, &y, &Session::new("rfecv", "fit")).unwrap();
+        let _fit = rfecv.fit(&x, &y, &Session::new("rfecv", "fit")).unwrap();
         assert!(rfecv.support().iter().any(|s| *s));
         let mut fpr = SelectFpr::new(0.05);
-        fpr.fit(&x, &y, &Session::new("fpr", "fit")).unwrap();
+        let _fit = fpr.fit(&x, &y, &Session::new("fpr", "fit")).unwrap();
         assert!(fpr.support()[0]);
         let mut fdr = SelectFdr::new(0.05);
-        fdr.fit(&x, &y, &Session::new("fdr", "fit")).unwrap();
+        let _fit = fdr.fit(&x, &y, &Session::new("fdr", "fit")).unwrap();
         assert!(fdr.support()[0]);
         let xnn = Matrix::from_fn(16, 2, |i, j| 0.2 + (i + j) as f64);
         let mut chi = AdditiveChi2Sampler::new(2);
-        chi.fit_unsupervised(&xnn, &Session::new("achi", "fit"))
+        let _fit = chi
+            .fit_unsupervised(&xnn, &Session::new("achi", "fit"))
             .unwrap();
         let z = chi
             .transform(&xnn, &Session::new("achi", "t"))
@@ -2768,13 +2769,15 @@ mod tests {
         assert_eq!(z.ncols(), 8);
         assert!(z.get(0, 0).is_finite());
         let mut sk = SkewedChi2Sampler::new(6);
-        sk.fit_unsupervised(&xnn, &Session::new("sch", "fit"))
+        let _fit = sk
+            .fit_unsupervised(&xnn, &Session::new("sch", "fit"))
             .unwrap();
         let zs = sk.transform(&xnn, &Session::new("sch", "t")).unwrap().value;
         assert_eq!(zs.ncols(), 6);
         assert!(zs.get(0, 0).is_finite());
         let mut pcs = PolynomialCountSketch::new(8);
-        pcs.fit_unsupervised(&xnn, &Session::new("pcs", "fit"))
+        let _fit = pcs
+            .fit_unsupervised(&xnn, &Session::new("pcs", "fit"))
             .unwrap();
         let zp = pcs
             .transform(&xnn, &Session::new("pcs", "t"))
@@ -2783,13 +2786,13 @@ mod tests {
         assert_eq!(zp.ncols(), 8);
         assert!(zp.get(0, 0).is_finite());
         let mut fwe = SelectFwe::new(0.05);
-        fwe.fit(&x, &y, &Session::new("fwe", "fit")).unwrap();
+        let _fit = fwe.fit(&x, &y, &Session::new("fwe", "fit")).unwrap();
         assert!(fwe.support()[0]);
         let mut guni = GenericUnivariateSelect::new(UnivariateMode::KBest, 1.0);
-        guni.fit(&x, &y, &Session::new("guni", "fit")).unwrap();
+        let _fit = guni.fit(&x, &y, &Session::new("guni", "fit")).unwrap();
         assert!(guni.support().iter().any(|s| *s));
         let mut rcv = RFECV::new(3);
-        rcv.fit(&x, &y, &Session::new("rfcv", "fit")).unwrap();
+        let _fit = rcv.fit(&x, &y, &Session::new("rfcv", "fit")).unwrap();
         assert!(rcv.support().iter().any(|s| *s));
         let _rfe = RFE::new(1);
         let zh = FeatureHasher::new(8)

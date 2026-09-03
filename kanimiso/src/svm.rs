@@ -2165,7 +2165,8 @@ mod tests {
             .value;
         assert!(hat.as_slice().iter().all(|v| v.is_finite()));
         let mut oc = SgdOneClassSvm::new();
-        oc.partial_fit(&x, None, &Session::new("ocsgd", "pf"))
+        let _update = oc
+            .partial_fit(&x, None, &Session::new("ocsgd", "pf"))
             .expect("oc");
         let z = oc.predict(&x, &Session::new("ocsgd", "p")).unwrap().value;
         assert_eq!(z.len(), x.nrows());

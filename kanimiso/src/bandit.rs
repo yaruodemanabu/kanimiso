@@ -1649,21 +1649,9 @@ fn reject(update: u64, batch: usize, n_seen: u64, why: &str) -> IncrementalExpla
 
 fn finish(ctx: &FitCtx, expl: IncrementalExplain) -> Result<Qualified<IncrementalExplain>> {
     ctx.session.record_incremental(expl.clone());
-    // FitCtx::finish consumes self; rebuild from the same session.
-    let owned = FitCtx::with_session(ctx.session.clone());
-    // Copy already-pushed issues by finishing on a fresh report would drop them.
-    // Use the original context by reconstructing via session only when the
-    // report is empty of extras we care about — callers push on `ctx`.
-    drop(owned);
-    let FitCtx {
-        session,
-        report,
-        policy,
-    } = FitCtx {
-        session: ctx.session.clone(),
-        report: ctx.report.clone(),
-        policy: ctx.policy.clone(),
-    };
+    let session = ctx.session.clone();
+    let report = ctx.report.clone();
+    let policy = ctx.policy.clone();
     match report.finish_with_policy(policy, expl) {
         Ok(q) => {
             session.finish_ok(&q);
@@ -1689,7 +1677,7 @@ mod tests {
         for _ in 0..40 {
             let x = Matrix::from_fn(3, 1, |i, _| i as f64);
             let y = Vector::from_slice(&[0.0, 0.0, 1.0]);
-            b.partial_fit(&x, Some(&y), &session).expect("eg");
+            let _update = b.partial_fit(&x, Some(&y), &session).expect("eg");
         }
         assert!(b.values()[2] > b.values()[0]);
         assert!(b.values()[2] > b.values()[1]);

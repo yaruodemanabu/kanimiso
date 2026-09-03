@@ -1,6 +1,6 @@
 //! Matrix decompositions and latent-factor models.
 //!
-//! PCA / truncated SVD go through [`thin_svd`] of (centered) `X`. Incremental
+//! PCA / truncated SVD go through `thin_svd` of (centered) `X`. Incremental
 //! PCA maintains a running mean and a sequential Karhunen–Loève basis and
 //! **must** emit [`IncrementalExplain`] on every `partial_fit`. NMF, FastICA,
 //! factor analysis, CCA, sparse PCA, and dictionary learning are pure-Rust
@@ -1800,8 +1800,9 @@ impl MiniBatchSparsePca {
 
     /// Offline alias: one `partial_fit` on the full design.
     pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedSparsePca>> {
-        self.partial_fit(x, None, session)?;
         let mut ctx = FitCtx::with_session(session.child("finish"));
+        let update = self.partial_fit(x, None, session)?;
+        ctx.report.merge(update.report);
         ctx.finish(FittedSparsePca {
             components: self.components.clone(),
             mean: self.mean.clone(),
@@ -2187,10 +2188,7 @@ impl PartialFit for MiniBatchDictionaryLearning {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
-                    | IssueCode::RankZero
-                    | IssueCode::R2IsOne
+                IssueCode::NearSingular | IssueCode::RankZero | IssueCode::R2IsOne
             ) {
                 continue;
             }
@@ -2355,7 +2353,9 @@ impl Transform for FittedKernelCca {
             let mut s = 0.0_f64;
             for j in 0..m.min(self.alpha.len()) {
                 let kij = rbf_rows(x, i, &self.train, j, self.gamma);
-                let kc = kij - self.k_mean.as_slice().get(j).copied().unwrap_or(0.0) - self.row_mean(x, i)
+                let kc = kij
+                    - self.k_mean.as_slice().get(j).copied().unwrap_or(0.0)
+                    - self.row_mean(x, i)
                     + self.k_grand;
                 s += kc * self.alpha[j];
             }
@@ -2586,15 +2586,34 @@ impl Transform for FittedConfirmatoryFactor {
         let pc = self.mean.len().min(p).min(self.loadings.len());
         let mut denom = 0.0_f64;
         for j in 0..pc {
-            let psi = self.uniqueness.as_slice().get(j).copied().unwrap_or(1.0).max(1e-8);
+            let psi = self
+                .uniqueness
+                .as_slice()
+                .get(j)
+                .copied()
+                .unwrap_or(1.0)
+                .max(1e-8);
             denom += self.loadings[j] * self.loadings[j] / psi;
         }
         let den = denom.max(1e-8);
         let out = Matrix::from_fn(n, 1, |i, _| {
             let mut s = 0.0_f64;
             for j in 0..pc {
-                let psi = self.uniqueness.as_slice().get(j).copied().unwrap_or(1.0).max(1e-8);
-                let z = (x.get(i, j) - self.mean[j]) / self.scale.as_slice().get(j).copied().unwrap_or(1.0).max(1e-8);
+                let psi = self
+                    .uniqueness
+                    .as_slice()
+                    .get(j)
+                    .copied()
+                    .unwrap_or(1.0)
+                    .max(1e-8);
+                let z = (x.get(i, j) - self.mean[j])
+                    / self
+                        .scale
+                        .as_slice()
+                        .get(j)
+                        .copied()
+                        .unwrap_or(1.0)
+                        .max(1e-8);
                 s += self.loadings[j] * z / psi;
             }
             s / den
@@ -2634,7 +2653,8 @@ impl FitUnsupervised for ConfirmatoryFactor {
             }
             s / df
         });
-        let mut lam = Vector::from_iter((0..p).map(|j| (corr.get(j, j).abs().sqrt() * 0.5).clamp(0.1, 0.9)));
+        let mut lam =
+            Vector::from_iter((0..p).map(|j| (corr.get(j, j).abs().sqrt() * 0.5).clamp(0.1, 0.9)));
         for _ in 0..self.max_iter.max(1) {
             let mut nxt = Vector::zeros(p);
             for j in 0..p {
@@ -2655,7 +2675,8 @@ impl FitUnsupervised for ConfirmatoryFactor {
             }
             lam = nxt;
         }
-        let uniqueness = Vector::from_iter((0..p).map(|j| (1.0 - lam[j] * lam[j]).clamp(1e-4, 1.0)));
+        let uniqueness =
+            Vector::from_iter((0..p).map(|j| (1.0 - lam[j] * lam[j]).clamp(1e-4, 1.0)));
         let mut rss = 0.0_f64;
         for i in 0..p {
             for j in (i + 1)..p {
@@ -2714,8 +2735,7 @@ impl Lisrel {
             Err(e) => {
                 if !matches!(
                     e.primary.code,
-                    IssueCode::ResidualTooLarge
-                        | IssueCode::NearSingular
+                    IssueCode::NearSingular
                         | IssueCode::RankZero
                         | IssueCode::R2IsOne
                         | IssueCode::MeaninglessFit
@@ -2737,8 +2757,7 @@ impl Lisrel {
         for issue in q.report.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::RankZero
                     | IssueCode::R2IsOne
                     | IssueCode::MeaninglessFit
@@ -2760,8 +2779,7 @@ impl Lisrel {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::RankZero
                     | IssueCode::R2IsOne
                     | IssueCode::CholeskyFailed
@@ -2829,9 +2847,9 @@ impl FittedLisrel {
             Ok(q) => q.value,
             Err(_) => Matrix::zeros(x.nrows(), 1),
         };
-        ctx.finish(Vector::from_iter((0..x.nrows()).map(|i| {
-            self.intercept + self.slope * z.get(i, 0)
-        })))
+        ctx.finish(Vector::from_iter(
+            (0..x.nrows()).map(|i| self.intercept + self.slope * z.get(i, 0)),
+        ))
     }
 }
 
@@ -2871,11 +2889,7 @@ impl LatentGrowth {
     }
 
     /// Fit alias.
-    pub fn fit(
-        &mut self,
-        x: &Matrix,
-        session: &Session,
-    ) -> Result<Qualified<FittedLatentGrowth>> {
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedLatentGrowth>> {
         self.fit_unsupervised(x, session)
     }
 }
@@ -2980,12 +2994,7 @@ impl Mimic {
     }
 
     /// Score remaining columns of \(X\), then OLS of \(y\) on causes and the factor.
-    pub fn fit(
-        &self,
-        x: &Matrix,
-        y: &Vector,
-        session: &Session,
-    ) -> Result<Qualified<FittedMimic>> {
+    pub fn fit(&self, x: &Matrix, y: &Vector, session: &Session) -> Result<Qualified<FittedMimic>> {
         let mut ctx = FitCtx::with_session(session.clone());
         inspect_xy(&mut ctx.report, x, Some(y), &ctx.policy);
         let nc = self.n_causes.max(1).min(x.ncols().saturating_sub(1).max(1));
@@ -3018,8 +3027,7 @@ impl Mimic {
             Err(e) => {
                 if !matches!(
                     e.primary.code,
-                    IssueCode::ResidualTooLarge
-                        | IssueCode::NearSingular
+                    IssueCode::NearSingular
                         | IssueCode::RankZero
                         | IssueCode::R2IsOne
                         | IssueCode::MeaninglessFit
@@ -3043,8 +3051,7 @@ impl Mimic {
         for issue in q.report.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::RankZero
                     | IssueCode::R2IsOne
                     | IssueCode::MeaninglessFit
@@ -3074,8 +3081,7 @@ impl Mimic {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::RankZero
                     | IssueCode::R2IsOne
                     | IssueCode::CholeskyFailed
@@ -3102,9 +3108,9 @@ impl Mimic {
             mean: q.value.mean.clone(),
             scale: q.value.scale.clone(),
             intercept: coef.as_slice().first().copied().unwrap_or(0.0),
-            coef_causes: Vector::from_iter((0..nc).map(|j| {
-                coef.as_slice().get(1 + j).copied().unwrap_or(0.0)
-            })),
+            coef_causes: Vector::from_iter(
+                (0..nc).map(|j| coef.as_slice().get(1 + j).copied().unwrap_or(0.0)),
+            ),
             slope_factor: coef.as_slice().get(1 + nc).copied().unwrap_or(0.0),
             scores,
             n_causes: nc,
@@ -3141,9 +3147,7 @@ impl FittedMimic {
         inspect_xy(&mut ctx.report, x, None, &ctx.policy);
         let nc = self.n_causes;
         let n_ind = self.mean.len();
-        let ind = Matrix::from_fn(x.nrows(), n_ind, |i, j| {
-            x.get(i, nc + j)
-        });
+        let ind = Matrix::from_fn(x.nrows(), n_ind, |i, j| x.get(i, nc + j));
         let cfa = FittedConfirmatoryFactor {
             loadings: self.loadings.clone(),
             uniqueness: self.uniqueness.clone(),
@@ -3190,21 +3194,14 @@ impl PathAnalysis {
         inspect_identification(&mut ctx.report, x.nrows(), x.ncols(), &ctx.policy);
         let n = x.nrows().min(y.len());
         let p = x.ncols();
-        let design = Matrix::from_fn(n, 1 + p, |i, j| {
-            if j == 0 {
-                1.0
-            } else {
-                x.get(i, j - 1)
-            }
-        });
+        let design = Matrix::from_fn(n, 1 + p, |i, j| if j == 0 { 1.0 } else { x.get(i, j - 1) });
         let mut scratch = Report::new("path", "y");
         let coef = least_squares(&mut scratch, &design, y, &ctx.policy)
             .unwrap_or_else(|| Vector::from_slice(&[y.mean()]));
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::RankZero
                     | IssueCode::R2IsOne
                     | IssueCode::CholeskyFailed
@@ -3247,9 +3244,9 @@ impl PathAnalysis {
         );
         ctx.finish(FittedPathAnalysis {
             intercept: coef.as_slice().first().copied().unwrap_or(0.0),
-            coef_y: Vector::from_iter((0..p).map(|j| {
-                coef.as_slice().get(1 + j).copied().unwrap_or(0.0)
-            })),
+            coef_y: Vector::from_iter(
+                (0..p).map(|j| coef.as_slice().get(1 + j).copied().unwrap_or(0.0)),
+            ),
             paths,
         })
     }
@@ -3309,31 +3306,19 @@ impl SeeminglyUnrelated {
         let n = x.nrows().min(y.len());
         let p = x.ncols();
         let q1 = 1 + p.saturating_sub(1);
-        let z1 = Matrix::from_fn(n, q1, |i, j| {
-            if j == 0 {
-                1.0
-            } else {
-                x.get(i, j)
-            }
-        });
+        let z1 = Matrix::from_fn(n, q1, |i, j| if j == 0 { 1.0 } else { x.get(i, j) });
         let q2 = 1 + p.saturating_sub(2);
-        let z2 = Matrix::from_fn(n, q2, |i, j| {
-            if j == 0 {
-                1.0
-            } else {
-                x.get(i, j + 1)
-            }
-        });
+        let z2 = Matrix::from_fn(n, q2, |i, j| if j == 0 { 1.0 } else { x.get(i, j + 1) });
         let x0 = Vector::from_iter((0..n).map(|i| x.get(i, 0)));
         let mut sc1 = Report::new("sur", "eq1");
         let b1 = least_squares(&mut sc1, &z1, y, &ctx.policy).unwrap_or_else(|| Vector::zeros(q1));
         let mut sc2 = Report::new("sur", "eq2");
-        let b2 = least_squares(&mut sc2, &z2, &x0, &ctx.policy).unwrap_or_else(|| Vector::zeros(q2));
+        let b2 =
+            least_squares(&mut sc2, &z2, &x0, &ctx.policy).unwrap_or_else(|| Vector::zeros(q2));
         for issue in sc1.issues().iter().chain(sc2.issues()) {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::RankZero
                     | IssueCode::R2IsOne
                     | IssueCode::CholeskyFailed
@@ -3420,8 +3405,7 @@ impl SeeminglyUnrelated {
         for issue in scg.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::RankZero
                     | IssueCode::R2IsOne
                     | IssueCode::CholeskyFailed
@@ -3444,11 +3428,13 @@ impl SeeminglyUnrelated {
         );
         ctx.finish(FittedSeeminglyUnrelated {
             intercept: beta.as_slice().first().copied().unwrap_or(0.0),
-            coef_y: Vector::from_iter((1..q1).map(|j| beta.as_slice().get(j).copied().unwrap_or(0.0))),
+            coef_y: Vector::from_iter(
+                (1..q1).map(|j| beta.as_slice().get(j).copied().unwrap_or(0.0)),
+            ),
             intercept_eq2: beta.as_slice().get(q1).copied().unwrap_or(0.0),
-            coef_eq2: Vector::from_iter((1..q2).map(|j| {
-                beta.as_slice().get(q1 + j).copied().unwrap_or(0.0)
-            })),
+            coef_eq2: Vector::from_iter(
+                (1..q2).map(|j| beta.as_slice().get(q1 + j).copied().unwrap_or(0.0)),
+            ),
             sigma11: s11,
             sigma12: s12,
             sigma22: s22,
@@ -3506,11 +3492,7 @@ impl GrowthCurve {
     }
 
     /// Fit alias.
-    pub fn fit(
-        &mut self,
-        x: &Matrix,
-        session: &Session,
-    ) -> Result<Qualified<FittedGrowthCurve>> {
+    pub fn fit(&mut self, x: &Matrix, session: &Session) -> Result<Qualified<FittedGrowthCurve>> {
         self.fit_unsupervised(x, session)
     }
 }
@@ -3614,7 +3596,7 @@ impl StructuralEquation {
         Self
     }
 
-    /// CFA scores of \(X\), then OLS of \(y\) on \([1,X,f]\).
+    /// CFA scores of \(X\), then OLS of \(y\) on an intercept, \(X\), and \(f\).
     pub fn fit(
         &self,
         x: &Matrix,
@@ -3632,8 +3614,7 @@ impl StructuralEquation {
             Err(e) => {
                 if !matches!(
                     e.primary.code,
-                    IssueCode::ResidualTooLarge
-                        | IssueCode::NearSingular
+                    IssueCode::NearSingular
                         | IssueCode::RankZero
                         | IssueCode::R2IsOne
                         | IssueCode::MeaninglessFit
@@ -3652,8 +3633,7 @@ impl StructuralEquation {
         for issue in q.report.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::RankZero
                     | IssueCode::R2IsOne
                     | IssueCode::MeaninglessFit
@@ -3683,8 +3663,7 @@ impl StructuralEquation {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::RankZero
                     | IssueCode::R2IsOne
                     | IssueCode::CholeskyFailed
@@ -3696,7 +3675,9 @@ impl StructuralEquation {
         ctx.push(
             Issue::builder(IssueCode::CausalClaimUnidentified)
                 .severity(Severity::Advisory)
-                .message("StructuralEquation is CFA scores plus OLS on [1, X, f], not published LISREL")
+                .message(
+                    "StructuralEquation is CFA scores plus OLS on [1, X, f], not published LISREL",
+                )
                 .compromise(NumericalCompromise::new(
                     "LISREL / SEM",
                     "MINRES scores of X, then OLS of y on [1, X, f]",
@@ -3707,9 +3688,9 @@ impl StructuralEquation {
         );
         ctx.finish(FittedStructuralEquation {
             intercept: coef.as_slice().first().copied().unwrap_or(0.0),
-            coef_x: Vector::from_iter((0..p).map(|j| {
-                coef.as_slice().get(1 + j).copied().unwrap_or(0.0)
-            })),
+            coef_x: Vector::from_iter(
+                (0..p).map(|j| coef.as_slice().get(1 + j).copied().unwrap_or(0.0)),
+            ),
             slope_factor: coef.as_slice().get(1 + p).copied().unwrap_or(0.0),
             scores,
         })
@@ -3824,7 +3805,8 @@ mod tests {
             .partial_fit(&x, None, &Session::new("mbsp", "pf"))
             .expect("mbsp");
         assert!(!qe.value.narrative.is_empty());
-        mb.partial_fit(&x, None, &Session::new("mbnmf", "pf"))
+        let _update = mb
+            .partial_fit(&x, None, &Session::new("mbnmf", "pf"))
             .expect("pf");
         assert!(mb.h().is_some());
         let mut mbdl = MiniBatchDictionaryLearning::new(2);

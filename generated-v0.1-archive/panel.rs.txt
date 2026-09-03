@@ -14,7 +14,9 @@ use crate::stats::HypothesisTest;
 use crate::traits::Predict;
 use crate::validate::inspect_xy;
 use ojizou_san::Session;
-use signlred::{Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result, Severity};
+use signlred::{
+    Issue, IssueCode, Meaninglessness, NumericalCompromise, Qualified, Result, Severity,
+};
 use std::collections::BTreeMap;
 
 fn group_sizes(groups: &Vector) -> BTreeMap<i64, usize> {
@@ -216,10 +218,7 @@ impl PanelFe {
             return ctx.finish(empty_panel(x.ncols()));
         };
         for issue in scratch.issues() {
-            if matches!(
-                issue.code,
-                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
-            ) {
+            if matches!(issue.code, IssueCode::NearSingular | IssueCode::R2IsOne) {
                 continue;
             }
             ctx.push(issue.clone());
@@ -300,10 +299,7 @@ impl BetweenOls {
             return ctx.finish(empty_panel(x.ncols()));
         };
         for issue in scratch.issues() {
-            if matches!(
-                issue.code,
-                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
-            ) {
+            if matches!(issue.code, IssueCode::NearSingular | IssueCode::R2IsOne) {
                 continue;
             }
             ctx.push(issue.clone());
@@ -428,10 +424,7 @@ impl FirstDifferenceOls {
             return ctx.finish(empty_panel(p));
         };
         for issue in scratch.issues() {
-            if matches!(
-                issue.code,
-                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
-            ) {
+            if matches!(issue.code, IssueCode::NearSingular | IssueCode::R2IsOne) {
                 continue;
             }
             ctx.push(issue.clone());
@@ -487,10 +480,7 @@ impl PooledOls {
             return ctx.finish(empty_panel(x.ncols()));
         };
         for issue in scratch.issues() {
-            if matches!(
-                issue.code,
-                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
-            ) {
+            if matches!(issue.code, IssueCode::NearSingular | IssueCode::R2IsOne) {
                 continue;
             }
             ctx.push(issue.clone());
@@ -619,10 +609,7 @@ impl RandomEffects {
             return PooledOls::new().fit(x, y, groups, session);
         };
         for issue in scratch.issues() {
-            if matches!(
-                issue.code,
-                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
-            ) {
+            if matches!(issue.code, IssueCode::NearSingular | IssueCode::R2IsOne) {
                 continue;
             }
             ctx.push(issue.clone());
@@ -808,10 +795,7 @@ impl ArellanoBondGmm {
         let beta = least_squares(&mut scratch, &xhat, &yvec, &ctx.policy)
             .unwrap_or_else(|| Vector::zeros(p + 1));
         for issue in scratch.issues() {
-            if matches!(
-                issue.code,
-                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
-            ) {
+            if matches!(issue.code, IssueCode::NearSingular | IssueCode::R2IsOne) {
                 continue;
             }
             ctx.push(issue.clone());
@@ -954,10 +938,7 @@ impl BlundellBond {
         let beta = least_squares(&mut scratch, &xhat, &yvec, &ctx.policy)
             .unwrap_or_else(|| Vector::zeros(p + 1));
         for issue in scratch.issues() {
-            if matches!(
-                issue.code,
-                IssueCode::ResidualTooLarge | IssueCode::NearSingular | IssueCode::R2IsOne
-            ) {
+            if matches!(issue.code, IssueCode::NearSingular | IssueCode::R2IsOne) {
                 continue;
             }
             ctx.push(issue.clone());
@@ -1022,8 +1003,7 @@ impl DifferenceGmm {
                 for issue in q.report.issues() {
                     if matches!(
                         issue.code,
-                        IssueCode::ResidualTooLarge
-                            | IssueCode::NearSingular
+                        IssueCode::NearSingular
                             | IssueCode::R2IsOne
                             | IssueCode::RankZero
                             | IssueCode::CholeskyFailed
@@ -1084,8 +1064,7 @@ impl SystemGmm {
                 for issue in q.report.issues() {
                     if matches!(
                         issue.code,
-                        IssueCode::ResidualTooLarge
-                            | IssueCode::NearSingular
+                        IssueCode::NearSingular
                             | IssueCode::R2IsOne
                             | IssueCode::RankZero
                             | IssueCode::CholeskyFailed
@@ -1197,8 +1176,7 @@ impl FamaMacBeth {
             for issue in scratch.issues() {
                 if matches!(
                     issue.code,
-                    IssueCode::ResidualTooLarge
-                        | IssueCode::NearSingular
+                    IssueCode::NearSingular
                         | IssueCode::R2IsOne
                         | IssueCode::RankZero
                         | IssueCode::CholeskyFailed
@@ -1211,9 +1189,9 @@ impl FamaMacBeth {
                 continue;
             }
             intercepts.push(sol.as_slice().first().copied().unwrap_or(0.0));
-            betas.push(Vector::from_iter((0..p).map(|j| {
-                sol.as_slice().get(j + 1).copied().unwrap_or(0.0)
-            })));
+            betas.push(Vector::from_iter(
+                (0..p).map(|j| sol.as_slice().get(j + 1).copied().unwrap_or(0.0)),
+            ));
             n_cs += rows.len() as f64;
         }
         let n_times = betas.len();
@@ -1232,18 +1210,21 @@ impl FamaMacBeth {
             });
         }
         let intercept = intercepts.iter().sum::<f64>() / n_times as f64;
-        let coef = Vector::from_iter((0..p).map(|j| {
-            betas.iter().map(|b| b[j]).sum::<f64>() / n_times as f64
-        }));
+        let coef = Vector::from_iter(
+            (0..p).map(|j| betas.iter().map(|b| b[j]).sum::<f64>() / n_times as f64),
+        );
         let se = Vector::from_iter((0..p).map(|j| {
             if n_times < 2 {
                 return f64::NAN;
             }
             let m = coef[j];
-            let ss: f64 = betas.iter().map(|b| {
-                let d = b[j] - m;
-                d * d
-            }).sum();
+            let ss: f64 = betas
+                .iter()
+                .map(|b| {
+                    let d = b[j] - m;
+                    d * d
+                })
+                .sum();
             (ss / (n_times as f64 - 1.0)).sqrt() / (n_times as f64).sqrt()
         }));
         ctx.finish(FittedFamaMacBeth {
@@ -1294,8 +1275,7 @@ impl AbsorbingLs {
                 for issue in q.report.issues() {
                     if matches!(
                         issue.code,
-                        IssueCode::ResidualTooLarge
-                            | IssueCode::NearSingular
+                        IssueCode::NearSingular
                             | IssueCode::R2IsOne
                             | IssueCode::RankZero
                             | IssueCode::CholeskyFailed
@@ -1448,8 +1428,7 @@ impl TwoWayFe {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::R2IsOne
                     | IssueCode::RankZero
                     | IssueCode::CholeskyFailed
@@ -1540,8 +1519,7 @@ impl Mundlak {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::R2IsOne
                     | IssueCode::RankZero
                     | IssueCode::CholeskyFailed
@@ -1552,9 +1530,8 @@ impl Mundlak {
             ctx.push(issue.clone());
         }
         let intercept = beta.as_slice().first().copied().unwrap_or(0.0);
-        let coef = Vector::from_iter((0..p).map(|j| {
-            beta.as_slice().get(j + 1).copied().unwrap_or(0.0)
-        }));
+        let coef =
+            Vector::from_iter((0..p).map(|j| beta.as_slice().get(j + 1).copied().unwrap_or(0.0)));
         ctx.finish(FittedPanel {
             coef,
             intercept,
@@ -1604,8 +1581,7 @@ impl HausmanTaylor {
                 for issue in q.report.issues() {
                     if matches!(
                         issue.code,
-                        IssueCode::ResidualTooLarge
-                            | IssueCode::NearSingular
+                        IssueCode::NearSingular
                             | IssueCode::R2IsOne
                             | IssueCode::RankZero
                             | IssueCode::CholeskyFailed
@@ -1710,8 +1686,7 @@ impl ClusteredFamaMacBeth {
             for issue in scratch.issues() {
                 if matches!(
                     issue.code,
-                    IssueCode::ResidualTooLarge
-                        | IssueCode::NearSingular
+                    IssueCode::NearSingular
                         | IssueCode::R2IsOne
                         | IssueCode::RankZero
                         | IssueCode::CholeskyFailed
@@ -1724,9 +1699,9 @@ impl ClusteredFamaMacBeth {
                 continue;
             }
             intercepts.push(sol.as_slice().first().copied().unwrap_or(0.0));
-            betas.push(Vector::from_iter((0..p).map(|j| {
-                sol.as_slice().get(j + 1).copied().unwrap_or(0.0)
-            })));
+            betas.push(Vector::from_iter(
+                (0..p).map(|j| sol.as_slice().get(j + 1).copied().unwrap_or(0.0)),
+            ));
             n_cs += rows.len() as f64;
         }
         let n_times = betas.len();
@@ -1745,9 +1720,9 @@ impl ClusteredFamaMacBeth {
             });
         }
         let intercept = intercepts.iter().sum::<f64>() / n_times as f64;
-        let coef = Vector::from_iter((0..p).map(|j| {
-            betas.iter().map(|b| b[j]).sum::<f64>() / n_times as f64
-        }));
+        let coef = Vector::from_iter(
+            (0..p).map(|j| betas.iter().map(|b| b[j]).sum::<f64>() / n_times as f64),
+        );
         let se = Vector::from_iter((0..p).map(|j| {
             if n_times < 2 {
                 return f64::NAN;
@@ -1860,8 +1835,7 @@ impl Between2Sls {
             for issue in scratch.issues() {
                 if matches!(
                     issue.code,
-                    IssueCode::ResidualTooLarge
-                        | IssueCode::NearSingular
+                    IssueCode::NearSingular
                         | IssueCode::R2IsOne
                         | IssueCode::RankZero
                         | IssueCode::CholeskyFailed
@@ -1885,8 +1859,7 @@ impl Between2Sls {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::R2IsOne
                     | IssueCode::RankZero
                     | IssueCode::CholeskyFailed
@@ -1898,9 +1871,9 @@ impl Between2Sls {
         }
         ctx.finish(FittedPanel {
             intercept: beta.as_slice().first().copied().unwrap_or(0.0),
-            coef: Vector::from_iter((0..p).map(|j| {
-                beta.as_slice().get(j + 1).copied().unwrap_or(0.0)
-            })),
+            coef: Vector::from_iter(
+                (0..p).map(|j| beta.as_slice().get(j + 1).copied().unwrap_or(0.0)),
+            ),
             n_groups: g,
             n_eff: g,
         })
@@ -1954,8 +1927,16 @@ impl FirstDifferenceIv {
                 continue;
             }
             yd.push(y[i] - y[i - 1]);
-            xd.push((0..p).map(|j| x.get(i, j) - x.get(i - 1, j)).collect::<Vec<_>>());
-            zd.push((0..q).map(|j| z.get(i, j) - z.get(i - 1, j)).collect::<Vec<_>>());
+            xd.push(
+                (0..p)
+                    .map(|j| x.get(i, j) - x.get(i - 1, j))
+                    .collect::<Vec<_>>(),
+            );
+            zd.push(
+                (0..q)
+                    .map(|j| z.get(i, j) - z.get(i - 1, j))
+                    .collect::<Vec<_>>(),
+            );
         }
         if xd.is_empty() {
             ctx.push(
@@ -2003,8 +1984,7 @@ impl FirstDifferenceIv {
             for issue in scratch.issues() {
                 if matches!(
                     issue.code,
-                    IssueCode::ResidualTooLarge
-                        | IssueCode::NearSingular
+                    IssueCode::NearSingular
                         | IssueCode::R2IsOne
                         | IssueCode::RankZero
                         | IssueCode::CholeskyFailed
@@ -2027,8 +2007,7 @@ impl FirstDifferenceIv {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::R2IsOne
                     | IssueCode::RankZero
                     | IssueCode::CholeskyFailed
@@ -2109,8 +2088,7 @@ impl Pooled2Sls {
             for issue in scratch.issues() {
                 if matches!(
                     issue.code,
-                    IssueCode::ResidualTooLarge
-                        | IssueCode::NearSingular
+                    IssueCode::NearSingular
                         | IssueCode::R2IsOne
                         | IssueCode::RankZero
                         | IssueCode::CholeskyFailed
@@ -2134,8 +2112,7 @@ impl Pooled2Sls {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::NearSingular
+                IssueCode::NearSingular
                     | IssueCode::R2IsOne
                     | IssueCode::RankZero
                     | IssueCode::CholeskyFailed
@@ -2147,9 +2124,9 @@ impl Pooled2Sls {
         }
         ctx.finish(FittedPanel {
             intercept: beta.as_slice().first().copied().unwrap_or(0.0),
-            coef: Vector::from_iter((0..p).map(|j| {
-                beta.as_slice().get(j + 1).copied().unwrap_or(0.0)
-            })),
+            coef: Vector::from_iter(
+                (0..p).map(|j| beta.as_slice().get(j + 1).copied().unwrap_or(0.0)),
+            ),
             n_groups: 1,
             n_eff: n,
         })
@@ -2159,8 +2136,7 @@ impl Pooled2Sls {
 fn skip_panel_inner(issue: &signlred::Issue) -> bool {
     matches!(
         issue.code,
-        IssueCode::ResidualTooLarge
-            | IssueCode::NearSingular
+        IssueCode::NearSingular
             | IssueCode::R2IsOne
             | IssueCode::RankZero
             | IssueCode::CholeskyFailed
@@ -2205,7 +2181,11 @@ fn twosls_stages(
             ctx.push(issue.clone());
         }
     }
-    let design = if intercept { xhat.with_intercept() } else { xhat };
+    let design = if intercept {
+        xhat.with_intercept()
+    } else {
+        xhat
+    };
     let y_use = Vector::from_iter((0..n).map(|i| y[i]));
     let mut scratch = signlred::Report::new(tag, "ss");
     let beta = least_squares(&mut scratch, &design, &y_use, policy);
@@ -2301,10 +2281,18 @@ impl Absorbing2Sls {
             let g = g_n[i].round() as i64;
             yw[i] = y_n[i] - my.get(&g).copied().unwrap_or(0.0);
             for j in 0..p {
-                xw.set(i, j, x_n.get(i, j) - mx.get(&g).map(|v| v[j]).unwrap_or(0.0));
+                xw.set(
+                    i,
+                    j,
+                    x_n.get(i, j) - mx.get(&g).map(|v| v[j]).unwrap_or(0.0),
+                );
             }
             for j in 0..q {
-                zw.set(i, j, z_n.get(i, j) - mz.get(&g).map(|v| v[j]).unwrap_or(0.0));
+                zw.set(
+                    i,
+                    j,
+                    z_n.get(i, j) - mz.get(&g).map(|v| v[j]).unwrap_or(0.0),
+                );
             }
         }
         if yw.std() <= ctx.policy.near_zero_variance {
@@ -2457,9 +2445,9 @@ impl RandomEffectsIv {
         match twosls_stages(&xq, &yq, &zq, true, &policy, "reiv", &mut ctx) {
             Some(beta) => ctx.finish(FittedPanel {
                 intercept: beta.as_slice().first().copied().unwrap_or(0.0),
-                coef: Vector::from_iter((0..p).map(|j| {
-                    beta.as_slice().get(j + 1).copied().unwrap_or(0.0)
-                })),
+                coef: Vector::from_iter(
+                    (0..p).map(|j| beta.as_slice().get(j + 1).copied().unwrap_or(0.0)),
+                ),
                 n_groups: sizes.len(),
                 n_eff: n,
             }),
@@ -2562,9 +2550,9 @@ impl Chamberlain {
         }
         ctx.finish(FittedPanel {
             intercept: beta.as_slice().first().copied().unwrap_or(0.0),
-            coef: Vector::from_iter((0..p).map(|j| {
-                beta.as_slice().get(j + 1).copied().unwrap_or(0.0)
-            })),
+            coef: Vector::from_iter(
+                (0..p).map(|j| beta.as_slice().get(j + 1).copied().unwrap_or(0.0)),
+            ),
             n_groups: gsz.len(),
             n_eff: n,
         })
@@ -2758,9 +2746,9 @@ impl EntityClusteredFamaMacBeth {
             let a = sol.as_slice().first().copied().unwrap_or(0.0);
             intercepts.push(a);
             alpha_t.insert(t, a);
-            betas.push(Vector::from_iter((0..p).map(|j| {
-                sol.as_slice().get(j + 1).copied().unwrap_or(0.0)
-            })));
+            betas.push(Vector::from_iter(
+                (0..p).map(|j| sol.as_slice().get(j + 1).copied().unwrap_or(0.0)),
+            ));
             n_cs += rows.len() as f64;
         }
         let n_times = betas.len();
@@ -2779,9 +2767,9 @@ impl EntityClusteredFamaMacBeth {
             });
         }
         let intercept = intercepts.iter().sum::<f64>() / n_times as f64;
-        let coef = Vector::from_iter((0..p).map(|j| {
-            betas.iter().map(|b| b[j]).sum::<f64>() / n_times as f64
-        }));
+        let coef = Vector::from_iter(
+            (0..p).map(|j| betas.iter().map(|b| b[j]).sum::<f64>() / n_times as f64),
+        );
         let mut scores: BTreeMap<i64, Vector> = BTreeMap::new();
         for i in 0..n {
             if !times[i].is_finite() || !groups[i].is_finite() {
@@ -3256,7 +3244,8 @@ impl CallawaySantanna {
                         None
                     }
                 };
-                let treated = |i: usize| first_treat[i].is_finite() && first_treat[i].round() as i64 == g;
+                let treated =
+                    |i: usize| first_treat[i].is_finite() && first_treat[i].round() as i64 == g;
                 let never = |i: usize| !first_treat[i].is_finite();
                 let (Some(ytg), Some(ypg), Some(ytn), Some(ypn)) = (
                     mean(&treated, t),
@@ -3273,7 +3262,9 @@ impl CallawaySantanna {
             ctx.push(
                 Issue::builder(IssueCode::InsufficientSample)
                     .severity(Severity::Warning)
-                    .message("CallawaySantanna found no (g,t) cell with a pre period and never-treated")
+                    .message(
+                        "CallawaySantanna found no (g,t) cell with a pre period and never-treated",
+                    )
                     .build(),
             );
         }
@@ -3456,7 +3447,9 @@ impl BorusyakJaravelSpiess {
         ctx.push(
             Issue::builder(IssueCode::CausalClaimUnidentified)
                 .severity(Severity::Advisory)
-                .message("BorusyakJaravelSpiess is alternating two-way FE, not the published estimator")
+                .message(
+                    "BorusyakJaravelSpiess is alternating two-way FE, not the published estimator",
+                )
                 .compromise(NumericalCompromise::new(
                     "BJS imputation DiD",
                     "entity + time means on untreated rows, then treated residuals",
@@ -3587,7 +3580,9 @@ impl SunAbraham {
         ctx.push(
             Issue::builder(IssueCode::CausalClaimUnidentified)
                 .severity(Severity::Advisory)
-                .message("SunAbraham is cell-size-weighted 2×2 ATTs, not the published IW estimator")
+                .message(
+                    "SunAbraham is cell-size-weighted 2×2 ATTs, not the published IW estimator",
+                )
                 .compromise(NumericalCompromise::new(
                     "Sun–Abraham interaction-weighted event study",
                     "cohort-size weighted average of never-treated 2×2 cells",
@@ -3686,9 +3681,8 @@ impl DeChaisemartin {
             };
             let switcher =
                 |i: usize| first_treat[i].is_finite() && first_treat[i].round() as i64 == t;
-            let not_yet = |i: usize| {
-                !first_treat[i].is_finite() || first_treat[i].round() as i64 > t
-            };
+            let not_yet =
+                |i: usize| !first_treat[i].is_finite() || first_treat[i].round() as i64 > t;
             let (Some(ys), Some(ys0), Some(yc), Some(yc0)) = (
                 mean(&switcher, t),
                 mean(&switcher, pre),
@@ -3930,10 +3924,7 @@ impl AipwDid {
             n_d += d as f64;
             n_ok += 1.0;
         }
-        if cells[0][0].1 < 1.0
-            || cells[0][1].1 < 1.0
-            || cells[1][0].1 < 1.0
-            || cells[1][1].1 < 1.0
+        if cells[0][0].1 < 1.0 || cells[0][1].1 < 1.0 || cells[1][0].1 < 1.0 || cells[1][1].1 < 1.0
         {
             ctx.push(
                 Issue::builder(IssueCode::MeaninglessFit)
@@ -4080,13 +4071,15 @@ mod tests {
         let als = AbsorbingLs::new()
             .fit(&x, &y, &g, &Session::new("als", "fit"))
             .expect("als");
-        assert!((als.value.coef[0] - 2.0).abs() < 0.25, "als={}", als.value.coef[0]);
-        let xtw = Matrix::from_fn(32, 1, |i, _| {
-            (i % 8) as f64 * (1.0 + (i / 8) as f64)
-        });
-        let ytw = Vector::from_iter((0..32).map(|i| {
-            2.0 * (i % 8) as f64 * (1.0 + (i / 8) as f64) + 5.0 * (i / 8) as f64
-        }));
+        assert!(
+            (als.value.coef[0] - 2.0).abs() < 0.25,
+            "als={}",
+            als.value.coef[0]
+        );
+        let xtw = Matrix::from_fn(32, 1, |i, _| (i % 8) as f64 * (1.0 + (i / 8) as f64));
+        let ytw = Vector::from_iter(
+            (0..32).map(|i| 2.0 * (i % 8) as f64 * (1.0 + (i / 8) as f64) + 5.0 * (i / 8) as f64),
+        );
         let tw = TwoWayFe::new()
             .fit(&xtw, &ytw, &g, &time, &Session::new("twfe", "fit"))
             .expect("twfe");
@@ -4102,7 +4095,11 @@ mod tests {
         let ht = HausmanTaylor::new()
             .fit(&x, &y, &g, &Session::new("ht", "fit"))
             .expect("ht");
-        assert!((ht.value.coef[0] - 2.0).abs() < 0.25, "ht={}", ht.value.coef[0]);
+        assert!(
+            (ht.value.coef[0] - 2.0).abs() < 0.25,
+            "ht={}",
+            ht.value.coef[0]
+        );
         let cfm = ClusteredFamaMacBeth::new()
             .fit(&xfm, &y, &time, &Session::new("cfm", "fit"))
             .expect("cfm");
@@ -4127,7 +4124,11 @@ mod tests {
         let a2 = Absorbing2Sls::new()
             .fit(&x, &y, &x, &g, &Session::new("a2s", "fit"))
             .expect("a2s");
-        assert!((a2.value.coef[0] - 2.0).abs() < 0.25, "a2s={}", a2.value.coef[0]);
+        assert!(
+            (a2.value.coef[0] - 2.0).abs() < 0.25,
+            "a2s={}",
+            a2.value.coef[0]
+        );
         let reiv = RandomEffectsIv::new(0.5)
             .fit(&x, &y, &x, &g, &Session::new("reiv", "fit"))
             .expect("reiv");
@@ -4143,7 +4144,11 @@ mod tests {
         let mg = MeanGroup::new()
             .fit(&x, &y, &g, &Session::new("mg", "fit"))
             .expect("mg");
-        assert!((mg.value.coef[0] - 2.0).abs() < 0.25, "mg={}", mg.value.coef[0]);
+        assert!(
+            (mg.value.coef[0] - 2.0).abs() < 0.25,
+            "mg={}",
+            mg.value.coef[0]
+        );
         let ecfm = EntityClusteredFamaMacBeth::new()
             .fit(&xfm, &y, &time, &g, &Session::new("ecfm", "fit"))
             .expect("ecfm");
@@ -4163,13 +4168,7 @@ mod tests {
             .expect("sc");
         assert_eq!(sc.value.weights.len(), 3);
         assert!(sc.value.att.is_finite());
-        let first = Vector::from_iter((0..32).map(|i| {
-            if i / 8 >= 2 {
-                4.0
-            } else {
-                f64::NAN
-            }
-        }));
+        let first = Vector::from_iter((0..32).map(|i| if i / 8 >= 2 { 4.0 } else { f64::NAN }));
         let evs = EventStudy::new(2)
             .fit(&y, &time, &first, &Session::new("evs", "fit"))
             .expect("evs");

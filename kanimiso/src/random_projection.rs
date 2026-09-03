@@ -228,7 +228,8 @@ mod tests {
     fn gaussian_and_sparse_project() {
         let x = Matrix::from_fn(20, 6, |i, j| (i + j) as f64);
         let mut g = GaussianRandomProjection::new(3);
-        g.fit_unsupervised(&x, &Session::new("grp", "fit"))
+        let _gaussian_fit = g
+            .fit_unsupervised(&x, &Session::new("grp", "fit"))
             .expect("gfit");
         let z = g
             .transform(&x, &Session::new("grp", "t"))
@@ -237,7 +238,8 @@ mod tests {
         assert_eq!(z.shape(), (20, 3));
         assert!(z.get(0, 0).is_finite());
         let mut s = SparseRandomProjection::new(4);
-        s.fit_unsupervised(&x, &Session::new("srp", "fit"))
+        let _sparse_fit = s
+            .fit_unsupervised(&x, &Session::new("srp", "fit"))
             .expect("sfit");
         let w = s
             .transform(&x, &Session::new("srp", "t"))

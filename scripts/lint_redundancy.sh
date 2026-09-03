@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
-# 冗長性 lint（R1 / R4 / R5 / R7 / R10）+ スタック拡張 + faer 単一版。全て ratchet 予算。
+# 冗長性 lint（R1 / R4 / R5 / R7 / R10）+ 通常スタック + ndarray/faer 単一版。全て ratchet 予算。
 set -uo pipefail
 SRC="kanimiso/src signlred/src ojizou-san/src"
 ALLOW=scripts/lint_allowlist.txt        # 固有名詞の数値（Exp3, Ucb1, Catch22, X13, 2Sls, Chi2, F1, R2 …）を 1 行 1 固定文字列
 [ -f "$ALLOW" ] || : > "$ALLOW"
 
 # ---- 予算（下げるのみ。初期値 = 2026-09-01 実測）-----------------------------
-MAX_R1_NUMERAL_IDENTS=5200     # 目標 0  （Garch11 のような「パラメータ値」は allowlist に入れない）
-MAX_R4_PUB_ITEMS=19731         # 目標 1000
-MAX_R5_FILES_OVER_3000=13      # 目標 0
-MAX_R7_DENSITY_FLOORS=1857     # 目標 0
-MAX_R10_DISTINCT_FROM=3435     # 目標 0
-ALLOW_RUST_MIN_STACK=1         # PR 8 で 0 にする
+MAX_R1_NUMERAL_IDENTS=18       # 目標 0  （Garch11 のような「パラメータ値」は allowlist に入れない）
+MAX_R4_PUB_ITEMS=1430          # 目標 1000
+MAX_R5_FILES_OVER_3000=6       # 目標 0
+MAX_R7_DENSITY_FLOORS=40       # 目標 0
+MAX_R10_DISTINCT_FROM=8        # 目標 0
+ALLOW_RUST_MIN_STACK=0         # generated HMM monolith was archived in PR 8
 # ------------------------------------------------------------------------------
 fail=0
 budget() { # name actual max
   if [ "$2" -gt "$3" ]; then echo "FAIL $1: $2 > budget $3"; fail=1; else echo "ok   $1: $2 (budget $3)"; fi
 }
+
+python3 scripts/lint_dependencies.py || fail=1
 
 r1=$(grep -rhE '^\s*pub (struct|enum|trait|fn|type|mod) [A-Za-z_]*[0-9]+[A-Za-z_0-9]*' --include='*.rs' $SRC \
      | grep -vF -f "$ALLOW" | wc -l)
@@ -40,5 +42,8 @@ if [ "$ALLOW_RUST_MIN_STACK" -eq 0 ] && grep -q RUST_MIN_STACK .cargo/config.tom
 # Invert tree lists dependents too; count distinct `faer v…` roots (D6).
 faer_versions=$(cargo tree -i faer -e normal --prefix none 2>/dev/null | awk '/^faer /' | sort -u | wc -l)
 if [ "$faer_versions" -gt 1 ]; then echo "FAIL multiple faer versions in the graph"; fail=1; fi
+
+ndarray_versions=$(cargo tree -i ndarray -e normal --prefix none 2>/dev/null | awk '/^ndarray /' | sort -u | wc -l)
+if [ "$ndarray_versions" -gt 1 ]; then echo "FAIL multiple ndarray versions in the graph"; fail=1; fi
 
 exit $fail

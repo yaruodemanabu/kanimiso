@@ -949,10 +949,7 @@ impl FitUnsupervised for IterativeImputer {
                 for issue in scratch.issues() {
                     if matches!(
                         issue.code,
-                        IssueCode::ResidualTooLarge
-                            | IssueCode::NearSingular
-                            | IssueCode::R2IsOne
-                            | IssueCode::InvalidWeight
+                        IssueCode::NearSingular | IssueCode::R2IsOne | IssueCode::InvalidWeight
                     ) {
                         continue;
                     }
@@ -2488,7 +2485,7 @@ mod tests {
         let x = Matrix::from_fn(30, 2, |i, j| (i as f64) + 3.0 * (j as f64));
         let session = Session::new("scaler", "fit");
         let mut s = StandardScaler::new();
-        s.fit_unsupervised(&x, &session).expect("fit");
+        let _fit = s.fit_unsupervised(&x, &session).expect("fit");
         let z = s.transform(&x, &session).expect("transform").value;
         for j in 0..2 {
             let col = z.column(j);
@@ -2522,22 +2519,23 @@ mod tests {
         let x = Matrix::from_fn(20, 1, |i, _| (i / 5) as f64);
         let y = Vector::from_iter((0..20).map(|i| if i < 10 { 0.0 } else { 2.0 }));
         let mut te = TargetEncoder::new();
-        te.fit(&x, &y, &Session::new("te", "fit")).unwrap();
+        let _fit = te.fit(&x, &y, &Session::new("te", "fit")).unwrap();
         let z = te.transform(&x, &Session::new("te", "t")).unwrap().value;
         assert!(z.get(0, 0) < z.get(19, 0));
         let mut sp = SplineTransformer::new(4);
-        sp.fit_unsupervised(&x, &Session::new("sp", "fit")).unwrap();
+        let _fit = sp.fit_unsupervised(&x, &Session::new("sp", "fit")).unwrap();
         let b = sp.transform(&x, &Session::new("sp", "t")).unwrap().value;
         assert!(b.ncols() > 1);
         let mut ft = FunctionTransformer::new(ElementwiseFn::Log1p);
-        ft.fit_unsupervised(&x, &Session::new("ft", "fit")).unwrap();
+        let _fit = ft.fit_unsupervised(&x, &Session::new("ft", "fit")).unwrap();
         let w = ft.transform(&x, &Session::new("ft", "t")).unwrap().value;
         assert!((w.get(0, 0) - 0.0).abs() < 1e-12);
         let mut xm = Matrix::from_fn(20, 2, |i, j| if j == 0 { i as f64 } else { 2.0 * i as f64 });
         xm.set(3, 1, f64::NAN);
         xm.set(7, 0, f64::NAN);
         let mut ii = IterativeImputer::new();
-        ii.fit_unsupervised(&xm, &Session::new("ii", "fit"))
+        let _fit = ii
+            .fit_unsupervised(&xm, &Session::new("ii", "fit"))
             .unwrap();
         let filled = ii.transform(&xm, &Session::new("ii", "t")).unwrap().value;
         for i in 0..filled.nrows() {
@@ -2547,7 +2545,7 @@ mod tests {
         }
         let yb = Vector::from_iter((0..20).map(|i| if i < 10 { 0.0 } else { 1.0 }));
         let mut lb = LabelBinarizer::new();
-        lb.fit_series(&yb, &Session::new("lb", "fit")).unwrap();
+        let _fit = lb.fit_series(&yb, &Session::new("lb", "fit")).unwrap();
         let oh = lb
             .transform(&Matrix::from_vector(&yb), &Session::new("lb", "t"))
             .unwrap()
@@ -2566,7 +2564,8 @@ mod tests {
             _ => 1.0,
         });
         let mut mlb = MultiLabelBinarizer::new();
-        mlb.fit_unsupervised(&labs, &Session::new("mlb", "fit"))
+        let _fit = mlb
+            .fit_unsupervised(&labs, &Session::new("mlb", "fit"))
             .unwrap();
         assert_eq!(mlb.classes(), &[0, 1, 2]);
         let bin = mlb
@@ -2578,7 +2577,8 @@ mod tests {
         assert!((bin.get(0, 2) - 1.0).abs() < 1e-12);
         let gram = Matrix::from_fn(6, 6, |i, j| (i as f64 - j as f64).abs());
         let mut kc = KernelCenterer::new();
-        kc.fit_unsupervised(&gram, &Session::new("kc", "fit"))
+        let _fit = kc
+            .fit_unsupervised(&gram, &Session::new("kc", "fit"))
             .unwrap();
         let ck = kc.transform(&gram, &Session::new("kc", "t")).unwrap().value;
         let mut mean = 0.0;
@@ -2589,19 +2589,18 @@ mod tests {
         }
         assert!(mean.abs() < 1e-8, "centered gram mean={mean}");
         let mut mi = MissingIndicator::new();
-        mi.fit_unsupervised(&xm, &Session::new("mi", "fit"))
+        let _fit = mi
+            .fit_unsupervised(&xm, &Session::new("mi", "fit"))
             .unwrap();
         let ind = mi.transform(&xm, &Session::new("mi", "t")).unwrap().value;
         assert_eq!(ind.shape(), xm.shape());
         assert!((ind.get(3, 1) - 1.0).abs() < 1e-12);
         assert!((ind.get(0, 0) - 0.0).abs() < 1e-12);
         let mut knn: KNNImputer = KnnImputer::new(3);
-        knn.fit_unsupervised(&xm, &Session::new("knn", "fit"))
+        let _fit = knn
+            .fit_unsupervised(&xm, &Session::new("knn", "fit"))
             .unwrap();
-        let kn = knn
-            .transform(&xm, &Session::new("knn", "t"))
-            .unwrap()
-            .value;
+        let kn = knn.transform(&xm, &Session::new("knn", "t")).unwrap().value;
         assert!(kn.get(3, 1).is_finite());
         assert!(kn.get(7, 0).is_finite());
     }

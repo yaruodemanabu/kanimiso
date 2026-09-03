@@ -1,7 +1,7 @@
 //! Kernel PCA (Schölkopf, Smola, Müller) on an RBF Gram.
 //!
 //! The Gram is centred in feature space and factored with
-//! [`crate::linalg::symmetric_eigen`]. Negative eigenvalues are dropped and
+//! the shared internal symmetric eigensolver. Negative eigenvalues are dropped and
 //! recorded as [`IssueCode::NegativeEigenvalueDropped`]. A non-PD kernel is
 //! [`IssueCode::KernelNotPd`].
 

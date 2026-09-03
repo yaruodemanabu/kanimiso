@@ -127,8 +127,7 @@ impl FitSeries for RecursiveReducer {
         for issue in scratch.issues() {
             if matches!(
                 issue.code,
-                IssueCode::ResidualTooLarge
-                    | IssueCode::PerfectCollinearity
+                IssueCode::PerfectCollinearity
                     | IssueCode::NearSingular
                     | IssueCode::SingularMatrix
             ) {
@@ -307,8 +306,7 @@ impl FitSeries for DirectReducer {
             for issue in scratch.issues() {
                 if matches!(
                     issue.code,
-                    IssueCode::ResidualTooLarge
-                        | IssueCode::PerfectCollinearity
+                    IssueCode::PerfectCollinearity
                         | IssueCode::NearSingular
                         | IssueCode::SingularMatrix
                 ) {
@@ -494,8 +492,7 @@ impl FitSeries for DirRecReducer {
             for issue in scratch.issues() {
                 if matches!(
                     issue.code,
-                    IssueCode::ResidualTooLarge
-                        | IssueCode::PerfectCollinearity
+                    IssueCode::PerfectCollinearity
                         | IssueCode::NearSingular
                         | IssueCode::SingularMatrix
                         | IssueCode::RankZero

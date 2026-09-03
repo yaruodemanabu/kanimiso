@@ -12,6 +12,7 @@ authors = ["kanimiso contributors"]
 repository = "https://github.com/yaruodemanabu/kanimiso"
 
 [workspace.dependencies]
-faer = { version = "0.24.4", default-features = true }
+faer = { version = "=0.24.4", default-features = false, features = ["std", "linalg", "rayon"] }
+ndarray = { version = "=0.17.2", default-features = false, features = ["std"] }
 signlred = { path = "signlred", version = "0.1.0" }
 ojizou-san = { path = "ojizou-san", version = "0.1.0" }

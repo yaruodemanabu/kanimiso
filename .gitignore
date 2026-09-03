@@ -13,6 +13,12 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# Oracle generators are Python source, but their local bytecode is not evidence.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
