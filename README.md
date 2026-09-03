@@ -164,7 +164,7 @@ python scripts/lint_dependencies.py
 python scripts/lint_clippy.py
 bash scripts/lint_redundancy.sh
 cargo deny check
-cargo llvm-cov --workspace --locked --summary-only --fail-under-lines 76.0
+cargo llvm-cov --workspace --locked --summary-only --fail-under-lines 75.0
 ```
 
 CI は全ワークスペースを MSRV 1.85 と固定 toolchain 1.98.0 で検査し、stable では

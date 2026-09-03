@@ -81,8 +81,9 @@ Tier 0/1 の一点一致だけでは Verified にしません。式の読み違�
 Python オラクルを持つジョブは fixture の provenance または多倍長精度差分も検査します。
 特殊関数ジョブは scipy 由来のコミット済み JSON を Rust から再生します。さらに MSRV、
 rustfmt、警告を error にした rustdoc、依存境界、cargo-deny、冗長性・Clippy の減少専用
-ratchet を検査します。line coverage は Windows 実測 `76.30%` に対して `76.0%` を
-初期下限とし、レポート生成だけでなく退行時に失敗させます。
+ratchet を検査します。line coverage は Windows 実測 `76.30%` に対し、Linux CI の
+初回実測を得るまでは環境差を吸収する暫定下限 `75.0%` を使います。レポート生成だけ
+でなく、下限を割る退行は失敗させます。
 
 ローカルで全 Rust テストを再生する最短のコマンドは次です。
 
