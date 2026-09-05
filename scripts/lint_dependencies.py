@@ -18,6 +18,8 @@ EXPECTED_MEMBERS = [
     "number-ruler",
     "oldwood",
     "mayoi-no-mori",
+    "denshi",
+    "riko",
     "kanimiso",
 ]
 DEPENDENCY_KINDS = ("dependencies", "dev-dependencies", "build-dependencies")
@@ -107,6 +109,8 @@ def main() -> int:
         "ojizou-san",
         "oldwood",
         "mayoi-no-mori",
+        "denshi",
+        "riko",
         "amatsuki",
     }
     require(
@@ -214,6 +218,18 @@ def main() -> int:
         "mayoi-no-mori/Cargo.toml": {
             "package": "mayoi-no-mori",
             "dependencies": {"oldwood", "amatsuki"},
+            "dev-dependencies": set(),
+            "build-dependencies": set(),
+        },
+        "denshi/Cargo.toml": {
+            "package": "denshi",
+            "dependencies": set(),
+            "dev-dependencies": set(),
+            "build-dependencies": set(),
+        },
+        "riko/Cargo.toml": {
+            "package": "riko",
+            "dependencies": set(),
             "dev-dependencies": set(),
             "build-dependencies": set(),
         },

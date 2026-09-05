@@ -1,0 +1,22 @@
+[package]
+name = "denshi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Verification-first online prediction and regret-minimization algorithms"
+readme = "README.md"
+keywords = ["online-learning", "regret", "prediction"]
+categories = ["algorithms", "science"]
+
+[lib]
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "deny"
+pedantic = "deny"
