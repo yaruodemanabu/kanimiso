@@ -202,7 +202,9 @@ CI は全ワークスペースを MSRV 1.85 と固定 toolchain 1.98.0 で検査
 全 support crate の lint・test・docs を先行監視します。オラクル群も領域別
 ジョブで再生します。設計判断と冗長性予算は
 [AGENTS.md](https://github.com/yaruodemanabu/kanimiso/blob/main/AGENTS.md)、v0.1 の削除 API
-と移行先は [移行メモ](https://github.com/yaruodemanabu/kanimiso/blob/main/docs/dropped_v0_1.md)
+と移行先は [移行メモ](https://github.com/yaruodemanabu/kanimiso/blob/main/docs/dropped_v0_1.md)、
+仕様書とテストのcrate横断棚卸しは
+[カバー状況](https://github.com/yaruodemanabu/kanimiso/blob/main/docs/spec-and-test-coverage.md)
 を参照してください。利用者に影響する変更は
 [CHANGELOG](https://github.com/yaruodemanabu/kanimiso/blob/main/CHANGELOG.md) に記録します。
 

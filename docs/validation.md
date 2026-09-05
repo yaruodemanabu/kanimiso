@@ -9,6 +9,9 @@
 [`number-ruler の検証仕様`](../number-ruler/docs/validation.md) にまとめています。
 正規分布の上側 p 値は同 fixture の直接裾 oracle により Verified へ昇格しました。
 
+クレート横断の仕様書の有無とテスト層の棚卸し（実装変更なし、疑問点を含む）は
+[`docs/spec-and-test-coverage.md`](spec-and-test-coverage.md) に分離しています。
+
 ## 状態の意味
 
 | 状態 | 意味 |
