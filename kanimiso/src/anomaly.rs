@@ -91,28 +91,31 @@ pub struct FittedAnomalyForest {
 }
 
 impl FittedAnomalyForest {
-    fn score_vec(&self, x: &Matrix) -> Vector {
+    #[allow(clippy::result_large_err)] // Preserve the full nested quality report.
+    fn score_vec(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
         match &self.inner {
-            Some(f) => f.score_samples(x),
-            None => Vector::zeros(x.nrows()),
+            Some(fitted) => fitted.score_samples(x, session),
+            None => {
+                let mut ctx = FitCtx::with_session(session.clone());
+                inspect_xy(&mut ctx.report, x, None, &ctx.policy);
+                ctx.finish(Vector::zeros(x.nrows()))
+            }
         }
     }
 
     /// Isolation scores `2^{-E(h)/c(n)}` (higher = more anomalous).
     pub fn scores(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
-        let mut ctx = FitCtx::with_session(session.child("score"));
-        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        ctx.finish(self.score_vec(x))
+        self.score_vec(x, &session.child("score"))
     }
 }
 
 impl Predict for FittedAnomalyForest {
     type Output = Vector;
     fn predict(&self, x: &Matrix, session: &Session) -> Result<Qualified<Vector>> {
-        let mut ctx = FitCtx::with_session(session.child("predict"));
-        inspect_xy(&mut ctx.report, x, None, &ctx.policy);
-        let s = self.score_vec(x);
-        ctx.finish(labels_from_scores(&s, self.threshold, true))
+        self.score_vec(x, &session.child("predict"))
+            .map(|qualified| {
+                qualified.map(|scores| labels_from_scores(&scores, self.threshold, true))
+            })
     }
 }
 
@@ -143,12 +146,18 @@ impl FitUnsupervised for IsolationForest {
         let fitted = match inner.fit_unsupervised(x, &session.child("iforest")) {
             Ok(q) => Some(q.value),
             Err(e) => {
-                ctx.push(e.primary);
+                ctx.report.merge(e.report);
                 None
             }
         };
         let scores = match &fitted {
-            Some(f) => f.score_samples(x),
+            Some(fitted) => match fitted.score_samples(x, &session.child("training_scores")) {
+                Ok(qualified) => {
+                    ctx.report.merge(qualified.report);
+                    qualified.value
+                }
+                Err(failure) => return Err(ctx.merge_failure(failure)),
+            },
             None => Vector::zeros(x.nrows()),
         };
         let q = (1.0 - self.contamination.clamp(1e-6, 0.5)).clamp(0.5, 1.0);

@@ -55,13 +55,36 @@ jobs:
       - name: rustup override (ignore rust-toolchain.toml pin)
         run: rustup override set ${{ matrix.rust }}
       - run: cargo fmt --all --check
-      - run: cargo clippy -p signlred -p ojizou-san --all-targets --all-features --locked -- -D warnings
-      - run: cargo test -p signlred -p ojizou-san --all-features --locked
+      - run: cargo clippy -p signlred -p ojizou-san -p tsutsumi -p number-ruler -p oldwood -p mayoi-no-mori --all-targets --all-features --locked -- -D warnings
+      - run: cargo test -p signlred -p ojizou-san -p tsutsumi -p number-ruler -p oldwood -p mayoi-no-mori --all-features --locked
       - name: Test full workspace at MSRV
         if: matrix.rust == '1.85'
         run: cargo test --workspace --all-features --locked
-      - run: cargo test -p signlred -p ojizou-san --doc --locked
-      - run: cargo doc -p signlred -p ojizou-san --no-deps --locked
+      - run: cargo test -p signlred -p ojizou-san -p tsutsumi -p number-ruler -p oldwood -p mayoi-no-mori --doc --locked
+      - run: cargo doc -p signlred -p ojizou-san -p tsutsumi -p number-ruler -p oldwood -p mayoi-no-mori --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  tree-ensemble:
+    name: oldwood CART + mayoi-no-mori ensembles
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.85
+          components: rustfmt, clippy
+      - name: Verify the core-only ChaCha8 boundary
+        run: cargo test --manifest-path Isuzu/amatsuki/Cargo.toml -p amatsuki --no-default-features --locked
+      - name: Replay CART brute-force and ensemble properties
+        run: cargo test -p oldwood -p mayoi-no-mori --all-features --locked -- --nocapture
+      - name: Keep standalone crates warning-free
+        run: cargo clippy -p oldwood -p mayoi-no-mori --all-targets --all-features --locked -- -D warnings
+      - name: Keep standalone rustdoc warning-free
+        run: cargo doc -p oldwood -p mayoi-no-mori --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -77,7 +100,26 @@ jobs:
         with:
           toolchain: 1.98.0
       - name: Replay golden/special_functions.json
-        run: 'cargo test -p kanimiso --lib special:: --locked -- --nocapture'
+        run: 'cargo test -p tsutsumi --lib special:: --locked -- --nocapture'
+
+  regression-shared-kernels:
+    name: tsutsumi kernels + number-ruler external regression oracles
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.85
+      - name: Verify the dependency-free matrix contract
+        # Explicit toolchain selector overrides the repository's pinned TOML.
+        run: cargo +1.85 test -p tsutsumi --no-default-features --locked
+      - name: Replay optimizer branches, special functions, quadrature, and regression goldens
+        run: cargo +1.85 test -p tsutsumi -p number-ruler --all-features --locked -- --nocapture
+      - name: Ensure the packaged special-function fixture matches the canonical golden
+        run: cmp golden/special_functions.json tsutsumi/special_functions.json
 
   hmm-core:
     name: generic HMM brute-force and log-space kernels
@@ -146,7 +188,7 @@ jobs:
           cargo test -p kanimiso --lib state_space::smoother::tests::zero_cross_covariance_needs_no_inverse_even_with_future_observations --locked -- --exact --nocapture
           cargo test -p kanimiso --lib state_space::smoother::tests::trailing_missing_measurements_do_not_require_an_rts_inverse --locked -- --exact --nocapture
           cargo test -p kanimiso --lib state_space::smoother::tests::all_missing_smoothing_is_exact_prior_propagation --locked -- --exact --nocapture
-          cargo test -p kanimiso --lib linalg::tests::symmetrization_preserves_finite_extremes_without_intermediate_overflow --locked -- --exact --nocapture
+          cargo test -p tsutsumi --lib linalg::tests::symmetrization_preserves_finite_extremes_without_intermediate_overflow --locked -- --exact --nocapture
 
   online-rls-oracle:
     name: online RLS Decimal golden + exact EW moments
@@ -297,6 +339,12 @@ jobs:
           RUSTDOCFLAGS: -D warnings
       - name: Verify kanimiso package contents
         run: cargo package -p kanimiso --list --locked
+      - name: Verify standalone tree package contents
+        run: |
+          cargo package -p tsutsumi --list --locked
+          cargo package -p number-ruler --list --locked
+          cargo package -p oldwood --list --locked
+          cargo package -p mayoi-no-mori --list --locked
       - uses: taiki-e/install-action@b1d53d4d726d74b5a950a5b3798a3c6ede4e0f64 # cargo-llvm-cov
         with:
           tool: cargo-llvm-cov

@@ -11,7 +11,15 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_MEMBERS = ["signlred", "ojizou-san", "kanimiso"]
+EXPECTED_MEMBERS = [
+    "signlred",
+    "ojizou-san",
+    "tsutsumi",
+    "number-ruler",
+    "oldwood",
+    "mayoi-no-mori",
+    "kanimiso",
+]
 DEPENDENCY_KINDS = ("dependencies", "dev-dependencies", "build-dependencies")
 FORBID_UNSAFE = re.compile(r"#!\s*\[\s*forbid\s*\(\s*unsafe_code\s*\)\s*\]")
 ALLOW_UNSAFE = re.compile(r"#\s*!?\s*\[\s*(?:allow|expect)\s*\(\s*unsafe_code\s*\)")
@@ -84,9 +92,23 @@ def main() -> int:
         workspace.get("default-members") == EXPECTED_MEMBERS,
         "workspace.default-members must be exactly " + repr(EXPECTED_MEMBERS),
     )
+    require(
+        workspace.get("exclude") == ["Isuzu/amatsuki"],
+        "workspace.exclude must keep Isuzu/amatsuki as a core-only path dependency",
+    )
 
     workspace_dependencies = workspace.get("dependencies", {})
-    expected_workspace_dependencies = {"faer", "ndarray", "signlred", "ojizou-san"}
+    expected_workspace_dependencies = {
+        "tsutsumi",
+        "number-ruler",
+        "faer",
+        "ndarray",
+        "signlred",
+        "ojizou-san",
+        "oldwood",
+        "mayoi-no-mori",
+        "amatsuki",
+    }
     require(
         names(workspace_dependencies) == expected_workspace_dependencies,
         "workspace dependencies must be exactly "
@@ -123,11 +145,51 @@ def main() -> int:
         == {"path": "ojizou-san", "version": "0.1.0"},
         "workspace ojizou-san must remain the local ojizou-san path dependency",
     )
+    require(
+        workspace_dependencies.get("oldwood")
+        == {"path": "oldwood", "version": "0.1.0"},
+        "workspace oldwood must remain the local oldwood path dependency",
+    )
+    require(
+        workspace_dependencies.get("mayoi-no-mori")
+        == {"path": "mayoi-no-mori", "version": "0.1.0"},
+        "workspace mayoi-no-mori must remain the local path dependency",
+    )
+    require(
+        workspace_dependencies.get("amatsuki")
+        == {
+            "path": "Isuzu/amatsuki",
+            "version": "0.1.0",
+            "default-features": False,
+        },
+        "workspace amatsuki must remain the core-only first-party Isuzu RNG path dependency",
+    )
 
     policies = {
+        "tsutsumi/Cargo.toml": {
+            "package": "tsutsumi",
+            "dependencies": {"faer", "signlred", "ojizou-san"},
+            "dev-dependencies": {"serde_json"},
+            "build-dependencies": set(),
+        },
+        "number-ruler/Cargo.toml": {
+            "package": "number-ruler",
+            "dependencies": {"tsutsumi", "signlred", "ojizou-san"},
+            "dev-dependencies": {"serde_json"},
+            "build-dependencies": set(),
+        },
         "kanimiso/Cargo.toml": {
             "package": "kanimiso",
-            "dependencies": {"faer", "ndarray", "signlred", "ojizou-san"},
+            "dependencies": {
+                "tsutsumi",
+                "number-ruler",
+                "faer",
+                "ndarray",
+                "signlred",
+                "ojizou-san",
+                "oldwood",
+                "mayoi-no-mori",
+            },
             "dev-dependencies": {"serde_json"},
             "build-dependencies": set(),
         },
@@ -140,6 +202,24 @@ def main() -> int:
         "ojizou-san/Cargo.toml": {
             "package": "ojizou-san",
             "dependencies": {"signlred"},
+            "dev-dependencies": set(),
+            "build-dependencies": set(),
+        },
+        "oldwood/Cargo.toml": {
+            "package": "oldwood",
+            "dependencies": {"tsutsumi"},
+            "dev-dependencies": set(),
+            "build-dependencies": set(),
+        },
+        "mayoi-no-mori/Cargo.toml": {
+            "package": "mayoi-no-mori",
+            "dependencies": {"oldwood", "amatsuki"},
+            "dev-dependencies": set(),
+            "build-dependencies": set(),
+        },
+        "Isuzu/amatsuki/Cargo.toml": {
+            "package": "amatsuki",
+            "dependencies": set(),
             "dev-dependencies": set(),
             "build-dependencies": set(),
         },
@@ -171,7 +251,38 @@ def main() -> int:
                 )
 
     workspace_reference = {"workspace": True}
-    for dependency in ("faer", "ndarray", "signlred", "ojizou-san"):
+    for dependency in ("tsutsumi", "number-ruler"):
+        expected = {"path": dependency, "version": "0.1.0"}
+        if dependency == "tsutsumi":
+            expected["default-features"] = False
+        require(workspace_dependencies.get(dependency) == expected,
+                f"workspace {dependency} must remain its first-party path dependency")
+    for dependency in ("faer", "signlred", "ojizou-san"):
+        require(manifests["tsutsumi/Cargo.toml"]["dependencies"][dependency]
+                == {"workspace": True, "optional": True},
+                f"tsutsumi {dependency} must be feature-gated and workspace-owned")
+    require(manifests["tsutsumi/Cargo.toml"].get("features") == {
+        "default": ["linalg"], "linalg": ["dep:faer", "dep:signlred", "dep:ojizou-san"]},
+        "tsutsumi core-only feature must stay dependency-free")
+    require(manifests["oldwood/Cargo.toml"]["dependencies"]["tsutsumi"] == workspace_reference,
+            "oldwood may consume only the core matrix contract")
+    for crate in ("number-ruler", "kanimiso"):
+        require(manifests[f"{crate}/Cargo.toml"]["dependencies"]["tsutsumi"]
+                == {"workspace": True, "features": ["linalg"]},
+                f"{crate} must consume tsutsumi's single linalg implementation")
+    for dependency in ("signlred", "ojizou-san"):
+        require(manifests["number-ruler/Cargo.toml"]["dependencies"][dependency] == workspace_reference,
+                f"number-ruler {dependency} must use the workspace contract")
+    require(manifests["kanimiso/Cargo.toml"]["dependencies"]["number-ruler"] == workspace_reference,
+            "kanimiso must use the workspace number-ruler")
+    for dependency in (
+        "faer",
+        "ndarray",
+        "signlred",
+        "ojizou-san",
+        "oldwood",
+        "mayoi-no-mori",
+    ):
         require(
             manifests["kanimiso/Cargo.toml"]
             .get("dependencies", {})
@@ -186,6 +297,14 @@ def main() -> int:
         == workspace_reference,
         "ojizou-san dependency 'signlred' must use only workspace = true",
     )
+    for dependency in ("oldwood", "amatsuki"):
+        require(
+            manifests["mayoi-no-mori/Cargo.toml"]
+            .get("dependencies", {})
+            .get(dependency)
+            == workspace_reference,
+            f"mayoi-no-mori dependency {dependency!r} must use only workspace = true",
+        )
 
     serde_json = manifests["kanimiso/Cargo.toml"].get("dev-dependencies", {}).get(
         "serde_json"
@@ -258,9 +377,14 @@ def main() -> int:
     )
 
     crate_roots = [
+        "tsutsumi/src/lib.rs",
+        "number-ruler/src/lib.rs",
         "kanimiso/src/lib.rs",
         "signlred/src/lib.rs",
         "ojizou-san/src/lib.rs",
+        "oldwood/src/lib.rs",
+        "mayoi-no-mori/src/lib.rs",
+        "Isuzu/amatsuki/src/lib.rs",
     ]
     for relative_path in crate_roots:
         text = (ROOT / relative_path).read_text(encoding="utf-8")
@@ -269,7 +393,16 @@ def main() -> int:
             f"{relative_path} must contain exactly one #![forbid(unsafe_code)]",
         )
 
-    for source_root in ("kanimiso/src", "signlred/src", "ojizou-san/src"):
+    for source_root in (
+        "tsutsumi/src",
+        "number-ruler/src",
+        "kanimiso/src",
+        "signlred/src",
+        "ojizou-san/src",
+        "oldwood/src",
+        "mayoi-no-mori/src",
+        "Isuzu/amatsuki/src",
+    ):
         for path in (ROOT / source_root).rglob("*.rs"):
             text = path.read_text(encoding="utf-8")
             require(

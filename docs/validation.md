@@ -3,6 +3,12 @@
 この文書は、README の `Verified` 主張をどの証拠で支えているかをまとめたものです。
 利用方法ではなく、数値結果を採用する前に根拠と限界を監査したい人を対象にします。
 
+共通核は [`tsutsumi`](../tsutsumi/README.md) に移動しました。特殊関数・最適化・
+線形代数の既存テストも同じ crate で再生し、kanimiso の同名モジュールは再公開です。
+新しい注釈付き回帰、混合・加法モデル、線形 SHAP の外部オラクルと実測誤差は
+[`number-ruler の検証仕様`](../number-ruler/docs/validation.md) にまとめています。
+正規分布の上側 p 値は同 fixture の直接裾 oracle により Verified へ昇格しました。
+
 ## 状態の意味
 
 | 状態 | 意味 |
@@ -45,6 +51,8 @@ Tier 0/1 の一点一致だけでは Verified にしません。式の読み違�
 | FIEGARCH | `golden/fiegarch_qml.json` / Decimal | 固定値、QMLE、勾配、境界・尺度 | 論文式の高精度実装。外部 fit との照合は今後も追加する |
 | Process MLE lite | `golden/process_mle.json` / dense Decimal GLS | median-gap の 1 / 2 / 4 / 8 / 16 倍という 5 range 候補での profile likelihood、並べ替え・affine 不変性 | 各候補は solver と異なる dense GLS 経路。range の連続最大化ではない |
 | HMM | `golden/hmm.json` / Decimal 全経路列挙 | 尤度、Viterbi、Baum–Welch | 小問題では強いが同一仕様解釈のリスクが残るため Experimental |
+| CART (`oldwood`) | `oldwood/golden/sklearn_cart.csv` / scikit-learn 1.7.2 + 解析解 + 独立に書いた全候補 brute-force | weighted Gini / entropy / SSE、probe prediction / probability、split、leaf value、tie-break | 外部 fixture は3ケースを `0.0` 絶対許容差で再生。threshold・child index・leaf ID の sklearn parity は対象外。brute-force は prefix/suffix accumulator と異なる候補ごとの再集計 |
+| Forest / boosting (`mayoi-no-mori`) | verified CART kernel + ensemble の閉形式・性質 | random forest / ExtraTrees / GBDT / AdaBoost / Isolation Forest の seed 再現性、確率和、OOB、bin 単調性、ordered statistic の target leakage 不在 | 全 estimator が Experimental。外部 ensemble fixture は未収録。LightGBM / CatBoost 名は明記された subset であり upstream parity は未主張 |
 
 各 fixture の隣にある `scripts/*_oracle.py` は、schema / provenance の確認と、より高い
 精度での再生成差分を担当します。Python は fixture 生成・監査時だけ必要です。
@@ -77,7 +85,7 @@ Tier 0/1 の一点一致だけでは Verified にしません。式の読み違�
 ## CI での再生
 
 `.github/workflows/ci.yml` は、特殊関数、OLS、状態空間、Online RLS、時系列、
-ボラティリティを別ジョブに分けています。全ジョブが対応する Rust replay を実行し、
+ボラティリティ、CART / ensemble、tsutsumi / number-ruler を別ジョブに分けています。全ジョブが対応する Rust replay を実行し、
 Python オラクルを持つジョブは fixture の provenance または多倍長精度差分も検査します。
 特殊関数ジョブは scipy 由来のコミット済み JSON を Rust から再生します。さらに MSRV、
 rustfmt、警告を error にした rustdoc、依存境界、cargo-deny、冗長性・Clippy の減少専用
@@ -99,6 +107,9 @@ cargo test --workspace --all-features --locked
   する余地があります。
 - HMM は全列挙と高精度再生を持ちますが、hmmlearn など出自の異なる fixture がまだ
   ないため Experimental のままです。
+- `mayoi-no-mori` は verified な CART 核を共有しますが、ensemble 全体を外部実装と
+  照合する fixture が未収録のため、random forest から LightGBM / CatBoost 系 subset
+  まで Experimental のままです。
 - Verified は記載した入力領域と性質に対する証拠レベルです。任意のデータで統計的に
   適切なモデル選択が保証される、という意味ではありません。
 - v0.2 は alpha 前で、API 安定性を保証しません。

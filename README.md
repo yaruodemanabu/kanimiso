@@ -7,7 +7,8 @@
 **数値品質を結果に同伴させる、Pure Rust の時系列計量・オンライン推定コア。**
 
 `kanimiso` は、OLS、オンライン統計量、線形 Gaussian 状態空間、ARMA、
-ボラティリティモデルなどを、一つの品質契約で扱うワークスペースです。各領域には
+ボラティリティモデルに加え、注釈付き回帰、検証済み CART と Experimental な tree ensemble を、
+一つの品質契約で扱うワークスペースです。各領域には
 `fit` / `partial_fit`、`filter` / `smooth`、時系列関数など適した API を残しています。
 計算に成功しても、ランク落ち、境界解、数値的な代替処理などがあれば、値だけでなく
 機械可読な品質報告を返します。
@@ -21,6 +22,8 @@
 - 推定値だけでなく、警告・数値的妥協・識別不能の理由も保存したい
 - native BLAS / LAPACK、C、C++、Fortran に依存しないビルドが必要
 - Python 実装や高精度計算との照合根拠を、リポジトリ内で再実行したい
+- CART、random forest、ExtraTrees、GBDT、AdaBoost、Isolation Forest を、native
+  依存なしの小さな Rust crate として使いたい
 
 次の用途には、まだ向きません。
 
@@ -90,14 +93,20 @@ kanimiso = { git = "https://github.com/yaruodemanabu/kanimiso", rev = "<commit-s
 | 領域 | 主な API | 状態 |
 |---|---|---|
 | 線形回帰 | `linear_model::LinearRegression` | Verified |
+| 最初の回帰分析 | `number_ruler::LinearModel` / `GeneralizedLinearModel`、interventional `linear_shap` | Verified（Gaussian / Bernoulli / Poisson の明示範囲） |
+| 混合・加法モデル | `number_ruler::MixedModel` / `AdditiveModel` | Experimental（ランダム切片、区分線形スプライン） |
 | オンライン推定 | RLS、平均・分散・共分散、指数重み、自己相関、分散選択 | Verified |
 | 状態空間 | `state_space::LinearGaussianStateSpace` の filter / RTS smoother | Verified |
 | 時系列 | ARMA の ACF・ACOVF・比多項式展開、BK / CF / 線形フィルタ | Verified |
 | ボラティリティ | GARCH(1,1)、power-2 FIGARCH(1,d,1)、Eq. 11 の one-AR / news-MA なし FIEGARCH | Verified |
 | 確率過程 | median-gap 倍率 5 点を探索する `stats::process_mle` lite | Verified |
 | 特殊関数 | beta / gamma、正規・χ² の CDF、t / F の CDF・p-value | Verified |
+| 決定木 | `oldwood` の weighted CART（Gini / entropy / squared error） | Verified |
+| Forest / boosting | `mayoi-no-mori` の random forest、ExtraTrees、GBDT、AdaBoost | Experimental |
+| Histogram / categorical boosting | `LightGbm*` の depth-wise histogram/Newton subset、`CatBoost*` の ordered-category subset | Experimental（非 drop-in） |
+| Tree anomaly detection | `mayoi_no_mori::IsolationForest` | Experimental |
 | HMM | Gaussian / categorical / Poisson emission の汎用 HMM | Experimental |
-| その他 | 正規・χ²の上側 p-value、k-NN 異常検知、Nelder–Mead、EWMA / EGARCH、ARMA 生成 | Experimental |
+| その他 | χ²の上側 p-value、k-NN 異常検知、Nelder–Mead、EWMA / EGARCH、ARMA 生成 | Experimental |
 
 Verified は「正しそう」という意味ではありません。決定的 golden、閉形式または
 brute-force、性質テストを CI で再生し、許容差の根拠を記録した項目です。検証方式、
@@ -133,9 +142,23 @@ fit / predict / partial_fit
 
 | crate | 責務 |
 |---|---|
-| `kanimiso` | 推定、変換、予測と共有数値核 |
+| `kanimiso` | 推定、変換、予測の統合 API と品質アダプター |
+| [`tsutsumi`](tsutsumi/README.md) | 共通の行列・分解・最小二乗・特殊関数・最適化・求積と独立検証 |
+| [`number-ruler`](number-ruler/README.md) | 濃密な注釈を持つ LM / GLM / LMM / GLMM / LAM / GAM / 線形 SHAP |
 | `signlred` | `Qualified<T>`、`Failure`、`Policy`、数値・統計品質の診断 |
 | `ojizou-san` | `Session`、品質 ledger、妥協 journal、オンライン学習の説明 |
+| [`oldwood`](oldwood/README.md) | weighted CART の単一 split / arena / traversal 核 |
+| [`mayoi-no-mori`](mayoi-no-mori/README.md) | random forest、ExtraTrees、GBDT、AdaBoost、Isolation Forest、範囲を限定した LightGBM / CatBoost 系 |
+
+最初の回帰分析には `number-ruler`、計算核の直接利用・比較には `tsutsumi`、
+単体 crate として CART だけが必要なら `oldwood`、ensemble が必要なら
+`mayoi-no-mori` から始めてください。`kanimiso::tree` と `kanimiso::histgb` は同じ実装を
+`Session` / `Qualified<T>` の品質契約へ接続するアダプターですが、旧 API との source
+compatibility は保証しません。公開時の first-party crate の順序は
+`signlred` → `ojizou-san` → `tsutsumi` → `number-ruler` / `oldwood`、
+続いて `amatsuki` と `oldwood` に依存する `mayoi-no-mori`、最後に `kanimiso` です。
+旧 `kanimiso::{data,linalg,optimize,special,...}` は `tsutsumi`、OLS は `number-ruler` を
+再公開し、数値核を二重に持ちません。
 
 直接の科学技術計算依存は、ワークスペース全体で次の二つだけです。
 
@@ -144,6 +167,7 @@ fit / predict / partial_fit
 
 両方とも完全固定し、`ndarray-linalg`、`ndarray-stats`、native BLAS / LAPACK は
 依存ポリシー lint で拒否します。first-party code は `#![forbid(unsafe_code)]` です。
+ensemble の乱数は Isuzu の first-party `amatsuki` を core-only で共有し、CART や PRNG をモデルごとに複製しません。
 Python は fixture の生成・監査と CI lint にだけ使い、Rust ライブラリの実行時依存では
 ありません。
 
@@ -160,6 +184,10 @@ cargo test --workspace --all-features --locked
 cargo test --workspace --doc --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo package -p kanimiso --list --locked
+cargo package -p tsutsumi --list --locked
+cargo package -p number-ruler --list --locked
+cargo package -p oldwood --list --locked
+cargo package -p mayoi-no-mori --list --locked
 python scripts/lint_dependencies.py
 python scripts/lint_clippy.py
 bash scripts/lint_redundancy.sh
@@ -168,7 +196,7 @@ cargo llvm-cov --workspace --locked --summary-only --fail-under-lines 76.0
 ```
 
 CI は全ワークスペースを MSRV 1.85 と固定 toolchain 1.98.0 で検査し、stable では
-`signlred` / `ojizou-san` の lint・test・docs を先行監視します。オラクル群も領域別
+全 support crate の lint・test・docs を先行監視します。オラクル群も領域別
 ジョブで再生します。設計判断と冗長性予算は
 [AGENTS.md](https://github.com/yaruodemanabu/kanimiso/blob/main/AGENTS.md)、v0.1 の削除 API
 と移行先は [移行メモ](https://github.com/yaruodemanabu/kanimiso/blob/main/docs/dropped_v0_1.md)

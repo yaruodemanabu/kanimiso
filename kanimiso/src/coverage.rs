@@ -65,6 +65,102 @@ const fn a(name: &'static str, python_equiv: &'static str, kind: &'static str) -
 }
 
 const INVENTORY: &[Algorithm] = &[
+    v("number_ruler.LinearModel", "statsmodels.OLS", "regression"),
+    v(
+        "number_ruler.GeneralizedLinearModel",
+        "statsmodels.GLM.canonical",
+        "regression",
+    ),
+    v(
+        "number_ruler.linear_shap",
+        "SHAP.interventional_linear_predictor",
+        "interpretation",
+    ),
+    a(
+        "number_ruler.MixedModel",
+        "statsmodels.MixedLM / marginal-ML GLMM",
+        "regression",
+    ),
+    a(
+        "number_ruler.AdditiveModel",
+        "linear-spline LAM / GAM",
+        "regression",
+    ),
+    v(
+        "oldwood.DecisionTreeClassifier",
+        "sklearn.tree.DecisionTreeClassifier",
+        "tree",
+    ),
+    v(
+        "oldwood.DecisionTreeRegressor",
+        "sklearn.tree.DecisionTreeRegressor",
+        "tree",
+    ),
+    a(
+        "mayoi_no_mori.RandomForestClassifier",
+        "sklearn.ensemble.RandomForestClassifier",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.RandomForestRegressor",
+        "sklearn.ensemble.RandomForestRegressor",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.ExtraTreesClassifier",
+        "sklearn.ensemble.ExtraTreesClassifier",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.ExtraTreesRegressor",
+        "sklearn.ensemble.ExtraTreesRegressor",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.GradientBoostingClassifier",
+        "sklearn.ensemble.GradientBoostingClassifier",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.GradientBoostingRegressor",
+        "sklearn.ensemble.GradientBoostingRegressor",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.AdaBoostClassifier",
+        "sklearn.ensemble.AdaBoostClassifier",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.AdaBoostRegressor",
+        "sklearn.ensemble.AdaBoostRegressor",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.IsolationForest",
+        "sklearn.ensemble.IsolationForest",
+        "anomaly",
+    ),
+    a(
+        "mayoi_no_mori.LightGbmClassifier",
+        "lightgbm.LGBMClassifier",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.LightGbmRegressor",
+        "lightgbm.LGBMRegressor",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.CatBoostClassifier",
+        "catboost.CatBoostClassifier",
+        "ensemble",
+    ),
+    a(
+        "mayoi_no_mori.CatBoostRegressor",
+        "catboost.CatBoostRegressor",
+        "ensemble",
+    ),
     v(
         "linear_model.LinearRegression",
         "sklearn.linear_model.LinearRegression",
@@ -103,7 +199,7 @@ const INVENTORY: &[Algorithm] = &[
     v("special.gamma_p", "scipy.special.gammainc", "function"),
     v("special.ln_gamma", "scipy.special.gammaln", "function"),
     v("special.norm_cdf", "scipy.stats.norm.cdf", "function"),
-    a(
+    v(
         "special.norm_pvalue_two_sided",
         "scipy.stats.norm.sf",
         "function",
@@ -231,6 +327,11 @@ mod tests {
     use super::*;
 
     const VERIFIED_NAMES: &[&str] = &[
+        "number_ruler.LinearModel",
+        "number_ruler.GeneralizedLinearModel",
+        "number_ruler.linear_shap",
+        "oldwood.DecisionTreeClassifier",
+        "oldwood.DecisionTreeRegressor",
         "linear_model.LinearRegression",
         "online.LinearRegression",
         "online.OnlineAutoCorr",
@@ -252,6 +353,7 @@ mod tests {
         "special.gamma_p",
         "special.ln_gamma",
         "special.norm_cdf",
+        "special.norm_pvalue_two_sided",
         "special.student_t_cdf",
         "special.student_t_pvalue",
         "state_space.LinearGaussianStateSpace",
@@ -295,6 +397,12 @@ mod tests {
     #[test]
     fn registered_paths_link_to_active_symbols() {
         fn type_exists<T>() {}
+
+        type_exists::<crate::number_ruler::LinearModel>();
+        type_exists::<crate::number_ruler::GeneralizedLinearModel>();
+        type_exists::<crate::number_ruler::MixedModel>();
+        type_exists::<crate::number_ruler::AdditiveModel>();
+        let _ = crate::number_ruler::linear_shap;
 
         type_exists::<crate::linear_model::LinearRegression>();
         type_exists::<crate::online::LinearRegression>();
