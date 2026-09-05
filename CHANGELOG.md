@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+### Documentation
+
+- 仕様書とテストのcrate横断棚卸しを
+  [`docs/spec-and-test-coverage.md`](docs/spec-and-test-coverage.md)
+  に追加しました。実装変更はなく、台帳外モジュールと疑問点を含みます。
+
 ### Added
 
 - `tsutsumi` を追加し、行列・分解・最小二乗・特殊関数・Nelder–Mead・正規求積を
